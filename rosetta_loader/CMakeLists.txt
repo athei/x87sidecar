@@ -20,5 +20,6 @@ add_custom_command(TARGET runtime_loader POST_BUILD
 )
 
 target_compile_features(runtime_loader PRIVATE cxx_std_23)
-target_compile_options(runtime_loader PRIVATE -g)
+target_compile_options(runtime_loader PRIVATE -g -O2)
 target_link_libraries(runtime_loader PRIVATE rosetta_config)
+set_property(TARGET runtime_loader PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
