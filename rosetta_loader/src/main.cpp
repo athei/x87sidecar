@@ -4,7 +4,9 @@
 #include <rosetta_config/Config.h>
 #include <stdint.h>
 #include <sys/mman.h>
+#include <sys/event.h>
 #include <sys/ptrace.h>
+#include <sys/wait.h>
 
 #include <cstdio>
 #include <cstring>
@@ -44,18 +46,30 @@ private:
     task_t taskPort_ = MACH_PORT_NULL;
     std::map<uint64_t, uint32_t> breakpoints_;  // addr -> original instruction
 
-    bool waitForStopped() {
-        int status;
-        if (waitpid(childPid_, &status, 0) == -1) {
-            perror("waitpid");
-            return false;
+    // Wait for the traced process to stop. If expectedSignal is non-zero,
+    // loop and suppress any other signals until the expected one arrives.
+    bool waitForStopped(int expectedSignal = 0) {
+        while (true) {
+            int status;
+            if (waitpid(childPid_, &status, 0) == -1) {
+                perror("waitpid");
+                return false;
+            }
+            if (!WIFSTOPPED(status)) {
+                return false;
+            }
+            int sig = WSTOPSIG(status);
+            LOG("Process stopped signal=%d\n", sig);
+            if (expectedSignal == 0 || sig == expectedSignal) {
+                return true;
+            }
+            // Spurious signal; suppress it and continue
+            LOG("Suppressing unexpected signal %d (waiting for %d)\n", sig, expectedSignal);
+            if (ptrace(PT_CONTINUE, childPid_, (caddr_t)1, 0) < 0) {
+                perror("ptrace(PT_CONTINUE suppress)");
+                return false;
+            }
         }
-        if (WIFSTOPPED(status)) {
-            int signal = WSTOPSIG(status);
-            LOG("Process stopped signal=%d\n", signal);
-            return true;
-        }
-        return false;
     }
 
 public:
@@ -69,9 +83,25 @@ public:
         childPid_ = pid;
         LOG("Attempting to attach to %d\n", childPid_);
 
-        // Child already called PT_TRACE_ME, so we are the tracer.
-        // Wait for the child to stop at its execv (SIGTRAP).
+        // Attach to the target via PT_ATTACH (sends SIGSTOP).
+        if (ptrace(PT_ATTACH, childPid_, nullptr, 0) == -1) {
+            perror("ptrace(PT_ATTACH)");
+            return false;
+        }
         if (!waitForStopped()) {
+            return false;
+        }
+        LOG("Attached to %d (SIGSTOP)\n", childPid_);
+        return true;
+    }
+
+    // Continue the traced process and wait for it to stop at execv (SIGTRAP).
+    bool waitForExecStop() {
+        if (ptrace(PT_CONTINUE, childPid_, (caddr_t)1, 0) < 0) {
+            perror("ptrace(PT_CONTINUE for exec)");
+            return false;
+        }
+        if (!waitForStopped(SIGTRAP)) {
             return false;
         }
         LOG("Program stopped due to execv\n");
@@ -92,7 +122,7 @@ public:
 
         LOG("continueExecution...\n");
 
-        return waitForStopped();
+        return waitForStopped(SIGTRAP);
     }
 
     bool detach() {
@@ -546,7 +576,7 @@ static bool isX86PE(const std::string& path) {
 // Returns true if a 32-bit PE was found (needs x87 JIT), false to bypass.
 static bool needsX87JIT(int argc, char* argv[]) {
     for (int i = 2; i < argc; i++) {
-        // Look for Windows-style paths (drive letter + colon)
+        // Windows-style path (drive letter + colon)
         if (strlen(argv[i]) >= 3 && argv[i][1] == ':') {
             std::string nativePath = resolveWinePath(argv[i]);
             if (nativePath.empty()) {
@@ -558,9 +588,25 @@ static bool needsX87JIT(int argc, char* argv[]) {
             LOG("PE architecture: %s\n", x86 ? "x86 (32-bit)" : "x64 (64-bit)");
             return x86;
         }
+
+        // Bare .exe filename — resolve relative to cwd
+        size_t len = strlen(argv[i]);
+        if (len >= 4 && strcasecmp(argv[i] + len - 4, ".exe") == 0) {
+            if (isX86PE(argv[i])) {
+                LOG("'%s' is x86 (32-bit)\n", argv[i]);
+                return true;
+            }
+            FILE* f = fopen(argv[i], "rb");
+            if (f) {
+                fclose(f);
+                LOG("'%s' is x64 (64-bit), skipping\n", argv[i]);
+                return false;
+            }
+            // File not found in cwd, continue scanning
+        }
     }
-    // No Windows path found, default to attaching
-    return true;
+    // No exe found in argv, default to skipping
+    return false;
 }
 
 int main(int argc, char* argv[]) {
@@ -581,24 +627,63 @@ int main(int argc, char* argv[]) {
 
     LOG("Launching debugger.\n");
 
-    // Fork and execute new instance
-    pid_t child = fork();
-
-    // the debugger will be this process debugging its child
-    if (child == 0) {
-        // the fresh child waiting to be debugged
-        if (ptrace(PT_TRACE_ME, 0, nullptr, 0) == -1) {
-            perror("child: ptrace(PT_TRACE_ME)");
-            return 1;
-        }
-        LOG("child: launching into program: %s\n", argv[1]);
-        execv(argv[1], &argv[1]);
+    // Reverse fork: parent execs into wine (keeps original PID for macOS
+    // dock/activation tracking), child becomes the debugger.
+    pid_t parentPid = getpid();
+    int syncPipe[2];
+    if (pipe(syncPipe) == -1) {
+        perror("pipe");
         return 1;
     }
 
+    pid_t child = fork();
+
+    if (child == -1) {
+        perror("fork");
+        return 1;
+    }
+
+    if (child != 0) {
+        // PARENT: will exec into wine-preloader (keeps original PID)
+        close(syncPipe[1]);
+        // Wait for child debugger to attach to us
+        char buf;
+        read(syncPipe[0], &buf, 1);
+        close(syncPipe[0]);
+        // Child has attached and will catch our exec's SIGTRAP
+        waitpid(child, nullptr, WNOHANG);  // reap intermediate double-fork child
+        LOG("parent: launching into program: %s\n", argv[1]);
+        execv(argv[1], &argv[1]);
+        perror("parent: execv");
+        return 1;
+    }
+
+    // CHILD: double-fork to orphan the debugger process.
+    // This prevents a PID cycle (child->parent->child via ptrace) in the
+    // process table that crashes Terminal.app's recursive process-tree walker.
+    close(syncPipe[0]);
+    pid_t grandchild = fork();
+    if (grandchild == -1) {
+        perror("fork (double-fork)");
+        _exit(1);
+    }
+    if (grandchild != 0) {
+        _exit(0);  // intermediate child exits; grandchild reparented to PID 1
+    }
+
+    // GRANDCHILD: becomes the debugger (ppid = 1, no cycle with parent)
     MuhDebugger dbg;
-    if (!dbg.attach(child)) {
-        fprintf(stderr, "Failed to attach to process\n");
+    if (!dbg.attach(parentPid)) {
+        fprintf(stderr, "Failed to attach to parent process\n");
+        return 1;
+    }
+    // Signal parent to proceed with execv
+    write(syncPipe[1], "x", 1);
+    close(syncPipe[1]);
+
+    // Wait for parent's execv to trigger SIGTRAP
+    if (!dbg.waitForExecStop()) {
+        fprintf(stderr, "Failed to catch parent's exec\n");
         return 1;
     }
     LOG("Attached successfully\n");
@@ -909,13 +994,18 @@ int main(int argc, char* argv[]) {
     // dbg.setBreakpoint(trampolineTarget);
 
     dbg.detach();
-    // dbg.continueExecution();
 
-    // LOG("Hit breakpoint at trampoline target: 0x%llx\n", trampolineTarget);
-
-    // block until the child exits
-    int status;
-    waitpid(child, &status, 0);
+    // Block until the parent (wine) exits. We can't use waitpid since
+    // the parent is not our child, so use kqueue with EVFILT_PROC.
+    int kq = kqueue();
+    if (kq != -1) {
+        struct kevent ev;
+        EV_SET(&ev, parentPid, EVFILT_PROC, EV_ADD, NOTE_EXIT, 0, nullptr);
+        kevent(kq, &ev, 1, nullptr, 0, nullptr);
+        // Block until parent exits
+        kevent(kq, nullptr, 0, &ev, 1, nullptr);
+        close(kq);
+    }
 
     return 0;
 }
