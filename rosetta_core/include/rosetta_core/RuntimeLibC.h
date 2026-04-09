@@ -31,6 +31,7 @@ int rt_vsnprintf(char* buf, size_t size, const char* fmt, va_list ap);
 #define RT_ASSERT(expr) ((expr) ? (void)0 : rt_assert_fail(#expr, __FILE__, __LINE__))
 
 // Process
+int rt_getpid(void);
 [[noreturn]] void rt_abort(void);
 int* rt_errno_location(void);
 
@@ -72,6 +73,7 @@ void rt_pthread_jit_write_protect_np(int enabled);
 #undef abort
 #endif
 #define abort rt_abort
+#define getpid rt_getpid
 
 // errno: "__error" is what the system #define errno (*__error()) calls.
 // Providing our own __error() is enough; no alias needed.

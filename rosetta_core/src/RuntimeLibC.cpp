@@ -347,6 +347,10 @@ int rt_printf(const char* fmt, ...) {
 
 // ── Process ───────────────────────────────────────────────────────────────────
 
+int rt_getpid(void) {
+    return (int)_syscall3(SYS_getpid, 0, 0, 0);
+}
+
 [[noreturn]] void rt_abort(void) {
     long pid = _syscall3(SYS_getpid, 0, 0, 0);
     _syscall3(SYS_kill, pid, 6 /*SIGABRT*/, 0);
