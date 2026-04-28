@@ -23,14 +23,16 @@ bool installPortInParent(mach_port_t parentTaskPort,
                          mach_port_t* outServicePort,
                          uint32_t* outParentNameRef);
 
-// Run the Mach receive loop on `servicePort`. M2 behavior: receive-and-
-// discard. Blocks forever; caller is expected to set up parent-exit
-// detection separately (e.g., kqueue + alternative thread).
-void runReceiveLoop(mach_port_t servicePort);
+// Run the Mach receive loop on `servicePort`. The receive thread also
+// needs `parentTaskPort` to mach_vm_read structs in the parent's address
+// space (TranslationResult, IRInstr arrays). Blocks forever; caller is
+// expected to set up parent-exit detection separately (e.g., kqueue +
+// alternative thread).
+void runReceiveLoop(mach_port_t servicePort, mach_port_t parentTaskPort);
 
 // Spawn a detached worker thread that runs runReceiveLoop. Returns true
-// on success (thread started); the caller does NOT need to join it. For
-// M2 the thread terminates implicitly on process exit.
-bool spawnReceiveThread(mach_port_t servicePort);
+// on success (thread started); the caller does NOT need to join it. The
+// thread terminates implicitly on process exit.
+bool spawnReceiveThread(mach_port_t servicePort, mach_port_t parentTaskPort);
 
 }  // namespace sidecar

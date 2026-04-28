@@ -87,6 +87,13 @@ constexpr uint32_t str_w_offset(uint32_t wt, uint32_t rn, uint32_t imm) {
     return 0xB9000000u | (imm12 << 10) | ((rn & 0x1F) << 5) | (wt & 0x1F);
 }
 
+// STR Xt, [Xn|SP, #imm]  (64-bit store, unsigned offset, scaled by 8)
+//   11_111_0_01_00_imm12_Rn_Rt
+constexpr uint32_t str_x_offset(uint32_t xt, uint32_t rn, uint32_t imm) {
+    uint32_t imm12 = (imm / 8) & 0xFFF;
+    return 0xF9000000u | (imm12 << 10) | ((rn & 0x1F) << 5) | (xt & 0x1F);
+}
+
 // CBZ Xt, +imm19*4   (branch if zero — 64-bit). imm19 is signed PC-relative
 //   in 4-byte units.
 constexpr uint32_t cbz(uint32_t rt, int32_t imm19_words) {
@@ -206,9 +213,17 @@ StubBlobs build(uint64_t handlerAddr, uint64_t translateInsnAddr,
     //
     // MACH_MSGH_BITS_REMOTE(MACH_MSG_TYPE_COPY_SEND) = 19 = 0x13.
     // (NOT 0x11 — that's MOVE_SEND which consumes the right after one use.)
-    constexpr uint32_t MSG_BITS = 0x13;       // COPY_SEND on remote, none on local
-    constexpr uint32_t MSG_SIZE = 24;          // header only, no payload
-    constexpr uint32_t MSG_ID   = 0x10000001;  // arbitrary, matches sidecar's switch
+    // MACH_MSGH_BITS_REMOTE(MACH_MSG_TYPE_COPY_SEND) = 19 = 0x13.
+    // After the 24-byte header we lay down a 40-byte body holding the five
+    // translate_insn arguments in their natural register order:
+    //   body[+ 0..+ 8] : x0  (TranslationResult* — parent-side pointer)
+    //   body[+ 8..+16] : x1  (IRBlock*          — parent-side pointer)
+    //   body[+16..+24] : x2  (IRInstr*          — parent-side pointer to array)
+    //   body[+24..+32] : x3  (num_instrs)
+    //   body[+32..+40] : x4  (insn_idx)
+    constexpr uint32_t MSG_BITS = 0x13;        // COPY_SEND on remote, none on local
+    constexpr uint32_t MSG_SIZE = 24 + 40;      // header + 5×8-byte args
+    constexpr uint32_t MSG_ID   = 0x10000001;   // arbitrary; sidecar dispatches on it
 
     // Use x9 as scratch for header field values.
 
@@ -235,6 +250,14 @@ StubBlobs build(uint64_t handlerAddr, uint64_t translateInsnAddr,
     emit(h, movz(9, uint16_t(MSG_ID & 0xFFFF), 0));
     emit(h, movk(9, uint16_t((MSG_ID >> 16) & 0xFFFF), 16));
     emit(h, str_w_offset(9, SP, 84));         // [sp+84]
+
+    // ── Body: five translate_insn args (still in x0..x4 at this point) ──────
+    // Header lives at sp+64 .. sp+88. Body lives at sp+88 .. sp+128.
+    emit(h, str_x_offset(0, SP, 88));         // body[+0]  = x0 = TR*
+    emit(h, str_x_offset(1, SP, 96));         // body[+8]  = x1 = block*
+    emit(h, str_x_offset(2, SP, 104));        // body[+16] = x2 = instr_array*
+    emit(h, str_x_offset(3, SP, 112));        // body[+24] = x3 = num_instrs
+    emit(h, str_x_offset(4, SP, 120));        // body[+32] = x4 = insn_idx
 
     // ── mach_msg_trap arguments ──────────────────────────────────────────────
     //   x0 = msg pointer (sp + 64)

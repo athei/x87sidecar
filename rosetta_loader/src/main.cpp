@@ -1054,14 +1054,17 @@ int main(int argc, char* argv[]) {
             fclose(f);
         }
 
-        // Stash for the sidecar phase below.
-        // (servicePort is captured into the receive thread below.)
+        // Capture the parent's task port BEFORE detach. The send-right is
+        // held in MuhDebugger::taskPort_ and stays valid past dbg.detach()
+        // (only ~MuhDebugger releases it). The receive thread will use it
+        // for mach_vm_read on TranslationResult / IRInstr structs.
+        mach_port_t parentTaskPort = dbg.taskPort();
         dbg.detach();
 
         // Spawn the Mach receive thread BEFORE the kqueue wait below so
         // any in-flight tickle messages from the parent get drained while
         // we sit on kqueue. Detached thread; cleaned up on process exit.
-        if (!sidecar::spawnReceiveThread(servicePort)) {
+        if (!sidecar::spawnReceiveThread(servicePort, parentTaskPort)) {
             fprintf(stderr, "M2: failed to spawn receive thread\n");
             return 1;
         }

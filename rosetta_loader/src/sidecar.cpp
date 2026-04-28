@@ -5,20 +5,26 @@
 
 #include <mach/mach.h>
 #include <mach/mach_port.h>
+#include <mach/mach_vm.h>
 
 namespace sidecar {
 
 namespace {
 
-// Largest message we expect to receive in M2 — header only is 24 bytes,
-// plus trailer (mach_msg_trailer_t is at least 8 bytes), plus future
-// payload. 4 KB is generous.
+// Largest message we expect to receive — header (24) + 5×8 args (40) +
+// trailer + future payload. 4 KB is generous.
 constexpr size_t kRecvBufferSize = 4096;
+
+struct ThreadArgs {
+    mach_port_t servicePort;
+    mach_port_t parentTaskPort;
+};
 
 // Receive-loop worker thread entry point.
 void* threadEntry(void* arg) {
-    mach_port_t servicePort = mach_port_t(uintptr_t(arg));
-    runReceiveLoop(servicePort);
+    auto* a = reinterpret_cast<ThreadArgs*>(arg);
+    runReceiveLoop(a->servicePort, a->parentTaskPort);
+    delete a;
     return nullptr;
 }
 
@@ -105,8 +111,10 @@ bool installPortInParent(mach_port_t parentTaskPort,
     return true;
 }
 
-void runReceiveLoop(mach_port_t servicePort) {
-    fprintf(stderr, "sidecar: receive loop starting on port 0x%x\n", servicePort);
+void runReceiveLoop(mach_port_t servicePort, mach_port_t parentTaskPort) {
+    fprintf(stderr,
+            "sidecar: receive loop starting on port 0x%x (parent task=0x%x)\n",
+            servicePort, parentTaskPort);
 
     // Counter file we update on each successful receive — survives process
     // exit so post-mortem can verify whether the loop ever drained anything.
@@ -143,11 +151,42 @@ void runReceiveLoop(mach_port_t servicePort) {
         hits++;
         bumpCounter(hits, 0);
 
-        // M2 dummy: log first few and drop. M3 will dispatch real work.
-        if (hits <= 5) {
-            fprintf(stderr,
-                    "sidecar: received #%llu msgh_id=0x%x size=%u remote=0x%x\n",
-                    hits, hdr->msgh_id, hdr->msgh_size, hdr->msgh_remote_port);
+        // M3 payload: header (24 B) + 5 × 8-byte args (40 B) = 64 B.
+        if (hdr->msgh_size >= 24 + 40 && hdr->msgh_id == 0x10000001) {
+            const uint64_t* body = reinterpret_cast<const uint64_t*>(
+                buf.bytes + sizeof(mach_msg_header_t));
+            uint64_t trAddr     = body[0];
+            uint64_t blockAddr  = body[1];
+            uint64_t instrAddr  = body[2];
+            int64_t numInstrs   = int64_t(body[3]);
+            int64_t insnIdx     = int64_t(body[4]);
+
+            // M3c: read the IRInstr at instr_array[insn_idx] from the parent
+            // via mach_vm_read_overwrite. IRInstr's exact layout will be
+            // pulled in from rosetta_core in M3d; for now read 64 bytes
+            // (enough to cover the opcode field + early flags) and log.
+            if (hits <= 5) {
+                uint8_t instrBuf[64] = {};
+                mach_vm_size_t got = 0;
+                kern_return_t kr2 = mach_vm_read_overwrite(
+                    parentTaskPort, instrAddr + uint64_t(insnIdx) * 64,
+                    sizeof(instrBuf),
+                    mach_vm_address_t(instrBuf), &got);
+                if (kr2 == KERN_SUCCESS) {
+                    fprintf(stderr,
+                            "sidecar: #%llu TR=0x%llx instr[%lld] of %lld "
+                            "first8bytes=%02x%02x%02x%02x%02x%02x%02x%02x\n",
+                            hits, trAddr, insnIdx, numInstrs,
+                            instrBuf[0], instrBuf[1], instrBuf[2], instrBuf[3],
+                            instrBuf[4], instrBuf[5], instrBuf[6], instrBuf[7]);
+                } else {
+                    fprintf(stderr,
+                            "sidecar: #%llu mach_vm_read_overwrite failed "
+                            "0x%x %s\n",
+                            hits, kr2, mach_error_string(kr2));
+                }
+                (void)blockAddr;
+            }
         }
 
         if (hdr->msgh_remote_port != MACH_PORT_NULL &&
@@ -158,16 +197,17 @@ void runReceiveLoop(mach_port_t servicePort) {
     }
 }
 
-bool spawnReceiveThread(mach_port_t servicePort) {
+bool spawnReceiveThread(mach_port_t servicePort, mach_port_t parentTaskPort) {
     pthread_t thr;
     pthread_attr_t attr;
     pthread_attr_init(&attr);
     pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
 
-    int rc = pthread_create(&thr, &attr, threadEntry,
-                            reinterpret_cast<void*>(uintptr_t(servicePort)));
+    auto* args = new ThreadArgs{servicePort, parentTaskPort};
+    int rc = pthread_create(&thr, &attr, threadEntry, args);
     pthread_attr_destroy(&attr);
     if (rc != 0) {
+        delete args;
         fprintf(stderr, "sidecar: pthread_create failed (%d)\n", rc);
         return false;
     }
