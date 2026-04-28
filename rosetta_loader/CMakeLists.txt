@@ -11,6 +11,8 @@ add_executable(runtime_loader
     src/main.cpp
     src/macho_loader.cpp
     src/offset_finder.cpp
+    src/sidecar.cpp
+    src/stub_asm.cpp
 )
 
 set(ENTITLEMENTS_FILE "${CMAKE_CURRENT_SOURCE_DIR}/entitlements.plist")

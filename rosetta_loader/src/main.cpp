@@ -17,6 +17,8 @@
 
 #include "macho_loader.hpp"
 #include "offset_finder.hpp"
+#include "sidecar.hpp"
+#include "stub_asm.hpp"
 #include "types.h"
 
 const char* logsEnabled = nullptr;
@@ -78,6 +80,8 @@ public:
             mach_port_deallocate(mach_task_self(), taskPort_);
         }
     }
+
+    task_t taskPort() const { return taskPort_; }
 
     bool attach(pid_t pid) {
         childPid_ = pid;
@@ -730,270 +734,357 @@ int main(int argc, char* argv[]) {
 
     LOG("Rosetta version: %llx\n", exports.version);
 
-    char path[PATH_MAX];
-    uint32_t pathSize = sizeof(path);
-    if (_NSGetExecutablePath(path, &pathSize) != 0) {
-        fprintf(stderr, "Failed to get executable path\n");
-        return 1;
-    }
-
-    // get the directory of the current executable
-    std::filesystem::path executablePath(path);
-    std::filesystem::path executableDir = executablePath.parent_path();
-
-    MachoLoader machoLoader;
-    if (!machoLoader.open(executableDir / "libRuntimeRosettax87")) {
-        fprintf(stderr, "Failed to open Mach-O file\n");
-        return 1;
-    }
-
-    // first we store the original state of the thread
-    arm_thread_state64_t backupThreadState;
-    dbg.copyThreadState(backupThreadState);
-
-    // now we prepare the registers for the mmap call
-    arm_thread_state64_t mmapThreadState;
-    memcpy(&mmapThreadState, &backupThreadState, sizeof(arm_thread_state64_t));
-
-    mmapThreadState.__x[0] = 0LL;                                      // addr
-    mmapThreadState.__x[1] = machoLoader.imageSize();                  // size
-    mmapThreadState.__x[2] = VM_PROT_READ | VM_PROT_WRITE;             // prot
-    mmapThreadState.__x[3] = MAP_ANON | MAP_TRANSLATED_ALLOW_EXECUTE;  // flags
-    mmapThreadState.__x[4] = -1;                                       // fd
-    mmapThreadState.__x[5] = 0;                                        // offset
-    mmapThreadState.__pc = runtimeBase + offsetFinder.offsetSvcCallEntry_;
-
-    dbg.restoreThreadState(mmapThreadState);
-
-    // setup a breakpoint after mmap syscall
-    dbg.setBreakpoint(runtimeBase + offsetFinder.offsetSvcCallRet_);
-    dbg.continueExecution();
-    dbg.removeBreakpoint(runtimeBase + offsetFinder.offsetSvcCallRet_);
-
-    uint64_t machoBase = dbg.readRegister(MuhDebugger::Register::X0);
-
-    LOG("Allocated memory at 0x%llx\n", machoBase);
-
-    dbg.restoreThreadState(backupThreadState);
-
-    // Calculate the Mach-O's preferred base (lowest vmaddr) so we can rebase segments correctly
-    uint64_t machoPreferredBase = UINT64_MAX;
-    machoLoader.forEachSegment([&](segment_command_64* segm) {
-        if (segm->vmaddr < machoPreferredBase)
-            machoPreferredBase = segm->vmaddr;
-    });
-    if (machoPreferredBase == UINT64_MAX)
-        machoPreferredBase = 0;
-
-    // Pass 1: write all segment data while the mmap'd region is still uniformly rw-.
-    // Protections must NOT be applied until all segments are written, because page-aligned
-    // protection changes for one segment can overlap adjacent segments.
-    // __LINKEDIT is skipped: it contains only linker metadata, is not needed at runtime,
-    // and its vmaddr range overlaps __DATA in this binary's layout.
-    machoLoader.forEachSegment([&](segment_command_64* segm) {
-        if (strncmp(segm->segname, "__LINKEDIT", 16) == 0)
-            return;
-
-        uint64_t segOffset = segm->vmaddr - machoPreferredBase;
-        uint64_t dest = machoBase + segOffset;
-
-        LOG("Copying segment %s: fileoff=0x%llx filesize=0x%llx vmaddr=0x%llx vmsize=0x%llx -> "
-            "dest=0x%llx\n",
-            segm->segname, (uint64_t)segm->fileoff, (uint64_t)segm->filesize,
-            (uint64_t)segm->vmaddr, (uint64_t)segm->vmsize, dest);
-
-        // Zero-fill vmsize bytes, then overwrite the first filesize bytes from the file.
-        // vmsize >= filesize; the tail (BSS-like) must stay zero.
-        std::vector<uint8_t> segData(segm->vmsize, 0);
-        if (segm->filesize > 0) {
-            memcpy(segData.data(), machoLoader.buffer_.data() + segm->fileoff, segm->filesize);
+    // ── M2: Inline IPC stub install ─────────────────────────────────────────
+    //
+    // 1. Find libRosettaRuntime's __TEXT trailing alignment padding (zero
+    //    bytes between last function and segment-end page boundary). That's
+    //    where OUR_HANDLER + STASH + STASH_JUMP will live.
+    // 2. Allocate a Mach receive port in this process and plant a SEND
+    //    right under a fresh name in the parent's port namespace.
+    // 3. Assemble stub bytes (entry @ translate_insn[0..16] + handler blob
+    //    @ trailing padding) referencing that port name.
+    // 4. COW + mach_vm_write the bytes; restore RX.
+    // 5. After detach, run the receive loop alongside kqueue parent-exit.
+    {
+        // ── Read live Mach-O headers from parent's address space ────────────
+        // The on-disk libRosettaRuntime at /Library/Apple/usr/libexec/oah is a
+        // shared-cache STUB whose segment sizes (and the byte-pattern offsets
+        // computed against it) do NOT match what's actually mapped in the
+        // parent — the dyld_shared_cache version is repacked. Everything we
+        // need (translate_insn address, __TEXT bounds) we discover from the
+        // live process memory instead.
+        mach_header_64 mh{};
+        if (!dbg.readMemory(runtimeBase, &mh, sizeof(mh))) {
+            fprintf(stderr, "M2: failed to read parent's mach_header_64\n");
+            return 1;
+        }
+        if (mh.magic != MH_MAGIC_64) {
+            fprintf(stderr, "M2: parent's mach_header magic mismatch (0x%x)\n",
+                    mh.magic);
+            return 1;
         }
 
-        dbg.writeMemory(dest, segData.data(), segm->vmsize);
-    });
+        // Read the load-commands region following the header.
+        std::vector<uint8_t> lcBuf(mh.sizeofcmds, 0);
+        if (!dbg.readMemory(runtimeBase + sizeof(mh), lcBuf.data(),
+                            mh.sizeofcmds)) {
+            fprintf(stderr, "M2: failed to read parent's load commands\n");
+            return 1;
+        }
 
-    // Pass 2: apply chained fixup rebases from __TEXT,__chain_starts.
-    // Must happen after all segment data is written but before protections are applied
-    // (while the entire region is still uniformly rw-).
-    {
-        uint64_t rebaseSlide = machoBase - machoPreferredBase;
-        LOG("Rebase slide: 0x%llx\n", rebaseSlide);
-
-        auto* chainStartsSect = machoLoader.getSection("__TEXT", "__chain_starts");
-        if (!chainStartsSect) {
-            LOG("WARNING: no __chain_starts section found, skipping rebase\n");
-        } else if (rebaseSlide == 0) {
-            LOG("Rebase slide is 0, skipping rebase\n");
-        } else {
-            uint8_t* sectData = machoLoader.buffer_.data() + chainStartsSect->offset;
-
-            // dyld_chained_starts_offsets layout:
-            //   uint32_t pointer_format
-            //   uint32_t starts_count
-            //   uint32_t chain_starts[starts_count]  <- file offsets to first chain entry
-            uint32_t pointerFormat = *(uint32_t*)(sectData + 0);
-            uint32_t startsCount = *(uint32_t*)(sectData + 4);
-
-            LOG("chain_starts: pointer_format=%u starts_count=%u\n", pointerFormat, startsCount);
-
-            if (pointerFormat != 6) {
-                // 6 = DYLD_CHAINED_PTR_64_OFFSET
-                LOG("WARNING: unsupported chain pointer format %u, skipping rebase\n",
-                    pointerFormat);
-            } else {
-                for (uint32_t i = 0; i < startsCount; i++) {
-                    uint32_t chainFileOffset = *(uint32_t*)(sectData + 8 + i * 4);
-                    LOG("  chain[%u] file offset: 0x%x\n", i, chainFileOffset);
-
-                    uint64_t curFileOffset = chainFileOffset;
-
-                    while (true) {
-                        uint64_t raw = *(uint64_t*)(machoLoader.buffer_.data() + curFileOffset);
-
-                        // dyld_chained_ptr_64_rebase bitfield:
-                        //   [35: 0] target   (36 bits) runtimeOffset from image base
-                        //   [43:36] high8    ( 8 bits) top 8 bits of target
-                        //   [50:44] reserved ( 7 bits)
-                        //   [62:51] next     (12 bits) 4-byte stride to next entry, 0 = end
-                        //   [63:63] bind     ( 1 bit)  0 = rebase, 1 = bind (ignored for static)
-                        uint64_t target = (raw >> 0) & 0xFFFFFFFFFULL;
-                        uint64_t high8 = (raw >> 36) & 0xFFULL;
-                        uint64_t next = (raw >> 51) & 0xFFFULL;  // starts at bit 51, not 52
-                        uint64_t bind = (raw >> 63) & 0x1ULL;
-
-                        if (bind == 0) {
-                            uint64_t fullTarget = target | (high8 << 56);
-                            uint64_t rebased = fullTarget + rebaseSlide;
-
-                            // Find which segment owns this file offset to compute dest address
-                            uint64_t destAddr = 0;
-                            machoLoader.forEachSegment([&](segment_command_64* segm) {
-                                if (curFileOffset >= segm->fileoff &&
-                                    curFileOffset < segm->fileoff + segm->filesize) {
-                                    uint64_t offsetInSeg = curFileOffset - segm->fileoff;
-                                    destAddr = machoBase + (segm->vmaddr - machoPreferredBase) +
-                                               offsetInSeg;
-                                }
-                            });
-
-                            if (destAddr != 0) {
-                                LOG("  Rebase: fileoff=0x%llx target=0x%llx -> 0x%llx "
-                                    "dest=0x%llx\n",
-                                    curFileOffset, fullTarget, rebased, destAddr);
-                                dbg.writeMemory(destAddr, &rebased, sizeof(rebased));
-                            } else {
-                                LOG("  WARNING: could not map fileoff=0x%llx to any segment\n",
-                                    curFileOffset);
-                            }
-                        }
-
-                        if (next == 0)
-                            break;
-                        curFileOffset += next * 4;  // 4-byte stride
-                    }
+        // Walk to find __TEXT segment.
+        uint64_t textVmAddr = 0;   // link-time vmaddr (offset basis for dyld
+                                   // shared-cache; runtimeBase corresponds
+                                   // to this)
+        uint64_t textVmSize = 0;
+        const uint8_t* p = lcBuf.data();
+        for (uint32_t i = 0; i < mh.ncmds; i++) {
+            auto* lc = (const load_command*)p;
+            if (lc->cmd == LC_SEGMENT_64) {
+                auto* seg = (const segment_command_64*)p;
+                if (strncmp(seg->segname, "__TEXT", 16) == 0) {
+                    textVmAddr = seg->vmaddr;
+                    textVmSize = seg->vmsize;
+                    break;
                 }
             }
+            p += lc->cmdsize;
+        }
+        if (textVmSize == 0) {
+            fprintf(stderr, "M2: parent has no __TEXT segment\n");
+            return 1;
+        }
+        const uint64_t textEndAddr = runtimeBase + textVmSize;
+        LOG("__TEXT range (live): [0x%lx, 0x%lx) (vmaddr=0x%llx vmsize=0x%llx)\n",
+            (unsigned long)runtimeBase, (unsigned long)textEndAddr, textVmAddr,
+            textVmSize);
+
+        // ── Compute translate_insn's live address from a known function ──
+        // pointer plus the file-offset delta. dyld_shared_cache may remap
+        // libRosettaRuntime's segments to different addresses, so we cannot
+        // just do `runtimeBase + translate_insn_rva`. Within a single
+        // segment, however, function-to-function offsets are preserved, so:
+        //   translate_insn_addr  =  init_library_runtime_addr
+        //                         + (translate_insn_rva - init_library_rva)
+        // init_library's runtime address is the first entry in
+        // libRosettaRuntime's x87Exports[] array (X19 points at the
+        // Exports struct; first export is init_library).
+        Export initLibraryExport{};
+        if (!dbg.readMemory(uint64_t(exports.x87Exports), &initLibraryExport,
+                            sizeof(initLibraryExport))) {
+            fprintf(stderr, "M2: failed to read init_library export entry\n");
+            return 1;
+        }
+        uint64_t initLibraryAddr =
+            uint64_t(initLibraryExport.address) & 0xFFFFFFFFFFFFULL;
+        if (initLibraryAddr == 0) {
+            fprintf(stderr, "M2: init_library export address is null\n");
+            return 1;
+        }
+        if (offsetFinder.offsetInitLibrary_ == 0 ||
+            offsetFinder.offsetTranslateInsn_ == 0) {
+            fprintf(stderr,
+                    "M2: missing init_library_rva or translate_insn_rva from "
+                    "offset_finder\n");
+            return 1;
+        }
+        uint64_t translateInsnAddr =
+            initLibraryAddr +
+            (uint64_t(offsetFinder.offsetTranslateInsn_) -
+             uint64_t(offsetFinder.offsetInitLibrary_));
+        LOG("M2: init_library live=0x%llx rva=0x%llx | translate_insn rva=0x%llx → "
+            "live=0x%llx\n",
+            initLibraryAddr, (uint64_t)offsetFinder.offsetInitLibrary_,
+            (uint64_t)offsetFinder.offsetTranslateInsn_, translateInsnAddr);
+
+        // Snapshot the original prologue.
+        uint8_t origPrologue[16];
+        if (!dbg.readMemory(translateInsnAddr, origPrologue,
+                             sizeof(origPrologue))) {
+            fprintf(stderr,
+                    "M2: failed to read translate_insn prologue at 0x%llx\n",
+                    translateInsnAddr);
+            return 1;
+        }
+        LOG("M2: translate_insn prologue: %02x%02x%02x%02x %02x%02x%02x%02x "
+            "%02x%02x%02x%02x %02x%02x%02x%02x\n",
+            origPrologue[0], origPrologue[1], origPrologue[2], origPrologue[3],
+            origPrologue[4], origPrologue[5], origPrologue[6], origPrologue[7],
+            origPrologue[8], origPrologue[9], origPrologue[10], origPrologue[11],
+            origPrologue[12], origPrologue[13], origPrologue[14], origPrologue[15]);
+
+        // ── Find the live executable region containing translate_insn ───────
+        // dyld_shared_cache may split libRosettaRuntime segments. The
+        // mach_header at runtimeBase doesn't necessarily live in the same
+        // region as translate_insn's code. Use mach_vm_region to find the
+        // bounds of the contiguous executable mapping that holds it.
+        mach_vm_address_t regAddr = translateInsnAddr;
+        mach_vm_size_t regSize = 0;
+        vm_region_basic_info_data_64_t regInfo{};
+        mach_msg_type_number_t regCount = VM_REGION_BASIC_INFO_COUNT_64;
+        mach_port_t regObj = MACH_PORT_NULL;
+        if (mach_vm_region(dbg.taskPort(), &regAddr, &regSize,
+                           VM_REGION_BASIC_INFO_64,
+                           reinterpret_cast<vm_region_info_t>(&regInfo),
+                           &regCount, &regObj) != KERN_SUCCESS) {
+            fprintf(stderr,
+                    "M2: mach_vm_region(translate_insn=0x%llx) failed\n",
+                    translateInsnAddr);
+            return 1;
+        }
+        if (translateInsnAddr < regAddr ||
+            translateInsnAddr >= regAddr + regSize) {
+            fprintf(stderr,
+                    "M2: translate_insn (0x%llx) not in region [0x%llx, "
+                    "0x%llx)\n",
+                    translateInsnAddr, (uint64_t)regAddr,
+                    (uint64_t)(regAddr + regSize));
+            return 1;
+        }
+        const uint64_t codeRegStart = uint64_t(regAddr);
+        const uint64_t codeRegEnd = uint64_t(regAddr + regSize);
+        LOG("M2: code region containing translate_insn: [0x%llx, 0x%llx) "
+            "size=0x%llx prot=0x%x\n",
+            codeRegStart, codeRegEnd, codeRegEnd - codeRegStart,
+            regInfo.protection);
+
+        // ── Find trailing alignment padding inside that region ──────────────
+        // Read the last 64 KB and find the last non-zero byte, then bytes
+        // after that are trailing padding.
+        constexpr uint64_t kScanWindow = 0x10000;  // 64 KB
+        uint64_t scanWindow =
+            std::min(kScanWindow, codeRegEnd - codeRegStart);
+        uint64_t scanStart = codeRegEnd - scanWindow;
+        std::vector<uint8_t> tail(scanWindow, 0);
+        if (!dbg.readMemory(scanStart, tail.data(), scanWindow)) {
+            fprintf(stderr,
+                    "M2: failed to read code-region tail at 0x%llx\n",
+                    scanStart);
+            return 1;
+        }
+        ssize_t lastNonZero = -1;
+        for (ssize_t i = ssize_t(scanWindow) - 1; i >= 0; i--) {
+            if (tail[i] != 0) {
+                lastNonZero = i;
+                break;
+            }
+        }
+        if (lastNonZero < 0) {
+            fprintf(stderr, "M2: code-region tail is all zeros, refusing\n");
+            return 1;
+        }
+        uint64_t padStartOff = (uint64_t(lastNonZero + 1) + 3) & ~uint64_t(3);
+        uint64_t padStartAddr = scanStart + padStartOff;
+        uint64_t padBytes = codeRegEnd - padStartAddr;
+        LOG("M2: __TEXT trailing padding starts at 0x%llx, %llu bytes free\n",
+            padStartAddr, padBytes);
+
+        // ── Install Mach service port in parent ─────────────────────────────
+        mach_port_t servicePort = MACH_PORT_NULL;
+        uint32_t parentPortName = 0;
+        if (!sidecar::installPortInParent(dbg.taskPort(), &servicePort,
+                                           &parentPortName)) {
+            fprintf(stderr, "M2: sidecar::installPortInParent failed\n");
+            return 1;
+        }
+        LOG("M2: parent port name 0x%x; local servicePort 0x%x\n",
+            parentPortName, servicePort);
+
+        // ── Assemble stub bytes ─────────────────────────────────────────────
+        // OUR_HANDLER + STASH + STASH_JUMP go to padStartAddr.
+        // ENTRY (16-byte abs-jump to OUR_HANDLER) goes to translate_insn[0..16].
+        auto blobs = stub_asm::build(padStartAddr, translateInsnAddr,
+                                      origPrologue, parentPortName);
+        if (blobs.entry.size() != 16) {
+            fprintf(stderr,
+                    "M2: stub_asm::build returned wrong entry size %zu\n",
+                    blobs.entry.size());
+            return 1;
+        }
+        if (blobs.handler.size() > padBytes) {
+            fprintf(stderr,
+                    "M2: handler blob (%zu bytes) doesn't fit in trailing "
+                    "padding (%llu bytes)\n",
+                    blobs.handler.size(), padBytes);
+            return 1;
+        }
+        LOG("M2: handler blob = %zu bytes (fits in %llu padding)\n",
+            blobs.handler.size(), padBytes);
+
+        // ── Write OUR_HANDLER + STASH + STASH_JUMP into trailing padding ───
+        if (!dbg.adjustMemoryProtection(
+                padStartAddr, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY,
+                blobs.handler.size())) {
+            fprintf(stderr, "M2: failed to make padding writable\n");
+            return 1;
+        }
+        if (!dbg.writeMemory(padStartAddr, blobs.handler.data(),
+                             blobs.handler.size())) {
+            fprintf(stderr, "M2: failed to write handler blob\n");
+            return 1;
+        }
+        if (!dbg.adjustMemoryProtection(padStartAddr,
+                                        VM_PROT_READ | VM_PROT_EXECUTE,
+                                        blobs.handler.size())) {
+            fprintf(stderr, "M2: failed to restore padding protection\n");
+            return 1;
+        }
+        LOG("M2: handler installed at 0x%llx\n", padStartAddr);
+
+        // ── DIAGNOSTIC (temporary): replace ENTRY with `mov x0, #0xCAFE; ret`
+        // padded with nops so we can tell whether translate_insn is even
+        // being called after our patch lands. If test_arith behaves
+        // differently from a no-patch baseline, the patch IS being hit.
+        if (getenv("ROSETTA_X87_DIAG_ENTRY_RET")) {
+            blobs.entry.clear();
+            // movz x0, #0xCAFE
+            uint32_t movzInsn = 0xD2800000u | (uint32_t(0xCAFE) << 5) | 0;
+            // ret  (= BR x30)
+            uint32_t retInsn  = 0xD65F03C0u;
+            uint32_t nopInsn  = 0xD503201Fu;
+            for (uint32_t insn : {movzInsn, retInsn, nopInsn, nopInsn}) {
+                blobs.entry.push_back(uint8_t(insn));
+                blobs.entry.push_back(uint8_t(insn >> 8));
+                blobs.entry.push_back(uint8_t(insn >> 16));
+                blobs.entry.push_back(uint8_t(insn >> 24));
+            }
+            LOG("M2: DIAG_ENTRY_RET active — entry replaced with mov x0,#0xCAFE; ret\n");
+        }
+
+        // ── Patch translate_insn[0..16] with the abs-jump ENTRY ────────────
+        if (!dbg.adjustMemoryProtection(
+                translateInsnAddr, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY,
+                blobs.entry.size())) {
+            fprintf(stderr, "M2: failed to make translate_insn writable\n");
+            return 1;
+        }
+        if (!dbg.writeMemory(translateInsnAddr, blobs.entry.data(),
+                             blobs.entry.size())) {
+            fprintf(stderr, "M2: failed to write translate_insn entry\n");
+            return 1;
+        }
+        if (!dbg.adjustMemoryProtection(translateInsnAddr,
+                                        VM_PROT_READ | VM_PROT_EXECUTE,
+                                        blobs.entry.size())) {
+            fprintf(stderr, "M2: failed to restore translate_insn protection\n");
+            return 1;
+        }
+        LOG("M2: translate_insn entry patched (abs-jump to 0x%llx)\n",
+            padStartAddr);
+
+        // Read-back verification: confirm the patch actually landed, and
+        // dump the FULL handler so we can decode each instruction post-mortem.
+        uint8_t verifyEntry[16];
+        if (dbg.readMemory(translateInsnAddr, verifyEntry, 16)) {
+            LOG("M2: post-patch translate_insn[0..16]: %02x%02x%02x%02x "
+                "%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x\n",
+                verifyEntry[0], verifyEntry[1], verifyEntry[2], verifyEntry[3],
+                verifyEntry[4], verifyEntry[5], verifyEntry[6], verifyEntry[7],
+                verifyEntry[8], verifyEntry[9], verifyEntry[10],
+                verifyEntry[11], verifyEntry[12], verifyEntry[13],
+                verifyEntry[14], verifyEntry[15]);
+        }
+        std::vector<uint8_t> verifyHandler(blobs.handler.size(), 0);
+        if (dbg.readMemory(padStartAddr, verifyHandler.data(),
+                            verifyHandler.size())) {
+            LOG("M2: handler full dump (%zu bytes), 4 insns/line:\n",
+                verifyHandler.size());
+            for (size_t i = 0; i < verifyHandler.size(); i += 16) {
+                LOG("  +0x%03zx: %02x%02x%02x%02x %02x%02x%02x%02x "
+                    "%02x%02x%02x%02x %02x%02x%02x%02x\n",
+                    i,
+                    verifyHandler[i + 0], verifyHandler[i + 1],
+                    verifyHandler[i + 2], verifyHandler[i + 3],
+                    verifyHandler[i + 4], verifyHandler[i + 5],
+                    verifyHandler[i + 6], verifyHandler[i + 7],
+                    verifyHandler[i + 8], verifyHandler[i + 9],
+                    verifyHandler[i + 10], verifyHandler[i + 11],
+                    verifyHandler[i + 12], verifyHandler[i + 13],
+                    verifyHandler[i + 14], verifyHandler[i + 15]);
+            }
+        }
+
+        // Marker file so external smoke tests can confirm M2 actually ran.
+        if (FILE* f = fopen("/tmp/rosettax87_jit_m2_marker", "w")) {
+            fprintf(f, "translate_insn=0x%llx\n", translateInsnAddr);
+            fprintf(f, "handler=0x%llx\n", padStartAddr);
+            fprintf(f, "handler_bytes=%zu\n", blobs.handler.size());
+            fprintf(f, "padding_bytes=%llu\n", padBytes);
+            fprintf(f, "parent_port_name=0x%x\n", parentPortName);
+            fclose(f);
+        }
+
+        // Stash for the sidecar phase below.
+        // (servicePort is captured into the receive thread below.)
+        dbg.detach();
+
+        // Spawn the Mach receive thread BEFORE the kqueue wait below so
+        // any in-flight tickle messages from the parent get drained while
+        // we sit on kqueue. Detached thread; cleaned up on process exit.
+        if (!sidecar::spawnReceiveThread(servicePort)) {
+            fprintf(stderr, "M2: failed to spawn receive thread\n");
+            return 1;
+        }
+        LOG("M2: receive thread running; entering kqueue wait\n");
+
+        // Self-test: send a tickle message from this process to our own
+        // service port. If the receive thread picks it up, the receive
+        // plumbing is healthy (and the issue is on the parent side).
+        {
+            mach_msg_header_t selfMsg{};
+            selfMsg.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+            selfMsg.msgh_size = sizeof(selfMsg);
+            selfMsg.msgh_remote_port = servicePort;
+            selfMsg.msgh_local_port = MACH_PORT_NULL;
+            selfMsg.msgh_id = 0xCAFEBABE;
+            kern_return_t kr =
+                mach_msg(&selfMsg, MACH_SEND_MSG, sizeof(selfMsg), 0,
+                         MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE,
+                         MACH_PORT_NULL);
+            LOG("M2: self-test mach_msg send → 0x%x (%s)\n", kr,
+                mach_error_string(kr));
         }
     }
-
-    // Pass 3: apply per-segment memory protections now that all data and rebases are in place.
-    machoLoader.forEachSegment([&](segment_command_64* segm) {
-        if (strncmp(segm->segname, "__LINKEDIT", 16) == 0)
-            return;
-
-        uint64_t segOffset = segm->vmaddr - machoPreferredBase;
-        uint64_t dest = machoBase + segOffset;
-        dbg.adjustMemoryProtection(dest, segm->initprot, segm->vmsize);
-    });
-
-    // Write the offsets we found to __DATA,offsets
-    uint64_t machoOffsetsAddress = machoBase + machoLoader.getSection("__DATA", "offsets")->addr;
-    Offsets machoOffsets = {
-        .init_library_rva = offsetFinder.offsetInitLibrary_,
-        .translate_insn_addr = offsetFinder.offsetTranslateInsn_,
-        .transaction_result_size_addr = offsetFinder.offsetTransactionResultSize_};
-
-    dbg.writeMemory(machoOffsetsAddress, &machoOffsets, sizeof(machoOffsets));
-
-    // Write runtime feature config to __DATA,config
-    if (auto* configSection = machoLoader.getSection("__DATA", "config")) {
-        RosettaConfig runtimeConfig = parse_config_from_env();
-        uint64_t machoConfigAddress = machoBase + configSection->addr;
-        dbg.writeMemory(machoConfigAddress, &runtimeConfig, sizeof(runtimeConfig));
-    }
-
-    // fix up Exports segment of mapped macho
-    uint64_t machoExportsAddress = machoBase + machoLoader.getSection("__DATA", "exports")->addr;
-    Exports machoExports;
-
-    dbg.readMemory(machoExportsAddress, &machoExports, sizeof(machoExports));
-    // x87Exports and runtimeExports are already correct absolute addresses
-    // after chain fixup rebasing — do NOT add machoBase again.
-
-    std::vector<Export> x87Exports(machoExports.x87ExportCount);
-    std::vector<Export> runtimeExports(machoExports.runtimeExportCount);
-
-    dbg.readMemory(machoExports.x87Exports, x87Exports.data(), x87Exports.size() * sizeof(Export));
-    dbg.readMemory(machoExports.runtimeExports, runtimeExports.data(),
-                   runtimeExports.size() * sizeof(Export));
-
-    // address and name fields are already correct absolute addresses
-    // after chain fixup rebasing — do NOT add machoBase again.
-
-    dbg.writeMemory(machoExports.x87Exports, x87Exports.data(), x87Exports.size() * sizeof(Export));
-    dbg.writeMemory(machoExports.runtimeExports, runtimeExports.data(),
-                    runtimeExports.size() * sizeof(Export));
-
-    LOG("machoExports_address: 0x%llx\n", machoExportsAddress);
-    LOG("machoExports.x87Exports: 0x%llx\n", machoExports.x87Exports);
-    LOG("machoExports.runtimeExports: 0x%llx\n", machoExports.runtimeExports);
-
-    // match the running system's Rosetta version and export count
-    auto libRosettaRuntimeExportsAddress = dbg.readRegister(MuhDebugger::Register::X19);
-    Exports libRosettaRuntimeExports;
-    dbg.readMemory(libRosettaRuntimeExportsAddress, &libRosettaRuntimeExports,
-                   sizeof(libRosettaRuntimeExports));
-
-    machoExports.version = libRosettaRuntimeExports.version;
-    if (libRosettaRuntimeExports.x87ExportCount < machoExports.x87ExportCount) {
-        LOG("Capping x87ExportCount from %llu to %llu to match system\n",
-            machoExports.x87ExportCount, libRosettaRuntimeExports.x87ExportCount);
-        machoExports.x87ExportCount = libRosettaRuntimeExports.x87ExportCount;
-    }
-
-    dbg.writeMemory(machoExportsAddress, &machoExports, sizeof(machoExports));
-
-    // look up imports section of mapped macho
-    auto machoImportsAddress = machoBase + machoLoader.getSection("__DATA", "imports")->addr;
-    LOG("machoImportsAddress: 0x%llx\n", machoImportsAddress);
-
-    LOG("libRosettaRuntimeExportsAddress: 0x%llx\n", libRosettaRuntimeExportsAddress);
-
-    LOG("libRosettaRuntimeExports.version = 0x%llx\n", libRosettaRuntimeExports.version);
-    LOG("libRosettaRuntimeExports.x87Exports = 0x%llx\n", libRosettaRuntimeExports.x87Exports);
-    LOG("libRosettaRuntimeExports.x87Export_count = 0x%llx\n",
-        libRosettaRuntimeExports.x87ExportCount);
-    LOG("libRosettaRuntimeExports.runtimeExports = 0x%llx\n",
-        libRosettaRuntimeExports.runtimeExports);
-    LOG("libRosettaRuntimeExports.runtimeExportCount = 0x%llx\n",
-        libRosettaRuntimeExports.runtimeExportCount);
-
-    dbg.writeMemory(machoImportsAddress, &libRosettaRuntimeExports,
-                    sizeof(libRosettaRuntimeExports));
-
-    // replace the exports in X19 register with the address of the mapped macho
-    dbg.setRegister(MuhDebugger::Register::X19, machoExportsAddress);
-
-    // calculate base of rosetta  libRosettaRuntime
-    uint64_t rosettaRuntimeBase = libRosettaRuntimeExportsAddress - 0x6A4F8;
-    LOG("Calculated rosetta runtime base: 0x%llx\n", rosettaRuntimeBase);
-
-    // calculate address of where our trampoline jumps to
-    uint64_t trampolineTarget = rosettaRuntimeBase + 0x1a664;
-    // 64 c6 f8 0a 01 00 00 00
-    // dbg.setBreakpoint(trampolineTarget);
-
-    dbg.detach();
 
     // Block until the parent (wine) exits. We can't use waitpid since
     // the parent is not our child, so use kqueue with EVFILT_PROC.
