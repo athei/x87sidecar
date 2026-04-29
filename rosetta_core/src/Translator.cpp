@@ -1,9 +1,6 @@
 #include "rosetta_core/Translator.h"
 
-#include <unistd.h>
-
 #include "rosetta_core/CoreConfig.h"
-#include "rosetta_core/CoreLog.h"
 #include "rosetta_core/IRInstr.h"
 #include "rosetta_core/Opcode.h"
 #include "rosetta_core/TranslationResult.h"
@@ -13,74 +10,6 @@
 #include "rosetta_core/X87IR.h"
 #include "rosetta_config/Config.h"
 
-
-static const char* opcode_id_name(OpcodeId id) {
-    switch (id) {
-        case OpcodeId::fldz:     return "fldz";
-        case OpcodeId::fld1:     return "fld1";
-        case OpcodeId::fldl2e:   return "fldl2e";
-        case OpcodeId::fldl2t:   return "fldl2t";
-        case OpcodeId::fldlg2:   return "fldlg2";
-        case OpcodeId::fldln2:   return "fldln2";
-        case OpcodeId::fldpi:    return "fldpi";
-        case OpcodeId::fld:      return "fld";
-        case OpcodeId::fild:     return "fild";
-        case OpcodeId::fadd:     return "fadd";
-        case OpcodeId::faddp:    return "faddp";
-        case OpcodeId::fiadd:    return "fiadd";
-        case OpcodeId::fsub:     return "fsub";
-        case OpcodeId::fsubr:    return "fsubr";
-        case OpcodeId::fsubp:    return "fsubp";
-        case OpcodeId::fsubrp:   return "fsubrp";
-        case OpcodeId::fdiv:     return "fdiv";
-        case OpcodeId::fdivr:    return "fdivr";
-        case OpcodeId::fdivp:    return "fdivp";
-        case OpcodeId::fdivrp:   return "fdivrp";
-        case OpcodeId::fmul:     return "fmul";
-        case OpcodeId::fmulp:    return "fmulp";
-        case OpcodeId::fst:      return "fst";
-        case OpcodeId::fst_stack: return "fst_stack";
-        case OpcodeId::fstp:     return "fstp";
-        case OpcodeId::fstp_stack: return "fstp_stack";
-        case OpcodeId::fstsw:    return "fstsw";
-        case OpcodeId::fcom:     return "fcom";
-        case OpcodeId::fcomp:    return "fcomp";
-        case OpcodeId::fcompp:   return "fcompp";
-        case OpcodeId::fucom:    return "fucom";
-        case OpcodeId::fucomp:   return "fucomp";
-        case OpcodeId::fucompp:  return "fucompp";
-        case OpcodeId::fxch:     return "fxch";
-        case OpcodeId::fchs:     return "fchs";
-        case OpcodeId::fabs:     return "fabs";
-        case OpcodeId::fsqrt:    return "fsqrt";
-        case OpcodeId::fistp:    return "fistp";
-        case OpcodeId::fisttp:   return "fisttp";
-        case OpcodeId::fidiv:    return "fidiv";
-        case OpcodeId::fimul:    return "fimul";
-        case OpcodeId::fisub:    return "fisub";
-        case OpcodeId::fidivr:   return "fidivr";
-        case OpcodeId::frndint:  return "frndint";
-        case OpcodeId::fcomi:    return "fcomi";
-        case OpcodeId::fcomip:   return "fcomip";
-        case OpcodeId::fucomi:   return "fucomi";
-        case OpcodeId::fucomip:  return "fucomip";
-        case OpcodeId::ftst:     return "ftst";
-        case OpcodeId::fist:     return "fist";
-        case OpcodeId::fisubr:   return "fisubr";
-        case OpcodeId::fcmovb:   return "fcmovb";
-        case OpcodeId::fcmovbe:  return "fcmovbe";
-        case OpcodeId::fcmove:   return "fcmove";
-        case OpcodeId::fcmovnb:  return "fcmovnb";
-        case OpcodeId::fcmovnbe: return "fcmovnbe";
-        case OpcodeId::fcmovne:  return "fcmovne";
-        case OpcodeId::fcmovu:   return "fcmovu";
-        case OpcodeId::fcmovnu:  return "fcmovnu";
-        case OpcodeId::ficom:    return "ficom";
-        case OpcodeId::ficomp:   return "ficomp";
-        case OpcodeId::kCount:   return "unknown";
-    }
-    return "unknown";
-}
 
 static OpcodeId opcode_to_id(uint16_t op) {
     using O = Opcode;
@@ -157,21 +86,6 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
     const auto cur_instr = &instr_array[insn_idx];
     const auto opcode = cur_instr->opcode;
     auto& cache = translation_result->x87_cache;
-
-    {
-        static uint64_t seen_ops = 0;
-        static int cached_pid = 0;
-        const auto id = opcode_to_id(opcode);
-        if (id != OpcodeId::kCount) {
-            const uint64_t bit = uint64_t(1) << static_cast<int>(id);
-            if (!(seen_ops & bit)) {
-                seen_ops |= bit;
-                if (!cached_pid)
-                    cached_pid = getpid();
-                CORE_LOG("[JIT][pid=%d] translate: %s", cached_pid, opcode_id_name(id));
-            }
-        }
-    }
 
     // If extended FPR scratch is enabled, upgrade the mask from 8-reg to 16-reg form on first use.
     if (g_rosetta_config && g_rosetta_config->extended_fpr_scratch &&
