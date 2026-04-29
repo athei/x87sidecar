@@ -97,4 +97,6 @@ auto translate_fdecstp(TranslationResult* a1, IRInstr* a2) -> void;
 
 auto translate_fincstp(TranslationResult* a1, IRInstr* a2) -> void;
 
+auto translate_ffree(TranslationResult* a1, IRInstr* a2) -> void;
+
 };  // namespace TranslatorX87

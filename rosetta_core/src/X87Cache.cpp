@@ -80,6 +80,7 @@ static bool is_handled_x87(uint16_t op) {
         case kOpcodeName_fclex:
         case kOpcodeName_fdecstp:
         case kOpcodeName_fincstp:
+        case kOpcodeName_ffree:
             return true;
         default:
             return false;

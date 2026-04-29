@@ -3419,6 +3419,91 @@ auto translate_fincstp(TranslationResult* a1, IRInstr* /*a2*/) -> void {
 }
 
 // =============================================================================
+// FFREE ST(i) — mark ST(i)'s tag as Empty.
+//
+// x87 semantics:
+//   tag_word[(2*phys+1):(2*phys)] = 0b11   where phys = (TOP + i) & 7
+//   data registers, TOP, status flags: unchanged
+//
+// Pre-flush deferred tag state (tag_push_pending / deferred_pop_count both
+// write to tag_word).  Then OR in the empty-tag bits at the right slot
+// position computed at run time from Wd_top + depth.
+//
+// Steady state in a run: 7 emitted instructions per ffree
+//   ADD Wb, Wd_top, #depth   (skipped if depth==0)
+//   AND Wb, Wb, #7           (skipped if depth==0)
+//   LSL Wb, Wb, #1
+//   MOVZ Wm, #3
+//   LSLV Wm, Wm, Wb          (mask = 3 << (2*phys))
+//   LDRH Wt, [Xbase, #tag_word]
+//   ORR  Wt, Wt, Wm
+//   STRH Wt, [Xbase, #tag_word]
+// =============================================================================
+auto translate_ffree(TranslationResult* a1, IRInstr* a2) -> void {
+    AssemblerBuffer& buf = a1->insn_buf;
+    static constexpr int16_t kX87TagWordImm12 = kX87TagWordOff / 2;  // = 2
+
+    auto [Xbase, Wd_top] = x87_begin(*a1, buf);
+    const int Wd_tmp = alloc_gpr(*a1, 2);
+
+    // Operand encoding: ffree has a single ST(i) operand.  Existing
+    // unary handlers (translate_fxch reads it from operands[1] because
+    // Rosetta normalises {[ST(0), ST(i)]} for swap-shape ops; ffree is
+    // a true single-operand op so its register is at operands[0]).
+    const int logical_depth = a2->operands[0].reg.reg.index();
+    const int depth = resolve_depth(*a1, logical_depth);
+
+    // Flush any deferred tag-word updates so our LDRH sees coherent state.
+    {
+        const int Wd_tmp2 = alloc_free_gpr(*a1);
+        x87_flush_tags(buf, *a1, Xbase, Wd_top, Wd_tmp, Wd_tmp2);
+        free_gpr(*a1, Wd_tmp2);
+    }
+
+    const int Wd_bitpos = alloc_free_gpr(*a1);
+    const int Wd_mask   = alloc_free_gpr(*a1);
+
+    // Compute physical slot index in Wd_bitpos.
+    if (depth == 0) {
+        // bitpos = Wd_top * 2  (no add needed)
+        emit_bitfield(buf, /*is_64=*/0, /*UBFM*/ 2, /*N=*/0,
+                      /*immr=*/31, /*imms=*/30, Wd_top, Wd_bitpos);
+    } else {
+        // ADD Wd_bitpos, Wd_top, #depth
+        emit_add_imm(buf, /*is_64bit=*/0, /*is_sub=*/0, /*is_set_flags=*/0,
+                     /*shift=*/0, /*imm12=*/depth, Wd_top, Wd_bitpos);
+        // AND Wd_bitpos, Wd_bitpos, #7
+        emit_and_imm(buf, /*is_64bit=*/0, /*Rd=*/Wd_bitpos,
+                     /*N=*/0, /*immr=*/0, /*imms=*/2, /*Rn=*/Wd_bitpos);
+        // LSL Wd_bitpos, Wd_bitpos, #1  → 2*phys
+        emit_bitfield(buf, /*is_64=*/0, /*UBFM*/ 2, /*N=*/0,
+                      /*immr=*/31, /*imms=*/30, Wd_bitpos, Wd_bitpos);
+    }
+
+    // MOVZ Wd_mask, #3
+    emit_movn(buf, /*is_64=*/0, /*MOVZ opc=*/2, /*hw=*/0, /*imm=*/3, Wd_mask);
+    // LSLV Wd_mask, Wd_mask, Wd_bitpos   → mask = 3 << (2*phys)
+    emit_lslv(buf, /*is_64=*/0, /*Rm=*/Wd_bitpos, /*Rn=*/Wd_mask, /*Rd=*/Wd_mask);
+
+    // LDRH Wd_bitpos, [Xbase, #tag_word]   (reuse Wd_bitpos as tag-word reg)
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*LDR=*/1,
+                     kX87TagWordImm12, Xbase, Wd_bitpos);
+    // ORR Wd_bitpos, Wd_bitpos, Wd_mask
+    emit_logical_shifted_reg(buf, /*is_64=*/0, /*ORR=*/1, /*N=*/0,
+                             /*LSL=*/0, /*Rm=*/Wd_mask, /*shift=*/0,
+                             /*Rn=*/Wd_bitpos, /*Rd=*/Wd_bitpos);
+    // STRH Wd_bitpos, [Xbase, #tag_word]
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*STR=*/0,
+                     kX87TagWordImm12, Xbase, Wd_bitpos);
+
+    free_gpr(*a1, Wd_mask);
+    free_gpr(*a1, Wd_bitpos);
+
+    x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp);
+    free_gpr(*a1, Wd_tmp);
+}
+
+// =============================================================================
 // FCLEX / FNCLEX — clear x87 exception flags.
 //
 // x87 semantics:

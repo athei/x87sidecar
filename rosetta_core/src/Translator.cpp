@@ -270,6 +270,10 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                 TranslatorX87::translate_fincstp(translation_result, cur_instr);
                 break;
 
+            case Opcode::kOpcodeName_ffree:
+                TranslatorX87::translate_ffree(translation_result, cur_instr);
+                break;
+
             case Opcode::kOpcodeName_fcom:
             case Opcode::kOpcodeName_fcomp:
             case Opcode::kOpcodeName_fcompp:
