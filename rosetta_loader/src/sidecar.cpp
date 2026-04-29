@@ -38,6 +38,11 @@ struct ThreadArgs {
 //
 // Strategy:
 //   1. Read parent's TR, ThreadContextOffsets, and IR array into locals.
+//      The read pulls sizeof(tr) bytes — including space for our appended
+//      x87_cache, which lives PAST stock's TR allocation in parent. Those
+//      tail bytes come back as junk from adjacent heap and we immediately
+//      overwrite the cache field with X87Cache{} so Translator never sees
+//      the junk.
 //   2. RESET TR's mutable buffers to empty (data=null, end=0, end_cap=0,
 //      use_heap=1) and lists to nullptr. With use_heap=1 grow uses calloc
 //      (no munmap of foreign pointers); with empty lists push_back_slow's
@@ -50,7 +55,9 @@ struct ThreadArgs {
 //      replacement via `mach_vm_allocate`, copy parent's existing
 //      contents over, then append the new tail. Update TR's pointers to
 //      the parent VA.
-//   5. mach_vm_write the patched TR back. Free our local allocations.
+//   5. mach_vm_write the patched TR back, capped at the offset of our
+//      x87_cache addition so we never write past parent's stock-shape
+//      allocation. Free our local allocations.
 //
 // Parent's old buffer (when we replace it on grow) becomes orphaned in
 // parent's heap — we can't `free()` parent-side from here. The leak is
@@ -305,13 +312,13 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask,
         lists[i]->_size   = origLists[i]._size;
     }
 
-    // Stock libRosettaRuntime's TR is 0x288 bytes; our struct appends
-    // x87_cache afterward (OPT-1 — see TranslationResult.h note). Writing
-    // sizeof(TranslationResult) overwrites bytes past parent's actual
-    // allocation, corrupting adjacent heap and crashing parent later with
-    // EXC_BAD_INSTRUCTION. Cap the write at the stock size — our cache is
-    // process-local scratch, never persisted to parent.
-    constexpr size_t kStockTrBytes = 0x288;
+    // Stock libRosettaRuntime's TR ends right before our appended x87_cache
+    // field (OPT-1 — see TranslationResult.h note). Writing sizeof(tr) would
+    // overflow parent's stock-shape allocation and corrupt adjacent heap,
+    // which crashes parent later with EXC_BAD_INSTRUCTION. Cap the write at
+    // the offset of our addition — the cache is process-local scratch,
+    // never persisted to parent.
+    constexpr size_t kStockTrBytes = offsetof(TranslationResult, x87_cache);
     if (!writeParent(parentTask, req.tr_addr, &tr, kStockTrBytes)) return out;
 
     out.reply_some = true;
