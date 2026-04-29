@@ -10,16 +10,19 @@
 //   stock translate_insn[0..16]:
 //       16-byte abs-jump to OUR_HANDLER  (movz/movk/movk x16 + br x16)
 //   trailing padding region of __TEXT segment:
-//       OUR_HANDLER  (~64 instr): builds mach_msg header on stack, sends it,
-//                                 falls through to STASH unconditionally for M2.
+//       OUR_HANDLER  (~60 instr): saves caller regs, builds mach_msg header
+//                                 + 5×8 args body on stack, svc into
+//                                 mach_msg_trap with SEND|RCV. After reply,
+//                                 branches on msgh_id:
+//                                   id == 1 (Some) → load body[0] into x0,
+//                                                    restore, ret.
+//                                   id == 0 (None) → restore, fall through
+//                                                    to STASH below.
 //       STASH        (4 instr):   copy of translate_insn[0..16] original bytes.
 //       STASH_JUMP   (4 instr):   abs-jump to translate_insn+16.
 //
-// Sizes:
-//   16-byte stub at translate_insn[0..16].
-//   Total bytes needed in trailing padding = sizeof(handler) + 16 + 16.
-//
-// All the produced bytes are arm64 instructions encoded little-endian.
+// Total bytes needed in trailing padding = sizeof(handler) + 16 + 16.
+// All produced bytes are arm64 instructions encoded little-endian.
 namespace stub_asm {
 
 struct StubBlobs {
