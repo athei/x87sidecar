@@ -17,6 +17,7 @@
 
 #include "macho_loader.hpp"
 #include "offset_finder.hpp"
+#include "rosetta_core/TranslationResult.h"
 #include "sidecar.hpp"
 #include "stub_asm.hpp"
 #include "types.h"
@@ -836,6 +837,73 @@ int main(int argc, char* argv[]) {
             "live=0x%llx\n",
             initLibraryAddr, (uint64_t)offsetFinder.offsetInitLibrary_,
             (uint64_t)offsetFinder.offsetTranslateInsn_, translateInsnAddr);
+
+        // ── Patch stock's TR-size MOVZ so each TR holds our X87Cache ────────
+        // libRosettaRuntime allocates per-thread TranslationResults sized by
+        // a `MOV W0, #0x288` immediate that aotinvoke's pattern search located
+        // (offsetTransactionResultSize_). We've extended TranslationResult
+        // with `x87_cache` (OPT-1) appended at the end — see
+        // TranslationResult.h. Patch the MOVZ in stock's __TEXT to allocate
+        // sizeof(TranslationResult) bytes per TR so the cache field lives
+        // inside parent's allocation and our write-back at the end of every
+        // translate_insn call can persist it across calls (no heap overflow).
+        //
+        // Patch must run BEFORE any TR is allocated. We're paused at
+        // offsetExportsFetch_ — early in libRosettaRuntime's init, before
+        // any thread has called translate_insn — so we're safe.
+        {
+            if (offsetFinder.offsetTransactionResultSize_ == 0) {
+                fprintf(stderr, "M2: missing offsetTransactionResultSize_\n");
+                return 1;
+            }
+            const uint64_t trSizeAddr =
+                initLibraryAddr +
+                (uint64_t(offsetFinder.offsetTransactionResultSize_) -
+                 uint64_t(offsetFinder.offsetInitLibrary_));
+
+            constexpr uint32_t kNewTrSize = sizeof(TranslationResult);
+            static_assert(kNewTrSize <= 0xFFFFu,
+                          "TranslationResult must fit in MOVZ imm16");
+
+            uint32_t origInsn = 0;
+            if (!dbg.readMemory(trSizeAddr, &origInsn, sizeof(origInsn))) {
+                fprintf(stderr, "M2: failed to read TR-size MOVZ at 0x%llx\n",
+                        trSizeAddr);
+                return 1;
+            }
+            // MOVZ Wd, #imm16, lsl #0 — sf=0, opc=10, hw=00.
+            //   fixed bits mask 0xFFE00000, value 0x52800000
+            //   imm16 lives in bits [20:5]
+            if ((origInsn & 0xFFE00000u) != 0x52800000u) {
+                fprintf(stderr,
+                        "M2: TR-size patch site at 0x%llx is not MOVZ "
+                        "Wd,#imm (got 0x%08x)\n",
+                        trSizeAddr, origInsn);
+                return 1;
+            }
+            const uint32_t origImm = (origInsn >> 5) & 0xFFFFu;
+            const uint32_t newInsn =
+                (origInsn & ~0x001FFFE0u) | (uint32_t(kNewTrSize) << 5);
+
+            if (!dbg.adjustMemoryProtection(
+                    trSizeAddr, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY,
+                    sizeof(newInsn))) {
+                fprintf(stderr, "M2: TR-size patch protect-RW failed\n");
+                return 1;
+            }
+            if (!dbg.writeMemory(trSizeAddr, &newInsn, sizeof(newInsn))) {
+                fprintf(stderr, "M2: TR-size patch write failed\n");
+                return 1;
+            }
+            if (!dbg.adjustMemoryProtection(trSizeAddr,
+                                            VM_PROT_READ | VM_PROT_EXECUTE,
+                                            sizeof(newInsn))) {
+                fprintf(stderr, "M2: TR-size patch protect-RX failed\n");
+                return 1;
+            }
+            LOG("M2: TR-size MOVZ at 0x%llx patched: 0x%x → 0x%x\n",
+                trSizeAddr, origImm, kNewTrSize);
+        }
 
         // Snapshot the original prologue.
         uint8_t origPrologue[16];

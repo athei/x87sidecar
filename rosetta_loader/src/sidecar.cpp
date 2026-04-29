@@ -38,11 +38,10 @@ struct ThreadArgs {
 //
 // Strategy:
 //   1. Read parent's TR, ThreadContextOffsets, and IR array into locals.
-//      The read pulls sizeof(tr) bytes — including space for our appended
-//      x87_cache, which lives PAST stock's TR allocation in parent. Those
-//      tail bytes come back as junk from adjacent heap and we immediately
-//      overwrite the cache field with X87Cache{} so Translator never sees
-//      the junk.
+//      sizeof(tr) bytes are read in full — the loader's M2 init patched
+//      stock's TR allocator to allocate sizeof(TranslationResult) per TR
+//      so parent's heap has the full extended struct (including our
+//      appended x87_cache, OPT-1).
 //   2. RESET TR's mutable buffers to empty (data=null, end=0, end_cap=0,
 //      use_heap=1) and lists to nullptr. With use_heap=1 grow uses calloc
 //      (no munmap of foreign pointers); with empty lists push_back_slow's
@@ -55,9 +54,9 @@ struct ThreadArgs {
 //      replacement via `mach_vm_allocate`, copy parent's existing
 //      contents over, then append the new tail. Update TR's pointers to
 //      the parent VA.
-//   5. mach_vm_write the patched TR back, capped at the offset of our
-//      x87_cache addition so we never write past parent's stock-shape
-//      allocation. Free our local allocations.
+//   5. mach_vm_write the patched TR back in full (sizeof(TranslationResult))
+//      — including x87_cache so OPT-1's cross-instruction state persists.
+//      Free our local allocations.
 //
 // Parent's old buffer (when we replace it on grow) becomes orphaned in
 // parent's heap — we can't `free()` parent-side from here. The leak is
@@ -184,12 +183,12 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask,
                     sizeof(localTCO))) return out;
 
     // x87_cache is OUR addition (OPT-1) — see comment in TranslationResult.h.
-    // Stock libRosettaRuntime's TR has sizeof = 0x288, ours appends the cache
-    // afterward. mach_vm_read of sizeof(TranslationResult) past stock's end
-    // reads junk heap bytes into x87_cache, which Translator then trusts.
-    // Reset to a known-empty cache so Translator behaves as if this were a
-    // fresh run.
-    tr.x87_cache = X87Cache{};
+    // The loader's M2 init patched stock's TR allocator to allocate
+    // sizeof(TranslationResult) bytes per TR, so the cache field lives
+    // inside parent's TR allocation and persists across calls. Trust
+    // parent's bytes. (`cache.invalidate()` will fire automatically on
+    // first call when prev_block doesn't match the just-passed block,
+    // converging junk-initialised cache state to a sane baseline.)
 
     // Set up local insn_buf with capacity ≥ parent's. Critical: end starts at
     // origInsnEnd so Translator's emit/fixup offsets count in the SAME
@@ -312,14 +311,11 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask,
         lists[i]->_size   = origLists[i]._size;
     }
 
-    // Stock libRosettaRuntime's TR ends right before our appended x87_cache
-    // field (OPT-1 — see TranslationResult.h note). Writing sizeof(tr) would
-    // overflow parent's stock-shape allocation and corrupt adjacent heap,
-    // which crashes parent later with EXC_BAD_INSTRUCTION. Cap the write at
-    // the offset of our addition — the cache is process-local scratch,
-    // never persisted to parent.
-    constexpr size_t kStockTrBytes = offsetof(TranslationResult, x87_cache);
-    if (!writeParent(parentTask, req.tr_addr, &tr, kStockTrBytes)) return out;
+    // Write back the full TR. The loader's M2 init patched stock's TR
+    // allocator to sizeof(TranslationResult), so parent's allocation has
+    // room for our appended x87_cache field — persisting it across calls
+    // is what restores OPT-1's cross-instruction reuse.
+    if (!writeParent(parentTask, req.tr_addr, &tr, sizeof(tr))) return out;
 
     out.reply_some = true;
     out.value      = result.value();
