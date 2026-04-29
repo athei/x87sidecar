@@ -11,12 +11,6 @@
 
 #include "rosetta_core/CoreLog.h"
 
-// Must come AFTER system headers so #define aliases override system macros
-// without interfering with system header declarations.
-#ifdef ROSETTA_RUNTIME
-#include "rosetta_core/RuntimeLibC.h"
-#endif
-
 #define PATCH_SIZE 16u
 #define AARCH64_PAGE_SIZE 16384u
 
@@ -53,15 +47,13 @@ int hook_install(void* target, void* hook_fn, void** trampoline) {
     }
 
     // ------------------------------------------------------------------
-    // 1. Allocate a JIT page for the trampoline.
+    // 1. Allocate a JIT page for the trampoline.  rosetta_core's only
+    // remaining consumer is aotinvoke (a normal native arm64 process),
+    // so we use Apple's standard JIT mapping. The libRuntimeRosettax87
+    // build that needed MAP_TRANSLATED_ALLOW_EXECUTE is gone.
     // ------------------------------------------------------------------
-#if defined(ROSETTA_RUNTIME)
-    void* tramp = mmap((void*)NULL, AARCH64_PAGE_SIZE, PROT_READ | PROT_WRITE,
-                       MAP_ANON | MAP_TRANSLATED_ALLOW_EXECUTE, -1, 0);
-#else
     void* tramp = mmap(NULL, AARCH64_PAGE_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC,
                        MAP_PRIVATE | MAP_ANONYMOUS | MAP_JIT, -1, 0);
-#endif
     if (tramp == MAP_FAILED) {
         CORE_LOG("hook_install: mmap failed");
         return -1;

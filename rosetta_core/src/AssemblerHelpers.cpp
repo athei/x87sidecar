@@ -5,9 +5,6 @@
 #include "rosetta_core/IROperand.h"
 #include "rosetta_core/Register.h"
 
-#ifdef ROSETTA_RUNTIME
-#include "rosetta_core/RuntimeLibC.h"
-#endif
 
 // AArch64 logical immediates encode a value as a replicated bitmask:
 //   - Pick an element size S ∈ {2,4,8,16,32,64} bits

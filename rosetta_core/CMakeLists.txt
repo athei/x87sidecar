@@ -25,48 +25,16 @@ set(ROSETTA_CORE_SOURCES
     src/X87IRBuild.cpp
     src/X87IROptimize.cpp
     src/X87IRLower.cpp
-    src/RuntimeRoutine.cpp
-    src/RuntimeLibC.cpp
     src/IRModuleData.cpp
 )
 
-# --- Standard build (used by aotinvoke / oahd_inject) ---
+# Single canonical build — the dylib variant (`rosetta_core_runtime` with
+# ROSETTA_RUNTIME=1, RuntimeLibC shims, hidden visibility, nostdlib) was
+# dropped along with libRuntimeRosettax87 when the loader switched to an
+# inline IPC stub installed into stock libRosettaRuntime's __TEXT.
 add_library(rosetta_core STATIC ${ROSETTA_CORE_SOURCES})
 target_include_directories(rosetta_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(rosetta_core PUBLIC cxx_std_23)
 target_compile_options(rosetta_core PRIVATE -g -O2)
 target_link_libraries(rosetta_core PUBLIC rosetta_config)
 set_property(TARGET rosetta_core PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
-
-# --- Runtime build (used by rosetta_runtime / libRuntimeRosettax87) ---
-add_library(rosetta_core_runtime STATIC ${ROSETTA_CORE_SOURCES})
-target_include_directories(rosetta_core_runtime PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_compile_features(rosetta_core_runtime PUBLIC cxx_std_23)
-target_compile_options(rosetta_core_runtime PRIVATE
-    -fvisibility=hidden
-    -funroll-loops
-    -march=native
-    -mtune=native
-    -fomit-frame-pointer
-    -mcpu=apple-m1
-    -fno-builtin-sin
-    -fno-builtin-printf
-    -fno-builtin-puts
-    -fno-builtin-putchar
-    -ftree-vectorize
-    -fvectorize
-    -finline-functions
-    -fno-stack-protector
-    -fno-exceptions
-    -fno-unwind-tables
-    -fno-asynchronous-unwind-tables
-)
-target_link_libraries(rosetta_core_runtime PUBLIC rosetta_config)
-target_compile_definitions(rosetta_core_runtime PRIVATE ROSETTA_RUNTIME=1)
-target_sources(rosetta_core_runtime PRIVATE
-    src/RuntimeOperatorNew.cpp
-    src/RuntimeSymbols.cpp
-)
-# LTO disabled: incompatible with -fno-builtin in the nostdlib runtime binary
-# (LTO eliminates/miscompiles the custom libc wrappers in RuntimeSymbols.cpp).
-# set_property(TARGET rosetta_core_runtime PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)

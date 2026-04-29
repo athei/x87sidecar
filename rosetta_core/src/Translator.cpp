@@ -13,9 +13,6 @@
 #include "rosetta_core/X87IR.h"
 #include "rosetta_config/Config.h"
 
-#if defined(ROSETTA_RUNTIME)
-#include "rosetta_core/RuntimeLibC.h"
-#endif
 
 static const char* opcode_id_name(OpcodeId id) {
     switch (id) {

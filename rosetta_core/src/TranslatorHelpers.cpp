@@ -8,9 +8,6 @@
 #include "rosetta_core/RuntimeRoutine.h"
 #include "rosetta_config/Config.h"
 
-#ifdef ROSETTA_RUNTIME
-#include "rosetta_core/RuntimeLibC.h"
-#endif
 
 int alloc_gpr(TranslationResult& translation, int pool_index) {
     const int reg = kGprScratchPool[pool_index];

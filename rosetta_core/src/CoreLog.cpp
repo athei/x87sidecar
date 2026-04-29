@@ -2,9 +2,6 @@
 
 #include <cstdio>
 
-#if defined(ROSETTA_RUNTIME)
-#include "rosetta_core/RuntimeLibC.h"
-#endif
 
 // Default sink: write to stdout. Override in each binary's entry point.
 static void default_log(const char* msg) {

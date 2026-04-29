@@ -4,9 +4,6 @@
 #include <string.h>
 #include <sys/mman.h>
 
-#ifdef ROSETTA_RUNTIME
-#include "rosetta_core/RuntimeLibC.h"
-#endif
 
 void* mmap_anonymous_rw(size_t size, int tag) {
     void* result;  // x0
