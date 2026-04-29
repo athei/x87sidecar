@@ -187,6 +187,21 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                 break;
 
             case Opcode::kOpcodeName_fld:
+                // m80fp variant of fld used to emit a BL+Fixup targeting
+                // kRuntimeRoutine_fld_fp80 — the deleted dylib provided a
+                // custom implementation matching our Translator's
+                // X22/X23 register convention. In the sidecar
+                // architecture stock's own x87_fld_fp80 (with a different
+                // ABI) handles it; let stock translate the whole
+                // instruction so its prologue and the routine's ABI line
+                // up automatically.
+                if (cur_instr->operands[0].kind != IROperandKind::Register &&
+                    cur_instr->operands[0].mem.size == IROperandSize::S80) {
+                    cache.invalidate(translation_result->free_gpr_mask, kGprScratchMask);
+                    translation_result->free_fpr_mask =
+                        translation_result->_unoccupied_temporary_fprs_for_xmm_scalars;
+                    return std::nullopt;
+                }
                 TranslatorX87::translate_fld(translation_result, cur_instr);
                 break;
 

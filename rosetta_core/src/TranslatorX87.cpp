@@ -149,7 +149,7 @@ auto translate_fldpi(TranslationResult* a1, IRInstr* /*a2*/) -> void {
 }
 
 // =============================================================================
-// FLD — D9 /0 (m32fp), DD /0 (m64fp), DB /5 (m80fp), D9 C0+i (ST(i))
+// FLD — D9 /0 (m32fp), DD /0 (m64fp), D9 C0+i (ST(i))
 //
 // Pushes a floating-point value onto the x87 stack.
 //
@@ -157,10 +157,15 @@ auto translate_fldpi(TranslationResult* a1, IRInstr* /*a2*/) -> void {
 //   FLD ST(i)   D9 C0+i  operands = [ST(0) dst Register, ST(i) src Register]
 //   FLD m32fp   D9 /0    operands = [m32fp MemRef src]  — operands[0].size == S32
 //   FLD m64fp   DD /0    operands = [m64fp MemRef src]  — operands[0].size == S64
-//   FLD m80fp   DB /5    operands = [m80fp MemRef src]  — operands[0].size == S80
 //
-// m80fp is handled via kRuntimeRoutine_fld_fp80 and early-returns before any
-// direct x87-state setup. All other variants use direct AArch64 emission.
+// FLD m80fp (DB /5) is intentionally NOT handled here. The dispatcher in
+// `Translator::translate_instruction` short-circuits to nullopt before
+// calling us so stock libRosettaRuntime translates the entire instruction
+// (its emit + its `x87_fld_fp80` routine, ABI matched). A previous
+// version emitted a BL+Fixup for this case targeting our deleted dylib's
+// custom routine; without the dylib, that fixup resolves to Apple's
+// stock routine whose ABI doesn't match our prologue's register
+// convention.
 //
 // ST(i) ordering requirement:
 //   Intel spec: temp = ST(i); TOP--; ST(0) = temp.
@@ -175,43 +180,9 @@ auto translate_fldpi(TranslationResult* a1, IRInstr* /*a2*/) -> void {
 //                           reused as RMW scratch inside emit_x87_push
 //   Dd_val  (fpr free pool) -- the loaded value
 //   addr_reg (free pool) -- memory paths only; freed after FP load (OPT-4)
-//
-// Register allocation (m80fp runtime path):
-//   W_lo    (gpr pool 0) -- low  8 bytes of the f80 value (mantissa)
-//   W_hi    (gpr pool 1) -- high 2 bytes of the f80 value (sign + 15-bit exponent)
-//   addr_reg (free pool) -- freed before the BL placeholder is emitted
 // =============================================================================
 auto translate_fld(TranslationResult* a1, IRInstr* a2) -> void {
     AssemblerBuffer& buf = a1->insn_buf;
-
-    // -------------------------------------------------------------------------
-    // FLD m80fp — DB /5  (early-out, handed off to runtime routine)
-    // -------------------------------------------------------------------------
-    if (a2->operands[0].kind != IROperandKind::Register &&
-        a2->operands[0].mem.size == IROperandSize::S80) {
-        // OPT-1: Release any cached base/top GPRs — the BL below clobbers
-        // all scratch registers, and we need pool slots 0+1 for W_lo/W_hi.
-        x87_cache_force_release(*a1, buf);
-
-        const int W_lo = alloc_gpr(*a1, 0);
-        const int W_hi = alloc_gpr(*a1, 1);
-        const int addr_reg =
-            compute_operand_address(*a1, /*is_64bit=*/true, &a2->operands[0], GPR::XZR);
-        emit_ldr_imm(buf, /*size=*/3, W_lo, addr_reg, /*imm12=*/0);
-        emit_ldr_imm(buf, /*size=*/1, W_hi, addr_reg, /*imm12=*/4);
-        free_gpr(*a1, addr_reg);
-
-        Fixup fixup;
-        fixup.kind = FixupKind::Branch26;
-        fixup.insn_offset = static_cast<uint32_t>(a1->insn_buf.end);
-        fixup.target = kRuntimeRoutine_fld_fp80;
-        a1->_fixups.push_back(fixup);
-        a1->insn_buf.emit(0x94000000u);
-
-        free_gpr(*a1, W_hi);
-        free_gpr(*a1, W_lo);
-        return;
-    }
 
     // -------------------------------------------------------------------------
     // Common setup for ST(i), m32fp, m64fp paths
