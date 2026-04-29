@@ -1,6 +1,9 @@
 #include "stub_asm.hpp"
 
+#include <cstddef>
 #include <cstring>
+
+#include "rosetta_core/IRInstr.h"
 
 namespace stub_asm {
 namespace {
@@ -133,6 +136,42 @@ constexpr uint32_t add_imm(uint32_t rd, uint32_t rn, uint32_t imm) {
     return 0x91000000u | (imm12 << 10) | ((rn & 0x1F) << 5) | (rd & 0x1F);
 }
 
+// SUB Wd, Wn, #imm12  (32-bit subtract immediate, no flags)
+//   sf=0, op=1, S=0, 10001, sh=0, imm12, Rn, Rd
+constexpr uint32_t sub_imm_w(uint32_t rd, uint32_t rn, uint32_t imm) {
+    uint32_t imm12 = imm & 0xFFF;
+    return 0x51000000u | (imm12 << 10) | ((rn & 0x1F) << 5) | (rd & 0x1F);
+}
+
+// CMP Wn, #imm12   (= SUBS WZR, Wn, #imm12 — 32-bit compare immediate)
+//   sf=0, op=1, S=1, 10001, sh=0, imm12, Rn, 11111
+constexpr uint32_t cmp_imm_w(uint32_t rn, uint32_t imm) {
+    uint32_t imm12 = imm & 0xFFF;
+    return 0x7100001Fu | (imm12 << 10) | ((rn & 0x1F) << 5);
+}
+
+// B.cond +imm19*4   (signed PC-relative conditional branch, 4-byte units).
+//   0101_0100_imm19_0_cond
+constexpr uint32_t b_cond(uint32_t cond, int32_t imm19_words) {
+    uint32_t imm19 = uint32_t(imm19_words) & 0x7FFFF;
+    return 0x54000000u | (imm19 << 5) | (cond & 0xF);
+}
+constexpr uint32_t COND_LS = 0x9;  // unsigned ≤
+
+// LDRH Wt, [Xn|SP, #imm]   (16-bit load-zero-extend, unsigned offset, scaled by 2)
+//   01_111_0_01_01_imm12_Rn_Rt
+constexpr uint32_t ldrh_w_offset(uint32_t wt, uint32_t rn, uint32_t imm) {
+    uint32_t imm12 = (imm / 2) & 0xFFF;
+    return 0x79400000u | (imm12 << 10) | ((rn & 0x1F) << 5) | (wt & 0x1F);
+}
+
+// MADD Xd, Xn, Xm, Xa     (Xd = Xn * Xm + Xa, 64-bit)
+//   sf=1, op54=00, 11011, op31=000, Rm, o0=0, Ra, Rn, Rd
+constexpr uint32_t madd(uint32_t rd, uint32_t rn, uint32_t rm, uint32_t ra) {
+    return 0x9B000000u | ((rm & 0x1F) << 16) | ((ra & 0x1F) << 10) |
+           ((rn & 0x1F) << 5) | (rd & 0x1F);
+}
+
 // 32-bit register encoder helpers — only differ from 64-bit by sf=0 in
 // some contexts.  We don't need them yet (mach_msg uses 64-bit GPRs).
 
@@ -188,7 +227,15 @@ StubBlobs build(uint64_t handlerAddr, uint64_t translateInsnAddr,
         return blobs;
     }
 
-    auto& h = blobs.handler;
+    // We build in three stages so the filter prologue can absolute-jump
+    // straight to STASH for non-x87 opcodes (skipping the IPC entirely).
+    //   1. Build the IPC body (`ipc`) — its size determines STASH's offset.
+    //   2. Build the filter prologue (`filter`) — fixed size, computes
+    //      &instr_array[insn_idx], loads opcode, and abs-jumps to STASH if
+    //      the opcode is outside both x87 ranges.
+    //   3. Concatenate filter + ipc + STASH + STASH_JUMP into the handler.
+
+    std::vector<uint8_t> ipc;
 
     // ──── OUR_HANDLER (RPC version: send + receive) ─────────────────────────
     // Stack frame layout (FRAME_SIZE = 192 bytes):
@@ -214,13 +261,13 @@ StubBlobs build(uint64_t handlerAddr, uint64_t translateInsnAddr,
     constexpr int FRAME_SIZE = 192;
 
     // stp x0, x1, [sp, #-128]!
-    emit(h, stp_preindex(0, 1, SP, -FRAME_SIZE));
+    emit(ipc, stp_preindex(0, 1, SP, -FRAME_SIZE));
     // stp x2, x3, [sp, #16]
-    emit(h, stp_offset(2, 3, SP, 16));
+    emit(ipc, stp_offset(2, 3, SP, 16));
     // stp x4, x5, [sp, #32]
-    emit(h, stp_offset(4, 5, SP, 32));
+    emit(ipc, stp_offset(4, 5, SP, 32));
     // stp x16, lr, [sp, #48]
-    emit(h, stp_offset(16, LR, SP, 48));
+    emit(ipc, stp_offset(16, LR, SP, 48));
 
     // ── Build mach_msg_header_t at sp+64 ────────────────────────────────────
     // mach_msg_header_t layout (24 bytes):
@@ -259,38 +306,38 @@ StubBlobs build(uint64_t handlerAddr, uint64_t translateInsnAddr,
     // Use x9 as scratch for header field values.
 
     // msgh_bits — 0x1513 fits in 16 bits (single movz)
-    emit(h, movz(9, MSG_BITS, 0));
-    emit(h, str_w_offset(9, SP, 64));         // [sp+64]
+    emit(ipc, movz(9, MSG_BITS, 0));
+    emit(ipc, str_w_offset(9, SP, 64));         // [sp+64]
 
     // msgh_size
-    emit(h, movz(9, MSG_SIZE, 0));
-    emit(h, str_w_offset(9, SP, 68));         // [sp+68]
+    emit(ipc, movz(9, MSG_SIZE, 0));
+    emit(ipc, str_w_offset(9, SP, 68));         // [sp+68]
 
     // msgh_remote_port = sidecarReqName (32-bit)
-    emit_load_imm64(h, 9, sidecarReqName);    // 4 instructions
-    emit(h, str_w_offset(9, SP, 72));         // [sp+72]
+    emit_load_imm64(ipc, 9, sidecarReqName);    // 4 instructions
+    emit(ipc, str_w_offset(9, SP, 72));         // [sp+72]
 
     // msgh_local_port = parentReplyName (32-bit) — kernel auto-derives
     // a SEND_ONCE right via MAKE_SEND_ONCE in MSG_BITS.local.
-    emit_load_imm64(h, 9, parentReplyName);   // 4 instructions
-    emit(h, str_w_offset(9, SP, 76));         // [sp+76]
+    emit_load_imm64(ipc, 9, parentReplyName);   // 4 instructions
+    emit(ipc, str_w_offset(9, SP, 76));         // [sp+76]
 
     // msgh_voucher_port = 0
-    emit(h, movz(9, 0, 0));
-    emit(h, str_w_offset(9, SP, 80));         // [sp+80]
+    emit(ipc, movz(9, 0, 0));
+    emit(ipc, str_w_offset(9, SP, 80));         // [sp+80]
 
     // msgh_id
-    emit(h, movz(9, uint16_t(MSG_ID & 0xFFFF), 0));
-    emit(h, movk(9, uint16_t((MSG_ID >> 16) & 0xFFFF), 16));
-    emit(h, str_w_offset(9, SP, 84));         // [sp+84]
+    emit(ipc, movz(9, uint16_t(MSG_ID & 0xFFFF), 0));
+    emit(ipc, movk(9, uint16_t((MSG_ID >> 16) & 0xFFFF), 16));
+    emit(ipc, str_w_offset(9, SP, 84));         // [sp+84]
 
     // ── Body: five translate_insn args (still in x0..x4 at this point) ──────
     // Header lives at sp+64 .. sp+88. Body lives at sp+88 .. sp+128.
-    emit(h, str_x_offset(0, SP, 88));         // body[+0]  = x0 = TR*
-    emit(h, str_x_offset(1, SP, 96));         // body[+8]  = x1 = block*
-    emit(h, str_x_offset(2, SP, 104));        // body[+16] = x2 = instr_array*
-    emit(h, str_x_offset(3, SP, 112));        // body[+24] = x3 = num_instrs
-    emit(h, str_x_offset(4, SP, 120));        // body[+32] = x4 = insn_idx
+    emit(ipc, str_x_offset(0, SP, 88));         // body[+0]  = x0 = TR*
+    emit(ipc, str_x_offset(1, SP, 96));         // body[+8]  = x1 = block*
+    emit(ipc, str_x_offset(2, SP, 104));        // body[+16] = x2 = instr_array*
+    emit(ipc, str_x_offset(3, SP, 112));        // body[+24] = x3 = num_instrs
+    emit(ipc, str_x_offset(4, SP, 120));        // body[+32] = x4 = insn_idx
 
     // ── mach_msg_trap arguments ──────────────────────────────────────────────
     //   x0  = msg pointer (sp + 64)
@@ -301,15 +348,15 @@ StubBlobs build(uint64_t handlerAddr, uint64_t translateInsnAddr,
     //   x5  = timeout   = 0  (block forever)
     //   x6  = notify    = 0
     //   x16 = -31  (mach_msg_trap)
-    emit(h, add_imm(0, SP, 64));              // x0 = sp + 64
-    emit(h, movz(1, 0x0003, 0));              // x1 = SEND | RCV
-    emit(h, movz(2, MSG_SIZE, 0));            // x2 = send_size
-    emit(h, movz(3, RCV_SIZE, 0));            // x3 = rcv_size
-    emit_load_imm64(h, 4, parentReplyName);   // x4 = rcv_name
-    emit(h, movz(5, 0, 0));                   // x5 = timeout
-    emit(h, movz(6, 0, 0));                   // x6 = notify
-    emit(h, movn(16, 30, 0));                 // x16 = -31 (mach_msg_trap)
-    emit(h, svc(0x80));
+    emit(ipc, add_imm(0, SP, 64));              // x0 = sp + 64
+    emit(ipc, movz(1, 0x0003, 0));              // x1 = SEND | RCV
+    emit(ipc, movz(2, MSG_SIZE, 0));            // x2 = send_size
+    emit(ipc, movz(3, RCV_SIZE, 0));            // x3 = rcv_size
+    emit_load_imm64(ipc, 4, parentReplyName);   // x4 = rcv_name
+    emit(ipc, movz(5, 0, 0));                   // x5 = timeout
+    emit(ipc, movz(6, 0, 0));                   // x6 = notify
+    emit(ipc, movn(16, 30, 0));                 // x16 = -31 (mach_msg_trap)
+    emit(ipc, svc(0x80));
 
     // ── Reply parsing ───────────────────────────────────────────────────────
     // After mach_msg returns:
@@ -322,32 +369,101 @@ StubBlobs build(uint64_t handlerAddr, uint64_t translateInsnAddr,
     //                                        1 = Some, body[0] = result.
     //
     // Read msgh_id into w9.
-    emit(h, ldr_w_offset(9, SP, 84));         // w9 = msgh_id
+    emit(ipc, ldr_w_offset(9, SP, 84));         // w9 = msgh_id
     // CBZ branch is `target = CBZ_addr + imm19*4`. We want to land at the
     // FIRST instruction of NONE path, which is one past the SOME path's
     // last (7th) instruction, i.e., 8 instructions ahead of CBZ.
-    emit(h, cbz_w(9, 8));                     // skip 7 some-path → none_label
+    emit(ipc, cbz_w(9, 8));                     // skip 7 some-path → none_label
 
     // ── SOME PATH ───────────────────────────────────────────────────────────
-    emit(h, ldr_x_offset(0, SP, 88));         // x0 = result (replaces saved x0)
-    emit(h, ldr_x_offset(1, SP, 8));          // restore x1
-    emit(h, ldp_offset(2, 3, SP, 16));        // restore x2, x3
-    emit(h, ldp_offset(4, 5, SP, 32));        // restore x4, x5
-    emit(h, ldp_offset(16, LR, SP, 48));      // restore x16, lr
-    emit(h, add_imm(SP, SP, FRAME_SIZE));     // sp += FRAME_SIZE
-    emit(h, 0xD65F03C0u);                     // ret  (= BR x30)
+    emit(ipc, ldr_x_offset(0, SP, 88));         // x0 = result (replaces saved x0)
+    emit(ipc, ldr_x_offset(1, SP, 8));          // restore x1
+    emit(ipc, ldp_offset(2, 3, SP, 16));        // restore x2, x3
+    emit(ipc, ldp_offset(4, 5, SP, 32));        // restore x4, x5
+    emit(ipc, ldp_offset(16, LR, SP, 48));      // restore x16, lr
+    emit(ipc, add_imm(SP, SP, FRAME_SIZE));     // sp += FRAME_SIZE
+    emit(ipc, 0xD65F03C0u);                     // ret  (= BR x30)
 
     // ── NONE PATH ───────────────────────────────────────────────────────────
     // Restore caller regs then fall through to STASH below.
-    emit(h, ldp_offset(16, LR, SP, 48));
-    emit(h, ldp_offset(4, 5, SP, 32));
-    emit(h, ldp_offset(2, 3, SP, 16));
-    emit(h, ldp_postindex(0, 1, SP, FRAME_SIZE));
+    emit(ipc, ldp_offset(16, LR, SP, 48));
+    emit(ipc, ldp_offset(4, 5, SP, 32));
+    emit(ipc, ldp_offset(2, 3, SP, 16));
+    emit(ipc, ldp_postindex(0, 1, SP, FRAME_SIZE));
 
-    // ── STASH (4 instructions = original 16 bytes of translate_insn) ───────
+    // ──── FILTER prologue ───────────────────────────────────────────────────
+    // Bypass the IPC entirely for non-x87 opcodes — translate_insn fires for
+    // EVERY x86 instruction Rosetta translates (~85k/test) but only ~14% of
+    // them are x87. Without this filter every non-x87 call paid a Mach
+    // round-trip just to be told "fall through to stock".
+    //
+    // The filter dereferences the IRInstr at &instr_array[insn_idx] (parent
+    // memory; we run inside parent's address space) and reads its 16-bit
+    // opcode field. If the opcode is outside both x87 ranges
+    //   low:  0x25..0x30 = FCMOVcc + FCOMI variants
+    //   high: 0xBD..0x10C = most x87 ops
+    // it abs-jumps straight to STASH so the original translate_insn prologue
+    // runs and stock handles the instruction itself — same outcome as an IPC
+    // reply of None, but without the ~25 µs round-trip.
+    //
+    // Uses x9, x10, x11 — caller-saved scratch in AAPCS, so we don't need to
+    // preserve them across the filter.
+    constexpr size_t kFilterInstrs = 13;
+    constexpr size_t kFilterBytes  = kFilterInstrs * 4;
+    constexpr uint32_t kX87LoLo    = 0x25;
+    constexpr uint32_t kX87LoHi    = 0x30;
+    constexpr uint32_t kX87HiLo    = 0xBD;
+    constexpr uint32_t kX87HiHi    = 0x10C;
+
+    static_assert(sizeof(IRInstr) == 0x50,
+                  "stub filter assumes IRInstr stride 0x50");
+    static_assert(offsetof(IRInstr, opcode) == 0x4,
+                  "stub filter assumes IRInstr.opcode at +4");
+
+    // STASH lives right after the IPC body in the final blob.
+    const uint64_t stashAddr = handlerAddr + kFilterBytes + ipc.size();
+    if (stashAddr & 0xFFFF000000000000ULL) {
+        blobs.entry.clear();
+        return blobs;
+    }
+
+    std::vector<uint8_t> filter;
+    filter.reserve(kFilterBytes);
+    //  0: movz w9, #0x50              ; sizeof(IRInstr) — fits in 16 bits
+    emit(filter, movz(9, 0x50, 0));
+    //  1: madd x10, x4, x9, x2        ; x10 = &instr_array[insn_idx]
+    emit(filter, madd(10, 4, 9, 2));
+    //  2: ldrh w9, [x10, #4]          ; w9 = uint16_t opcode
+    emit(filter, ldrh_w_offset(9, 10, 4));
+    //  3: sub w11, w9, #0x25
+    emit(filter, sub_imm_w(11, 9, kX87LoLo));
+    //  4: cmp w11, #0xB               ; in-low-range if w11 ≤ 0xB unsigned
+    emit(filter, cmp_imm_w(11, kX87LoHi - kX87LoLo));
+    //  5: b.ls do_ipc                 ; +8 instr → land at do_ipc (instr 13)
+    emit(filter, b_cond(COND_LS, 8));
+    //  6: sub w11, w9, #0xBD
+    emit(filter, sub_imm_w(11, 9, kX87HiLo));
+    //  7: cmp w11, #0x4F              ; in-high-range if w11 ≤ 0x4F unsigned
+    emit(filter, cmp_imm_w(11, kX87HiHi - kX87HiLo));
+    //  8: b.ls do_ipc                 ; +5 instr → land at do_ipc (instr 13)
+    emit(filter, b_cond(COND_LS, 5));
+    //  9..12: abs-jump to STASH (movz/movk/movk x16, $stashAddr; br x16)
+    emit_abs_jump_3movs(filter, stashAddr);
+    // 13: do_ipc — IPC body starts here when filter falls through.
+
+    if (filter.size() != kFilterBytes) {
+        blobs.entry.clear();
+        return blobs;
+    }
+
+    // ──── Concatenate: filter + IPC + STASH + STASH_JUMP ───────────────────
+    auto& h = blobs.handler;
+    h.reserve(filter.size() + ipc.size() + 16 + 16);
+    h.insert(h.end(), filter.begin(), filter.end());
+    h.insert(h.end(), ipc.begin(),    ipc.end());
+    // STASH (4 instructions = original 16 bytes of translate_insn).
     h.insert(h.end(), origPrologue16, origPrologue16 + 16);
-
-    // ── STASH_JUMP (16 bytes abs-jump to translate_insn + 16) ──────────────
+    // STASH_JUMP (abs-jump to translate_insn + 16).
     emit_abs_jump_3movs(h, translateInsnAddr + 16);
 
     return blobs;
