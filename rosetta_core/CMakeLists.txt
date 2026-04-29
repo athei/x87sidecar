@@ -4,19 +4,9 @@ set(ROSETTA_CORE_SOURCES
     src/CustomTranslationHook.cpp
     src/hook.cpp
     src/AssemblerHelpers.cpp
-    src/IRBlock.cpp
-    src/IRInstr.cpp
-    src/IROperand.cpp
-    src/ModuleResult.cpp
-    src/ThreadContextOffsets.cpp
-    src/TranslationResult.cpp
     src/AssemblerBuffer.cpp
-    src/X87State.cpp
     src/Opcode.cpp
-    src/AssemblerBase.cpp
     src/TranslatorHelpers.cpp
-    src/Fixup.cpp
-    src/Register.cpp
     src/Translator.cpp
     src/TranslatorX87.cpp
     src/TranslatorX87Fusion.cpp
@@ -25,7 +15,6 @@ set(ROSETTA_CORE_SOURCES
     src/X87IRBuild.cpp
     src/X87IROptimize.cpp
     src/X87IRLower.cpp
-    src/IRModuleData.cpp
 )
 
 # Single canonical build — the dylib variant (`rosetta_core_runtime` with
