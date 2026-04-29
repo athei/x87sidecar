@@ -276,12 +276,18 @@ auto translate_fld(TranslationResult* a1, IRInstr* a2) -> void {
         // Pre-round: add 0x400 (= half of the 11-bit slack we'll truncate)
         // before LSR 11 to implement round-half-up. Without this, sqrt(2)
         // and similar values fail by 1 ULP because the sticky bits get
-        // dropped by pure truncation. (Edge case: a carry chain could flip
-        // the integer bit and require an exponent increment — none of the
-        // current tests hit it; if it ever matters, propagate the carry
-        // into exp_adj.)
-        emit_add_imm(buf, /*is_64=*/1, /*is_sub=*/0, /*set_flags=*/0,
+        // dropped by pure truncation.
+        //
+        // Use ADDS so we can capture the carry-out: when the mantissa is
+        // close enough to all-ones, the addition wraps past bit 63 and the
+        // integer bit is lost. We need to compensate by incrementing the
+        // f64 exponent (e.g., 1.999... → 2.0). Capture C immediately into
+        // Wd_carry and add it back into exp_adj after the normal-case
+        // SUB+ADD.
+        emit_add_imm(buf, /*is_64=*/1, /*is_sub=*/0, /*set_flags=*/1,
                      /*shift=*/0, /*imm12=*/0x400, Xmant, Xmant);
+        const int Wd_carry = alloc_free_gpr(*a1);
+        emit_cset(buf, /*is_64=*/0, /*CS=*/2, Wd_carry);
 
         // Mantissa: drop integer bit + low 11 fractional bits → 52-bit value.
         // LSR Xmant, Xmant, #11  (UBFM with immr=11, imms=63 in 64-bit form)
@@ -316,6 +322,15 @@ auto translate_fld(TranslationResult* a1, IRInstr* a2) -> void {
                      /*shift=*/1, /*imm12=*/4, Wexp, Wd_tmp);
         emit_add_imm(buf, /*is_64=*/0, /*is_sub=*/0, /*set_flags=*/0,
                      /*shift=*/0, /*imm12=*/0x400, Wd_tmp, Wd_tmp);
+
+        // Apply round-overflow carry from the +0x400 ADDS at the top:
+        // exp_adj += Wd_carry. For the all-ones-mantissa case the
+        // mantissa wrapped to zero, the integer bit was lost, and the
+        // f64 needs its exponent bumped by one (e.g., 1.999... → 2.0).
+        emit_add_sub_shifted_reg(buf, /*is_64=*/0, /*is_sub=*/0, /*set_flags=*/0,
+                                 /*shift=*/0, /*Rm=*/Wd_carry, /*amt=*/0,
+                                 /*Rn=*/Wd_tmp, /*Rd=*/Wd_tmp);
+        free_gpr(*a1, Wd_carry);
 
         // exp_adj override for exp == 0: CMP Wexp, #0; CSEL exp_adj, WZR, exp_adj, EQ
         emit_add_imm(buf, /*is_64=*/0, /*is_sub=*/1, /*is_set_flags=*/1,

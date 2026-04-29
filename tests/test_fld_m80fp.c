@@ -48,6 +48,9 @@ static uint64_t as_u64(double d) { uint64_t u; __builtin_memcpy(&u, &d, 8); retu
 #ifndef TEST_FLD_M80FP_TRUNC
 #  define TEST_FLD_M80FP_TRUNC   1
 #endif
+#ifndef TEST_FLD_M80FP_ROUND_OVERFLOW
+#  define TEST_FLD_M80FP_ROUND_OVERFLOW 1
+#endif
 
 // ---------------------------------------------------------------------------
 // Helper: load a long double from memory via 'fldt', store result as double.
@@ -177,6 +180,29 @@ static uint64_t test_fld_m80fp_trunc(void)
 }
 #endif
 
+// Rounding-overflow test.
+// f80 mantissa = 0xFFFFFFFFFFFFFFFF, exp = 0x3FFF (= 2^0).
+// Value = 1 + (2^64 - 1)/2^63 = just below 2.0 (every fractional bit set).
+// f64 round-to-nearest produces 2.0 exactly: the bits below the f64 LSB are
+// all 1s (round=1, sticky=1 → round up; the result mantissa overflows the
+// 52-bit field, carrying into the exponent).
+// Expected: 0x4000000000000000 (= +2.0).
+//
+// Implementation note: a "+0x400 then LSR 11" rounding scheme has to detect
+// the carry out of bit 63 of the mantissa and increment exp_adj — without
+// that the result drops back to 1.0 (mantissa zeroed by the carry, exp_adj
+// unchanged at 0x3FF).
+#if TEST_FLD_M80FP_ROUND_OVERFLOW
+static uint64_t test_fld_m80fp_round_overflow(void)
+{
+    static const volatile unsigned char src[10] = {
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,  // mantissa = all 1s
+        0xFF, 0x3F                                         // exp = 0x3FFF, sign = +
+    };
+    return load_f80_to_f64((volatile long double *)src);
+}
+#endif
+
 // ---------------------------------------------------------------------------
 
 typedef struct { const char* name; uint64_t (*fn)(void); uint64_t expected; } TestCase;
@@ -207,6 +233,9 @@ int main(void)
 #endif
 #if TEST_FLD_M80FP_TRUNC
         { "fld m80fp  trunc 2^-64 lost ", test_fld_m80fp_trunc,   0x3FF0000000000001ULL },
+#endif
+#if TEST_FLD_M80FP_ROUND_OVERFLOW
+        { "fld m80fp  round->2.0       ", test_fld_m80fp_round_overflow, 0x4000000000000000ULL },
 #endif
     };
 
