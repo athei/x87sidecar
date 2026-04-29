@@ -23,6 +23,13 @@ BUILD_DIR="$ROOT_DIR/build"
 BIN="$BUILD_DIR/bin"
 LOADER="$BIN/runtime_loader"
 
+# Force runtime_loader to attach + install the IPC stub even when argv[1]
+# isn't a 32-bit PE — our test binaries are x86_64 Mach-O, which the
+# loader's needsX87JIT() heuristic would otherwise let pass straight to
+# stock Rosetta without exercising the JIT path at all. (Without this
+# the test suite is a no-op against our changes.)
+export ROSETTA_X87_FORCE_ATTACH=1
+
 ALL_TESTS=(
     test_fldconst
     test_fld
