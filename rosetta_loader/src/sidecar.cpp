@@ -1,11 +1,21 @@
 #include "sidecar.hpp"
 
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <pthread.h>
+#include <vector>
 
 #include <mach/mach.h>
 #include <mach/mach_port.h>
 #include <mach/mach_vm.h>
+
+#include "rosetta_core/Fixup.h"
+#include "rosetta_core/IRInstr.h"
+#include "rosetta_core/ThreadContextOffsets.h"
+#include "rosetta_core/TranslationResult.h"
+#include "rosetta_core/Translator.h"
+#include "rosetta_core/X87Cache.h"
 
 namespace sidecar {
 
@@ -20,26 +30,321 @@ struct ThreadArgs {
     mach_port_t parentTaskPort;
 };
 
+// ── Cross-process marshalling helpers ───────────────────────────────────────
+// Translator + its helpers grow `insn_buf` (mmap/calloc) and append to six
+// fixup lists (`::operator new`). Both allocators land in *this* process, so
+// we can't simply hand parent's pointers to Translator — the resulting
+// pointers would be unreachable from the parent.
+//
+// Strategy:
+//   1. Read parent's TR, ThreadContextOffsets, and IR array into locals.
+//   2. RESET TR's mutable buffers to empty (data=null, end=0, end_cap=0,
+//      use_heap=1) and lists to nullptr. With use_heap=1 grow uses calloc
+//      (no munmap of foreign pointers); with empty lists push_back_slow's
+//      `delete old_begin` is `delete nullptr`, which is a no-op.
+//   3. Run Translator on `tr`. Its growth/pushes allocate fresh sidecar-
+//      local heap; the local TR's data/list pointers now name those.
+//   4. APPEND the locally-produced bytes/fixups to parent's existing
+//      buffers. If the append fits within parent's capacity we just
+//      mach_vm_write the delta. If it doesn't, allocate a parent-side
+//      replacement via `mach_vm_allocate`, copy parent's existing
+//      contents over, then append the new tail. Update TR's pointers to
+//      the parent VA.
+//   5. mach_vm_write the patched TR back. Free our local allocations.
+//
+// Parent's old buffer (when we replace it on grow) becomes orphaned in
+// parent's heap — we can't `free()` parent-side from here. The leak is
+// per-grow only; capacity doubles each time so growths are logarithmic.
+
+constexpr size_t kListCount = 6;
+
+struct TranslateRequest {
+    uint64_t tr_addr;
+    uint64_t block;          // opaque IRBlock* — Translator only compares as ptr
+    uint64_t instr_array;
+    uint64_t num_instrs;
+    uint64_t insn_idx;
+};
+
+struct TranslateOutcome {
+    bool reply_some;       // true → reply Some(value), else None.
+    int64_t value;
+};
+
+bool readParent(mach_port_t task, uint64_t addr, void* dst, size_t size) {
+    if (size == 0) return true;
+    mach_vm_size_t got = 0;
+    kern_return_t kr = mach_vm_read_overwrite(task, addr, size,
+                                              (mach_vm_address_t)dst, &got);
+    return kr == KERN_SUCCESS && got == size;
+}
+
+bool writeParent(mach_port_t task, uint64_t addr, const void* src, size_t size) {
+    if (size == 0) return true;
+    return mach_vm_write(task, addr, (vm_offset_t)const_cast<void*>(src), size) ==
+           KERN_SUCCESS;
+}
+
+// Allocate a parent-side replacement buffer of size `newCap`, copy parent's
+// existing live bytes, then append `tailSize` bytes from `tail`. On success
+// returns the parent VA of the new buffer. On any failure deallocates and
+// returns 0.
+mach_vm_address_t allocAndAppendInParent(mach_port_t parentTask,
+                                          uint64_t origAddr, uint64_t origLive,
+                                          uint64_t newCap,
+                                          const void* tail, uint64_t tailSize) {
+    // Round up to page granularity.
+    newCap = (newCap + 0xFFF) & ~uint64_t(0xFFF);
+    mach_vm_address_t parentNew = 0;
+    if (mach_vm_allocate(parentTask, &parentNew, newCap, VM_FLAGS_ANYWHERE) !=
+        KERN_SUCCESS)
+        return 0;
+    if (origLive > 0) {
+        std::vector<uint8_t> stash(origLive);
+        if (!readParent(parentTask, origAddr, stash.data(), origLive) ||
+            !writeParent(parentTask, parentNew, stash.data(), origLive)) {
+            mach_vm_deallocate(parentTask, parentNew, newCap);
+            return 0;
+        }
+    }
+    if (tailSize > 0) {
+        if (!writeParent(parentTask, parentNew + origLive, tail, tailSize)) {
+            mach_vm_deallocate(parentTask, parentNew, newCap);
+            return 0;
+        }
+    }
+    return parentNew;
+}
+
+// Run Translator and write its output back to parent's TR. Returns Some(N)
+// when translation produced a result and the write-back path completed;
+// otherwise returns None (the stub falls through to stock translate_insn).
+TranslateOutcome processTranslateRequest(mach_port_t parentTask,
+                                         const TranslateRequest& req) {
+    TranslateOutcome out{false, 0};
+
+    constexpr uint64_t kMaxNumInstrs = 0x10000;
+    if (req.num_instrs == 0 || req.num_instrs > kMaxNumInstrs) return out;
+    if (req.insn_idx >= req.num_instrs) return out;
+
+    // Read parent's TR. Default-constructed local; we sterilise its list
+    // pointers before scope end so `~TransactionalList` runs `::operator
+    // delete(nullptr)` (a no-op) instead of freeing arbitrary parent VAs.
+    TranslationResult tr;
+    if (!readParent(parentTask, req.tr_addr, &tr, sizeof(tr))) return out;
+
+    TransactionalList<Fixup>* lists[kListCount] = {
+        &tr.external_fixups, &tr.internal_fixups, &tr._fixups,
+        &tr.field_B0,        &tr.dyld_stub_fixups, &tr.field_1A8,
+    };
+
+    struct Sterilizer {
+        TransactionalList<Fixup>** ls;
+        ~Sterilizer() {
+            for (size_t i = 0; i < kListCount; i++) {
+                ls[i]->begin = ls[i]->end = ls[i]->end_cap = nullptr;
+                ls[i]->_size = 0;
+            }
+        }
+    } _sterilizer{lists};
+
+    // Snapshot parent-side state we need for write-back.
+    uint32_t* const origInsnData    = tr.insn_buf.data;
+    uint64_t  const origInsnEnd     = tr.insn_buf.end;
+    uint64_t  const origInsnCap     = tr.insn_buf.end_cap;
+    uint32_t  const origInsnUseHeap = tr.insn_buf.use_heap;
+    ThreadContextOffsets* const origTCO = tr.thread_context_offsets;
+
+    struct ListBackup {
+        Fixup* begin;
+        Fixup* end;
+        Fixup* end_cap;
+        uint64_t _size;
+    } origLists[kListCount];
+    for (size_t i = 0; i < kListCount; i++) {
+        origLists[i] = {lists[i]->begin, lists[i]->end, lists[i]->end_cap,
+                        lists[i]->_size};
+    }
+
+    // Read IR array + ThreadContextOffsets.
+    std::vector<IRInstr> localIR(req.num_instrs);
+    if (!readParent(parentTask, req.instr_array, localIR.data(),
+                    req.num_instrs * sizeof(IRInstr))) return out;
+
+    if (origTCO == nullptr) return out;
+    ThreadContextOffsets localTCO{};
+    if (!readParent(parentTask, (uint64_t)origTCO, &localTCO,
+                    sizeof(localTCO))) return out;
+
+    // x87_cache is OUR addition (OPT-1) — see comment in TranslationResult.h.
+    // Stock libRosettaRuntime's TR has sizeof = 0x288, ours appends the cache
+    // afterward. mach_vm_read of sizeof(TranslationResult) past stock's end
+    // reads junk heap bytes into x87_cache, which Translator then trusts.
+    // Reset to a known-empty cache so Translator behaves as if this were a
+    // fresh run.
+    tr.x87_cache = X87Cache{};
+
+    // Set up local insn_buf with capacity ≥ parent's. Critical: end starts at
+    // origInsnEnd so Translator's emit/fixup offsets count in the SAME
+    // coordinate space the parent uses (`data + insn_offset`). If we started
+    // end at 0, fixups referencing emitted bytes would patch into parent's
+    // pre-existing prologue bytes when stock later applies them — corruption
+    // that crashes parent with EXC_BAD_INSTRUCTION.
+    //
+    // use_heap=1 ensures grow() picks calloc and skips its munmap-of-old-
+    // pointer branch (the "old" pointer would otherwise be foreign memory).
+    std::vector<uint8_t> localInsnVec(std::max<uint64_t>(origInsnCap, 0x4000));
+    tr.insn_buf.data     = reinterpret_cast<uint32_t*>(localInsnVec.data());
+    tr.insn_buf.end      = origInsnEnd;
+    tr.insn_buf.end_cap  = localInsnVec.size();
+    tr.insn_buf.use_heap = 1;
+    for (size_t i = 0; i < kListCount; i++) {
+        lists[i]->begin = lists[i]->end = lists[i]->end_cap = nullptr;
+        lists[i]->_size = 0;
+    }
+    tr.thread_context_offsets = &localTCO;
+
+    auto result = Translator::translate_instruction(
+        &tr, reinterpret_cast<IRBlock*>(req.block),
+        localIR.data(), int64_t(req.num_instrs), int64_t(req.insn_idx));
+
+    // Capture growth state. If insn_buf grew, Translator's grow() abandoned
+    // localInsnVec for a calloc'd buffer (we own that and must free it).
+    uint8_t* const localInsnData = reinterpret_cast<uint8_t*>(tr.insn_buf.data);
+    bool     const insnGrew      = (localInsnData != localInsnVec.data());
+    uint64_t const insnEmitted   = tr.insn_buf.end - origInsnEnd;
+    Fixup*   localPushed[kListCount];
+    uint64_t localPushedBytes[kListCount];
+    for (size_t i = 0; i < kListCount; i++) {
+        localPushed[i] = lists[i]->begin;
+        localPushedBytes[i] =
+            uint64_t((uint8_t*)lists[i]->end - (uint8_t*)lists[i]->begin);
+    }
+    struct LocalCleanup {
+        uint8_t* insn_buf;       // null if Translator never grew (vec owns)
+        Fixup* lists[kListCount];
+        ~LocalCleanup() {
+            if (insn_buf) free(insn_buf);
+            for (size_t i = 0; i < kListCount; i++) {
+                if (lists[i]) ::operator delete(lists[i]);
+            }
+        }
+    } _cleanup{insnGrew ? localInsnData : nullptr,
+               {localPushed[0], localPushed[1], localPushed[2],
+                localPushed[3], localPushed[4], localPushed[5]}};
+
+    if (!result.has_value()) return out;  // None — stub falls through to stock
+
+    // Write insn_buf delta bytes (the region Translator emitted, at offsets
+    // [origInsnEnd .. origInsnEnd+emitted]) back to parent. Two cases:
+    //  - No grow + fits in parent's cap → mach_vm_write the tail in place.
+    //  - Grow OR doesn't fit → allocate a parent-side replacement, copy
+    //    parent's existing [0..origInsnEnd] bytes over, then append our
+    //    emitted slice, and pivot TR.insn_buf.data onto it.
+    uint64_t finalInsnEnd = origInsnEnd + insnEmitted;
+    uint32_t* finalInsnData = origInsnData;
+    uint64_t finalInsnCap = origInsnCap;
+    if (!insnGrew && finalInsnEnd <= origInsnCap) {
+        if (insnEmitted > 0) {
+            if (!writeParent(parentTask,
+                             (uint64_t)origInsnData + origInsnEnd,
+                             localInsnData + origInsnEnd, insnEmitted)) return out;
+        }
+    } else {
+        uint64_t newCap = std::max(origInsnCap * 2, finalInsnEnd);
+        mach_vm_address_t parentNew = allocAndAppendInParent(
+            parentTask, (uint64_t)origInsnData, origInsnEnd, newCap,
+            localInsnData + origInsnEnd, insnEmitted);
+        if (parentNew == 0) return out;
+        finalInsnData = reinterpret_cast<uint32_t*>(parentNew);
+        finalInsnCap = (newCap + 0xFFF) & ~uint64_t(0xFFF);
+    }
+
+    // Append each list's pushed entries to parent — same fits-or-grow split.
+    Fixup* finalListBegin[kListCount];
+    Fixup* finalListEnd[kListCount];
+    Fixup* finalListEndCap[kListCount];
+    for (size_t i = 0; i < kListCount; i++) {
+        const auto& orig = origLists[i];
+        uint64_t parentLive = (uint8_t*)orig.end - (uint8_t*)orig.begin;
+        uint64_t parentCap  = (uint8_t*)orig.end_cap - (uint8_t*)orig.begin;
+        uint64_t added      = localPushedBytes[i];
+        uint64_t newLive    = parentLive + added;
+
+        if (newLive <= parentCap) {
+            if (added > 0) {
+                if (!writeParent(parentTask, (uint64_t)orig.end,
+                                 localPushed[i], added)) return out;
+            }
+            finalListBegin[i]  = orig.begin;
+            finalListEnd[i]    = (Fixup*)((uint8_t*)orig.begin + newLive);
+            finalListEndCap[i] = orig.end_cap;
+        } else {
+            uint64_t newCap = std::max(parentCap * 2, newLive);
+            mach_vm_address_t parentNew = allocAndAppendInParent(
+                parentTask, (uint64_t)orig.begin, parentLive, newCap,
+                localPushed[i], added);
+            if (parentNew == 0) return out;
+            uint64_t roundedCap = (newCap + 0xFFF) & ~uint64_t(0xFFF);
+            finalListBegin[i]  = (Fixup*)parentNew;
+            finalListEnd[i]    = (Fixup*)(parentNew + newLive);
+            finalListEndCap[i] = (Fixup*)(parentNew + roundedCap);
+        }
+    }
+
+    // Patch TR back to parent VAs and write it.
+    tr.insn_buf.data     = finalInsnData;
+    tr.insn_buf.end      = finalInsnEnd;
+    tr.insn_buf.end_cap  = finalInsnCap;
+    tr.insn_buf.use_heap = origInsnUseHeap;
+    tr.thread_context_offsets = origTCO;
+    for (size_t i = 0; i < kListCount; i++) {
+        lists[i]->begin   = finalListBegin[i];
+        lists[i]->end     = finalListEnd[i];
+        lists[i]->end_cap = finalListEndCap[i];
+        lists[i]->_size   = origLists[i]._size;
+    }
+
+    // Stock libRosettaRuntime's TR is 0x288 bytes; our struct appends
+    // x87_cache afterward (OPT-1 — see TranslationResult.h note). Writing
+    // sizeof(TranslationResult) overwrites bytes past parent's actual
+    // allocation, corrupting adjacent heap and crashing parent later with
+    // EXC_BAD_INSTRUCTION. Cap the write at the stock size — our cache is
+    // process-local scratch, never persisted to parent.
+    constexpr size_t kStockTrBytes = 0x288;
+    if (!writeParent(parentTask, req.tr_addr, &tr, kStockTrBytes)) return out;
+
+    out.reply_some = true;
+    out.value      = result.value();
+    return out;
+}
+
 void runReceiveLoop(mach_port_t servicePort, mach_port_t parentTaskPort) {
     fprintf(stderr,
             "sidecar: receive loop starting on port 0x%x (parent task=0x%x)\n",
             servicePort, parentTaskPort);
 
     // Counter file we update on each successful receive — survives process
-    // exit so post-mortem can verify whether the loop ever drained anything.
-    auto bumpCounter = [](uint64_t hits, uint64_t lastErr) {
+    // exit so post-mortem can verify whether the loop ever drained anything,
+    // AND how many of those hits resulted in a Some vs None reply (i.e. how
+    // often our local Translator actually produced a result).
+    auto bumpCounter = [](uint64_t hits, uint64_t some, uint64_t none,
+                          uint64_t lastErr) {
         FILE* f = fopen("/tmp/rosettax87_jit_sidecar_count", "w");
         if (!f) return;
-        fprintf(f, "hits=%llu lastErr=0x%llx\n", hits, lastErr);
+        fprintf(f, "hits=%llu some=%llu none=%llu lastErr=0x%llx\n",
+                hits, some, none, lastErr);
         fclose(f);
     };
-    bumpCounter(0, 0);
+    bumpCounter(0, 0, 0, 0);
 
     struct alignas(8) {
         uint8_t bytes[kRecvBufferSize];
     } buf;
 
     uint64_t hits = 0;
+    uint64_t someCount = 0;
+    uint64_t noneCount = 0;
     for (;;) {
         mach_msg_header_t* hdr = reinterpret_cast<mach_msg_header_t*>(buf.bytes);
         hdr->msgh_local_port = servicePort;
@@ -51,22 +356,32 @@ void runReceiveLoop(mach_port_t servicePort, mach_port_t parentTaskPort) {
         if (kr != KERN_SUCCESS) {
             fprintf(stderr, "sidecar: mach_msg(RCV) returned 0x%x (%s)\n", kr,
                     mach_error_string(kr));
-            bumpCounter(hits, uint64_t(kr));
+            bumpCounter(hits, someCount, noneCount, uint64_t(kr));
             return;
         }
 
         hits++;
-        bumpCounter(hits, 0);
 
         // M3 payload: header (24 B) + 5 × 8-byte args (40 B) = 64 B.
+        // Args are TR*, IRBlock*, IRInstr*, num_instrs, insn_idx — the
+        // five translate_insn parameters in register order (x0..x4).
         // Reply path: stub provided a SEND_ONCE on msgh_remote_port (via
-        // its MAKE_SEND_ONCE on the local-port disposition). We use it to
-        // reply with msgh_id=0 (None — fall through to stock translate_insn)
-        // for now. Once the Translator is wired, msgh_id=1 + body[0]=result
-        // will let the stub return Some(N) directly without falling through.
+        // MAKE_SEND_ONCE on the local-port disposition). msgh_id=1 +
+        // body[0]=result returns Some(N) to the stub; msgh_id=0 falls
+        // through to stock translate_insn.
         mach_port_t replyPort = hdr->msgh_remote_port;
         if (hdr->msgh_size >= 24 + 40 && hdr->msgh_id == 0x10000001 &&
             replyPort != MACH_PORT_NULL) {
+            TranslateRequest req{};
+            std::memcpy(&req, buf.bytes + 24, sizeof(req));
+
+            TranslateOutcome outcome =
+                processTranslateRequest(parentTaskPort, req);
+
+            if (outcome.reply_some) someCount++;
+            else                    noneCount++;
+            bumpCounter(hits, someCount, noneCount, 0);
+
             struct ReplyMsg {
                 mach_msg_header_t hdr;
                 uint64_t result;
@@ -75,16 +390,20 @@ void runReceiveLoop(mach_port_t servicePort, mach_port_t parentTaskPort) {
             reply.hdr.msgh_size = sizeof(reply);
             reply.hdr.msgh_remote_port = replyPort;
             reply.hdr.msgh_local_port = MACH_PORT_NULL;
-            reply.hdr.msgh_id = 0;          // None — stub falls through
-            reply.result = 0;
+            reply.hdr.msgh_id = outcome.reply_some ? 1 : 0;
+            reply.result      = outcome.reply_some
+                                    ? uint64_t(outcome.value)
+                                    : 0;
 
             kern_return_t kr_send = mach_msg(
                 &reply.hdr, MACH_SEND_MSG, sizeof(reply), 0, MACH_PORT_NULL,
                 MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
-            if (kr_send != KERN_SUCCESS && hits <= 5) {
-                fprintf(stderr,
-                        "sidecar: #%llu reply send failed 0x%x %s\n",
-                        hits, kr_send, mach_error_string(kr_send));
+            if (kr_send != KERN_SUCCESS) {
+                if (hits <= 5) {
+                    fprintf(stderr,
+                            "sidecar: #%llu reply send failed 0x%x %s\n",
+                            hits, kr_send, mach_error_string(kr_send));
+                }
                 // mach_msg consumes the SEND_ONCE on success; on failure
                 // we must drop it ourselves.
                 mach_port_deallocate(mach_task_self(), replyPort);
