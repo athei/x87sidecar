@@ -12,16 +12,24 @@
 // them. M3 will add real translation work + reply.
 namespace sidecar {
 
-// Allocate a fresh Mach receive port in this process and insert a SEND
-// right under a chosen 32-bit name in `parentTaskPort`'s namespace.
-// On success, *outServicePort holds the local receive port and
-// *outParentNameRef holds the name the stub bytes should reference.
+// Mach IPC port plumbing for the inline stub.
 //
-// `parentTaskPort` must be a send-right to the parent's task port (today's
-// MuhDebugger holds this). Returns true on success.
+// Two ports are involved:
+//   1. Service port: owned by us (loader/sidecar). Parent gets a SEND
+//      right under `*outParentReqName`. Stub uses that name as the
+//      msgh_remote_port of every translate_insn call.
+//   2. Reply port: owned by parent. Allocated directly into parent's
+//      namespace via mach_port_allocate(parentTaskPort, RECEIVE, ...).
+//      Stub uses `*outParentReplyName` as msgh_local_port with
+//      MAKE_SEND_ONCE so the kernel hands the sidecar a fresh
+//      SEND_ONCE per call. Sidecar replies on that.
+//
+// `parentTaskPort` must be a send-right to the parent's task port (held
+// by MuhDebugger.taskPort_). Returns true on success.
 bool installPortInParent(mach_port_t parentTaskPort,
                          mach_port_t* outServicePort,
-                         uint32_t* outParentNameRef);
+                         uint32_t* outParentReqName,
+                         uint32_t* outParentReplyName);
 
 // Run the Mach receive loop on `servicePort`. The receive thread also
 // needs `parentTaskPort` to mach_vm_read structs in the parent's address

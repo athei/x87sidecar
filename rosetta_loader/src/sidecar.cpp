@@ -32,7 +32,8 @@ void* threadEntry(void* arg) {
 
 bool installPortInParent(mach_port_t parentTaskPort,
                          mach_port_t* outServicePort,
-                         uint32_t* outParentNameRef) {
+                         uint32_t* outParentReqName,
+                         uint32_t* outParentReplyName) {
     // Allocate a fresh receive port in this process.
     mach_port_t servicePort = MACH_PORT_NULL;
     kern_return_t kr =
@@ -107,7 +108,27 @@ bool installPortInParent(mach_port_t parentTaskPort,
     }
 
     *outServicePort = servicePort;
-    *outParentNameRef = uint32_t(parentName);
+    *outParentReqName = uint32_t(parentName);
+
+    // ── Allocate the parent-owned reply port ────────────────────────────────
+    // The stub names this port as msgh_local_port + MAKE_SEND_ONCE, so the
+    // kernel hands the server a fresh SEND_ONCE right per call. Sidecar
+    // replies via that send-once; the reply lands here in parent's space
+    // and the stub's mach_msg(RCV) drains it.
+    mach_port_name_t parentReplyName = MACH_PORT_NULL;
+    kr = mach_port_allocate(parentTaskPort, MACH_PORT_RIGHT_RECEIVE,
+                            &parentReplyName);
+    if (kr != KERN_SUCCESS) {
+        fprintf(stderr,
+                "sidecar: mach_port_allocate(parent, RECEIVE) for reply "
+                "failed (0x%x %s)\n",
+                kr, mach_error_string(kr));
+        return false;
+    }
+    fprintf(stderr,
+            "sidecar: parent reply port name 0x%x (RECEIVE in parent)\n",
+            parentReplyName);
+    *outParentReplyName = uint32_t(parentReplyName);
     return true;
 }
 
@@ -152,47 +173,43 @@ void runReceiveLoop(mach_port_t servicePort, mach_port_t parentTaskPort) {
         bumpCounter(hits, 0);
 
         // M3 payload: header (24 B) + 5 × 8-byte args (40 B) = 64 B.
-        if (hdr->msgh_size >= 24 + 40 && hdr->msgh_id == 0x10000001) {
-            const uint64_t* body = reinterpret_cast<const uint64_t*>(
-                buf.bytes + sizeof(mach_msg_header_t));
-            uint64_t trAddr     = body[0];
-            uint64_t blockAddr  = body[1];
-            uint64_t instrAddr  = body[2];
-            int64_t numInstrs   = int64_t(body[3]);
-            int64_t insnIdx     = int64_t(body[4]);
+        // Reply path: stub provided a SEND_ONCE on msgh_remote_port (via
+        // its MAKE_SEND_ONCE on the local-port disposition). We use it to
+        // reply with msgh_id=0 (None — fall through to stock translate_insn)
+        // for now. Once the Translator is wired, msgh_id=1 + body[0]=result
+        // will let the stub return Some(N) directly without falling through.
+        mach_port_t replyPort = hdr->msgh_remote_port;
+        if (hdr->msgh_size >= 24 + 40 && hdr->msgh_id == 0x10000001 &&
+            replyPort != MACH_PORT_NULL) {
+            // Build reply.
+            struct ReplyMsg {
+                mach_msg_header_t hdr;
+                uint64_t result;
+            } reply{};
+            reply.hdr.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_MOVE_SEND_ONCE, 0);
+            reply.hdr.msgh_size = sizeof(reply);
+            reply.hdr.msgh_remote_port = replyPort;
+            reply.hdr.msgh_local_port = MACH_PORT_NULL;
+            reply.hdr.msgh_id = 0;          // None — stub falls through
+            reply.result = 0;
 
-            // M3c: read the IRInstr at instr_array[insn_idx] from the parent
-            // via mach_vm_read_overwrite. IRInstr's exact layout will be
-            // pulled in from rosetta_core in M3d; for now read 64 bytes
-            // (enough to cover the opcode field + early flags) and log.
-            if (hits <= 5) {
-                uint8_t instrBuf[64] = {};
-                mach_vm_size_t got = 0;
-                kern_return_t kr2 = mach_vm_read_overwrite(
-                    parentTaskPort, instrAddr + uint64_t(insnIdx) * 64,
-                    sizeof(instrBuf),
-                    mach_vm_address_t(instrBuf), &got);
-                if (kr2 == KERN_SUCCESS) {
-                    fprintf(stderr,
-                            "sidecar: #%llu TR=0x%llx instr[%lld] of %lld "
-                            "first8bytes=%02x%02x%02x%02x%02x%02x%02x%02x\n",
-                            hits, trAddr, insnIdx, numInstrs,
-                            instrBuf[0], instrBuf[1], instrBuf[2], instrBuf[3],
-                            instrBuf[4], instrBuf[5], instrBuf[6], instrBuf[7]);
-                } else {
-                    fprintf(stderr,
-                            "sidecar: #%llu mach_vm_read_overwrite failed "
-                            "0x%x %s\n",
-                            hits, kr2, mach_error_string(kr2));
-                }
-                (void)blockAddr;
+            kern_return_t kr_send = mach_msg(
+                &reply.hdr, MACH_SEND_MSG, sizeof(reply), 0, MACH_PORT_NULL,
+                MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+            if (kr_send != KERN_SUCCESS && hits <= 5) {
+                fprintf(stderr,
+                        "sidecar: #%llu reply send failed 0x%x %s\n",
+                        hits, kr_send, mach_error_string(kr_send));
+                // mach_msg consumes the SEND_ONCE on success; on failure
+                // we must drop it ourselves.
+                mach_port_deallocate(mach_task_self(), replyPort);
             }
-        }
-
-        if (hdr->msgh_remote_port != MACH_PORT_NULL &&
-            (hdr->msgh_bits & MACH_MSGH_BITS_REMOTE_MASK) ==
-                MACH_MSG_TYPE_MOVE_SEND_ONCE) {
-            mach_port_deallocate(mach_task_self(), hdr->msgh_remote_port);
+            // mach_msg(SEND) on success consumed replyPort. Don't drop it.
+        } else if (replyPort != MACH_PORT_NULL &&
+                   (hdr->msgh_bits & MACH_MSGH_BITS_REMOTE_MASK) ==
+                       MACH_MSG_TYPE_MOVE_SEND_ONCE) {
+            // Other / malformed message — discard the SEND_ONCE.
+            mach_port_deallocate(mach_task_self(), replyPort);
         }
     }
 }

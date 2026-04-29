@@ -37,9 +37,15 @@ struct StubBlobs {
 //   translateInsnAddr  : absolute address of stock translate_insn entry
 //   origPrologue16     : the 16 bytes currently at translate_insn[0..16],
 //                         to be preserved verbatim into STASH
-//   sidecarPortName    : Mach send-right name, in the parent's namespace,
-//                         pointing at the loader-process service port
+//   sidecarReqName     : Mach SEND-right name, in the parent's namespace,
+//                         pointing at the loader-process service port.
+//                         Stub uses this as msgh_remote_port (COPY_SEND).
+//   parentReplyName    : Mach RECEIVE-right name, in the parent's namespace.
+//                         Stub uses it as msgh_local_port with
+//                         MAKE_SEND_ONCE; sidecar replies on the resulting
+//                         send-once and the reply lands here.
 StubBlobs build(uint64_t handlerAddr, uint64_t translateInsnAddr,
-                const uint8_t origPrologue16[16], uint32_t sidecarPortName);
+                const uint8_t origPrologue16[16], uint32_t sidecarReqName,
+                uint32_t parentReplyName);
 
 }  // namespace stub_asm

@@ -101,6 +101,26 @@ constexpr uint32_t cbz(uint32_t rt, int32_t imm19_words) {
     return 0xB4000000u | (imm19 << 5) | (rt & 0x1F);
 }
 
+// CBZ Wt, +imm19*4   (32-bit variant)
+constexpr uint32_t cbz_w(uint32_t rt, int32_t imm19_words) {
+    uint32_t imm19 = uint32_t(imm19_words) & 0x7FFFF;
+    return 0x34000000u | (imm19 << 5) | (rt & 0x1F);
+}
+
+// LDR Xt, [Xn|SP, #imm]  (64-bit load, unsigned offset, scaled by 8)
+//   11_111_0_01_01_imm12_Rn_Rt
+constexpr uint32_t ldr_x_offset(uint32_t xt, uint32_t rn, uint32_t imm) {
+    uint32_t imm12 = (imm / 8) & 0xFFF;
+    return 0xF9400000u | (imm12 << 10) | ((rn & 0x1F) << 5) | (xt & 0x1F);
+}
+
+// LDR Wt, [Xn|SP, #imm]  (32-bit load, unsigned offset, scaled by 4)
+//   10_111_0_01_01_imm12_Rn_Rt
+constexpr uint32_t ldr_w_offset(uint32_t wt, uint32_t rn, uint32_t imm) {
+    uint32_t imm12 = (imm / 4) & 0xFFF;
+    return 0xB9400000u | (imm12 << 10) | ((rn & 0x1F) << 5) | (wt & 0x1F);
+}
+
 // BRK #imm16
 constexpr uint32_t brk_imm(uint16_t imm) {
     return 0xD4200000u | (uint32_t(imm) << 5);
@@ -151,7 +171,8 @@ void emit_abs_jump_3movs(std::vector<uint8_t>& out, uint64_t target) {
 // ──── public ────────────────────────────────────────────────────────────────
 
 StubBlobs build(uint64_t handlerAddr, uint64_t translateInsnAddr,
-                const uint8_t origPrologue16[16], uint32_t sidecarPortName) {
+                const uint8_t origPrologue16[16], uint32_t sidecarReqName,
+                uint32_t parentReplyName) {
     StubBlobs blobs;
 
     // ENTRY: 16-byte abs-jump to handlerAddr, written into translate_insn[0..16].
@@ -169,24 +190,28 @@ StubBlobs build(uint64_t handlerAddr, uint64_t translateInsnAddr,
 
     auto& h = blobs.handler;
 
-    // ──── OUR_HANDLER ───────────────────────────────────────────────────────
-    // Save-and-restore stack frame layout:
-    //   sp[ 0..  8] : x0   (caller's translate_insn arg0)
-    //   sp[ 8.. 16] : x1
-    //   sp[16.. 24] : x2
-    //   sp[24.. 32] : x3
-    //   sp[32.. 40] : x4
-    //   sp[40.. 48] : x5
-    //   sp[48.. 56] : x16
-    //   sp[56.. 64] : LR
-    //   sp[64..128] : mach_msg_header_t (we use 64 bytes to be safe; header is 24)
+    // ──── OUR_HANDLER (RPC version: send + receive) ─────────────────────────
+    // Stack frame layout (FRAME_SIZE = 192 bytes):
+    //   sp[  0..  8] : x0   (caller's translate_insn arg0 = TR*)
+    //   sp[  8.. 16] : x1   (block*)
+    //   sp[ 16.. 24] : x2   (instr_array*)
+    //   sp[ 24.. 32] : x3   (num_instrs)
+    //   sp[ 32.. 40] : x4   (insn_idx)
+    //   sp[ 40.. 48] : x5   (caller scratch)
+    //   sp[ 48.. 56] : x16  (caller scratch / kept for sym with stp)
+    //   sp[ 56.. 64] : LR   (return address)
+    //   sp[ 64..192] : 128-byte buffer used for both send (msg ~= 64 B) and
+    //                  receive (kernel writes reply here on RCV).
+    //                  Header (24 B) at sp+64..sp+88.
+    //                  Send body (40 B) at sp+88..sp+128.
+    //                  Reply body lands at sp+88..sp+(64+rcv_size).
     //
-    // Save callee-saved args + LR + scratch x16. We don't trash x6/x7 directly
-    // but spill them anyway in case the syscall touches them.  After the
-    // syscall we reload x0..x5,x16,LR from the stack so the fall-through
-    // STASH executes with the original calling convention regs intact.
+    // After mach_msg(SEND|RCV) returns:
+    //   x0 = KERN_RETURN. Reply is in the buffer.
+    //   We read msgh_id (sp+84): 0 = None (fall through), 1 = Some(N).
+    //   For Some, body[0] (sp+88) is the int64_t value to return.
 
-    constexpr int FRAME_SIZE = 128;
+    constexpr int FRAME_SIZE = 192;
 
     // stp x0, x1, [sp, #-128]!
     emit(h, stp_preindex(0, 1, SP, -FRAME_SIZE));
@@ -213,7 +238,6 @@ StubBlobs build(uint64_t handlerAddr, uint64_t translateInsnAddr,
     //
     // MACH_MSGH_BITS_REMOTE(MACH_MSG_TYPE_COPY_SEND) = 19 = 0x13.
     // (NOT 0x11 — that's MOVE_SEND which consumes the right after one use.)
-    // MACH_MSGH_BITS_REMOTE(MACH_MSG_TYPE_COPY_SEND) = 19 = 0x13.
     // After the 24-byte header we lay down a 40-byte body holding the five
     // translate_insn arguments in their natural register order:
     //   body[+ 0..+ 8] : x0  (TranslationResult* — parent-side pointer)
@@ -221,13 +245,20 @@ StubBlobs build(uint64_t handlerAddr, uint64_t translateInsnAddr,
     //   body[+16..+24] : x2  (IRInstr*          — parent-side pointer to array)
     //   body[+24..+32] : x3  (num_instrs)
     //   body[+32..+40] : x4  (insn_idx)
-    constexpr uint32_t MSG_BITS = 0x13;        // COPY_SEND on remote, none on local
-    constexpr uint32_t MSG_SIZE = 24 + 40;      // header + 5×8-byte args
-    constexpr uint32_t MSG_ID   = 0x10000001;   // arbitrary; sidecar dispatches on it
+    //
+    // MACH_MSGH_BITS encoding: remote in low byte, local in next byte.
+    //   remote = MACH_MSG_TYPE_COPY_SEND      = 19 = 0x13  (preserves the
+    //            send right at parent's namespaced sidecarReqName)
+    //   local  = MACH_MSG_TYPE_MAKE_SEND_ONCE = 21 = 0x15  (kernel hands
+    //            the sidecar a fresh send-once for the reply)
+    constexpr uint32_t MSG_BITS = 0x13u | (0x15u << 8);  // = 0x1513
+    constexpr uint32_t MSG_SIZE = 24 + 40;                // header + 5×8 args
+    constexpr uint32_t RCV_SIZE = 128;                    // reply cap
+    constexpr uint32_t MSG_ID   = 0x10000001;             // sidecar dispatches on it
 
     // Use x9 as scratch for header field values.
 
-    // msgh_bits
+    // msgh_bits — 0x1513 fits in 16 bits (single movz)
     emit(h, movz(9, MSG_BITS, 0));
     emit(h, str_w_offset(9, SP, 64));         // [sp+64]
 
@@ -235,15 +266,17 @@ StubBlobs build(uint64_t handlerAddr, uint64_t translateInsnAddr,
     emit(h, movz(9, MSG_SIZE, 0));
     emit(h, str_w_offset(9, SP, 68));         // [sp+68]
 
-    // msgh_remote_port = sidecarPortName (32-bit)
-    emit_load_imm64(h, 9, sidecarPortName);   // 4 instructions; high half zero
+    // msgh_remote_port = sidecarReqName (32-bit)
+    emit_load_imm64(h, 9, sidecarReqName);    // 4 instructions
     emit(h, str_w_offset(9, SP, 72));         // [sp+72]
 
-    // msgh_local_port = 0
-    emit(h, movz(9, 0, 0));
+    // msgh_local_port = parentReplyName (32-bit) — kernel auto-derives
+    // a SEND_ONCE right via MAKE_SEND_ONCE in MSG_BITS.local.
+    emit_load_imm64(h, 9, parentReplyName);   // 4 instructions
     emit(h, str_w_offset(9, SP, 76));         // [sp+76]
 
-    // msgh_voucher_port = 0  (reuse x9=0)
+    // msgh_voucher_port = 0
+    emit(h, movz(9, 0, 0));
     emit(h, str_w_offset(9, SP, 80));         // [sp+80]
 
     // msgh_id
@@ -260,40 +293,55 @@ StubBlobs build(uint64_t handlerAddr, uint64_t translateInsnAddr,
     emit(h, str_x_offset(4, SP, 120));        // body[+32] = x4 = insn_idx
 
     // ── mach_msg_trap arguments ──────────────────────────────────────────────
-    //   x0 = msg pointer (sp + 64)
-    //   x1 = options = MACH_SEND_MSG | MACH_SEND_TIMEOUT_NONE = 0x1
-    //   x2 = send_size = 24
-    //   x3 = rcv_size  = 0
-    //   x4 = rcv_name  = MACH_PORT_NULL
-    //   x5 = timeout   = 0
-    //   x6 = notify    = 0
+    //   x0  = msg pointer (sp + 64)
+    //   x1  = options = MACH_SEND_MSG | MACH_RCV_MSG = 0x3
+    //   x2  = send_size = 64
+    //   x3  = rcv_size  = 128
+    //   x4  = rcv_name  = parentReplyName  (low 32 bits)
+    //   x5  = timeout   = 0  (block forever)
+    //   x6  = notify    = 0
     //   x16 = -31  (mach_msg_trap)
-    //
-    // From <mach/message.h>:
-    //   MACH_SEND_MSG       = 0x00000001
-    //   MACH_SEND_TIMEOUT   = 0x00000010   (we omit; just set 0 timeout in x5)
-    //
-    // Our send is fire-and-forget.  We do NOT set MACH_SEND_TIMEOUT so the
-    // call may block until the sidecar drains; for M2 dummy this is OK.
-
-    emit(h, add_imm(0, SP, 64));          // x0 = sp + 64
-    emit(h, movz(1, 0x0001, 0));          // x1 = MACH_SEND_MSG
-    emit(h, movz(2, MSG_SIZE, 0));        // x2 = send_size
-    emit(h, movz(3, 0, 0));               // x3 = rcv_size = 0
-    emit(h, movz(4, 0, 0));               // x4 = rcv_name = 0
-    emit(h, movz(5, 0, 0));               // x5 = timeout = 0
-    emit(h, movz(6, 0, 0));               // x6 = notify = 0
-    emit(h, movn(16, 30, 0));             // x16 = -31  (mach_msg_trap)
+    emit(h, add_imm(0, SP, 64));              // x0 = sp + 64
+    emit(h, movz(1, 0x0003, 0));              // x1 = SEND | RCV
+    emit(h, movz(2, MSG_SIZE, 0));            // x2 = send_size
+    emit(h, movz(3, RCV_SIZE, 0));            // x3 = rcv_size
+    emit_load_imm64(h, 4, parentReplyName);   // x4 = rcv_name
+    emit(h, movz(5, 0, 0));                   // x5 = timeout
+    emit(h, movz(6, 0, 0));                   // x6 = notify
+    emit(h, movn(16, 30, 0));                 // x16 = -31 (mach_msg_trap)
     emit(h, svc(0x80));
 
-    // ── Restore caller's regs ───────────────────────────────────────────────
-    // ldp x16, lr, [sp, #48]
+    // ── Reply parsing ───────────────────────────────────────────────────────
+    // After mach_msg returns:
+    //   x0 holds the kern_return_t (we ignore non-zero — Wine will hang
+    //        otherwise but for now treat it as fall-through implicitly via
+    //        the message buffer's leftover msgh_id which is whatever).
+    //   The buffer at sp+64..sp+192 holds the reply: header at +64..+88,
+    //                                                body at +88..end.
+    //   msgh_id (sp+84) tells us what to do: 0 = None (fall through),
+    //                                        1 = Some, body[0] = result.
+    //
+    // Read msgh_id into w9.
+    emit(h, ldr_w_offset(9, SP, 84));         // w9 = msgh_id
+    // CBZ branch is `target = CBZ_addr + imm19*4`. We want to land at the
+    // FIRST instruction of NONE path, which is one past the SOME path's
+    // last (7th) instruction, i.e., 8 instructions ahead of CBZ.
+    emit(h, cbz_w(9, 8));                     // skip 7 some-path → none_label
+
+    // ── SOME PATH ───────────────────────────────────────────────────────────
+    emit(h, ldr_x_offset(0, SP, 88));         // x0 = result (replaces saved x0)
+    emit(h, ldr_x_offset(1, SP, 8));          // restore x1
+    emit(h, ldp_offset(2, 3, SP, 16));        // restore x2, x3
+    emit(h, ldp_offset(4, 5, SP, 32));        // restore x4, x5
+    emit(h, ldp_offset(16, LR, SP, 48));      // restore x16, lr
+    emit(h, add_imm(SP, SP, FRAME_SIZE));     // sp += FRAME_SIZE
+    emit(h, 0xD65F03C0u);                     // ret  (= BR x30)
+
+    // ── NONE PATH ───────────────────────────────────────────────────────────
+    // Restore caller regs then fall through to STASH below.
     emit(h, ldp_offset(16, LR, SP, 48));
-    // ldp x4, x5, [sp, #32]
     emit(h, ldp_offset(4, 5, SP, 32));
-    // ldp x2, x3, [sp, #16]
     emit(h, ldp_offset(2, 3, SP, 16));
-    // ldp x0, x1, [sp], #128   (post-index)
     emit(h, ldp_postindex(0, 1, SP, FRAME_SIZE));
 
     // ── STASH (4 instructions = original 16 bytes of translate_insn) ───────

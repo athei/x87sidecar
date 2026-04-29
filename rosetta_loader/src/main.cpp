@@ -921,20 +921,23 @@ int main(int argc, char* argv[]) {
 
         // ── Install Mach service port in parent ─────────────────────────────
         mach_port_t servicePort = MACH_PORT_NULL;
-        uint32_t parentPortName = 0;
+        uint32_t parentReqName = 0;
+        uint32_t parentReplyName = 0;
         if (!sidecar::installPortInParent(dbg.taskPort(), &servicePort,
-                                           &parentPortName)) {
+                                           &parentReqName,
+                                           &parentReplyName)) {
             fprintf(stderr, "M2: sidecar::installPortInParent failed\n");
             return 1;
         }
-        LOG("M2: parent port name 0x%x; local servicePort 0x%x\n",
-            parentPortName, servicePort);
+        LOG("M2: parent req port 0x%x  reply port 0x%x  local service 0x%x\n",
+            parentReqName, parentReplyName, servicePort);
 
         // ── Assemble stub bytes ─────────────────────────────────────────────
         // OUR_HANDLER + STASH + STASH_JUMP go to padStartAddr.
         // ENTRY (16-byte abs-jump to OUR_HANDLER) goes to translate_insn[0..16].
         auto blobs = stub_asm::build(padStartAddr, translateInsnAddr,
-                                      origPrologue, parentPortName);
+                                      origPrologue, parentReqName,
+                                      parentReplyName);
         if (blobs.entry.size() != 16) {
             fprintf(stderr,
                     "M2: stub_asm::build returned wrong entry size %zu\n",
@@ -1050,7 +1053,8 @@ int main(int argc, char* argv[]) {
             fprintf(f, "handler=0x%llx\n", padStartAddr);
             fprintf(f, "handler_bytes=%zu\n", blobs.handler.size());
             fprintf(f, "padding_bytes=%llu\n", padBytes);
-            fprintf(f, "parent_port_name=0x%x\n", parentPortName);
+            fprintf(f, "parent_req_name=0x%x\n", parentReqName);
+            fprintf(f, "parent_reply_name=0x%x\n", parentReplyName);
             fclose(f);
         }
 
