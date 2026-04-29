@@ -3352,6 +3352,45 @@ auto translate_fnop(TranslationResult* a1, IRInstr* /*a2*/) -> void {
 }
 
 // =============================================================================
+// FDECSTP — decrement TOP.
+//
+// x87 semantics:
+//   TOP = (TOP - 1) & 7
+//   tag word, data registers: unchanged
+//   C1: cleared (we leave undefined; tests don't check)
+//
+// Cache: TOP changes, so we must flush perm (perm map is TOP-relative)
+// and tags (tag_push_pending / deferred_pop_count are slot indices
+// relative to current TOP).  After flushes, decrement Wd_top in-place
+// and set top_dirty=1; x87_end emits the memory write-back at run-end.
+// =============================================================================
+auto translate_fdecstp(TranslationResult* a1, IRInstr* /*a2*/) -> void {
+    AssemblerBuffer& buf = a1->insn_buf;
+    auto [Xbase, Wd_top] = x87_begin(*a1, buf);
+    const int Wd_tmp = alloc_gpr(*a1, 2);
+
+    // Flush state that's TOP-relative before changing TOP.
+    perm_flush_before_stack_change(buf, *a1, Xbase, Wd_top, Wd_tmp);
+    {
+        const int Wd_tmp2 = alloc_free_gpr(*a1);
+        x87_flush_tags(buf, *a1, Xbase, Wd_top, Wd_tmp, Wd_tmp2);
+        free_gpr(*a1, Wd_tmp2);
+    }
+
+    // SUB  Wd_top, Wd_top, #1
+    emit_add_imm(buf, /*is_64bit=*/0, /*is_sub=*/1, /*is_set_flags=*/0,
+                 /*shift=*/0, /*imm12=*/1, Wd_top, Wd_top);
+    // AND  Wd_top, Wd_top, #7  (N=0, immr=0, imms=2 → 3-bit mask)
+    emit_and_imm(buf, /*is_64bit=*/0, /*Rd=*/Wd_top,
+                 /*N=*/0, /*immr=*/0, /*imms=*/2, /*Rn=*/Wd_top);
+
+    a1->x87_cache.top_dirty = 1;
+
+    x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp);
+    free_gpr(*a1, Wd_tmp);
+}
+
+// =============================================================================
 // FCLEX / FNCLEX — clear x87 exception flags.
 //
 // x87 semantics:
