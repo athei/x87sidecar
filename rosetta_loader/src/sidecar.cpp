@@ -239,86 +239,102 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask,
                {localPushed[0], localPushed[1], localPushed[2],
                 localPushed[3], localPushed[4], localPushed[5]}};
 
-    if (!result.has_value()) return out;  // None — stub falls through to stock
-
-    // Write insn_buf delta bytes (the region Translator emitted, at offsets
-    // [origInsnEnd .. origInsnEnd+emitted]) back to parent. Two cases:
-    //  - No grow + fits in parent's cap → mach_vm_write the tail in place.
-    //  - Grow OR doesn't fit → allocate a parent-side replacement, copy
-    //    parent's existing [0..origInsnEnd] bytes over, then append our
-    //    emitted slice, and pivot TR.insn_buf.data onto it.
-    uint64_t finalInsnEnd = origInsnEnd + insnEmitted;
-    uint32_t* finalInsnData = origInsnData;
-    uint64_t finalInsnCap = origInsnCap;
-    if (!insnGrew && finalInsnEnd <= origInsnCap) {
-        if (insnEmitted > 0) {
-            if (!writeParent(parentTask,
-                             (uint64_t)origInsnData + origInsnEnd,
-                             localInsnData + origInsnEnd, insnEmitted)) return out;
-        }
-    } else {
-        uint64_t newCap = std::max(origInsnCap * 2, finalInsnEnd);
-        mach_vm_address_t parentNew = allocAndAppendInParent(
-            parentTask, (uint64_t)origInsnData, origInsnEnd, newCap,
-            localInsnData + origInsnEnd, insnEmitted);
-        if (parentNew == 0) return out;
-        finalInsnData = reinterpret_cast<uint32_t*>(parentNew);
-        finalInsnCap = (newCap + 0xFFF) & ~uint64_t(0xFFF);
-    }
-
-    // Append each list's pushed entries to parent — same fits-or-grow split.
-    Fixup* finalListBegin[kListCount];
-    Fixup* finalListEnd[kListCount];
-    Fixup* finalListEndCap[kListCount];
-    for (size_t i = 0; i < kListCount; i++) {
-        const auto& orig = origLists[i];
-        uint64_t parentLive = (uint8_t*)orig.end - (uint8_t*)orig.begin;
-        uint64_t parentCap  = (uint8_t*)orig.end_cap - (uint8_t*)orig.begin;
-        uint64_t added      = localPushedBytes[i];
-        uint64_t newLive    = parentLive + added;
-
-        if (newLive <= parentCap) {
-            if (added > 0) {
-                if (!writeParent(parentTask, (uint64_t)orig.end,
-                                 localPushed[i], added)) return out;
-            }
-            finalListBegin[i]  = orig.begin;
-            finalListEnd[i]    = (Fixup*)((uint8_t*)orig.begin + newLive);
-            finalListEndCap[i] = orig.end_cap;
-        } else {
-            uint64_t newCap = std::max(parentCap * 2, newLive);
-            mach_vm_address_t parentNew = allocAndAppendInParent(
-                parentTask, (uint64_t)orig.begin, parentLive, newCap,
-                localPushed[i], added);
-            if (parentNew == 0) return out;
-            uint64_t roundedCap = (newCap + 0xFFF) & ~uint64_t(0xFFF);
-            finalListBegin[i]  = (Fixup*)parentNew;
-            finalListEnd[i]    = (Fixup*)(parentNew + newLive);
-            finalListEndCap[i] = (Fixup*)(parentNew + roundedCap);
-        }
-    }
-
-    // Patch TR back to parent VAs and write it.
-    tr.insn_buf.data     = finalInsnData;
-    tr.insn_buf.end      = finalInsnEnd;
-    tr.insn_buf.end_cap  = finalInsnCap;
+    // We always write the TR back, even on None — Translator's default case
+    // (and other unhandled paths) calls cache.invalidate() and resets the
+    // scratch register masks; if we don't propagate those, parent ends up
+    // with stale `cache.gprs_valid=1` from the previous Some translation
+    // while stock's now-running translate_insn (for the unhandled opcode)
+    // happily clobbers the GPRs the cache claims are still holding TOP /
+    // base. The next x87 op would then trust the cache and emit wrong code.
+    // Restore parent VAs in TR before any conditional data writes below;
+    // the data-write path will re-pivot insn_buf/list pointers if grow
+    // happened.
+    tr.insn_buf.data     = origInsnData;
+    tr.insn_buf.end      = origInsnEnd;
+    tr.insn_buf.end_cap  = origInsnCap;
     tr.insn_buf.use_heap = origInsnUseHeap;
     tr.thread_context_offsets = origTCO;
     for (size_t i = 0; i < kListCount; i++) {
-        lists[i]->begin   = finalListBegin[i];
-        lists[i]->end     = finalListEnd[i];
-        lists[i]->end_cap = finalListEndCap[i];
+        lists[i]->begin   = origLists[i].begin;
+        lists[i]->end     = origLists[i].end;
+        lists[i]->end_cap = origLists[i].end_cap;
         lists[i]->_size   = origLists[i]._size;
     }
 
-    // Write back the full TR. The loader's M2 init patched stock's TR
+    if (result.has_value()) {
+        // Write insn_buf delta bytes (the region Translator emitted, at
+        // offsets [origInsnEnd .. origInsnEnd+emitted]) back to parent.
+        // Two cases:
+        //  - No grow + fits in parent's cap → mach_vm_write the tail
+        //    in place.
+        //  - Grow OR doesn't fit → allocate a parent-side replacement,
+        //    copy parent's existing [0..origInsnEnd] bytes over, then
+        //    append our emitted slice, and pivot TR.insn_buf.data onto
+        //    it.
+        uint64_t finalInsnEnd  = origInsnEnd + insnEmitted;
+        uint32_t* finalInsnData = origInsnData;
+        uint64_t finalInsnCap   = origInsnCap;
+        if (!insnGrew && finalInsnEnd <= origInsnCap) {
+            if (insnEmitted > 0) {
+                if (!writeParent(parentTask,
+                                 (uint64_t)origInsnData + origInsnEnd,
+                                 localInsnData + origInsnEnd,
+                                 insnEmitted)) return out;
+            }
+        } else {
+            uint64_t newCap = std::max(origInsnCap * 2, finalInsnEnd);
+            mach_vm_address_t parentNew = allocAndAppendInParent(
+                parentTask, (uint64_t)origInsnData, origInsnEnd, newCap,
+                localInsnData + origInsnEnd, insnEmitted);
+            if (parentNew == 0) return out;
+            finalInsnData = reinterpret_cast<uint32_t*>(parentNew);
+            finalInsnCap  = (newCap + 0xFFF) & ~uint64_t(0xFFF);
+        }
+        tr.insn_buf.data    = finalInsnData;
+        tr.insn_buf.end     = finalInsnEnd;
+        tr.insn_buf.end_cap = finalInsnCap;
+
+        // Append each list's pushed entries to parent — same fits-or-grow
+        // split.
+        for (size_t i = 0; i < kListCount; i++) {
+            const auto& orig    = origLists[i];
+            uint64_t parentLive = (uint8_t*)orig.end - (uint8_t*)orig.begin;
+            uint64_t parentCap  = (uint8_t*)orig.end_cap - (uint8_t*)orig.begin;
+            uint64_t added      = localPushedBytes[i];
+            uint64_t newLive    = parentLive + added;
+
+            if (newLive <= parentCap) {
+                if (added > 0) {
+                    if (!writeParent(parentTask, (uint64_t)orig.end,
+                                     localPushed[i], added)) return out;
+                }
+                lists[i]->end = (Fixup*)((uint8_t*)orig.begin + newLive);
+            } else {
+                uint64_t newCap = std::max(parentCap * 2, newLive);
+                mach_vm_address_t parentNew = allocAndAppendInParent(
+                    parentTask, (uint64_t)orig.begin, parentLive, newCap,
+                    localPushed[i], added);
+                if (parentNew == 0) return out;
+                uint64_t roundedCap = (newCap + 0xFFF) & ~uint64_t(0xFFF);
+                lists[i]->begin   = (Fixup*)parentNew;
+                lists[i]->end     = (Fixup*)(parentNew + newLive);
+                lists[i]->end_cap = (Fixup*)(parentNew + roundedCap);
+            }
+        }
+    }
+
+    // Write back the full TR (always — propagates cache + scratch-mask
+    // updates from Translator's run, plus any pivoted buffer pointers from
+    // the Some path above). The loader's M2 init patched stock's TR
     // allocator to sizeof(TranslationResult), so parent's allocation has
     // room for our appended x87_cache field — persisting it across calls
     // is what restores OPT-1's cross-instruction reuse.
     if (!writeParent(parentTask, req.tr_addr, &tr, sizeof(tr))) return out;
 
-    out.reply_some = true;
-    out.value      = result.value();
+    if (result.has_value()) {
+        out.reply_some = true;
+        out.value      = result.value();
+    }
     return out;
 }
 
