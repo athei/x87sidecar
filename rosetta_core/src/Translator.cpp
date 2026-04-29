@@ -9,6 +9,7 @@
 #include "rosetta_core/X87Cache.h"
 #include "rosetta_core/X87IR.h"
 #include "rosetta_config/Config.h"
+#include "TranslatorX87Internal.hpp"
 
 
 static OpcodeId opcode_to_id(uint16_t op) {
@@ -150,7 +151,14 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
         if (g_rosetta_config) {
             const auto id = opcode_to_id(opcode);
             if (id != OpcodeId::kCount && op_is_disabled(*g_rosetta_config, id)) {
-                cache.invalidate(translation_result->free_gpr_mask, kGprScratchMask);
+                // Flush any deferred x87 cache state (TOP, tag-word, perm,
+                // etc.) before handing this opcode to stock — silent
+                // cache.invalidate() drops the flags but leaves the
+                // memory updates un-emitted, and stock reads x87 state
+                // from memory.
+                TranslatorX87::x87_cache_force_release(*translation_result,
+                                                       translation_result->insn_buf);
+                translation_result->free_gpr_mask = kGprScratchMask;
                 translation_result->free_fpr_mask =
                     translation_result->_unoccupied_temporary_fprs_for_xmm_scalars;
                 return std::nullopt;
@@ -347,10 +355,17 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                 break;
 
             default:
-                // Hand translation back to rosetta, we don't support this instruction - invalidate
-                // cache.
-                cache.invalidate(translation_result->free_gpr_mask, kGprScratchMask);
-                // restore fpr mask
+                // Hand translation back to stock for opcodes we don't support.
+                // Flush any deferred x87 cache state (TOP write-back, tag
+                // updates, deferred pops, deferred fxch permutation) into the
+                // current insn_buf BEFORE returning, so that the in-memory
+                // x87 state is coherent for stock's emit. Silent
+                // cache.invalidate() would drop the flags without emitting
+                // the corresponding memory updates and stock would read
+                // stale state.
+                TranslatorX87::x87_cache_force_release(*translation_result,
+                                                       translation_result->insn_buf);
+                translation_result->free_gpr_mask = kGprScratchMask;
                 translation_result->free_fpr_mask =
                     translation_result->_unoccupied_temporary_fprs_for_xmm_scalars;
                 return std::nullopt;
