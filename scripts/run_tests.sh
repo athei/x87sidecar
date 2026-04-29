@@ -70,6 +70,7 @@ ALL_TESTS=(
     test_rc_recache
     test_fstpt_gs
     test_fbld
+    test_fclex
 )
 
 RED='\033[0;31m'

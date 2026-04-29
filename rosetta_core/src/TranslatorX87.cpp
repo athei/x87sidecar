@@ -3351,4 +3351,67 @@ auto translate_fnop(TranslationResult* a1, IRInstr* /*a2*/) -> void {
     free_gpr(*a1, Wd_tmp);
 }
 
+// =============================================================================
+// FCLEX / FNCLEX — clear x87 exception flags.
+//
+// x87 semantics:
+//   status_word &= 0x7F00
+//
+// Clears bits 0..7 (PE,UE,OE,ZE,DE,IE,SF,ES) and bit 15 (B).
+// Preserves C0,C1,C2 (bits 8..10), TOP (bits 11..13), C3 (bit 14).
+//
+// The AND-mask 0x7F00 happens to preserve TOP — so we don't need to flush
+// top_dirty before the RMW (stale memory TOP survives the AND unchanged),
+// and we don't need to load TOP into a register (x87_end's emit_store_top
+// handles flushing if top_dirty was set by a prior op in the run).
+//
+// Three emitted instructions (steady state, in a run): LDRH + AND-imm + STRH.
+// =============================================================================
+auto translate_fclex(TranslationResult* a1, IRInstr* /*a2*/) -> void {
+    AssemblerBuffer& buf = a1->insn_buf;
+    static constexpr int16_t kX87StatusWordImm12 = kX87StatusWordOff / 2;  // = 1
+
+    // Custom prologue when fclex is alone (run_remaining == 0): allocate
+    // only Xbase, skip emit_load_top.  When in a run, fall through to
+    // x87_begin so subsequent ops see a pinned Wd_top.
+    int Xbase, Wd_top;
+    bool wd_top_unused = false;
+    if (a1->x87_cache.run_remaining == 0) {
+        Xbase = alloc_gpr(*a1, 0);
+        emit_x87_base(buf, *a1, Xbase);
+        Wd_top = GPR::XZR;          // unused: gprs_valid==0 → no deferred
+                                    // flags set → x87_end won't write through it.
+        wd_top_unused = true;
+    } else {
+        auto pair = x87_begin(*a1, buf);
+        Xbase = pair.first;
+        Wd_top = pair.second;
+    }
+    const int Wd_tmp = alloc_gpr(*a1, 2);
+
+    // LDRH Wd_tmp, [Xbase, #status_word]
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*LDR=*/1,
+                     kX87StatusWordImm12, Xbase, Wd_tmp);
+
+    // AND  Wd_tmp, Wd_tmp, #0x7F00  — keep bits 8..14
+    LogicalImmEncoding enc_keep;
+    is_bitmask_immediate(/*is_64bit=*/false, 0x00007F00ULL, enc_keep);
+    emit_and_imm(buf, /*is_64bit=*/0, /*Rd=*/Wd_tmp,
+                 enc_keep.N, enc_keep.immr, enc_keep.imms, /*Rn=*/Wd_tmp);
+
+    // STRH Wd_tmp, [Xbase, #status_word]
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*STR=*/0,
+                     kX87StatusWordImm12, Xbase, Wd_tmp);
+
+    if (wd_top_unused) {
+        free_gpr(*a1, Wd_tmp);
+        free_gpr(*a1, Xbase);
+        // No x87_end needed: gprs_valid==0 means no deferred flags can
+        // be set, and run_remaining==0 means there is no run to tick.
+    } else {
+        x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp);
+        free_gpr(*a1, Wd_tmp);
+    }
+}
+
 };  // namespace TranslatorX87
