@@ -387,6 +387,139 @@ auto translate_fld(TranslationResult* a1, IRInstr* a2) -> void {
 }
 
 // =============================================================================
+// FBLD — DF /4 (m80bcd)
+//
+// Loads an 18-digit packed BCD value from memory, converts to f64, pushes onto
+// the x87 stack as ST(0).
+//
+// m80bcd layout (10 bytes, little-endian):
+//   bytes[0..8] : 18 packed BCD digits, 2 per byte (low byte = lowest digits).
+//                 Within each byte: bits[7:4] = high digit, bits[3:0] = low digit.
+//   byte[9]     : bit 7 = sign (1 = negative), bits[6:0] reserved (zero).
+//
+// Stock x87 spec is f80, but we natively store ST as f64 throughout. Conversion
+// path is BCD → i64 → f64 (one SCVTF), which avoids the f80 unpack stock would
+// pay. Max representable: |10^18 - 1| ≈ 60 bits, fits in i64; SCVTF rounds to
+// nearest-even on the f64 → 18-digit values lose ~7 LSBs of precision, matching
+// stock's f80→f64 round on the way out.
+//
+// We do not validate digit nibbles (>9 is implementation-defined per Intel);
+// the binary value of the nibble flows through MADD as-is, matching stock.
+// =============================================================================
+auto translate_fbld(TranslationResult* a1, IRInstr* a2) -> void {
+    AssemblerBuffer& buf = a1->insn_buf;
+    auto [Xbase, Wd_top] = x87_begin(*a1, buf);
+    const int Xst_base = x87_get_st_base(*a1);
+
+    const int Wd_tmp  = alloc_gpr(*a1, 2);   // x87_push scratch + emit_store_st offset
+    const int Wd_tmp2 = alloc_gpr(*a1, 3);   // x87_push scratch (freed after push)
+    const int Dd_val  = alloc_free_fpr(*a1);
+
+    // Step 1: compute source memory address.
+    const bool addr_is_64 = (a2->operands[0].mem.addr_size == IROperandSize::S64);
+    const int Xaddr = compute_operand_address(*a1, addr_is_64, &a2->operands[0], GPR::XZR);
+
+    // Step 2: load source bytes — 8-byte mantissa-side + 2-byte sign-side.
+    //   LDR  Xlow,  [Xaddr]      (digits 0..15)
+    //   LDRH Whigh, [Xaddr, #8]  (low byte: digits 16,17 ; high byte: sign in bit 7)
+    const int Xlow  = alloc_free_gpr(*a1);
+    const int Whigh = alloc_free_gpr(*a1);
+    emit_ldr_imm(buf, /*size=*/3, Xlow, Xaddr, /*imm12=*/0);
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/1, /*imm12=*/4, Xaddr, Whigh);
+    free_gpr(*a1, Xaddr);
+
+    // Step 3: x87 push — allocates ST(0), decrements TOP. Clobbers Wd_tmp/Wd_tmp2.
+    // Xlow/Whigh are free-pool regs and are NOT touched by the push.
+    x87_push(buf, *a1, Xbase, Wd_top, Wd_tmp, Wd_tmp2);
+    free_gpr(*a1, Wd_tmp2);
+
+    // Step 4: build the 18-digit integer in Xacc, MSB-first via MADD chain.
+    //   acc = digit_17
+    //   acc = acc * 10 + digit_16
+    //   acc = acc * 10 + digit_15
+    //   ...
+    //   acc = acc * 10 + digit_0
+    // Wd_tmp is dead between x87_push and emit_store_st — we reuse it as the
+    // current-digit scratch in the loop instead of burning a free-pool reg.
+    const int Xacc  = alloc_free_gpr(*a1);
+    const int Wten  = alloc_free_gpr(*a1);
+
+    // Wten = 10
+    emit_movn(buf, /*is_64=*/0, /*MOVZ=*/2, /*hw=*/0, /*imm=*/10, Wten);
+
+    // Inline 64-bit MADD encoder: Xd = Xn * Xm + Xa
+    //   1 0 0 11011 000 Rm 0 Ra Rn Rd  (sf=1)
+    auto emit_madd64 = [&](int Rd, int Rn, int Rm, int Ra) {
+        uint32_t insn = 0x9B000000u
+                      | ((uint32_t)(Rm & 0x1F) << 16)
+                      | ((uint32_t)(Ra & 0x1F) << 10)
+                      | ((uint32_t)(Rn & 0x1F) << 5)
+                      |  (uint32_t)(Rd & 0x1F);
+        buf.emit(insn);
+    };
+
+    // Initialise Xacc = digit_17 (high nibble of byte 8 = bits 4..7 of Whigh).
+    //   UBFX Wacc, Whigh, #4, #4
+    emit_bitfield(buf, /*is_64=*/0, /*UBFM=*/2, /*N=*/0,
+                  /*immr=*/4, /*imms=*/7, Whigh, Xacc);
+
+    // digit_16 = Whigh[3:0]
+    emit_bitfield(buf, /*is_64=*/0, /*UBFM=*/2, /*N=*/0,
+                  /*immr=*/0, /*imms=*/3, Whigh, Wd_tmp);
+    emit_madd64(Xacc, Xacc, Wten, Wd_tmp);
+
+    // digits 15..0 from Xlow (bytes 7..0, MSB first).
+    for (int byte_idx = 7; byte_idx >= 0; byte_idx--) {
+        const int hi_lsb = byte_idx * 8 + 4;
+        const int lo_lsb = byte_idx * 8;
+        // hi nibble
+        emit_bitfield(buf, /*is_64=*/1, /*UBFM=*/2, /*N=*/1,
+                      /*immr=*/(int8_t)hi_lsb, /*imms=*/(int8_t)(hi_lsb + 3),
+                      Xlow, Wd_tmp);
+        emit_madd64(Xacc, Xacc, Wten, Wd_tmp);
+        // lo nibble
+        emit_bitfield(buf, /*is_64=*/1, /*UBFM=*/2, /*N=*/1,
+                      /*immr=*/(int8_t)lo_lsb, /*imms=*/(int8_t)(lo_lsb + 3),
+                      Xlow, Wd_tmp);
+        emit_madd64(Xacc, Xacc, Wten, Wd_tmp);
+    }
+    free_gpr(*a1, Wten);
+    free_gpr(*a1, Xlow);
+
+    // Step 5: SCVTF Dd_val, Xacc — Xacc is always non-negative (summed positive
+    // digits), so SCVTF produces |result|. The sign bit is OR'd into the f64
+    // representation in step 6, which is the only path that correctly handles
+    // negative zero (CSNEG of integer 0 is still 0; SCVTF of 0 is +0.0; only
+    // an explicit sign-bit set produces -0.0 with bits 0x8000_0000_0000_0000).
+    emit_scvtf(buf, /*is_64bit_int=*/1, /*ftype=*/1 /*f64*/, Dd_val, Xacc);
+
+    // Step 6: OR sign bit (Whigh[15]) into the f64 result at bit 63.
+    //   UBFX Wsign, Whigh, #15, #1     ; Wsign in [0..1]
+    //   FMOV Xbits, Dd_val             ; raw f64 bits to GPR
+    //   ORR  Xbits, Xbits, Xsign, LSL #63
+    //   FMOV Dd_val, Xbits             ; bits back to FPR
+    const int Wsign = alloc_free_gpr(*a1);
+    emit_bitfield(buf, /*is_64=*/0, /*UBFM=*/2, /*N=*/0,
+                  /*immr=*/15, /*imms=*/15, Whigh, Wsign);
+    free_gpr(*a1, Whigh);
+    // Reuse Xacc as the bits-shuttle GPR — its previous value is no longer needed.
+    emit_fmov_d_to_x(buf, Xacc, Dd_val);
+    emit_logical_shifted_reg(buf, /*is_64=*/1, /*ORR=*/1, /*n=*/0,
+                             /*shift_type=LSL=*/0, /*Rm=*/Wsign,
+                             /*shift_amount=*/63, /*Rn=*/Xacc, /*Rd=*/Xacc);
+    emit_fmov_x_to_d(buf, Dd_val, Xacc);
+    free_gpr(*a1, Wsign);
+    free_gpr(*a1, Xacc);
+
+    // Step 7: store ST(0) = Dd_val.
+    emit_store_st(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Dd_val, Xst_base);
+    free_fpr(*a1, Dd_val);
+
+    x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp);
+    free_gpr(*a1, Wd_tmp);
+}
+
+// =============================================================================
 // FILD — DB /0 (m32int), DF /0 (m16int), DF /5 (m64int)
 //
 // Loads a signed integer from memory, converts it to f64, and pushes it onto

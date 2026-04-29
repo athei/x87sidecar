@@ -202,6 +202,10 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                 TranslatorX87::translate_fild(translation_result, cur_instr);
                 break;
 
+            case Opcode::kOpcodeName_fbld:
+                TranslatorX87::translate_fbld(translation_result, cur_instr);
+                break;
+
             case Opcode::kOpcodeName_fadd:
                 TranslatorX87::translate_fadd(translation_result, cur_instr);
                 break;

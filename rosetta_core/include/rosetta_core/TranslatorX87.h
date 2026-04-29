@@ -25,6 +25,8 @@ auto translate_fld(TranslationResult* a1, IRInstr* a2) -> void;
 
 auto translate_fild(TranslationResult* a1, IRInstr* a2) -> void;
 
+auto translate_fbld(TranslationResult* a1, IRInstr* a2) -> void;
+
 auto translate_fadd(TranslationResult* a1, IRInstr* a2) -> void;
 
 auto translate_faddp(TranslationResult* a1, IRInstr* a2) -> void;
