@@ -45,6 +45,8 @@ auto translate_fst(TranslationResult* a1, IRInstr* a2) -> void;
 
 auto translate_fstsw(TranslationResult* a1, IRInstr* a2) -> void;
 
+auto translate_fxam(TranslationResult* a1, IRInstr* a2) -> void;
+
 auto translate_fcom(TranslationResult* a1, IRInstr* a2) -> void;
 
 auto translate_fxch(TranslationResult* a1, IRInstr* a2) -> void;

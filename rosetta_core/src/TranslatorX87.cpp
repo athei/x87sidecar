@@ -1402,6 +1402,169 @@ auto translate_fstsw(TranslationResult* a1, IRInstr* a2) -> void {
 }
 
 // =============================================================================
+// FXAM — D9 E5 — examine ST(0), classify into status_word C0/C1/C2/C3.
+//
+// Rosetta stores ST values as f64 (8 bytes per slot). Classification reads the
+// raw bits and the tag-word entry for slot TOP, then sets these bits in
+// status_word (mask 0x4700 = bits 14, 10, 9, 8):
+//
+//   Class       Tag  Exp     Mant   C3 C2 C0  Bits
+//   Empty       =3    *       *      1  0  1  0x4100
+//   Zero        ≠3    0       0      1  0  0  0x4000
+//   Denormal    ≠3    0      ≠0      1  1  0  0x4400
+//   Normal      ≠3   other    *      0  1  0  0x0400
+//   Infinity    ≠3   0x7FF    0      0  1  1  0x0500
+//   NaN         ≠3   0x7FF   ≠0      0  0  1  0x0100
+//
+//   C1 (bit 9) = sign(ST(0)) regardless of class.
+//
+// Branchless rules (each flag is a 0/1 result):
+//   C0 = exp_max | tag_empty
+//   C3 = exp_zero | tag_empty
+//   C2 = ¬(tag_empty | (exp_zero & mant_zero) | (exp_max & ¬mant_zero))
+//   C1 = (Xv >> 63) & 1
+//
+// Then status_word = (status_word & ~0x4700) | (C0<<8 | C1<<9 | C2<<10 | C3<<14).
+// =============================================================================
+auto translate_fxam(TranslationResult* a1, IRInstr* /*a2*/) -> void {
+    AssemblerBuffer& buf = a1->insn_buf;
+
+    static constexpr int16_t kX87StatusWordImm12 = kX87StatusWordOff / 2;  // = 1
+    static constexpr int16_t kX87TagWordImm12    = kX87TagWordOff / 2;     // = 2
+
+    auto [Xbase, Wd_top] = x87_begin(*a1, buf);
+    const int Xst_base = x87_get_st_base(*a1);
+    const int Wd_tmp = alloc_gpr(*a1, 2);
+    const int Dd_v   = alloc_free_fpr(*a1);
+
+    // Flush deferred TOP / tag-push if cache is active. fxam reads tag and
+    // value from memory; both must be coherent before we run the classifier.
+    if (a1->x87_cache.top_dirty && a1->x87_cache.gprs_valid) {
+        emit_store_top(buf, Xbase, Wd_top, Wd_tmp);
+        a1->x87_cache.top_dirty = 0;
+    }
+    if (a1->x87_cache.tag_push_pending && a1->x87_cache.gprs_valid) {
+        const int Wd_tt = alloc_free_gpr(*a1);
+        emit_x87_tag_clear(buf, Xbase, Wd_top, Wd_tmp, Wd_tt);
+        free_gpr(*a1, Wd_tt);
+        a1->x87_cache.tag_push_pending = 0;
+    }
+
+    // Load ST(0) f64 → Xv (raw bits).
+    emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Dd_v, Xst_base);
+    const int Xv = alloc_free_gpr(*a1);
+    emit_fmov_d_to_x(buf, Xv, Dd_v);
+    free_fpr(*a1, Dd_v);
+
+    // Working set: Xv (held), w_class (held), w_a/w_b (rotating scratch).
+    // Build w_class via a chain of CSELs, defaulting to "Normal" (0x0400)
+    // and overriding for special exponent or empty-tag classes.
+    const int Wd_class = alloc_free_gpr(*a1);
+    const int Wd_a = alloc_free_gpr(*a1);
+    const int Wd_b = alloc_free_gpr(*a1);
+
+    LogicalImmEncoding enc_mantmask;
+    is_bitmask_immediate(/*is_64=*/true, 0x000FFFFFFFFFFFFFULL, enc_mantmask);
+
+    // Inline raw emitters — no helpers exist for ANDS-imm, CSEL, LSRV.
+    auto emit_ands_imm = [&](int is_64, int N, int immr, int imms, int Rn, int Rd) {
+        // sf=is_64 | opc=11 | 100100 | N | immr | imms | Rn | Rd
+        uint32_t insn = 0x72000000u | (1u << 30) | (1u << 29);  // opc=11
+        insn |= (uint32_t)(is_64 != 0) << 31;
+        insn |= (uint32_t)(N & 1) << 22;
+        insn |= (uint32_t)(immr & 0x3F) << 16;
+        insn |= (uint32_t)(imms & 0x3F) << 10;
+        insn |= (uint32_t)(Rn & 0x1F) << 5;
+        insn |= (uint32_t)(Rd & 0x1F);
+        buf.emit(insn);
+    };
+    auto emit_csel = [&](int is_64, int Rd, int Rn, int Rm, int cond) {
+        // sf | 0 | 0 | 11010100 | Rm | cond | 00 | Rn | Rd
+        uint32_t insn = 0x1A800000u;
+        insn |= (uint32_t)(is_64 != 0) << 31;
+        insn |= (uint32_t)(Rm   & 0x1F) << 16;
+        insn |= (uint32_t)(cond & 0xF)  << 12;
+        insn |= (uint32_t)(Rn   & 0x1F) << 5;
+        insn |= (uint32_t)(Rd   & 0x1F);
+        buf.emit(insn);
+    };
+    auto emit_lsrv = [&](int is_64, int Rd, int Rn, int Rm) {
+        // sf | 0 | 0 | 11010110 | Rm | 001001 | Rn | Rd
+        uint32_t insn = 0x1AC02400u;
+        insn |= (uint32_t)(is_64 != 0) << 31;
+        insn |= (uint32_t)(Rm & 0x1F) << 16;
+        insn |= (uint32_t)(Rn & 0x1F) << 5;
+        insn |= (uint32_t)(Rd & 0x1F);
+        buf.emit(insn);
+    };
+
+    // Default w_class = 0x0400  (Normal).
+    emit_movn(buf, 0, /*MOVZ=*/2, /*hw=*/0, /*imm=*/0x0400, Wd_class);
+
+    // ── Phase A: if exp == 0 → either Zero (0x4000) or Denormal (0x4400) ────
+    emit_movn(buf, 0, 2, 0, 0x4000, Wd_a);                  // w_a = zero
+    emit_movn(buf, 0, 2, 0, 0x4400, Wd_b);                  // w_b = denorm
+    emit_ands_imm(/*is_64=*/1, enc_mantmask.N,
+                  enc_mantmask.immr, enc_mantmask.imms, Xv, /*Rd=*/31);
+    emit_csel(/*is_64=*/0, Wd_a, /*Rn=*/Wd_a, /*Rm=*/Wd_b, /*EQ=*/0);  // mant_zero ? a : b
+    // Re-extract exp into Wd_b (UBFX is_64=1 so Xv→Wb's low 32 bits)
+    emit_bitfield(buf, /*is_64=*/1, /*UBFM=*/2, /*N=*/1,
+                  /*immr=*/52, /*imms=*/62, Xv, Wd_b);
+    emit_add_imm(buf, /*is_64=*/0, /*is_sub=*/1, /*is_set_flags=*/1,
+                 /*shift=*/0, /*imm12=*/0, Wd_b, /*Rd=*/31);             // CMP w_b, #0
+    emit_csel(0, Wd_class, Wd_a, Wd_class, /*EQ=*/0);
+
+    // ── Phase B: if exp == 0x7FF → Inf (0x0500) or NaN (0x0100) ─────────────
+    emit_movn(buf, 0, 2, 0, 0x0500, Wd_a);                  // w_a = inf
+    emit_movn(buf, 0, 2, 0, 0x0100, Wd_b);                  // w_b = nan
+    emit_ands_imm(1, enc_mantmask.N,
+                  enc_mantmask.immr, enc_mantmask.imms, Xv, 31);
+    emit_csel(0, Wd_a, Wd_a, Wd_b, /*EQ=*/0);
+    emit_bitfield(buf, 1, 2, 1, 52, 62, Xv, Wd_b);          // re-extract exp
+    emit_add_imm(buf, 0, 1, 1, 0, 0x7FF, Wd_b, 31);          // CMP w_b, #0x7FF
+    emit_csel(0, Wd_class, Wd_a, Wd_class, /*EQ=*/0);
+
+    // ── Phase C: if tag(top) == 3 → Empty override (0x4100) ─────────────────
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*LDR=*/1,
+                     kX87TagWordImm12, Xbase, Wd_a);          // w_a = tag_word
+    // w_b = w_top << 1
+    emit_bitfield(buf, 0, 2, 0, 31, 30, Wd_top, Wd_b);
+    emit_lsrv(0, Wd_a, Wd_a, Wd_b);
+    LogicalImmEncoding enc3;
+    is_bitmask_immediate(/*is_64=*/false, 3, enc3);
+    emit_and_imm(buf, 0, Wd_a, enc3.N, enc3.immr, enc3.imms, Wd_a);
+    emit_add_imm(buf, 0, 1, 1, 0, 3, Wd_a, 31);              // CMP w_a, #3
+    emit_movn(buf, 0, 2, 0, 0x4100, Wd_a);                  // w_a = empty
+    emit_csel(0, Wd_class, Wd_a, Wd_class, /*EQ=*/0);
+
+    // ── Phase D: OR sign bit into w_class at position 9 (C1). ───────────────
+    // Extract only bit 63 (avoids leaking exp bits into C0/C2/C3 through the
+    // shift), then OR-LSL by 9 into w_class. We reuse Wd_a as the 1-bit
+    // scratch since the previous mov to it (#0x4100) is no longer needed.
+    emit_bitfield(buf, /*is_64=*/1, /*UBFM=*/2, /*N=*/1,
+                  /*immr=*/63, /*imms=*/63, Xv, Wd_a);
+    emit_logical_shifted_reg(buf, /*is_64=*/0, /*ORR=*/1, /*N=*/0, /*LSL=*/0,
+                             /*Rm=*/Wd_a, /*amt=*/9,
+                             /*Rn=*/Wd_class, /*Rd=*/Wd_class);
+    free_gpr(*a1, Xv);
+
+    // ── Phase E: read sw, clear bits {8,9,10,14}, OR in w_class, write back.
+    emit_movn(buf, 0, 2, 0, 0x4700, Wd_a);                  // w_a = mask
+    emit_logical_shifted_reg(buf, 0, /*AND=*/0, 0, 0, Wd_a, 0, Wd_class, Wd_class);
+    emit_ldr_str_imm(buf, 1, 0, /*LDR=*/1, kX87StatusWordImm12, Xbase, Wd_b);
+    emit_logical_shifted_reg(buf, 0, /*AND=*/0, /*N=*/1, 0, Wd_a, 0, Wd_b, Wd_b);  // BIC
+    emit_logical_shifted_reg(buf, 0, /*ORR=*/1, 0, 0, Wd_class, 0, Wd_b, Wd_b);
+    emit_ldr_str_imm(buf, 1, 0, /*STR=*/0, kX87StatusWordImm12, Xbase, Wd_b);
+
+    free_gpr(*a1, Wd_b);
+    free_gpr(*a1, Wd_a);
+    free_gpr(*a1, Wd_class);
+
+    x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp);
+    free_gpr(*a1, Wd_tmp);
+}
+
+// =============================================================================
 // FCOM / FCOMP / FCOMPP — compare ST(0) with a source operand, update C0/C2/C3
 // in the x87 status_word, and optionally pop the stack.
 //
