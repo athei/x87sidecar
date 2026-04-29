@@ -3391,6 +3391,34 @@ auto translate_fdecstp(TranslationResult* a1, IRInstr* /*a2*/) -> void {
 }
 
 // =============================================================================
+// FINCSTP — increment TOP.  Symmetric to FDECSTP; ADD instead of SUB.
+// =============================================================================
+auto translate_fincstp(TranslationResult* a1, IRInstr* /*a2*/) -> void {
+    AssemblerBuffer& buf = a1->insn_buf;
+    auto [Xbase, Wd_top] = x87_begin(*a1, buf);
+    const int Wd_tmp = alloc_gpr(*a1, 2);
+
+    perm_flush_before_stack_change(buf, *a1, Xbase, Wd_top, Wd_tmp);
+    {
+        const int Wd_tmp2 = alloc_free_gpr(*a1);
+        x87_flush_tags(buf, *a1, Xbase, Wd_top, Wd_tmp, Wd_tmp2);
+        free_gpr(*a1, Wd_tmp2);
+    }
+
+    // ADD  Wd_top, Wd_top, #1
+    emit_add_imm(buf, /*is_64bit=*/0, /*is_sub=*/0, /*is_set_flags=*/0,
+                 /*shift=*/0, /*imm12=*/1, Wd_top, Wd_top);
+    // AND  Wd_top, Wd_top, #7
+    emit_and_imm(buf, /*is_64bit=*/0, /*Rd=*/Wd_top,
+                 /*N=*/0, /*immr=*/0, /*imms=*/2, /*Rn=*/Wd_top);
+
+    a1->x87_cache.top_dirty = 1;
+
+    x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp);
+    free_gpr(*a1, Wd_tmp);
+}
+
+// =============================================================================
 // FCLEX / FNCLEX — clear x87 exception flags.
 //
 // x87 semantics:

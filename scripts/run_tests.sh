@@ -72,6 +72,7 @@ ALL_TESTS=(
     test_fbld
     test_fclex
     test_fdecstp
+    test_fincstp
 )
 
 RED='\033[0;31m'
