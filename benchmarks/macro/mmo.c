@@ -2,11 +2,12 @@
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+#include "../bench_timing.h"
 
 #define TIMES 1000000
 #define RUNS 10
 
-typedef void (*BenchFunc)(clock_t *out_ticks, float *out_result);
+typedef void (*BenchFunc)(bench_ns_t *out_ticks, float *out_result);
 
 typedef struct {
 	const char *name;
@@ -57,14 +58,16 @@ static void fmt_float(char *buf, int buflen, const float *valp) {
 		snprintf(buf, buflen, "%lu.%04lu", ipart, fpart);
 }
 
-/* Format ticks as human-readable: "12.8k", "179.4k", "1.2M" etc. */
-static void fmt_ticks(char *buf, int buflen, unsigned long ticks) {
-	if (ticks >= 1000000)
-		snprintf(buf, buflen, "%lu.%luM", ticks / 1000000, (ticks % 1000000) / 100000);
-	else if (ticks >= 1000)
-		snprintf(buf, buflen, "%lu.%luk", ticks / 1000, (ticks % 1000) / 100);
+/* Format an ns count as human-readable with k/M/G scale: "12.8k", "1.2M", "3.4G". */
+static void fmt_ns(char *buf, int buflen, unsigned long ns) {
+	if (ns >= 1000000000UL)
+		snprintf(buf, buflen, "%lu.%luG", ns / 1000000000UL, (ns % 1000000000UL) / 100000000UL);
+	else if (ns >= 1000000UL)
+		snprintf(buf, buflen, "%lu.%luM", ns / 1000000UL, (ns % 1000000UL) / 100000UL);
+	else if (ns >= 1000UL)
+		snprintf(buf, buflen, "%lu.%luk", ns / 1000UL, (ns % 1000UL) / 100UL);
 	else
-		snprintf(buf, buflen, "%lu", ticks);
+		snprintf(buf, buflen, "%lu", ns);
 }
 
 /*
@@ -80,9 +83,9 @@ static void fmt_ticks(char *buf, int buflen, unsigned long ticks) {
  *  f32 memory arithmetic: flds/fstps/fadds/fsubs/fmuls/fdivs/etc
  * ================================================================ */
 
-void run_fld_f32(clock_t *out_ticks, float *out_result) {
+void run_fld_f32(bench_ns_t *out_ticks, float *out_result) {
 	volatile float a = 1.5f, r;
-	clock_t start = clock();
+	bench_ns_t start = bench_now_ns();
 	for (int i = 0; i < TIMES; i++) {
 		__asm__ volatile (
 			"flds %1\n\t"
@@ -90,13 +93,13 @@ void run_fld_f32(clock_t *out_ticks, float *out_result) {
 			: "=m"(r) : "m"(a)
 		);
 	}
-	*out_ticks = clock() - start;
+	*out_ticks = bench_now_ns() - start;
 	*out_result = r;
 }
 
-void run_fst_f32(clock_t *out_ticks, float *out_result) {
+void run_fst_f32(bench_ns_t *out_ticks, float *out_result) {
 	volatile float a = 1.5f, r;
-	clock_t start = clock();
+	bench_ns_t start = bench_now_ns();
 	for (int i = 0; i < TIMES; i++) {
 		__asm__ volatile (
 			"flds %1\n\t"
@@ -105,13 +108,13 @@ void run_fst_f32(clock_t *out_ticks, float *out_result) {
 			: "=m"(r) : "m"(a)
 		);
 	}
-	*out_ticks = clock() - start;
+	*out_ticks = bench_now_ns() - start;
 	*out_result = r;
 }
 
-void run_fmul_f32(clock_t *out_ticks, float *out_result) {
+void run_fmul_f32(bench_ns_t *out_ticks, float *out_result) {
 	volatile float a = 3.0f, b = 2.0f, r;
-	clock_t start = clock();
+	bench_ns_t start = bench_now_ns();
 	for (int i = 0; i < TIMES; i++) {
 		__asm__ volatile (
 			"flds %1\n\t"
@@ -120,13 +123,13 @@ void run_fmul_f32(clock_t *out_ticks, float *out_result) {
 			: "=m"(r) : "m"(a), "m"(b)
 		);
 	}
-	*out_ticks = clock() - start;
+	*out_ticks = bench_now_ns() - start;
 	*out_result = r;
 }
 
-void run_fadd_f32(clock_t *out_ticks, float *out_result) {
+void run_fadd_f32(bench_ns_t *out_ticks, float *out_result) {
 	volatile float a = 1.0f, b = 2.0f, r;
-	clock_t start = clock();
+	bench_ns_t start = bench_now_ns();
 	for (int i = 0; i < TIMES; i++) {
 		__asm__ volatile (
 			"flds %1\n\t"
@@ -135,13 +138,13 @@ void run_fadd_f32(clock_t *out_ticks, float *out_result) {
 			: "=m"(r) : "m"(a), "m"(b)
 		);
 	}
-	*out_ticks = clock() - start;
+	*out_ticks = bench_now_ns() - start;
 	*out_result = r;
 }
 
-void run_fsub_f32(clock_t *out_ticks, float *out_result) {
+void run_fsub_f32(bench_ns_t *out_ticks, float *out_result) {
 	volatile float a = 5.0f, b = 2.0f, r;
-	clock_t start = clock();
+	bench_ns_t start = bench_now_ns();
 	for (int i = 0; i < TIMES; i++) {
 		__asm__ volatile (
 			"flds %1\n\t"
@@ -150,13 +153,13 @@ void run_fsub_f32(clock_t *out_ticks, float *out_result) {
 			: "=m"(r) : "m"(a), "m"(b)
 		);
 	}
-	*out_ticks = clock() - start;
+	*out_ticks = bench_now_ns() - start;
 	*out_result = r;
 }
 
-void run_fdiv_f32(clock_t *out_ticks, float *out_result) {
+void run_fdiv_f32(bench_ns_t *out_ticks, float *out_result) {
 	volatile float a = 1.0f, b = 2.0f, r;
-	clock_t start = clock();
+	bench_ns_t start = bench_now_ns();
 	for (int i = 0; i < TIMES; i++) {
 		__asm__ volatile (
 			"flds %1\n\t"
@@ -165,13 +168,13 @@ void run_fdiv_f32(clock_t *out_ticks, float *out_result) {
 			: "=m"(r) : "m"(a), "m"(b)
 		);
 	}
-	*out_ticks = clock() - start;
+	*out_ticks = bench_now_ns() - start;
 	*out_result = r;
 }
 
-void run_fdivr_f32(clock_t *out_ticks, float *out_result) {
+void run_fdivr_f32(bench_ns_t *out_ticks, float *out_result) {
 	volatile float a = 2.0f, b = 1.0f, r;
-	clock_t start = clock();
+	bench_ns_t start = bench_now_ns();
 	for (int i = 0; i < TIMES; i++) {
 		__asm__ volatile (
 			"flds %1\n\t"
@@ -180,13 +183,13 @@ void run_fdivr_f32(clock_t *out_ticks, float *out_result) {
 			: "=m"(r) : "m"(a), "m"(b)
 		);
 	}
-	*out_ticks = clock() - start;
+	*out_ticks = bench_now_ns() - start;
 	*out_result = r;
 }
 
-void run_fsubr_f32(clock_t *out_ticks, float *out_result) {
+void run_fsubr_f32(bench_ns_t *out_ticks, float *out_result) {
 	volatile float a = 2.0f, b = 5.0f, r;
-	clock_t start = clock();
+	bench_ns_t start = bench_now_ns();
 	for (int i = 0; i < TIMES; i++) {
 		__asm__ volatile (
 			"flds %1\n\t"
@@ -195,14 +198,14 @@ void run_fsubr_f32(clock_t *out_ticks, float *out_result) {
 			: "=m"(r) : "m"(a), "m"(b)
 		);
 	}
-	*out_ticks = clock() - start;
+	*out_ticks = bench_now_ns() - start;
 	*out_result = r;
 }
 
-void run_fcom_f32(clock_t *out_ticks, float *out_result) {
+void run_fcom_f32(bench_ns_t *out_ticks, float *out_result) {
 	volatile float a = 3.0f, b = 2.0f, r;
 	unsigned short sw;
-	clock_t start = clock();
+	bench_ns_t start = bench_now_ns();
 	for (int i = 0; i < TIMES; i++) {
 		__asm__ volatile (
 			"flds %2\n\t"
@@ -213,7 +216,7 @@ void run_fcom_f32(clock_t *out_ticks, float *out_result) {
 			: "=m"(r), "=a"(sw) : "m"(a), "m"(b)
 		);
 	}
-	*out_ticks = clock() - start;
+	*out_ticks = bench_now_ns() - start;
 	*out_result = r;
 }
 
@@ -221,10 +224,10 @@ void run_fcom_f32(clock_t *out_ticks, float *out_result) {
  *  f64 memory arithmetic: fldl/fstpl/faddl/fsubl/fmull/fdivl/etc
  * ================================================================ */
 
-void run_fld_f64(clock_t *out_ticks, float *out_result) {
+void run_fld_f64(bench_ns_t *out_ticks, float *out_result) {
 	volatile double a = 1.5;
 	volatile float r;
-	clock_t start = clock();
+	bench_ns_t start = bench_now_ns();
 	for (int i = 0; i < TIMES; i++) {
 		__asm__ volatile (
 			"fldl %1\n\t"
@@ -232,14 +235,14 @@ void run_fld_f64(clock_t *out_ticks, float *out_result) {
 			: "=m"(r) : "m"(a)
 		);
 	}
-	*out_ticks = clock() - start;
+	*out_ticks = bench_now_ns() - start;
 	*out_result = r;
 }
 
-void run_fmul_f64(clock_t *out_ticks, float *out_result) {
+void run_fmul_f64(bench_ns_t *out_ticks, float *out_result) {
 	volatile double a = 3.0, b = 2.0;
 	volatile float r;
-	clock_t start = clock();
+	bench_ns_t start = bench_now_ns();
 	for (int i = 0; i < TIMES; i++) {
 		__asm__ volatile (
 			"fldl %1\n\t"
@@ -248,14 +251,14 @@ void run_fmul_f64(clock_t *out_ticks, float *out_result) {
 			: "=m"(r) : "m"(a), "m"(b)
 		);
 	}
-	*out_ticks = clock() - start;
+	*out_ticks = bench_now_ns() - start;
 	*out_result = r;
 }
 
-void run_fadd_f64(clock_t *out_ticks, float *out_result) {
+void run_fadd_f64(bench_ns_t *out_ticks, float *out_result) {
 	volatile double a = 1.0, b = 2.0;
 	volatile float r;
-	clock_t start = clock();
+	bench_ns_t start = bench_now_ns();
 	for (int i = 0; i < TIMES; i++) {
 		__asm__ volatile (
 			"fldl %1\n\t"
@@ -264,14 +267,14 @@ void run_fadd_f64(clock_t *out_ticks, float *out_result) {
 			: "=m"(r) : "m"(a), "m"(b)
 		);
 	}
-	*out_ticks = clock() - start;
+	*out_ticks = bench_now_ns() - start;
 	*out_result = r;
 }
 
-void run_fsub_f64(clock_t *out_ticks, float *out_result) {
+void run_fsub_f64(bench_ns_t *out_ticks, float *out_result) {
 	volatile double a = 5.0, b = 2.0;
 	volatile float r;
-	clock_t start = clock();
+	bench_ns_t start = bench_now_ns();
 	for (int i = 0; i < TIMES; i++) {
 		__asm__ volatile (
 			"fldl %1\n\t"
@@ -280,14 +283,14 @@ void run_fsub_f64(clock_t *out_ticks, float *out_result) {
 			: "=m"(r) : "m"(a), "m"(b)
 		);
 	}
-	*out_ticks = clock() - start;
+	*out_ticks = bench_now_ns() - start;
 	*out_result = r;
 }
 
-void run_fdiv_f64(clock_t *out_ticks, float *out_result) {
+void run_fdiv_f64(bench_ns_t *out_ticks, float *out_result) {
 	volatile double a = 1.0, b = 2.0;
 	volatile float r;
-	clock_t start = clock();
+	bench_ns_t start = bench_now_ns();
 	for (int i = 0; i < TIMES; i++) {
 		__asm__ volatile (
 			"fldl %1\n\t"
@@ -296,14 +299,14 @@ void run_fdiv_f64(clock_t *out_ticks, float *out_result) {
 			: "=m"(r) : "m"(a), "m"(b)
 		);
 	}
-	*out_ticks = clock() - start;
+	*out_ticks = bench_now_ns() - start;
 	*out_result = r;
 }
 
-void run_fdivr_f64(clock_t *out_ticks, float *out_result) {
+void run_fdivr_f64(bench_ns_t *out_ticks, float *out_result) {
 	volatile double a = 2.0, b = 1.0;
 	volatile float r;
-	clock_t start = clock();
+	bench_ns_t start = bench_now_ns();
 	for (int i = 0; i < TIMES; i++) {
 		__asm__ volatile (
 			"fldl %1\n\t"
@@ -312,14 +315,14 @@ void run_fdivr_f64(clock_t *out_ticks, float *out_result) {
 			: "=m"(r) : "m"(a), "m"(b)
 		);
 	}
-	*out_ticks = clock() - start;
+	*out_ticks = bench_now_ns() - start;
 	*out_result = r;
 }
 
-void run_fsubr_f64(clock_t *out_ticks, float *out_result) {
+void run_fsubr_f64(bench_ns_t *out_ticks, float *out_result) {
 	volatile double a = 2.0, b = 5.0;
 	volatile float r;
-	clock_t start = clock();
+	bench_ns_t start = bench_now_ns();
 	for (int i = 0; i < TIMES; i++) {
 		__asm__ volatile (
 			"fldl %1\n\t"
@@ -328,15 +331,15 @@ void run_fsubr_f64(clock_t *out_ticks, float *out_result) {
 			: "=m"(r) : "m"(a), "m"(b)
 		);
 	}
-	*out_ticks = clock() - start;
+	*out_ticks = bench_now_ns() - start;
 	*out_result = r;
 }
 
-void run_fcom_f64(clock_t *out_ticks, float *out_result) {
+void run_fcom_f64(bench_ns_t *out_ticks, float *out_result) {
 	volatile double b = 2.0;
 	volatile float a = 3.0f, r;
 	unsigned short sw;
-	clock_t start = clock();
+	bench_ns_t start = bench_now_ns();
 	for (int i = 0; i < TIMES; i++) {
 		__asm__ volatile (
 			"flds %2\n\t"
@@ -347,7 +350,7 @@ void run_fcom_f64(clock_t *out_ticks, float *out_result) {
 			: "=m"(r), "=a"(sw) : "m"(a), "m"(b)
 		);
 	}
-	*out_ticks = clock() - start;
+	*out_ticks = bench_now_ns() - start;
 	*out_result = r;
 }
 
@@ -355,11 +358,11 @@ void run_fcom_f64(clock_t *out_ticks, float *out_result) {
  *  f80 memory ops: fldt/fstpt
  * ================================================================ */
 
-void run_fld_f80(clock_t *out_ticks, float *out_result) {
+void run_fld_f80(bench_ns_t *out_ticks, float *out_result) {
 	/* 10-byte extended precision for 1.5: sign=0, exp=0x3FFF, mant=0xC000000000000000 */
 	volatile uint8_t f80[10] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC0, 0xFF, 0x3F};
 	volatile float r;
-	clock_t start = clock();
+	bench_ns_t start = bench_now_ns();
 	for (int i = 0; i < TIMES; i++) {
 		__asm__ volatile (
 			"fldt %1\n\t"
@@ -367,14 +370,14 @@ void run_fld_f80(clock_t *out_ticks, float *out_result) {
 			: "=m"(r) : "m"(f80)
 		);
 	}
-	*out_ticks = clock() - start;
+	*out_ticks = bench_now_ns() - start;
 	*out_result = r;
 }
 
-void run_fst_f80(clock_t *out_ticks, float *out_result) {
+void run_fst_f80(bench_ns_t *out_ticks, float *out_result) {
 	volatile float a = 1.5f, r;
 	volatile uint8_t f80[10];
-	clock_t start = clock();
+	bench_ns_t start = bench_now_ns();
 	for (int i = 0; i < TIMES; i++) {
 		__asm__ volatile (
 			"flds %1\n\t"
@@ -382,7 +385,7 @@ void run_fst_f80(clock_t *out_ticks, float *out_result) {
 			: "=m"(f80) : "m"(a)
 		);
 	}
-	*out_ticks = clock() - start;
+	*out_ticks = bench_now_ns() - start;
 	/* re-load f80 to get float result */
 	__asm__ volatile ("fldt %1\n\t" "fstps %0" : "=m"(r) : "m"(f80));
 	*out_result = r;
@@ -396,9 +399,9 @@ void run_fst_f80(clock_t *out_ticks, float *out_result) {
    forming the multiply-accumulate chain: fld → fmul mem → f*p → fstp.
    Benchmarks use that pattern instead of fld → fld → f*p → fstp. */
 
-void run_fadd_st(clock_t *out_ticks, float *out_result) {
+void run_fadd_st(bench_ns_t *out_ticks, float *out_result) {
 	volatile float seed = 1.0f, a = 1.0f, b = 2.0f, r;
-	clock_t start = clock();
+	bench_ns_t start = bench_now_ns();
 	for (int i = 0; i < TIMES; i++) {
 		__asm__ volatile (
 			"flds %1\n\t"
@@ -409,13 +412,13 @@ void run_fadd_st(clock_t *out_ticks, float *out_result) {
 			: "=m"(r) : "m"(seed), "m"(a), "m"(b)
 		);
 	}
-	*out_ticks = clock() - start;
+	*out_ticks = bench_now_ns() - start;
 	*out_result = r;
 }
 
-void run_fmul_st(clock_t *out_ticks, float *out_result) {
+void run_fmul_st(bench_ns_t *out_ticks, float *out_result) {
 	volatile float seed = 3.0f, a = 1.0f, b = 2.0f, r;
-	clock_t start = clock();
+	bench_ns_t start = bench_now_ns();
 	for (int i = 0; i < TIMES; i++) {
 		__asm__ volatile (
 			"flds %1\n\t"
@@ -426,14 +429,14 @@ void run_fmul_st(clock_t *out_ticks, float *out_result) {
 			: "=m"(r) : "m"(seed), "m"(a), "m"(b)
 		);
 	}
-	*out_ticks = clock() - start;
+	*out_ticks = bench_now_ns() - start;
 	*out_result = r;
 }
 
-void run_fsub_st(clock_t *out_ticks, float *out_result) {
+void run_fsub_st(bench_ns_t *out_ticks, float *out_result) {
 	/* AT&T fsubp: ST(0)-ST(1) → ST(1), pop. So a*b - seed. */
 	volatile float seed = -1.0f, a = 1.0f, b = 2.0f, r;
-	clock_t start = clock();
+	bench_ns_t start = bench_now_ns();
 	for (int i = 0; i < TIMES; i++) {
 		__asm__ volatile (
 			"flds %1\n\t"
@@ -444,14 +447,14 @@ void run_fsub_st(clock_t *out_ticks, float *out_result) {
 			: "=m"(r) : "m"(seed), "m"(a), "m"(b)
 		);
 	}
-	*out_ticks = clock() - start;
+	*out_ticks = bench_now_ns() - start;
 	*out_result = r;
 }
 
-void run_fsubr_st(clock_t *out_ticks, float *out_result) {
+void run_fsubr_st(bench_ns_t *out_ticks, float *out_result) {
 	/* AT&T fsubrp: ST(1)-ST(0) → ST(1), pop. So seed - a*b. */
 	volatile float seed = 8.0f, a = 1.0f, b = 5.0f, r;
-	clock_t start = clock();
+	bench_ns_t start = bench_now_ns();
 	for (int i = 0; i < TIMES; i++) {
 		__asm__ volatile (
 			"flds %1\n\t"
@@ -462,14 +465,14 @@ void run_fsubr_st(clock_t *out_ticks, float *out_result) {
 			: "=m"(r) : "m"(seed), "m"(a), "m"(b)
 		);
 	}
-	*out_ticks = clock() - start;
+	*out_ticks = bench_now_ns() - start;
 	*out_result = r;
 }
 
-void run_fdiv_st(clock_t *out_ticks, float *out_result) {
+void run_fdiv_st(bench_ns_t *out_ticks, float *out_result) {
 	/* AT&T fdivp: ST(0)/ST(1) → ST(1), pop. So a*b / seed. */
 	volatile float seed = 4.0f, a = 1.0f, b = 2.0f, r;
-	clock_t start = clock();
+	bench_ns_t start = bench_now_ns();
 	for (int i = 0; i < TIMES; i++) {
 		__asm__ volatile (
 			"flds %1\n\t"
@@ -480,14 +483,14 @@ void run_fdiv_st(clock_t *out_ticks, float *out_result) {
 			: "=m"(r) : "m"(seed), "m"(a), "m"(b)
 		);
 	}
-	*out_ticks = clock() - start;
+	*out_ticks = bench_now_ns() - start;
 	*out_result = r;
 }
 
-void run_fdivr_st(clock_t *out_ticks, float *out_result) {
+void run_fdivr_st(bench_ns_t *out_ticks, float *out_result) {
 	/* AT&T fdivrp: ST(1)/ST(0) → ST(1), pop. So seed / (a*b). */
 	volatile float seed = 1.0f, a = 1.0f, b = 2.0f, r;
-	clock_t start = clock();
+	bench_ns_t start = bench_now_ns();
 	for (int i = 0; i < TIMES; i++) {
 		__asm__ volatile (
 			"flds %1\n\t"
@@ -498,14 +501,14 @@ void run_fdivr_st(clock_t *out_ticks, float *out_result) {
 			: "=m"(r) : "m"(seed), "m"(a), "m"(b)
 		);
 	}
-	*out_ticks = clock() - start;
+	*out_ticks = bench_now_ns() - start;
 	*out_result = r;
 }
 
-void run_fcom_st(clock_t *out_ticks, float *out_result) {
+void run_fcom_st(bench_ns_t *out_ticks, float *out_result) {
 	volatile float a = 3.0f, b = 2.0f, r;
 	unsigned short sw;
-	clock_t start = clock();
+	bench_ns_t start = bench_now_ns();
 	for (int i = 0; i < TIMES; i++) {
 		__asm__ volatile (
 			"flds %2\n\t"
@@ -516,14 +519,14 @@ void run_fcom_st(clock_t *out_ticks, float *out_result) {
 			: "=m"(r), "=a"(sw) : "m"(a), "m"(b)
 		);
 	}
-	*out_ticks = clock() - start;
+	*out_ticks = bench_now_ns() - start;
 	*out_result = r;
 }
 
-void run_fcompp(clock_t *out_ticks, float *out_result) {
+void run_fcompp(bench_ns_t *out_ticks, float *out_result) {
 	volatile float a = 3.0f, b = 2.0f, r;
 	unsigned short sw;
-	clock_t start = clock();
+	bench_ns_t start = bench_now_ns();
 	for (int i = 0; i < TIMES; i++) {
 		__asm__ volatile (
 			"flds %2\n\t"
@@ -535,14 +538,14 @@ void run_fcompp(clock_t *out_ticks, float *out_result) {
 			: "=m"(r), "=a"(sw) : "m"(a), "m"(b)
 		);
 	}
-	*out_ticks = clock() - start;
+	*out_ticks = bench_now_ns() - start;
 	*out_result = r;
 }
 
-void run_fucom(clock_t *out_ticks, float *out_result) {
+void run_fucom(bench_ns_t *out_ticks, float *out_result) {
 	volatile float a = 3.0f, b = 2.0f, r;
 	unsigned short sw;
-	clock_t start = clock();
+	bench_ns_t start = bench_now_ns();
 	for (int i = 0; i < TIMES; i++) {
 		__asm__ volatile (
 			"flds %2\n\t"
@@ -554,13 +557,13 @@ void run_fucom(clock_t *out_ticks, float *out_result) {
 			: "=m"(r), "=a"(sw) : "m"(a), "m"(b)
 		);
 	}
-	*out_ticks = clock() - start;
+	*out_ticks = bench_now_ns() - start;
 	*out_result = r;
 }
 
-void run_fld_sti(clock_t *out_ticks, float *out_result) {
+void run_fld_sti(bench_ns_t *out_ticks, float *out_result) {
 	volatile float a = 1.5f, r;
-	clock_t start = clock();
+	bench_ns_t start = bench_now_ns();
 	for (int i = 0; i < TIMES; i++) {
 		__asm__ volatile (
 			"flds %1\n\t"
@@ -570,13 +573,13 @@ void run_fld_sti(clock_t *out_ticks, float *out_result) {
 			: "=m"(r) : "m"(a)
 		);
 	}
-	*out_ticks = clock() - start;
+	*out_ticks = bench_now_ns() - start;
 	*out_result = r;
 }
 
-void run_fst_sti(clock_t *out_ticks, float *out_result) {
+void run_fst_sti(bench_ns_t *out_ticks, float *out_result) {
 	volatile float a = 2.5f, b = 0.0f, r;
-	clock_t start = clock();
+	bench_ns_t start = bench_now_ns();
 	for (int i = 0; i < TIMES; i++) {
 		__asm__ volatile (
 			"flds %2\n\t"
@@ -586,13 +589,13 @@ void run_fst_sti(clock_t *out_ticks, float *out_result) {
 			: "=m"(r) : "m"(a), "m"(b)
 		);
 	}
-	*out_ticks = clock() - start;
+	*out_ticks = bench_now_ns() - start;
 	*out_result = r;
 }
 
-void run_fxch(clock_t *out_ticks, float *out_result) {
+void run_fxch(bench_ns_t *out_ticks, float *out_result) {
 	volatile float a = 1.0f, b = 2.0f, r;
-	clock_t start = clock();
+	bench_ns_t start = bench_now_ns();
 	for (int i = 0; i < TIMES; i++) {
 		__asm__ volatile (
 			"flds %1\n\t"
@@ -603,13 +606,13 @@ void run_fxch(clock_t *out_ticks, float *out_result) {
 			: "=m"(r) : "m"(a), "m"(b)
 		);
 	}
-	*out_ticks = clock() - start;
+	*out_ticks = bench_now_ns() - start;
 	*out_result = r;
 }
 
-void run_ffree(clock_t *out_ticks, float *out_result) {
+void run_ffree(bench_ns_t *out_ticks, float *out_result) {
 	volatile float a = 1.0f, r;
-	clock_t start = clock();
+	bench_ns_t start = bench_now_ns();
 	for (int i = 0; i < TIMES; i++) {
 		__asm__ volatile (
 			"flds %1\n\t"
@@ -619,13 +622,13 @@ void run_ffree(clock_t *out_ticks, float *out_result) {
 			: "=m"(r) : "m"(a)
 		);
 	}
-	*out_ticks = clock() - start;
+	*out_ticks = bench_now_ns() - start;
 	*out_result = r;
 }
 
-void run_fcmov(clock_t *out_ticks, float *out_result) {
+void run_fcmov(bench_ns_t *out_ticks, float *out_result) {
 	volatile float a = 1.0f, b = 2.0f, r;
-	clock_t start = clock();
+	bench_ns_t start = bench_now_ns();
 	for (int i = 0; i < TIMES; i++) {
 		__asm__ volatile (
 			"flds %1\n\t"
@@ -637,7 +640,7 @@ void run_fcmov(clock_t *out_ticks, float *out_result) {
 			: "=m"(r) : "m"(a), "m"(b)
 		);
 	}
-	*out_ticks = clock() - start;
+	*out_ticks = bench_now_ns() - start;
 	*out_result = r;
 }
 
@@ -645,10 +648,10 @@ void run_fcmov(clock_t *out_ticks, float *out_result) {
  *  Integer memory ops: fild/fist/fisttp
  * ================================================================ */
 
-void run_fild(clock_t *out_ticks, float *out_result) {
+void run_fild(bench_ns_t *out_ticks, float *out_result) {
 	volatile int32_t a = 42;
 	volatile float r;
-	clock_t start = clock();
+	bench_ns_t start = bench_now_ns();
 	for (int i = 0; i < TIMES; i++) {
 		__asm__ volatile (
 			"fildl %1\n\t"
@@ -656,16 +659,16 @@ void run_fild(clock_t *out_ticks, float *out_result) {
 			: "=m"(r) : "m"(a)
 		);
 	}
-	*out_ticks = clock() - start;
+	*out_ticks = bench_now_ns() - start;
 	*out_result = r;
 }
 
-void run_fist(clock_t *out_ticks, float *out_result) {
+void run_fist(bench_ns_t *out_ticks, float *out_result) {
 	/* In the MMO binary, 79% of fistp is preceded by fsub (floor/truncate idiom) */
 	volatile float a = 45.0f, b = 3.0f;
 	volatile int32_t r32;
 	volatile float r;
-	clock_t start = clock();
+	bench_ns_t start = bench_now_ns();
 	for (int i = 0; i < TIMES; i++) {
 		__asm__ volatile (
 			"flds %1\n\t"
@@ -674,16 +677,16 @@ void run_fist(clock_t *out_ticks, float *out_result) {
 			: "=m"(r32) : "m"(a), "m"(b)
 		);
 	}
-	*out_ticks = clock() - start;
+	*out_ticks = bench_now_ns() - start;
 	__asm__ volatile ("fildl %1\n\t" "fstps %0" : "=m"(r) : "m"(r32));
 	*out_result = r;
 }
 
-void run_fisttp(clock_t *out_ticks, float *out_result) {
+void run_fisttp(bench_ns_t *out_ticks, float *out_result) {
 	volatile float a = 42.7f;
 	volatile int32_t r32;
 	volatile float r;
-	clock_t start = clock();
+	bench_ns_t start = bench_now_ns();
 	for (int i = 0; i < TIMES; i++) {
 		__asm__ volatile (
 			"flds %1\n\t"
@@ -691,16 +694,16 @@ void run_fisttp(clock_t *out_ticks, float *out_result) {
 			: "=m"(r32) : "m"(a)
 		);
 	}
-	*out_ticks = clock() - start;
+	*out_ticks = bench_now_ns() - start;
 	__asm__ volatile ("fildl %1\n\t" "fstps %0" : "=m"(r) : "m"(r32));
 	*out_result = r;
 }
 
-void run_fiadd(clock_t *out_ticks, float *out_result) {
+void run_fiadd(bench_ns_t *out_ticks, float *out_result) {
 	volatile float a = 1.0f;
 	volatile int32_t b = 2;
 	volatile float r;
-	clock_t start = clock();
+	bench_ns_t start = bench_now_ns();
 	for (int i = 0; i < TIMES; i++) {
 		__asm__ volatile (
 			"flds %1\n\t"
@@ -709,15 +712,15 @@ void run_fiadd(clock_t *out_ticks, float *out_result) {
 			: "=m"(r) : "m"(a), "m"(b)
 		);
 	}
-	*out_ticks = clock() - start;
+	*out_ticks = bench_now_ns() - start;
 	*out_result = r;
 }
 
-void run_fimul(clock_t *out_ticks, float *out_result) {
+void run_fimul(bench_ns_t *out_ticks, float *out_result) {
 	volatile float a = 3.0f;
 	volatile int32_t b = 2;
 	volatile float r;
-	clock_t start = clock();
+	bench_ns_t start = bench_now_ns();
 	for (int i = 0; i < TIMES; i++) {
 		__asm__ volatile (
 			"flds %1\n\t"
@@ -726,15 +729,15 @@ void run_fimul(clock_t *out_ticks, float *out_result) {
 			: "=m"(r) : "m"(a), "m"(b)
 		);
 	}
-	*out_ticks = clock() - start;
+	*out_ticks = bench_now_ns() - start;
 	*out_result = r;
 }
 
-void run_fidiv(clock_t *out_ticks, float *out_result) {
+void run_fidiv(bench_ns_t *out_ticks, float *out_result) {
 	volatile float a = 6.0f;
 	volatile int32_t b = 2;
 	volatile float r;
-	clock_t start = clock();
+	bench_ns_t start = bench_now_ns();
 	for (int i = 0; i < TIMES; i++) {
 		__asm__ volatile (
 			"flds %1\n\t"
@@ -743,15 +746,15 @@ void run_fidiv(clock_t *out_ticks, float *out_result) {
 			: "=m"(r) : "m"(a), "m"(b)
 		);
 	}
-	*out_ticks = clock() - start;
+	*out_ticks = bench_now_ns() - start;
 	*out_result = r;
 }
 
-void run_fisub(clock_t *out_ticks, float *out_result) {
+void run_fisub(bench_ns_t *out_ticks, float *out_result) {
 	volatile float a = 5.0f;
 	volatile int32_t b = 2;
 	volatile float r;
-	clock_t start = clock();
+	bench_ns_t start = bench_now_ns();
 	for (int i = 0; i < TIMES; i++) {
 		__asm__ volatile (
 			"flds %1\n\t"
@@ -760,15 +763,15 @@ void run_fisub(clock_t *out_ticks, float *out_result) {
 			: "=m"(r) : "m"(a), "m"(b)
 		);
 	}
-	*out_ticks = clock() - start;
+	*out_ticks = bench_now_ns() - start;
 	*out_result = r;
 }
 
-void run_ficom(clock_t *out_ticks, float *out_result) {
+void run_ficom(bench_ns_t *out_ticks, float *out_result) {
 	volatile float a = 3.0f;
 	volatile int32_t b = 2;
 	volatile float r;
-	clock_t start = clock();
+	bench_ns_t start = bench_now_ns();
 	for (int i = 0; i < TIMES; i++) {
 		__asm__ volatile (
 			"flds %1\n\t"
@@ -778,7 +781,7 @@ void run_ficom(clock_t *out_ticks, float *out_result) {
 			: "=m"(r) : "m"(a), "m"(b)
 		);
 	}
-	*out_ticks = clock() - start;
+	*out_ticks = bench_now_ns() - start;
 	*out_result = r;
 }
 
@@ -786,9 +789,9 @@ void run_ficom(clock_t *out_ticks, float *out_result) {
  *  Unary / constant loads
  * ================================================================ */
 
-void run_fsqrt(clock_t *out_ticks, float *out_result) {
+void run_fsqrt(bench_ns_t *out_ticks, float *out_result) {
 	volatile float a = 4.0f, r;
-	clock_t start = clock();
+	bench_ns_t start = bench_now_ns();
 	for (int i = 0; i < TIMES; i++) {
 		__asm__ volatile (
 			"flds %1\n\t"
@@ -797,13 +800,13 @@ void run_fsqrt(clock_t *out_ticks, float *out_result) {
 			: "=m"(r) : "m"(a)
 		);
 	}
-	*out_ticks = clock() - start;
+	*out_ticks = bench_now_ns() - start;
 	*out_result = r;
 }
 
-void run_fchs(clock_t *out_ticks, float *out_result) {
+void run_fchs(bench_ns_t *out_ticks, float *out_result) {
 	volatile float a = 3.5f, r;
-	clock_t start = clock();
+	bench_ns_t start = bench_now_ns();
 	for (int i = 0; i < TIMES; i++) {
 		__asm__ volatile (
 			"flds %1\n\t"
@@ -812,13 +815,13 @@ void run_fchs(clock_t *out_ticks, float *out_result) {
 			: "=m"(r) : "m"(a)
 		);
 	}
-	*out_ticks = clock() - start;
+	*out_ticks = bench_now_ns() - start;
 	*out_result = r;
 }
 
-void run_fabs(clock_t *out_ticks, float *out_result) {
+void run_fabs(bench_ns_t *out_ticks, float *out_result) {
 	volatile float a = -3.5f, r;
-	clock_t start = clock();
+	bench_ns_t start = bench_now_ns();
 	for (int i = 0; i < TIMES; i++) {
 		__asm__ volatile (
 			"flds %1\n\t"
@@ -827,13 +830,13 @@ void run_fabs(clock_t *out_ticks, float *out_result) {
 			: "=m"(r) : "m"(a)
 		);
 	}
-	*out_ticks = clock() - start;
+	*out_ticks = bench_now_ns() - start;
 	*out_result = r;
 }
 
-void run_fld_const(clock_t *out_ticks, float *out_result) {
+void run_fld_const(bench_ns_t *out_ticks, float *out_result) {
 	volatile float r;
-	clock_t start = clock();
+	bench_ns_t start = bench_now_ns();
 	for (int i = 0; i < TIMES; i++) {
 		__asm__ volatile (
 			"fldz\n\t"
@@ -841,13 +844,13 @@ void run_fld_const(clock_t *out_ticks, float *out_result) {
 			: "=m"(r)
 		);
 	}
-	*out_ticks = clock() - start;
+	*out_ticks = bench_now_ns() - start;
 	*out_result = r;
 }
 
-void run_ftst(clock_t *out_ticks, float *out_result) {
+void run_ftst(bench_ns_t *out_ticks, float *out_result) {
 	volatile float a = 3.0f, r;
-	clock_t start = clock();
+	bench_ns_t start = bench_now_ns();
 	for (int i = 0; i < TIMES; i++) {
 		__asm__ volatile (
 			"flds %1\n\t"
@@ -856,13 +859,13 @@ void run_ftst(clock_t *out_ticks, float *out_result) {
 			: "=m"(r) : "m"(a)
 		);
 	}
-	*out_ticks = clock() - start;
+	*out_ticks = bench_now_ns() - start;
 	*out_result = r;
 }
 
-void run_fxam(clock_t *out_ticks, float *out_result) {
+void run_fxam(bench_ns_t *out_ticks, float *out_result) {
 	volatile float a = 3.0f, r;
-	clock_t start = clock();
+	bench_ns_t start = bench_now_ns();
 	for (int i = 0; i < TIMES; i++) {
 		__asm__ volatile (
 			"flds %1\n\t"
@@ -871,7 +874,7 @@ void run_fxam(clock_t *out_ticks, float *out_result) {
 			: "=m"(r) : "m"(a)
 		);
 	}
-	*out_ticks = clock() - start;
+	*out_ticks = bench_now_ns() - start;
 	*out_result = r;
 }
 
@@ -879,9 +882,9 @@ void run_fxam(clock_t *out_ticks, float *out_result) {
  *  Transcendental (rare in the MMO binary but present)
  * ================================================================ */
 
-void run_fsincos(clock_t *out_ticks, float *out_result) {
+void run_fsincos(bench_ns_t *out_ticks, float *out_result) {
 	volatile float a = 1.0f, r;
-	clock_t start = clock();
+	bench_ns_t start = bench_now_ns();
 	for (int i = 0; i < TIMES; i++) {
 		__asm__ volatile (
 			"flds %1\n\t"
@@ -891,13 +894,13 @@ void run_fsincos(clock_t *out_ticks, float *out_result) {
 			: "=m"(r) : "m"(a)
 		);
 	}
-	*out_ticks = clock() - start;
+	*out_ticks = bench_now_ns() - start;
 	*out_result = r;
 }
 
-void run_fsin(clock_t *out_ticks, float *out_result) {
+void run_fsin(bench_ns_t *out_ticks, float *out_result) {
 	volatile float a = 1.0f, r;
-	clock_t start = clock();
+	bench_ns_t start = bench_now_ns();
 	for (int i = 0; i < TIMES; i++) {
 		__asm__ volatile (
 			"flds %1\n\t"
@@ -906,13 +909,13 @@ void run_fsin(clock_t *out_ticks, float *out_result) {
 			: "=m"(r) : "m"(a)
 		);
 	}
-	*out_ticks = clock() - start;
+	*out_ticks = bench_now_ns() - start;
 	*out_result = r;
 }
 
-void run_fcos(clock_t *out_ticks, float *out_result) {
+void run_fcos(bench_ns_t *out_ticks, float *out_result) {
 	volatile float a = 1.0f, r;
-	clock_t start = clock();
+	bench_ns_t start = bench_now_ns();
 	for (int i = 0; i < TIMES; i++) {
 		__asm__ volatile (
 			"flds %1\n\t"
@@ -921,13 +924,13 @@ void run_fcos(clock_t *out_ticks, float *out_result) {
 			: "=m"(r) : "m"(a)
 		);
 	}
-	*out_ticks = clock() - start;
+	*out_ticks = bench_now_ns() - start;
 	*out_result = r;
 }
 
-void run_fpatan(clock_t *out_ticks, float *out_result) {
+void run_fpatan(bench_ns_t *out_ticks, float *out_result) {
 	volatile float y = 1.0f, x = 1.0f, r;
-	clock_t start = clock();
+	bench_ns_t start = bench_now_ns();
 	for (int i = 0; i < TIMES; i++) {
 		__asm__ volatile (
 			"flds %1\n\t"
@@ -937,13 +940,13 @@ void run_fpatan(clock_t *out_ticks, float *out_result) {
 			: "=m"(r) : "m"(y), "m"(x)
 		);
 	}
-	*out_ticks = clock() - start;
+	*out_ticks = bench_now_ns() - start;
 	*out_result = r;
 }
 
-void run_fptan(clock_t *out_ticks, float *out_result) {
+void run_fptan(bench_ns_t *out_ticks, float *out_result) {
 	volatile float a = 0.5f, r;
-	clock_t start = clock();
+	bench_ns_t start = bench_now_ns();
 	for (int i = 0; i < TIMES; i++) {
 		__asm__ volatile (
 			"flds %1\n\t"
@@ -953,13 +956,13 @@ void run_fptan(clock_t *out_ticks, float *out_result) {
 			: "=m"(r) : "m"(a)
 		);
 	}
-	*out_ticks = clock() - start;
+	*out_ticks = bench_now_ns() - start;
 	*out_result = r;
 }
 
-void run_fyl2x(clock_t *out_ticks, float *out_result) {
+void run_fyl2x(bench_ns_t *out_ticks, float *out_result) {
 	volatile float y = 1.0f, x = 8.0f, r;
-	clock_t start = clock();
+	bench_ns_t start = bench_now_ns();
 	for (int i = 0; i < TIMES; i++) {
 		__asm__ volatile (
 			"flds %1\n\t"
@@ -969,13 +972,13 @@ void run_fyl2x(clock_t *out_ticks, float *out_result) {
 			: "=m"(r) : "m"(y), "m"(x)
 		);
 	}
-	*out_ticks = clock() - start;
+	*out_ticks = bench_now_ns() - start;
 	*out_result = r;
 }
 
-void run_fprem(clock_t *out_ticks, float *out_result) {
+void run_fprem(bench_ns_t *out_ticks, float *out_result) {
 	volatile float a = 7.0f, b = 3.0f, r;
-	clock_t start = clock();
+	bench_ns_t start = bench_now_ns();
 	for (int i = 0; i < TIMES; i++) {
 		__asm__ volatile (
 			"flds %2\n\t"
@@ -986,7 +989,7 @@ void run_fprem(clock_t *out_ticks, float *out_result) {
 			: "=m"(r) : "m"(a), "m"(b)
 		);
 	}
-	*out_ticks = clock() - start;
+	*out_ticks = bench_now_ns() - start;
 	*out_result = r;
 }
 
@@ -994,11 +997,11 @@ void run_fprem(clock_t *out_ticks, float *out_result) {
  *  BCD (fbld/fbstp)
  * ================================================================ */
 
-void run_fbld(clock_t *out_ticks, float *out_result) {
+void run_fbld(bench_ns_t *out_ticks, float *out_result) {
 	/* BCD encoding of 42: packed BCD in 10 bytes */
 	volatile uint8_t bcd[10] = {0x42, 0, 0, 0, 0, 0, 0, 0, 0, 0};
 	volatile float r;
-	clock_t start = clock();
+	bench_ns_t start = bench_now_ns();
 	for (int i = 0; i < TIMES; i++) {
 		__asm__ volatile (
 			"fbld %1\n\t"
@@ -1006,7 +1009,7 @@ void run_fbld(clock_t *out_ticks, float *out_result) {
 			: "=m"(r) : "m"(bcd)
 		);
 	}
-	*out_ticks = clock() - start;
+	*out_ticks = bench_now_ns() - start;
 	*out_result = r;
 }
 
@@ -1014,15 +1017,15 @@ void run_fbld(clock_t *out_ticks, float *out_result) {
  *  Bench harness
  * ================================================================ */
 
-void bench(BenchFunc func, clock_t *out_avg, float *out_result) {
-	clock_t warmup_t;
+void bench(BenchFunc func, bench_ns_t *out_avg, float *out_result) {
+	bench_ns_t warmup_t;
 	float warmup_r;
 	func(&warmup_t, &warmup_r);
 
-	clock_t sum = 0;
+	bench_ns_t sum = 0;
 	float result = 0.0f;
 	for (int i = 0; i < RUNS; i++) {
-		clock_t t;
+		bench_ns_t t;
 		float r;
 		func(&t, &r);
 		sum += t;
@@ -1105,20 +1108,20 @@ int main() {
 
 	printf("+------------+-------+--------+------------+------------+-----+\n");
 	printf("| %-10s | %5s | %6s | %10s | %10s | %-3s |\n",
-		"op", "wt(%)", "ticks", "expected", "actual", "ok?");
+		"op", "wt(%)", "ns", "expected", "actual", "ok?");
 	printf("+------------+-------+--------+------------+------------+-----+\n");
 
-	unsigned long total_ticks = 0;
+	unsigned long total_ns = 0;
 	unsigned long long weighted_sum = 0;
 	int pass = 0;
 
 	for (int i = 0; i < n; i++) {
-		clock_t avg;
+		bench_ns_t avg;
 		float result;
 		bench(benchmarks[i].func, &avg, &result);
 
-		char tick_str[16], res_str[32];
-		fmt_ticks(tick_str, sizeof(tick_str), avg);
+		char ns_str[16], res_str[32];
+		fmt_ns(ns_str, sizeof(ns_str), avg);
 		fmt_float(res_str, sizeof(res_str), &result);
 
 		const char *exp = benchmarks[i].expected;
@@ -1129,18 +1132,18 @@ int main() {
 		printf("| %-10s | %2lu.%lu  | %6s | %10s | %10s | %-3s |\n",
 			benchmarks[i].name,
 			pct10 / 10, pct10 % 10,
-			tick_str, exp ? exp : "---", res_str,
+			ns_str, exp ? exp : "---", res_str,
 			ok ? "YES" : "NO");
 
-		total_ticks += avg;
+		total_ns += avg;
 		weighted_sum += (unsigned long long)avg * benchmarks[i].weight;
 		if (ok) pass++;
 	}
 
 	char total_str[16], weighted_str[16];
 	unsigned long coverage = total_weight * 100 / 76844;
-	fmt_ticks(total_str, sizeof(total_str), total_ticks);
-	fmt_ticks(weighted_str, sizeof(weighted_str), (unsigned long)(weighted_sum / total_weight));
+	fmt_ns(total_str, sizeof(total_str), total_ns);
+	fmt_ns(weighted_str, sizeof(weighted_str), (unsigned long)(weighted_sum / total_weight));
 
 	printf("+------------+-------+--------+-------------------------------+-----+\n");
 	printf("| RAW TOTAL  |       | %6s |            %2d/%d passed | %-3s |\n",

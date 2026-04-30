@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <time.h>
+#include "bench_timing.h"
 
 #define TIMES 1000000
 #define RUNS  5
@@ -23,8 +24,8 @@
  * ST(0)=4.  FLD [3.0] -> FMUL -> FADDP.
  * Result = 4 + 3*4 = 16.
  */
-static clock_t bench_fma_reg_faddp(void) {
-    clock_t start = clock();
+static bench_ns_t bench_fma_reg_faddp(void) {
+    bench_ns_t start = bench_now_ns();
     volatile double a = 4.0, src = 3.0;
     volatile double r;
     for (int i = 0; i < TIMES; i++)
@@ -35,7 +36,7 @@ static clock_t bench_fma_reg_faddp(void) {
             "faddp\n\t"
             "fstpl %0\n"
             : "=m"(r) : "m"(a), "m"(src));
-    return clock() - start;
+    return bench_now_ns() - start;
 }
 
 /*
@@ -45,8 +46,8 @@ static clock_t bench_fma_reg_faddp(void) {
  * ST(0)=4.  FLD [3.0] -> FMUL -> FSUBP.
  * Result = 3*4 - 4 = 8.
  */
-static clock_t bench_fma_reg_fsubp(void) {
-    clock_t start = clock();
+static bench_ns_t bench_fma_reg_fsubp(void) {
+    bench_ns_t start = bench_now_ns();
     volatile double a = 4.0, src = 3.0;
     volatile double r;
     for (int i = 0; i < TIMES; i++)
@@ -57,7 +58,7 @@ static clock_t bench_fma_reg_fsubp(void) {
             "fsubp\n\t"
             "fstpl %0\n"
             : "=m"(r) : "m"(a), "m"(src));
-    return clock() - start;
+    return bench_now_ns() - start;
 }
 
 /*
@@ -66,8 +67,8 @@ static clock_t bench_fma_reg_fsubp(void) {
  * ST(0)=5.  FLD [2.0] -> FMULL [4.0] -> FADDP.
  * Result = 5 + 2*4 = 13.
  */
-static clock_t bench_fma_mem_faddp(void) {
-    clock_t start = clock();
+static bench_ns_t bench_fma_mem_faddp(void) {
+    bench_ns_t start = bench_now_ns();
     volatile double a = 5.0, src = 2.0, mul_val = 4.0;
     volatile double r;
     for (int i = 0; i < TIMES; i++)
@@ -78,7 +79,7 @@ static clock_t bench_fma_mem_faddp(void) {
             "faddp\n\t"
             "fstpl %0\n"
             : "=m"(r) : "m"(a), "m"(src), "m"(mul_val));
-    return clock() - start;
+    return bench_now_ns() - start;
 }
 
 /*
@@ -87,8 +88,8 @@ static clock_t bench_fma_mem_faddp(void) {
  * ST(0)=5.  FLD [2.0] -> FADD ST(0),ST(1) -> FADDP.
  * Result = 5 + (2+5) = 12.
  */
-static clock_t bench_nonfma_fadd_faddp(void) {
-    clock_t start = clock();
+static bench_ns_t bench_nonfma_fadd_faddp(void) {
+    bench_ns_t start = bench_now_ns();
     volatile double a = 5.0, src = 2.0;
     volatile double r;
     for (int i = 0; i < TIMES; i++)
@@ -99,7 +100,7 @@ static clock_t bench_nonfma_fadd_faddp(void) {
             "faddp\n\t"
             "fstpl %0\n"
             : "=m"(r) : "m"(a), "m"(src));
-    return clock() - start;
+    return bench_now_ns() - start;
 }
 
 /*
@@ -111,8 +112,8 @@ static clock_t bench_nonfma_fadd_faddp(void) {
  *
  * Result = 1*4 + 2*5 + 3*6 = 32.
  */
-static clock_t bench_dot3_fma(void) {
-    clock_t start = clock();
+static bench_ns_t bench_dot3_fma(void) {
+    bench_ns_t start = bench_now_ns();
     volatile double a0 = 1.0, a1 = 2.0, a2 = 3.0;
     volatile double b0 = 4.0, b1 = 5.0, b2 = 6.0;
     volatile double r;
@@ -132,11 +133,11 @@ static clock_t bench_dot3_fma(void) {
             "fstpl %0\n"
             : "=m"(r) : "m"(a0), "m"(a1), "m"(a2),
                         "m"(b0), "m"(b1), "m"(b2));
-    return clock() - start;
+    return bench_now_ns() - start;
 }
 
 int main(void) {
-    struct { const char *name; clock_t (*fn)(void); } benches[] = {
+    struct { const char *name; bench_ns_t (*fn)(void); } benches[] = {
         {"fma_reg_faddp",     bench_fma_reg_faddp},
         {"fma_reg_fsubp",     bench_fma_reg_fsubp},
         {"fma_mem_faddp",     bench_fma_mem_faddp},
@@ -145,7 +146,7 @@ int main(void) {
     };
     int n = (int)(sizeof(benches) / sizeof(benches[0]));
     for (int i = 0; i < n; i++) {
-        clock_t sum = 0;
+        bench_ns_t sum = 0;
         for (int r = 0; r < RUNS; r++) sum += benches[i].fn();
         printf("BENCH %s %lu\n", benches[i].name, (unsigned long)(sum / RUNS));
     }

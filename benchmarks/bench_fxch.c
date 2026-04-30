@@ -14,14 +14,15 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <time.h>
+#include "bench_timing.h"
 
 #define TIMES 1000000
 #define RUNS  5
 
 /* Bare FXCH ST(1) -- the rename sweet spot.
  * Push two values, exchange, pop both.  The FXCH itself should be free. */
-static clock_t bench_fxch_st1(void) {
-    clock_t start = clock();
+static bench_ns_t bench_fxch_st1(void) {
+    bench_ns_t start = bench_now_ns();
     volatile double r;
     for (int i = 0; i < TIMES; i++)
         __asm__ volatile (
@@ -31,12 +32,12 @@ static clock_t bench_fxch_st1(void) {
             "fstpl %0\n\t"
             "fstp %%st(0)\n"
             : "=m"(r));
-    return clock() - start;
+    return bench_now_ns() - start;
 }
 
 /* FXCH ST(2) -- deeper exchange */
-static clock_t bench_fxch_st2(void) {
-    clock_t start = clock();
+static bench_ns_t bench_fxch_st2(void) {
+    bench_ns_t start = bench_now_ns();
     volatile double r;
     for (int i = 0; i < TIMES; i++)
         __asm__ volatile (
@@ -49,12 +50,12 @@ static clock_t bench_fxch_st2(void) {
             "fstp %%st(0)\n\t"
             "fstp %%st(0)\n"
             : "=m"(r));
-    return clock() - start;
+    return bench_now_ns() - start;
 }
 
 /* FXCH ST(3) -- even deeper */
-static clock_t bench_fxch_st3(void) {
-    clock_t start = clock();
+static bench_ns_t bench_fxch_st3(void) {
+    bench_ns_t start = bench_now_ns();
     volatile double r;
     for (int i = 0; i < TIMES; i++)
         __asm__ volatile (
@@ -67,12 +68,12 @@ static clock_t bench_fxch_st3(void) {
             "fstpl %0\n\t"
             "fstp %%st(0)\n\t fstp %%st(0)\n\t fstp %%st(0)\n"
             : "=m"(r));
-    return clock() - start;
+    return bench_now_ns() - start;
 }
 
 /* Double FXCH -- swap and swap back (no-op with rename) */
-static clock_t bench_fxch_double(void) {
-    clock_t start = clock();
+static bench_ns_t bench_fxch_double(void) {
+    bench_ns_t start = bench_now_ns();
     volatile double r;
     for (int i = 0; i < TIMES; i++)
         __asm__ volatile (
@@ -83,12 +84,12 @@ static clock_t bench_fxch_double(void) {
             "fstpl %0\n\t"
             "fstp %%st(0)\n"
             : "=m"(r));
-    return clock() - start;
+    return bench_now_ns() - start;
 }
 
 /* Triple consecutive FXCH -- compiler-generated reordering pattern */
-static clock_t bench_fxch_triple(void) {
-    clock_t start = clock();
+static bench_ns_t bench_fxch_triple(void) {
+    bench_ns_t start = bench_now_ns();
     volatile double r;
     for (int i = 0; i < TIMES; i++)
         __asm__ volatile (
@@ -102,12 +103,12 @@ static clock_t bench_fxch_triple(void) {
             "fstpl %0\n\t"
             "fstp %%st(0)\n\t fstp %%st(0)\n"
             : "=m"(r));
-    return clock() - start;
+    return bench_now_ns() - start;
 }
 
 /* FXCH + FADDP -- common arithmetic pattern */
-static clock_t bench_fxch_add(void) {
-    clock_t start = clock();
+static bench_ns_t bench_fxch_add(void) {
+    bench_ns_t start = bench_now_ns();
     volatile double r;
     for (int i = 0; i < TIMES; i++)
         __asm__ volatile (
@@ -117,12 +118,12 @@ static clock_t bench_fxch_add(void) {
             "faddp\n\t"                     /* 2+1=3 */
             "fstpl %0\n"
             : "=m"(r));
-    return clock() - start;
+    return bench_now_ns() - start;
 }
 
 /* FXCH + FSTP -- discard after swap pattern */
-static clock_t bench_fxch_fstp(void) {
-    clock_t start = clock();
+static bench_ns_t bench_fxch_fstp(void) {
+    bench_ns_t start = bench_now_ns();
     volatile double r;
     for (int i = 0; i < TIMES; i++)
         __asm__ volatile (
@@ -132,12 +133,12 @@ static clock_t bench_fxch_fstp(void) {
             "fstp %%st(0)\n\t"              /* discard swapped top */
             "fstpl %0\n"
             : "=m"(r));
-    return clock() - start;
+    return bench_now_ns() - start;
 }
 
 /* Repeated FXCH in a tight loop -- stress test */
-static clock_t bench_fxch_loop(void) {
-    clock_t start = clock();
+static bench_ns_t bench_fxch_loop(void) {
+    bench_ns_t start = bench_now_ns();
     volatile double r;
     for (int i = 0; i < TIMES; i++)
         __asm__ volatile (
@@ -154,11 +155,11 @@ static clock_t bench_fxch_loop(void) {
             "fstpl %0\n\t"
             "fstp %%st(0)\n"
             : "=m"(r));
-    return clock() - start;
+    return bench_now_ns() - start;
 }
 
 int main(void) {
-    struct { const char *name; clock_t (*fn)(void); } benches[] = {
+    struct { const char *name; bench_ns_t (*fn)(void); } benches[] = {
         {"fxch_st1",       bench_fxch_st1},
         {"fxch_st2",       bench_fxch_st2},
         {"fxch_st3",       bench_fxch_st3},
@@ -170,7 +171,7 @@ int main(void) {
     };
     int n = (int)(sizeof(benches) / sizeof(benches[0]));
     for (int i = 0; i < n; i++) {
-        clock_t sum = 0;
+        bench_ns_t sum = 0;
         for (int r = 0; r < RUNS; r++) sum += benches[i].fn();
         printf("BENCH %s %lu\n", benches[i].name, (unsigned long)(sum / RUNS));
     }

@@ -6,12 +6,13 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <time.h>
+#include "bench_timing.h"
 
 #define TIMES 1000000
 #define RUNS  5
 
-static clock_t bench_fld_fcomp_fstsw(void) {
-    clock_t start = clock();
+static bench_ns_t bench_fld_fcomp_fstsw(void) {
+    bench_ns_t start = bench_now_ns();
     volatile double src = 3.0;
     volatile uint16_t sw;
     for (int i = 0; i < TIMES; i++)
@@ -23,12 +24,12 @@ static clock_t bench_fld_fcomp_fstsw(void) {
             "movw %%ax, %0\n\t"
             "fstp %%st(0)\n\t"
             : "=m"(sw) : "m"(src) : "ax");
-    return clock() - start;
+    return bench_now_ns() - start;
 }
 
 /* Same pattern but loading a value smaller than the accumulator */
-static clock_t bench_fld_fcomp_fstsw_lt(void) {
-    clock_t start = clock();
+static bench_ns_t bench_fld_fcomp_fstsw_lt(void) {
+    bench_ns_t start = bench_now_ns();
     volatile double src = 0.5;
     volatile uint16_t sw;
     for (int i = 0; i < TIMES; i++)
@@ -40,17 +41,17 @@ static clock_t bench_fld_fcomp_fstsw_lt(void) {
             "movw %%ax, %0\n\t"
             "fstp %%st(0)\n\t"
             : "=m"(sw) : "m"(src) : "ax");
-    return clock() - start;
+    return bench_now_ns() - start;
 }
 
 int main(void) {
-    struct { const char *name; clock_t (*fn)(void); } benches[] = {
+    struct { const char *name; bench_ns_t (*fn)(void); } benches[] = {
         {"fld_fcomp_fstsw",    bench_fld_fcomp_fstsw},
         {"fld_fcomp_fstsw_lt", bench_fld_fcomp_fstsw_lt},
     };
     int n = (int)(sizeof(benches) / sizeof(benches[0]));
     for (int i = 0; i < n; i++) {
-        clock_t sum = 0;
+        bench_ns_t sum = 0;
         for (int r = 0; r < RUNS; r++) sum += benches[i].fn();
         printf("BENCH %s %lu\n", benches[i].name, (unsigned long)(sum / RUNS));
     }

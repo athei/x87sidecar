@@ -9,15 +9,16 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <time.h>
+#include "bench_timing.h"
 
 #define TIMES 2000000
 #define RUNS  5
 
-static clock_t bench_fsave_loop(void) {
+static bench_ns_t bench_fsave_loop(void) {
     uint8_t buf[108] __attribute__((aligned(16))) = {0};
     static const double v[8] = {1.0, 2.5, -3.5, 4.0, -5.0, 6.5, 7.25, -8.125};
 
-    clock_t start = clock();
+    bench_ns_t start = bench_now_ns();
     for (int i = 0; i < TIMES; i++) {
         /* Re-fill stack: 8 fld's bring the stack back to fully populated.
          * %0..%7 are v[0..7] inputs; %8 is buf output.  fnsave clears
@@ -37,16 +38,16 @@ static clock_t bench_fsave_loop(void) {
               "m"(v[4]), "m"(v[5]), "m"(v[6]), "m"(v[7])
             : "memory");
     }
-    return clock() - start;
+    return bench_now_ns() - start;
 }
 
 int main(void) {
-    struct { const char *name; clock_t (*fn)(void); } benches[] = {
+    struct { const char *name; bench_ns_t (*fn)(void); } benches[] = {
         {"fsave_loop", bench_fsave_loop},
     };
     int n = (int)(sizeof(benches) / sizeof(benches[0]));
     for (int i = 0; i < n; i++) {
-        clock_t sum = 0;
+        bench_ns_t sum = 0;
         for (int r = 0; r < RUNS; r++) sum += benches[i].fn();
         printf("BENCH %-15s %lu\n", benches[i].name, (unsigned long)(sum / RUNS));
     }

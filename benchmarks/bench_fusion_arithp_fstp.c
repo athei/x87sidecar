@@ -18,6 +18,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <time.h>
+#include "bench_timing.h"
 
 #define TIMES 1000000
 #define RUNS  5
@@ -31,8 +32,8 @@
  * fld [c] is standalone (no fusion partner).
  * faddp+fstp is our target fusion.
  */
-static clock_t bench_madd(void) {
-    clock_t start = clock();
+static bench_ns_t bench_madd(void) {
+    bench_ns_t start = bench_now_ns();
     volatile double a = 3.0, b = 4.0, c = 5.0;
     volatile double r;
     for (int i = 0; i < TIMES; i++)
@@ -43,7 +44,7 @@ static clock_t bench_madd(void) {
             "faddp\n\t"          /* ST(0)=c+(a*b)=17  ← arithp */
             "fstpl %0\n"         /*                    ← fstp   */
             : "=m"(r) : "m"(a), "m"(b), "m"(c));
-    return clock() - start;
+    return bench_now_ns() - start;
 }
 
 /*
@@ -54,8 +55,8 @@ static clock_t bench_madd(void) {
  * Both fld+fmul pairs are caught by fld_arithp.
  * faddp+fstp is our target.
  */
-static clock_t bench_dot2(void) {
-    clock_t start = clock();
+static bench_ns_t bench_dot2(void) {
+    bench_ns_t start = bench_now_ns();
     volatile double x0 = 1.0, y0 = 2.0, x1 = 3.0, y1 = 4.0;
     volatile double r;
     for (int i = 0; i < TIMES; i++)
@@ -67,7 +68,7 @@ static clock_t bench_dot2(void) {
             "faddp\n\t"          /* ST(0) = x0*y0 + x1*y1 */
             "fstpl %0\n"
             : "=m"(r) : "m"(x0), "m"(y0), "m"(x1), "m"(y1));
-    return clock() - start;
+    return bench_now_ns() - start;
 }
 
 /*
@@ -76,8 +77,8 @@ static clock_t bench_dot2(void) {
  * Common pattern in game engines for lighting/collision.
  * The final faddp+fstp stores the scalar result.
  */
-static clock_t bench_dot3(void) {
-    clock_t start = clock();
+static bench_ns_t bench_dot3(void) {
+    bench_ns_t start = bench_now_ns();
     volatile double x0 = 1.0, y0 = 2.0;
     volatile double x1 = 3.0, y1 = 4.0;
     volatile double x2 = 5.0, y2 = 6.0;
@@ -94,7 +95,7 @@ static clock_t bench_dot3(void) {
             "faddp\n\t"          /* x0*y0 + x1*y1 + x2*y2 */
             "fstpl %0\n"
             : "=m"(r) : "m"(x0), "m"(y0), "m"(x1), "m"(y1), "m"(x2), "m"(y2));
-    return clock() - start;
+    return bench_now_ns() - start;
 }
 
 /*
@@ -102,8 +103,8 @@ static clock_t bench_dot3(void) {
  *
  * Typical in game AI / collision detection.
  */
-static clock_t bench_distsq(void) {
-    clock_t start = clock();
+static bench_ns_t bench_distsq(void) {
+    bench_ns_t start = bench_now_ns();
     volatile double dx = 3.0, dy = 4.0, dz = 5.0;
     volatile double r;
     for (int i = 0; i < TIMES; i++)
@@ -118,7 +119,7 @@ static clock_t bench_distsq(void) {
             "faddp\n\t"          /* ST(0) = dx²+dy²+dz² */
             "fstpl %0\n"
             : "=m"(r) : "m"(dx), "m"(dy), "m"(dz));
-    return clock() - start;
+    return bench_now_ns() - start;
 }
 
 /*
@@ -127,8 +128,8 @@ static clock_t bench_distsq(void) {
  * Two intermediate faddp (not followed by fstp) plus final faddp+fstp.
  * Tests repeated arithp_fstp at the tail of a long accumulation chain.
  */
-static clock_t bench_dot4(void) {
-    clock_t start = clock();
+static bench_ns_t bench_dot4(void) {
+    bench_ns_t start = bench_now_ns();
     volatile double x0 = 1.0, y0 = 2.0;
     volatile double x1 = 3.0, y1 = 4.0;
     volatile double x2 = 5.0, y2 = 6.0;
@@ -151,15 +152,15 @@ static clock_t bench_dot4(void) {
             : "=m"(r)
             : "m"(x0), "m"(y0), "m"(x1), "m"(y1),
               "m"(x2), "m"(y2), "m"(x3), "m"(y3));
-    return clock() - start;
+    return bench_now_ns() - start;
 }
 
 /*
  * Multiple dot3 outputs (batch of 3 dot products).
  * Exercises arithp_fstp across a long x87 run boundary.
  */
-static clock_t bench_dot3_x3(void) {
-    clock_t start = clock();
+static bench_ns_t bench_dot3_x3(void) {
+    bench_ns_t start = bench_now_ns();
     volatile double a = 1.0, b = 2.0, c = 3.0;
     volatile double d = 4.0, e = 5.0, f = 6.0;
     volatile double r0, r1, r2;
@@ -182,11 +183,11 @@ static clock_t bench_dot3_x3(void) {
             "fstpl %2\n"
             : "=m"(r0), "=m"(r1), "=m"(r2)
             : "m"(a), "m"(b), "m"(c), "m"(d), "m"(e), "m"(f));
-    return clock() - start;
+    return bench_now_ns() - start;
 }
 
 int main(void) {
-    struct { const char *name; clock_t (*fn)(void); } benches[] = {
+    struct { const char *name; bench_ns_t (*fn)(void); } benches[] = {
         {"madd",     bench_madd},
         {"dot2",     bench_dot2},
         {"dot3",     bench_dot3},
@@ -196,7 +197,7 @@ int main(void) {
     };
     int n = (int)(sizeof(benches) / sizeof(benches[0]));
     for (int i = 0; i < n; i++) {
-        clock_t sum = 0;
+        bench_ns_t sum = 0;
         for (int r = 0; r < RUNS; r++) sum += benches[i].fn();
         printf("BENCH %s %lu\n", benches[i].name, (unsigned long)(sum / RUNS));
     }

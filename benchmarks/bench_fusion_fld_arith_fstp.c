@@ -6,12 +6,13 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <time.h>
+#include "bench_timing.h"
 
 #define TIMES 1000000
 #define RUNS  5
 
-static clock_t bench_fld_fadd_fstp(void) {
-    clock_t start = clock();
+static bench_ns_t bench_fld_fadd_fstp(void) {
+    bench_ns_t start = bench_now_ns();
     volatile double src = 3.0;
     volatile double r;
     for (int i = 0; i < TIMES; i++)
@@ -22,11 +23,11 @@ static clock_t bench_fld_fadd_fstp(void) {
             "fstp %%st(1)\n\t"                  /* store 5 -> ST(1), pop -> ST(0)=5 */
             "fstpl %0\n"
             : "=m"(r) : "m"(src));
-    return clock() - start;
+    return bench_now_ns() - start;
 }
 
-static clock_t bench_fld_fsub_fstp(void) {
-    clock_t start = clock();
+static bench_ns_t bench_fld_fsub_fstp(void) {
+    bench_ns_t start = bench_now_ns();
     volatile double src = 3.0;
     volatile double r;
     for (int i = 0; i < TIMES; i++)
@@ -37,11 +38,11 @@ static clock_t bench_fld_fsub_fstp(void) {
             "fstp %%st(1)\n\t"                                                     /* store -1->ST(1) */
             "fstpl %0\n"
             : "=m"(r) : "m"(src));
-    return clock() - start;
+    return bench_now_ns() - start;
 }
 
-static clock_t bench_fld_fmul_fstp(void) {
-    clock_t start = clock();
+static bench_ns_t bench_fld_fmul_fstp(void) {
+    bench_ns_t start = bench_now_ns();
     volatile double src = 3.0;
     volatile double r;
     for (int i = 0; i < TIMES; i++)
@@ -52,11 +53,11 @@ static clock_t bench_fld_fmul_fstp(void) {
             "fstp %%st(1)\n\t"                  /* store 6->ST(1) */
             "fstpl %0\n"
             : "=m"(r) : "m"(src));
-    return clock() - start;
+    return bench_now_ns() - start;
 }
 
-static clock_t bench_fld_fdiv_fstp(void) {
-    clock_t start = clock();
+static bench_ns_t bench_fld_fdiv_fstp(void) {
+    bench_ns_t start = bench_now_ns();
     volatile double src = 6.0;
     volatile double r;
     for (int i = 0; i < TIMES; i++)
@@ -67,11 +68,11 @@ static clock_t bench_fld_fdiv_fstp(void) {
             "fstp %%st(1)\n\t"
             "fstpl %0\n"
             : "=m"(r) : "m"(src));
-    return clock() - start;
+    return bench_now_ns() - start;
 }
 
 int main(void) {
-    struct { const char *name; clock_t (*fn)(void); } benches[] = {
+    struct { const char *name; bench_ns_t (*fn)(void); } benches[] = {
         {"fld_fadd_fstp", bench_fld_fadd_fstp},
         {"fld_fsub_fstp", bench_fld_fsub_fstp},
         {"fld_fmul_fstp", bench_fld_fmul_fstp},
@@ -79,7 +80,7 @@ int main(void) {
     };
     int n = (int)(sizeof(benches) / sizeof(benches[0]));
     for (int i = 0; i < n; i++) {
-        clock_t sum = 0;
+        bench_ns_t sum = 0;
         for (int r = 0; r < RUNS; r++) sum += benches[i].fn();
         printf("BENCH %s %lu\n", benches[i].name, (unsigned long)(sum / RUNS));
     }

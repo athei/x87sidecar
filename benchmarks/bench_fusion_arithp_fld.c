@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <time.h>
+#include "bench_timing.h"
 
 #define TIMES 1000000
 #define RUNS  5
@@ -23,8 +24,8 @@
  * The fmul is non-popping so it doesn't fuse with faddp via fld_arithp.
  * The faddp+fld pair is our target.
  */
-static clock_t bench_mul_accum_load(void) {
-    clock_t start = clock();
+static bench_ns_t bench_mul_accum_load(void) {
+    bench_ns_t start = bench_now_ns();
     volatile double a = 3.0, b = 4.0, c = 5.0;
     volatile double r;
     for (int i = 0; i < TIMES; i++)
@@ -37,7 +38,7 @@ static clock_t bench_mul_accum_load(void) {
             "faddp\n\t"              /* ST(0) = result + c */
             "fstpl %0\n"
             : "=m"(r) : "m"(a), "m"(b), "m"(c));
-    return clock() - start;
+    return bench_now_ns() - start;
 }
 
 /*
@@ -47,8 +48,8 @@ static clock_t bench_mul_accum_load(void) {
  * The fadd st(1),st writes to st(1) without popping; the faddp then
  * folds and pops.  faddp is preceded by fadd (not fld), so arithp_fld fires.
  */
-static clock_t bench_fadd_faddp_fld(void) {
-    clock_t start = clock();
+static bench_ns_t bench_fadd_faddp_fld(void) {
+    bench_ns_t start = bench_now_ns();
     volatile double x0 = 1.0, y0 = 2.0;
     volatile double x1 = 3.0, y1 = 4.0;
     volatile double x2 = 5.0;
@@ -65,7 +66,7 @@ static clock_t bench_fadd_faddp_fld(void) {
             "faddp\n\t"
             "fstpl %0\n"
             : "=m"(r) : "m"(x0), "m"(y0), "m"(x1), "m"(y1), "m"(x2));
-    return clock() - start;
+    return bench_now_ns() - start;
 }
 
 /*
@@ -74,8 +75,8 @@ static clock_t bench_fadd_faddp_fld(void) {
  *
  * fsubp preceded by fsub (not fld), so arithp_fld fires.
  */
-static clock_t bench_sub_fsubp_fld(void) {
-    clock_t start = clock();
+static bench_ns_t bench_sub_fsubp_fld(void) {
+    bench_ns_t start = bench_now_ns();
     volatile double a = 10.0, b = 3.0, c = 7.0;
     volatile double r;
     for (int i = 0; i < TIMES; i++)
@@ -88,7 +89,7 @@ static clock_t bench_sub_fsubp_fld(void) {
             "faddp\n\t"
             "fstpl %0\n"
             : "=m"(r) : "m"(a), "m"(b), "m"(c));
-    return clock() - start;
+    return bench_now_ns() - start;
 }
 
 /*
@@ -97,8 +98,8 @@ static clock_t bench_sub_fsubp_fld(void) {
  *
  * Pattern: fld a | fld b | fmul st(0),st(1) | fmulp | fld c | fmul st(0),st(1) | fmulp | fld d | ...
  */
-static clock_t bench_mulp_fld_chain(void) {
-    clock_t start = clock();
+static bench_ns_t bench_mulp_fld_chain(void) {
+    bench_ns_t start = bench_now_ns();
     volatile double a = 1.1, b = 1.2, c = 1.3, d = 1.4;
     volatile double r;
     for (int i = 0; i < TIMES; i++)
@@ -114,15 +115,15 @@ static clock_t bench_mulp_fld_chain(void) {
             "faddp\n\t"
             "fstpl %0\n"
             : "=m"(r) : "m"(a), "m"(b), "m"(c), "m"(d));
-    return clock() - start;
+    return bench_now_ns() - start;
 }
 
 /*
  * faddp + fld ST(0): arithp followed by register load of the result.
  * Tests the emit_fmov_f64_reg path in the fusion.
  */
-static clock_t bench_faddp_fld_st0(void) {
-    clock_t start = clock();
+static bench_ns_t bench_faddp_fld_st0(void) {
+    bench_ns_t start = bench_now_ns();
     volatile double a = 3.0, b = 4.0;
     volatile double r;
     for (int i = 0; i < TIMES; i++)
@@ -135,7 +136,7 @@ static clock_t bench_faddp_fld_st0(void) {
             "faddp\n\t"              /* ST(0) = 2 * result */
             "fstpl %0\n"
             : "=m"(r) : "m"(a), "m"(b));
-    return clock() - start;
+    return bench_now_ns() - start;
 }
 
 /*
@@ -143,8 +144,8 @@ static clock_t bench_faddp_fld_st0(void) {
  * This is common in game engines: multiply-accumulate where the multiply
  * is memory-operand (not preceded by fld push).
  */
-static clock_t bench_fmul_mem_faddp_fld(void) {
-    clock_t start = clock();
+static bench_ns_t bench_fmul_mem_faddp_fld(void) {
+    bench_ns_t start = bench_now_ns();
     volatile double a = 2.0, b = 3.0, c = 4.0, d = 5.0;
     volatile double r;
     for (int i = 0; i < TIMES; i++)
@@ -157,11 +158,11 @@ static clock_t bench_fmul_mem_faddp_fld(void) {
             "fmulp\n\t"              /* d * result */
             "fstpl %0\n"
             : "=m"(r) : "m"(a), "m"(b), "m"(c), "m"(d));
-    return clock() - start;
+    return bench_now_ns() - start;
 }
 
 int main(void) {
-    struct { const char *name; clock_t (*fn)(void); } benches[] = {
+    struct { const char *name; bench_ns_t (*fn)(void); } benches[] = {
         {"mul_accum_load",    bench_mul_accum_load},
         {"fadd_faddp_fld",    bench_fadd_faddp_fld},
         {"sub_fsubp_fld",     bench_sub_fsubp_fld},
@@ -171,7 +172,7 @@ int main(void) {
     };
     int n = (int)(sizeof(benches) / sizeof(benches[0]));
     for (int i = 0; i < n; i++) {
-        clock_t sum = 0;
+        bench_ns_t sum = 0;
         for (int r = 0; r < RUNS; r++) sum += benches[i].fn();
         printf("BENCH %s %lu\n", benches[i].name, (unsigned long)(sum / RUNS));
     }

@@ -19,7 +19,7 @@ function(add_x86_sample name)
         OUTPUT  "${out}"
         COMMAND ${CMAKE_COMMAND} -E make_directory "${out_dir}"
         COMMAND /usr/bin/clang -arch x86_64 -O2 -o "${out}" "${src}"
-        DEPENDS "${src}"
+        DEPENDS "${src}" ${X86_SAMPLE_EXTRA_DEPS}
         COMMENT "Building x86_64 ${name}"
         VERBATIM
     )

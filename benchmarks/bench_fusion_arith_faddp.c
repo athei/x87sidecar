@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <time.h>
+#include "bench_timing.h"
 
 #define TIMES 1000000
 #define RUNS  5
@@ -27,8 +28,8 @@
  * Pattern: fld [a] | fld [b] | fmull [c] | faddp
  *          → b*c + a
  */
-static clock_t bench_madd_mem(void) {
-    clock_t start = clock();
+static bench_ns_t bench_madd_mem(void) {
+    bench_ns_t start = bench_now_ns();
     volatile double a = 2.0, b = 3.0, c = 5.0;
     volatile double r;
     for (int i = 0; i < TIMES; i++)
@@ -39,7 +40,7 @@ static clock_t bench_madd_mem(void) {
             "faddp\n\t"           /* ST(0)=2+15=17 */
             "fstpl %0\n"
             : "=m"(r) : "m"(a), "m"(b), "m"(c));
-    return clock() - start;
+    return bench_now_ns() - start;
 }
 
 /*
@@ -48,8 +49,8 @@ static clock_t bench_madd_mem(void) {
  * fld_arith_arithp requires the middle arith to use ST(0) op ST(1).
  * Using ST(2) bypasses the 3-instr fusion.
  */
-static clock_t bench_madd_deep_reg(void) {
-    clock_t start = clock();
+static bench_ns_t bench_madd_deep_reg(void) {
+    bench_ns_t start = bench_now_ns();
     volatile double a = 2.0, b = 3.0, c = 5.0;
     volatile double r;
     for (int i = 0; i < TIMES; i++)
@@ -62,7 +63,7 @@ static clock_t bench_madd_deep_reg(void) {
             "fstpl %0\n\t"
             "fstp  %%st(0)\n"
             : "=m"(r) : "m"(c), "m"(b), "m"(a));
-    return clock() - start;
+    return bench_now_ns() - start;
 }
 
 /*
@@ -73,8 +74,8 @@ static clock_t bench_madd_deep_reg(void) {
  * First term uses fld_arithp (FLD+FMULP). Second and third terms use
  * FMULL [mem] + FADDP — the arith_faddp target.
  */
-static clock_t bench_dot3_mem(void) {
-    clock_t start = clock();
+static bench_ns_t bench_dot3_mem(void) {
+    bench_ns_t start = bench_now_ns();
     volatile double a0 = 1.0, a1 = 2.0, a2 = 3.0;
     volatile double b0 = 4.0, b1 = 5.0, b2 = 6.0;
     volatile double r;
@@ -94,7 +95,7 @@ static clock_t bench_dot3_mem(void) {
             "fstpl %0\n"
             : "=m"(r) : "m"(a0), "m"(a1), "m"(a2),
                         "m"(b0), "m"(b1), "m"(b2));
-    return clock() - start;
+    return bench_now_ns() - start;
 }
 
 /*
@@ -103,8 +104,8 @@ static clock_t bench_dot3_mem(void) {
  * Values loaded first, then two multiply-accumulate steps without FLD
  * between them.
  */
-static clock_t bench_consecutive_madd(void) {
-    clock_t start = clock();
+static bench_ns_t bench_consecutive_madd(void) {
+    bench_ns_t start = bench_now_ns();
     volatile double a = 2.0, b = 3.0, c = 5.0, d = 7.0;
     volatile double r;
     for (int i = 0; i < TIMES; i++)
@@ -120,14 +121,14 @@ static clock_t bench_consecutive_madd(void) {
             "fstpl %0\n\t"
             "fstp  %%st(0)\n"
             : "=m"(r) : "m"(a), "m"(b), "m"(c), "m"(d));
-    return clock() - start;
+    return bench_now_ns() - start;
 }
 
 /*
  * Scenario 5: FMUL mem + FSUBP — multiply-subtract with memory operand.
  */
-static clock_t bench_msub_mem(void) {
-    clock_t start = clock();
+static bench_ns_t bench_msub_mem(void) {
+    bench_ns_t start = bench_now_ns();
     volatile double a = 10.0, b = 3.0, c = 2.0;
     volatile double r;
     for (int i = 0; i < TIMES; i++)
@@ -138,11 +139,11 @@ static clock_t bench_msub_mem(void) {
             "fsubp\n\t"           /* GAS fsubp = Intel fsubrp: ST(0)-ST(1)=6-10=-4 */
             "fstpl %0\n"
             : "=m"(r) : "m"(a), "m"(b), "m"(c));
-    return clock() - start;
+    return bench_now_ns() - start;
 }
 
 int main(void) {
-    struct { const char *name; clock_t (*fn)(void); } benches[] = {
+    struct { const char *name; bench_ns_t (*fn)(void); } benches[] = {
         {"madd_mem",         bench_madd_mem},
         {"madd_deep_reg",    bench_madd_deep_reg},
         {"dot3_mem",         bench_dot3_mem},
@@ -151,7 +152,7 @@ int main(void) {
     };
     int n = (int)(sizeof(benches) / sizeof(benches[0]));
     for (int i = 0; i < n; i++) {
-        clock_t sum = 0;
+        bench_ns_t sum = 0;
         for (int r = 0; r < RUNS; r++) sum += benches[i].fn();
         printf("BENCH %s %lu\n", benches[i].name, (unsigned long)(sum / RUNS));
     }

@@ -10,13 +10,14 @@
 #include <stdint.h>
 #include <string.h>
 #include <time.h>
+#include "bench_timing.h"
 
 #define TIMES 1000000
 #define RUNS  5
 
 /* FCMOVb: CF=1 (below). Set CF=1 via: 0 < 1 */
-static clock_t bench_fcmovb(void) {
-    clock_t start = clock();
+static bench_ns_t bench_fcmovb(void) {
+    bench_ns_t start = bench_now_ns();
     volatile double r;
     for (int i = 0; i < TIMES; i++)
         __asm__ volatile (
@@ -28,12 +29,12 @@ static clock_t bench_fcmovb(void) {
             "fstp %%st(0)\n\t"
             "fstpl %0\n"
             : "=m"(r) : : "eax");
-    return clock() - start;
+    return bench_now_ns() - start;
 }
 
 /* FCMOVnb: CF=0 (not below). Set CF=0 via: 1 >= 1 */
-static clock_t bench_fcmovnb(void) {
-    clock_t start = clock();
+static bench_ns_t bench_fcmovnb(void) {
+    bench_ns_t start = bench_now_ns();
     volatile double r;
     for (int i = 0; i < TIMES; i++)
         __asm__ volatile (
@@ -45,12 +46,12 @@ static clock_t bench_fcmovnb(void) {
             "fstp %%st(0)\n\t"
             "fstpl %0\n"
             : "=m"(r) : : "eax");
-    return clock() - start;
+    return bench_now_ns() - start;
 }
 
 /* FCMOVe: ZF=1 (equal). Set ZF=1 via: 1 == 1 */
-static clock_t bench_fcmove(void) {
-    clock_t start = clock();
+static bench_ns_t bench_fcmove(void) {
+    bench_ns_t start = bench_now_ns();
     volatile double r;
     for (int i = 0; i < TIMES; i++)
         __asm__ volatile (
@@ -62,12 +63,12 @@ static clock_t bench_fcmove(void) {
             "fstp %%st(0)\n\t"
             "fstpl %0\n"
             : "=m"(r) : : "eax");
-    return clock() - start;
+    return bench_now_ns() - start;
 }
 
 /* FCMOVne: ZF=0 (not equal). Set ZF=0 via: 1 != 2 */
-static clock_t bench_fcmovne(void) {
-    clock_t start = clock();
+static bench_ns_t bench_fcmovne(void) {
+    bench_ns_t start = bench_now_ns();
     volatile double r;
     for (int i = 0; i < TIMES; i++)
         __asm__ volatile (
@@ -79,12 +80,12 @@ static clock_t bench_fcmovne(void) {
             "fstp %%st(0)\n\t"
             "fstpl %0\n"
             : "=m"(r) : : "eax");
-    return clock() - start;
+    return bench_now_ns() - start;
 }
 
 /* FCMOVbe: CF=1 or ZF=1 (below or equal). Use CF=1 case */
-static clock_t bench_fcmovbe(void) {
-    clock_t start = clock();
+static bench_ns_t bench_fcmovbe(void) {
+    bench_ns_t start = bench_now_ns();
     volatile double r;
     for (int i = 0; i < TIMES; i++)
         __asm__ volatile (
@@ -96,12 +97,12 @@ static clock_t bench_fcmovbe(void) {
             "fstp %%st(0)\n\t"
             "fstpl %0\n"
             : "=m"(r) : : "eax");
-    return clock() - start;
+    return bench_now_ns() - start;
 }
 
 /* FCMOVnbe: CF=0 and ZF=0 (above). Set via: 2 > 1 */
-static clock_t bench_fcmovnbe(void) {
-    clock_t start = clock();
+static bench_ns_t bench_fcmovnbe(void) {
+    bench_ns_t start = bench_now_ns();
     volatile double r;
     for (int i = 0; i < TIMES; i++)
         __asm__ volatile (
@@ -113,12 +114,12 @@ static clock_t bench_fcmovnbe(void) {
             "fstp %%st(0)\n\t"
             "fstpl %0\n"
             : "=m"(r) : : "eax");
-    return clock() - start;
+    return bench_now_ns() - start;
 }
 
 /* FCMOVu: PF=1 (unordered). Use fucomip with NaN to set PF=1 */
-static clock_t bench_fcmovu(void) {
-    clock_t start = clock();
+static bench_ns_t bench_fcmovu(void) {
+    bench_ns_t start = bench_now_ns();
     volatile double nan_val;
     uint64_t nan_bits = 0x7FF8000000000000ULL;
     memcpy((void *)&nan_val, &nan_bits, 8);
@@ -137,12 +138,12 @@ static clock_t bench_fcmovu(void) {
             "fstp %%st(0)\n\t"
             "fstpl %0\n"
             : "=m"(r) : "m"(nan_val));
-    return clock() - start;
+    return bench_now_ns() - start;
 }
 
 /* FCMOVnu: PF=0 (not unordered). Use fucomip with normal values */
-static clock_t bench_fcmovnu(void) {
-    clock_t start = clock();
+static bench_ns_t bench_fcmovnu(void) {
+    bench_ns_t start = bench_now_ns();
     volatile double r;
     for (int i = 0; i < TIMES; i++)
         __asm__ volatile (
@@ -158,11 +159,11 @@ static clock_t bench_fcmovnu(void) {
             "fstp %%st(0)\n\t"
             "fstpl %0\n"
             : "=m"(r));
-    return clock() - start;
+    return bench_now_ns() - start;
 }
 
 int main(void) {
-    struct { const char *name; clock_t (*fn)(void); } benches[] = {
+    struct { const char *name; bench_ns_t (*fn)(void); } benches[] = {
         {"fcmovb",   bench_fcmovb},
         {"fcmovnb",  bench_fcmovnb},
         {"fcmove",   bench_fcmove},
@@ -174,7 +175,7 @@ int main(void) {
     };
     int n = (int)(sizeof(benches) / sizeof(benches[0]));
     for (int i = 0; i < n; i++) {
-        clock_t sum = 0;
+        bench_ns_t sum = 0;
         for (int r = 0; r < RUNS; r++) sum += benches[i].fn();
         printf("BENCH %s %lu\n", benches[i].name, (unsigned long)(sum / RUNS));
     }

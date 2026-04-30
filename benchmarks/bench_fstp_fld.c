@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <time.h>
+#include "bench_timing.h"
 
 #define TIMES 2000000
 #define RUNS  5
@@ -21,8 +22,8 @@
  * Unfused: each pair does pop-deferred → store_top → push-deferred → ...
  * Fused:   each pair is a single net-zero operation, no TOP round-trips.
  * -------------------------------------------------------------------------- */
-static clock_t bench_chain_8x(void) {
-    clock_t start = clock();
+static bench_ns_t bench_chain_8x(void) {
+    bench_ns_t start = bench_now_ns();
     volatile double r;
     double a = 1.0, b = 2.0;
     for (int i = 0; i < TIMES; i++)
@@ -38,7 +39,7 @@ static clock_t bench_chain_8x(void) {
             "fstpl %0\n\t fldl %1\n\t"
             "fstp %%st(0)\n"
             : "=m"(r) : "m"(a), "m"(b));
-    return clock() - start;
+    return bench_now_ns() - start;
 }
 
 /* --------------------------------------------------------------------------
@@ -46,8 +47,8 @@ static clock_t bench_chain_8x(void) {
  * Simulates real-world pattern: compute → store → load next operand.
  * The FSTP+FLD at the boundary is the fusion target.
  * -------------------------------------------------------------------------- */
-static clock_t bench_arith_boundary(void) {
-    clock_t start = clock();
+static bench_ns_t bench_arith_boundary(void) {
+    bench_ns_t start = bench_now_ns();
     volatile double r;
     double a = 2.0, b = 3.0, c = 4.0;
     for (int i = 0; i < TIMES; i++)
@@ -78,7 +79,7 @@ static clock_t bench_arith_boundary(void) {
             "fmull %2\n\t"
             "fstp %%st(0)\n"
             : "=m"(r) : "m"(a), "m"(b), "m"(c));
-    return clock() - start;
+    return bench_now_ns() - start;
 }
 
 /* --------------------------------------------------------------------------
@@ -86,8 +87,8 @@ static clock_t bench_arith_boundary(void) {
  * so the FLD side is trivial — any savings come purely from skipping
  * the push/pop TOP bookkeeping.
  * -------------------------------------------------------------------------- */
-static clock_t bench_fldz_chain(void) {
-    clock_t start = clock();
+static bench_ns_t bench_fldz_chain(void) {
+    bench_ns_t start = bench_now_ns();
     volatile double r;
     double a = 42.0;
     for (int i = 0; i < TIMES; i++)
@@ -103,7 +104,7 @@ static clock_t bench_fldz_chain(void) {
             "fstpl %0\n\t fldz\n\t"
             "fstp %%st(0)\n"
             : "=m"(r) : "m"(a));
-    return clock() - start;
+    return bench_now_ns() - start;
 }
 
 /* --------------------------------------------------------------------------
@@ -111,8 +112,8 @@ static clock_t bench_fldz_chain(void) {
  * and reload a new value.  Tests FSTP m64 + FLD m64 with a live
  * value below on the stack (common in real code).
  * -------------------------------------------------------------------------- */
-static clock_t bench_two_deep(void) {
-    clock_t start = clock();
+static bench_ns_t bench_two_deep(void) {
+    bench_ns_t start = bench_now_ns();
     volatile double r;
     double a = 1.0, b = 2.0, c = 3.0;
     for (int i = 0; i < TIMES; i++)
@@ -130,15 +131,15 @@ static clock_t bench_two_deep(void) {
             "fstp %%st(0)\n\t"
             "fstp %%st(0)\n"
             : "=m"(r) : "m"(a), "m"(b), "m"(c));
-    return clock() - start;
+    return bench_now_ns() - start;
 }
 
 /* --------------------------------------------------------------------------
  * FSTP ST(1) + FLD m64 chain (register dest).
  * Maintains 2 values, repeatedly overwrites ST(1) then loads new ST(0).
  * -------------------------------------------------------------------------- */
-static clock_t bench_reg_chain(void) {
-    clock_t start = clock();
+static bench_ns_t bench_reg_chain(void) {
+    bench_ns_t start = bench_now_ns();
     volatile double r;
     double a = 1.0, b = 2.0;
     for (int i = 0; i < TIMES; i++)
@@ -156,7 +157,7 @@ static clock_t bench_reg_chain(void) {
             "fstp %%st(0)\n\t"
             "fstp %%st(0)\n"
             : "=m"(r) : "m"(a), "m"(b));
-    return clock() - start;
+    return bench_now_ns() - start;
 }
 
 /* --------------------------------------------------------------------------
@@ -173,8 +174,8 @@ static clock_t bench_reg_chain(void) {
  * This pattern is common in real code: store FP result, do integer work
  * (address calculation, loop counter, branch), load next FP operand.
  * -------------------------------------------------------------------------- */
-static clock_t bench_isolated_pairs(void) {
-    clock_t start = clock();
+static bench_ns_t bench_isolated_pairs(void) {
+    bench_ns_t start = bench_now_ns();
     volatile double r;
     double a = 1.0, b = 2.0;
     volatile int dummy = 0;
@@ -226,7 +227,7 @@ static clock_t bench_isolated_pairs(void) {
             "fstp %%st(0)\n"
             : "=m"(r), "+m"(dummy)
             : "m"(dummy), "m"(a), "m"(b));
-    return clock() - start;
+    return bench_now_ns() - start;
 }
 
 /* --------------------------------------------------------------------------
@@ -237,8 +238,8 @@ static clock_t bench_isolated_pairs(void) {
  * integer work happens, and the next operand is loaded.  The integer
  * break makes the FSTP+FLD a separate short run.
  * -------------------------------------------------------------------------- */
-static clock_t bench_short_run_boundary(void) {
-    clock_t start = clock();
+static bench_ns_t bench_short_run_boundary(void) {
+    bench_ns_t start = bench_now_ns();
     volatile double r;
     double a = 2.0, b = 3.0, c = 4.0;
     volatile int dummy = 0;
@@ -272,11 +273,11 @@ static clock_t bench_short_run_boundary(void) {
             "fstp %%st(0)\n"
             : "=m"(r), "+m"(dummy)
             : "m"(dummy), "m"(a), "m"(b), "m"(c));
-    return clock() - start;
+    return bench_now_ns() - start;
 }
 
 int main(void) {
-    struct { const char *name; clock_t (*fn)(void); } benches[] = {
+    struct { const char *name; bench_ns_t (*fn)(void); } benches[] = {
         {"chain_8x",           bench_chain_8x},
         {"arith_boundary",     bench_arith_boundary},
         {"fldz_chain",         bench_fldz_chain},
@@ -287,7 +288,7 @@ int main(void) {
     };
     int n = (int)(sizeof(benches) / sizeof(benches[0]));
     for (int i = 0; i < n; i++) {
-        clock_t sum = 0;
+        bench_ns_t sum = 0;
         for (int r = 0; r < RUNS; r++) sum += benches[i].fn();
         printf("BENCH %-20s %lu\n", benches[i].name, (unsigned long)(sum / RUNS));
     }
