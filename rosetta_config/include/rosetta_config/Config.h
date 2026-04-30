@@ -2,73 +2,6 @@
 
 #include <cstdint>
 
-// Bit positions for disabled translated opcodes.
-// One bit per individual opcode — no aliasing, no grouping.
-enum class OpcodeId : int {
-    fldz = 0,
-    fld1,
-    fldl2e,
-    fldl2t,
-    fldlg2,
-    fldln2,
-    fldpi,
-    fld,
-    fild,
-    fadd,
-    faddp,
-    fiadd,
-    fsub,
-    fsubr,
-    fsubp,
-    fsubrp,
-    fdiv,
-    fdivr,
-    fdivp,
-    fdivrp,
-    fmul,
-    fmulp,
-    fst,
-    fst_stack,
-    fstp,
-    fstp_stack,
-    fstsw,
-    fcom,
-    fcomp,
-    fcompp,
-    fucom,
-    fucomp,
-    fucompp,
-    fxch,
-    fchs,
-    fabs,
-    fsqrt,
-    fistp,
-    fidiv,
-    fimul,
-    fisub,
-    fidivr,
-    frndint,
-    fcomi,
-    fcomip,
-    fucomi,
-    fucomip,
-    ftst,
-    fist,
-    fisubr,
-    fcmovb,
-    fcmovbe,
-    fcmove,
-    fcmovnb,
-    fcmovnbe,
-    fcmovne,
-    fcmovu,
-    fcmovnu,
-    fisttp,
-    ficom,
-    ficomp,
-    kCount  // = 61, fits in uint64_t
-};
-
 // Bit positions for peephole fusion patterns in TranslatorX87Fusion.cpp.
 enum class FusionId : int {
     fld_arithp = 0,     // FLD + FADDP / FSUBP / FDIVP / FMULP
@@ -96,14 +29,9 @@ struct RosettaConfig {
     uint8_t  disable_x87_ir;         // ROSETTA_X87_DISABLE_IR=1 — disable IR optimization pipeline
     uint8_t  extended_fpr_scratch;   // ROSETTA_X87_EXTENDED_FPR_SCRATCH=1 — expand FPR scratch pool from 8 (V24–V31) to 16 (V16–V31)
     uint8_t  _pad[3];
-    uint64_t disabled_ops_mask;      // ROSETTA_X87_DISABLE_OPS=fadd,fsub,...
     uint64_t disabled_fusions_mask;  // ROSETTA_X87_DISABLE_FUSIONS=fld_arithp,...
 };
-static_assert(sizeof(RosettaConfig) == 0x18);
-
-inline bool op_is_disabled(const RosettaConfig& cfg, OpcodeId id) {
-    return (cfg.disabled_ops_mask >> static_cast<int>(id)) & 1u;
-}
+static_assert(sizeof(RosettaConfig) == 0x10);
 
 inline bool fusion_is_disabled(const RosettaConfig& cfg, FusionId id) {
     return (cfg.disabled_fusions_mask >> static_cast<int>(id)) & 1u;
@@ -113,8 +41,6 @@ inline bool fusion_is_disabled(const RosettaConfig& cfg, FusionId id) {
 // Only call from normal executables (aotinvoke, runtime_loader).
 // Environment variables:
 //   ROSETTA_X87_DISABLE_CACHE=1          disable X87Cache
-//   ROSETTA_X87_DISABLE_OPS=fadd,fmul    disable specific translated opcodes
-//   ROSETTA_X87_DISABLE_ALL_OPS=1        disable all translated opcodes
 //   ROSETTA_X87_DISABLE_FUSIONS=fld_arithp,fcom_fstsw  disable specific fusions
 //   ROSETTA_X87_DISABLE_ALL_FUSIONS=1    disable all fusion patterns
 //   ROSETTA_X87_FAST_ROUND=1             skip RC dispatch; always emit FCVTNS/FRINTN (nearest only)

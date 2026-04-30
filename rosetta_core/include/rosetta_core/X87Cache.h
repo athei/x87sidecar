@@ -43,9 +43,5 @@ struct X87Cache {
     bool perm_is_identity() const;
 
     // Scan forward from insn_idx counting consecutive handled x87 instructions.
-    // disabled_ops_mask: bitmask of OpcodeId bits for disabled opcodes — stops
-    // counting when a disabled opcode is encountered (it will fall back to Rosetta,
-    // breaking the run from our perspective).
-    static int lookahead(IRInstr* instr_array, int64_t num_instrs, int64_t insn_idx,
-                         uint64_t disabled_ops_mask = 0);
+    static int lookahead(IRInstr* instr_array, int64_t num_instrs, int64_t insn_idx);
 };
