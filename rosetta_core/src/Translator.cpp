@@ -298,16 +298,13 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                 break;
 
             default:
-                // Hand translation back to stock for opcodes we don't support.
-                // Flush any deferred x87 cache state (TOP write-back, tag
-                // updates, deferred pops, deferred fxch permutation) into the
-                // current insn_buf BEFORE returning, so that the in-memory
-                // x87 state is coherent for stock's emit. Silent
-                // cache.invalidate() would drop the flags without emitting
-                // the corresponding memory updates and stock would read
-                // stale state.
-                TranslatorX87::x87_cache_force_release(*translation_result,
-                                                       translation_result->insn_buf);
+                // Hand translation back to stock for opcodes we don't
+                // support — currently just the transcendentals, which are
+                // already broken at the our-emit/stock-emit boundary
+                // (ABI mismatch on x22:w23, f80↔f64 representation gap).
+                // No flush of deferred state is emitted: stock would
+                // misread it, and the transcendentals are slated to
+                // route through sidecar IPC instead.
                 translation_result->free_gpr_mask = kGprScratchMask;
                 translation_result->free_fpr_mask =
                     translation_result->_unoccupied_temporary_fprs_for_xmm_scalars;

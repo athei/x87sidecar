@@ -118,55 +118,6 @@ inline void x87_end(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, int 
     free_gpr(a1, Xbase);
 }
 
-inline void x87_cache_force_release(TranslationResult& a1, AssemblerBuffer& buf) {
-    // OPT-G: flush deferred permutation before releasing.
-    if (a1.x87_cache.perm_dirty && a1.x87_cache.gprs_valid) {
-        const int Xst_base = x87_get_st_base(a1);
-        const int tmp = alloc_gpr(a1, 2);
-        const int Dd_save = alloc_free_fpr(a1);
-        const int Dd_chain = alloc_free_fpr(a1);
-        emit_x87_perm_flush(buf, a1.x87_cache.base_gpr, a1.x87_cache.top_gpr,
-                            tmp, a1.x87_cache.perm, Xst_base, Dd_save, Dd_chain);
-        free_fpr(a1, Dd_chain);
-        free_fpr(a1, Dd_save);
-        free_gpr(a1, tmp);
-        a1.x87_cache.reset_perm();
-    }
-    // OPT-D2: flush deferred pop tag updates before releasing.
-    if (a1.x87_cache.deferred_pop_count > 0 && a1.x87_cache.gprs_valid) {
-        const int tmp = alloc_gpr(a1, 2);
-        const int tmp2 = alloc_free_gpr(a1);
-        const int tagw = alloc_free_gpr(a1);
-        emit_x87_tag_set_empty_batch(buf, a1.x87_cache.base_gpr, a1.x87_cache.top_gpr,
-                                      tmp, tmp2, tagw, a1.x87_cache.deferred_pop_count);
-        free_gpr(a1, tagw);
-        free_gpr(a1, tmp2);
-        free_gpr(a1, tmp);
-        a1.x87_cache.deferred_pop_count = 0;
-    }
-    // OPT-D: flush deferred tag-valid update before releasing.
-    if (a1.x87_cache.tag_push_pending && a1.x87_cache.gprs_valid) {
-        const int tmp = alloc_gpr(a1, 2);
-        const int tmp2 = alloc_gpr(a1, 3);
-        emit_x87_tag_clear(buf, a1.x87_cache.base_gpr, a1.x87_cache.top_gpr, tmp, tmp2);
-        free_gpr(a1, tmp2);
-        free_gpr(a1, tmp);
-        a1.x87_cache.tag_push_pending = 0;
-    }
-    if (a1.x87_cache.top_dirty && a1.x87_cache.gprs_valid) {
-        const int tmp = alloc_gpr(a1, 2);
-        emit_store_top(buf, a1.x87_cache.base_gpr, a1.x87_cache.top_gpr, tmp);
-        free_gpr(a1, tmp);
-        a1.x87_cache.top_dirty = 0;
-    }
-    if (a1.x87_cache.gprs_valid) {
-        a1.free_gpr_mask |= (1u << a1.x87_cache.base_gpr);
-        a1.free_gpr_mask |= (1u << a1.x87_cache.top_gpr);
-        a1.free_gpr_mask |= (1u << a1.x87_cache.st_base_gpr);
-    }
-    a1.x87_cache.invalidate();
-}
-
 // ── OPT-C/D/D2: Flush helpers ────────────────────────────────────────────────
 
 inline void x87_flush_top(AssemblerBuffer& buf, TranslationResult& a1, int Xbase, int Wd_top,
