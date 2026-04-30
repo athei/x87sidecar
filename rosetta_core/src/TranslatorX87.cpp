@@ -3882,23 +3882,38 @@ auto translate_fbstp(TranslationResult* a1, IRInstr* a2) -> void {
     const int Xten = alloc_free_gpr(*a1);
     emit_movn(buf, /*is_64=*/0, /*MOVZ=*/2, /*hw=*/0, /*imm=*/10, Xten);
 
-    // WsignByte = Wsign << 7  via "ORR Rd, WZR, Wsign, LSL #7" (= MOV-shifted)
-    const int WsignByte = alloc_free_gpr(*a1);
+    // Sign byte = Wsign << 7, computed in place to keep peak GPR
+    // allocation at 8 (= pool size).  Previously a separate WsignByte
+    // register pushed peak to 9 and silently produced garbage in
+    // release-NDEBUG builds; with assert-in-release (commit e780554)
+    // that became a hard abort at JIT-time.
+    //
+    // ORR Wsign, WZR, Wsign, LSL #7 = LSL Wsign, Wsign, #7.
     emit_logical_shifted_reg(buf, /*is_64=*/0, /*ORR=*/1, /*N=*/0, /*LSL=*/0,
-                             /*Rm=*/Wsign, /*shift=*/7, /*Rn=*/GPR::XZR, /*Rd=*/WsignByte);
-    free_gpr(*a1, Wsign);
+                             /*Rm=*/Wsign, /*shift=*/7, /*Rn=*/GPR::XZR, /*Rd=*/Wsign);
+    const int WsignByte = Wsign;
 
     // Step 9: branch on Wovf.  Layout (instruction indices relative to CBNZ):
     //   [0]      CBNZ Wovf, +57       → indef block at +57
-    //   [1..54]  9 × {UDIV, MSUB, UDIV, MSUB, ORR-shifted, STRB} = 54 insns
-    //   [55]     STRB WsignByte, [Xaddr, #9]
+    //   [1]      STRB WsignByte, [Xaddr, #9]   (free WsignByte after)
+    //   [2..55]  9 × {UDIV, MSUB, UDIV, MSUB, ORR-shifted, STRB} = 54 insns
     //   [56]     B +6                 → past indef
     //   [57..61] 5-insn indef pattern
     //   [62]     (next; falls through)
-    constexpr int kNonIndefLen = 56;  // 54 digits/bytes + 1 sign STRB + 1 final B
+    //
+    // The sign STRB is emitted *before* the divmod loop so WsignByte can
+    // be freed before allocating the loop-body scratches (Xb, Wlo).  Peak
+    // GPR usage is 8 (= pool size).  Layout count is unchanged: 1 sign
+    // STRB + 54 divmod + 1 B = 56 insns in the non-indef block.
+    constexpr int kNonIndefLen = 56;
     constexpr int kIndefLen    = 5;
     emit_cbz(buf, /*is_64=*/0, /*is_nz=*/1, Wovf, kNonIndefLen + 1);
     free_gpr(*a1, Wovf);
+
+    // [insn 0] STRB WsignByte, [Xaddr, #9]
+    emit_ldr_str_imm(buf, /*size=*/0, /*is_fp=*/0, /*STR=*/0,
+                     /*imm12=*/9, Xaddr, WsignByte);
+    free_gpr(*a1, WsignByte);  // = Wsign — freed before divmod's Xb/Wlo.
 
     // Non-indef block.  Xa = current dividend (gets overwritten each iter
     // with the next quotient); Xb is scratch for the inner quotient.
@@ -3925,11 +3940,6 @@ auto translate_fbstp(TranslationResult* a1, IRInstr* a2) -> void {
 
     free_gpr(*a1, Wlo);
     free_gpr(*a1, Xb);
-
-    // [insn 54] STRB WsignByte, [Xaddr, #9]
-    emit_ldr_str_imm(buf, /*size=*/0, /*is_fp=*/0, /*STR=*/0,
-                     /*imm12=*/9, Xaddr, WsignByte);
-    free_gpr(*a1, WsignByte);
 
     // [insn 55] B +6  → skip indef block
     emit_b(buf, kIndefLen + 1);
