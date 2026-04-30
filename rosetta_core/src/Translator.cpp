@@ -1,5 +1,7 @@
 #include "rosetta_core/Translator.h"
 
+#include <cstdio>
+
 #include "rosetta_core/CoreConfig.h"
 #include "rosetta_core/IRInstr.h"
 #include "rosetta_core/Opcode.h"
@@ -321,6 +323,19 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                 TranslatorX87::translate_fnop(translation_result, cur_instr);
                 break;
 
+            case Opcode::kOpcodeName_fxsave:
+            case Opcode::kOpcodeName_fxrstor:
+                // fxsave/fxrstor touch x87 state (env header + 8 ST slots
+                // overlap fsave's 108-byte layout) plus XMM0..15 + MXCSR.
+                // We want to inline them eventually, but XMM↔V mapping and
+                // NEON 128 b emit don't yet exist in this codebase. Print
+                // a one-line diagnostic so we notice if a workload starts
+                // using them, then fall through to stock.
+                fprintf(stdout,
+                        "[rosettax87] %s not yet handled (opcode 0x%x); "
+                        "deferring to stock\n",
+                        kOpcodeNames[opcode], static_cast<unsigned>(opcode));
+                [[fallthrough]];
             default:
                 // Hand translation back to stock for opcodes we don't
                 // support — currently just the transcendentals, which are
