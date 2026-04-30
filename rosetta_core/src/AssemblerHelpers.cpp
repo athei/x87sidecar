@@ -49,9 +49,14 @@ bool is_bitmask_immediate(bool is_64bit, uint64_t value, LogicalImmEncoding& out
         element_size = half;
     } while (element_size > 2);
 
-    // Step 2: isolate one element
-    uint64_t element_mask =
-        0xFFFFFFFFFFFFFFFFULL >> (-(char)element_size);  // same as >> (64 - element_size)
+    // Step 2: isolate one element.
+    // Original code: `0xFF..FFULL >> (-(char)element_size)`, which relied on
+    // mod-64 of a negative shift count.  That's UB and LLVM optimised it
+    // into a fault when this function got inlined into a separate-function
+    // helper (see `feedback_is_bitmask_immediate_ub.md`).  The well-defined
+    // form: `>> (64 - element_size)`.  element_size ∈ {2,4,8,16,32,64} so
+    // (64 - element_size) ∈ {62,60,56,48,32,0} — always a valid shift.
+    uint64_t element_mask = 0xFFFFFFFFFFFFFFFFULL >> (64 - element_size);
     uint64_t element = element_mask & value;
 
     uint8_t rotation;
