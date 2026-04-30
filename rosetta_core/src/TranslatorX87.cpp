@@ -4389,4 +4389,24 @@ auto translate_fsin(TranslationResult* a1, IRInstr* /*a2*/) -> void {
     free_gpr(*a1, Wd_tmp);
 }
 
+// =============================================================================
+// FCOS — replace ST(0) with cos(ST(0)).  Mirrors translate_fsin; only
+// the opcode_tag differs.
+// =============================================================================
+auto translate_fcos(TranslationResult* a1, IRInstr* /*a2*/) -> void {
+    AssemblerBuffer& buf = a1->insn_buf;
+    auto [Xbase, Wd_top] = x87_begin(*a1, buf);
+    const int Wd_tmp = alloc_gpr(*a1, 2);
+
+    emit_transcendental_ipc(*a1, buf, Xbase, Wd_top, Wd_tmp,
+                            rosetta_core::kTransFcos, /*num_inputs=*/1);
+
+    const int Xst_base = x87_get_st_base(*a1);
+    const int depth_st0 = resolve_depth(*a1, 0);
+    emit_store_st(buf, Xbase, Wd_top, depth_st0, Wd_tmp, /*Dd=*/0, Xst_base);
+
+    x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp);
+    free_gpr(*a1, Wd_tmp);
+}
+
 };  // namespace TranslatorX87

@@ -1,0 +1,51 @@
+/*
+ * bench_fcos.c — FCOS throughput.  Same shape as bench_fsin.
+ */
+#include <stdint.h>
+#include <stdio.h>
+#include <time.h>
+
+#define TIMES 2000000
+#define RUNS  5
+
+static clock_t bench_fcos_small(void) {
+    volatile double a = 0.125;
+    volatile double r;
+    clock_t start = clock();
+    for (int i = 0; i < TIMES; i++) {
+        __asm__ volatile (
+            "fldl  %1\n\t"
+            "fcos\n\t"
+            "fstpl %0\n\t"
+            : "=m"(r) : "m"(a) : "st");
+    }
+    return clock() - start;
+}
+
+static clock_t bench_fcos_midrange(void) {
+    volatile double a = 0.7853981633974483; /* ≈ M_PI/4 */
+    volatile double r;
+    clock_t start = clock();
+    for (int i = 0; i < TIMES; i++) {
+        __asm__ volatile (
+            "fldl  %1\n\t"
+            "fcos\n\t"
+            "fstpl %0\n\t"
+            : "=m"(r) : "m"(a) : "st");
+    }
+    return clock() - start;
+}
+
+int main(void) {
+    struct { const char *name; clock_t (*fn)(void); } benches[] = {
+        {"fcos_small",    bench_fcos_small},
+        {"fcos_midrange", bench_fcos_midrange},
+    };
+    int n = (int)(sizeof(benches) / sizeof(benches[0]));
+    for (int i = 0; i < n; i++) {
+        clock_t sum = 0;
+        for (int r = 0; r < RUNS; r++) sum += benches[i].fn();
+        printf("BENCH %-15s %lu\n", benches[i].name, (unsigned long)(sum / RUNS));
+    }
+    return 0;
+}

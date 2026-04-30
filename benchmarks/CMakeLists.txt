@@ -42,5 +42,6 @@ add_x86_sample(bench_fstenv)
 add_x86_sample(bench_frstor)
 add_x86_sample(bench_fsave)
 add_x86_sample(bench_fsin)
+add_x86_sample(bench_fcos)
 
 add_subdirectory(macro)
