@@ -4505,6 +4505,10 @@ auto translate_fyl2x(TranslationResult* a1, IRInstr* /*a2*/) -> void {
     emit_2in_pop_translate(*a1, a1->insn_buf, rosetta_core::kTransFyl2x);
 }
 
+auto translate_fyl2xp1(TranslationResult* a1, IRInstr* /*a2*/) -> void {
+    emit_2in_pop_translate(*a1, a1->insn_buf, rosetta_core::kTransFyl2xp1);
+}
+
 // =============================================================================
 // F2XM1 — replace ST(0) with 2^ST(0) - 1.  x87 spec says input must be
 // |ST(0)| <= 1; outside that range result is undefined.  We always
