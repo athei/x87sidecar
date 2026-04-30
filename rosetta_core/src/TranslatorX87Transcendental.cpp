@@ -156,27 +156,16 @@ void emit_apply_qn_sign(TranslationResult& a1, AssemblerBuffer& buf,
     free_gpr(a1, Xy);
 }
 
-// Shared body of fsin/fcos.  Loads ST(0), runs Cody-Waite reduction in
-// `mode`, evaluates the sin polynomial, applies the qn sign flip, and
-// leaves the f64 result in d0 (matching the IPC convention so the
-// caller's emit_store_st(..., Dd=0, ...) Just Works).
-void emit_inline_sin_or_cos(TranslationResult& a1, AssemblerBuffer& buf,
-                             int Xbase, int Wd_top, int Wd_tmp,
-                             TrigReduceMode mode) {
-    const int Xst_base  = x87_get_st_base(a1);
-    const int depth_st0 = resolve_depth(a1, 0);
-
-    // 1. Load ST(0) into a scratch FPR.
-    const int Dx = alloc_free_fpr(a1);
-    emit_load_st(buf, Xbase, Wd_top, depth_st0, Wd_tmp, Dx, Xst_base);
-
-    // 2. Materialise Xconst = &TranscendentalConstants in the trailing pad.
-    const int Xconst = alloc_free_gpr(a1);
-    const uint64_t consts_addr = rosetta_core::get_transcendental_constants_addr();
-    assert(consts_addr != 0 && "transcendental constants not installed; loader should have set address");
-    emit_movz_movk_abs64(buf, Xconst, consts_addr);
-
-    // 3. Range reduction → Dr, Xqn.
+// Body of fsin/fcos given a pre-loaded Dx and a pre-materialised Xconst.
+// Runs Cody-Waite reduction in `mode`, evaluates the sin polynomial,
+// applies the qn sign flip.  Result lands in Dd_out (caller-specified,
+// must not overlap Dx or any FPR in kFprScratchPool that's currently
+// live in the cache).  Caller still owns Dx and Xconst — this function
+// neither frees nor clobbers them (other than Dx surviving the read).
+void emit_inline_trig_body(TranslationResult& a1, AssemblerBuffer& buf,
+                            int Dx, int Xconst, int Dd_out,
+                            TrigReduceMode mode) {
+    // 1. Range reduction → Dr, Xqn.
     const int Dn   = alloc_free_fpr(a1);
     const int Xqn  = alloc_free_gpr(a1);
     const int Dr   = alloc_free_fpr(a1);
@@ -184,19 +173,40 @@ void emit_inline_sin_or_cos(TranslationResult& a1, AssemblerBuffer& buf,
     emit_trig_range_reduce(buf, Xconst, Dx, Dn, Xqn, Dr, Dtmp, mode);
     free_fpr(a1, Dtmp);
     free_fpr(a1, Dn);
-    free_fpr(a1, Dx);
 
-    // 4. y = r + r³ · P(r²).
+    // 2. y = r + r³ · P(r²).
     const int Dy = alloc_free_fpr(a1);
     emit_sin_poly_estrin(a1, buf, Dy, Dr, Xconst);
     free_fpr(a1, Dr);
 
-    // 5. Sign flip: y ^= qn << 63;  result lands in d0.
-    emit_apply_qn_sign(a1, buf, Dy, Xqn, /*Dd_out=*/0);
-
+    // 3. Sign flip: y ^= qn << 63;  result lands in Dd_out.
+    emit_apply_qn_sign(a1, buf, Dy, Xqn, Dd_out);
     free_gpr(a1, Xqn);
-    free_gpr(a1, Xconst);
     free_fpr(a1, Dy);
+}
+
+// Single-output wrapper used by fsin / fcos.  Loads ST(0), materialises
+// Xconst, runs one trig body, then frees.  Result lands in d0 (matching
+// the IPC convention so the caller's emit_store_st(..., Dd=0, ...)
+// Just Works).
+void emit_inline_sin_or_cos(TranslationResult& a1, AssemblerBuffer& buf,
+                             int Xbase, int Wd_top, int Wd_tmp,
+                             TrigReduceMode mode) {
+    const int Xst_base  = x87_get_st_base(a1);
+    const int depth_st0 = resolve_depth(a1, 0);
+
+    const int Dx = alloc_free_fpr(a1);
+    emit_load_st(buf, Xbase, Wd_top, depth_st0, Wd_tmp, Dx, Xst_base);
+
+    const int Xconst = alloc_free_gpr(a1);
+    const uint64_t consts_addr = rosetta_core::get_transcendental_constants_addr();
+    assert(consts_addr != 0 && "transcendental constants not installed; loader should have set address");
+    emit_movz_movk_abs64(buf, Xconst, consts_addr);
+
+    emit_inline_trig_body(a1, buf, Dx, Xconst, /*Dd_out=*/0, mode);
+
+    free_gpr(a1, Xconst);
+    free_fpr(a1, Dx);
 }
 
 }  // namespace
@@ -248,6 +258,32 @@ void emit_inline_fcos(TranslationResult& a1, AssemblerBuffer& buf,
                       int Xbase, int Wd_top, int Wd_tmp) {
     emit_inline_sin_or_cos(a1, buf, Xbase, Wd_top, Wd_tmp,
                            TrigReduceMode::Cos);
+}
+
+void emit_inline_fsincos(TranslationResult& a1, AssemblerBuffer& buf,
+                          int Xbase, int Wd_top, int Wd_tmp) {
+    // fsincos: replace ST(0) with sin(ST(0)) and push cos(ST(0)).
+    // Convention matches the prior IPC path — d0 = sin, d1 = cos.
+    // Both share the input load and the Xconst pointer; their range
+    // reductions and qn values differ (sin uses round(x*inv_pi), cos
+    // uses round(x*inv_pi + 0.5) - 0.5) so there's nothing to share
+    // beyond Dx / Xconst between the two pipelines.
+    const int Xst_base  = x87_get_st_base(a1);
+    const int depth_st0 = resolve_depth(a1, 0);
+
+    const int Dx = alloc_free_fpr(a1);
+    emit_load_st(buf, Xbase, Wd_top, depth_st0, Wd_tmp, Dx, Xst_base);
+
+    const int Xconst = alloc_free_gpr(a1);
+    const uint64_t consts_addr = rosetta_core::get_transcendental_constants_addr();
+    assert(consts_addr != 0 && "transcendental constants not installed; loader should have set address");
+    emit_movz_movk_abs64(buf, Xconst, consts_addr);
+
+    emit_inline_trig_body(a1, buf, Dx, Xconst, /*Dd_out=*/0, TrigReduceMode::Sin);
+    emit_inline_trig_body(a1, buf, Dx, Xconst, /*Dd_out=*/1, TrigReduceMode::Cos);
+
+    free_gpr(a1, Xconst);
+    free_fpr(a1, Dx);
 }
 
 }  // namespace TranslatorX87

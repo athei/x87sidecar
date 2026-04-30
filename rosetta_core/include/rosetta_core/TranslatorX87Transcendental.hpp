@@ -48,4 +48,11 @@ void emit_inline_fsin(TranslationResult& a1, AssemblerBuffer& buf,
 void emit_inline_fcos(TranslationResult& a1, AssemblerBuffer& buf,
                       int Xbase, int Wd_top, int Wd_tmp);
 
+// fsincos: replace ST(0) with sin(ST(0)); push cos(ST(0)) onto the
+// stack.  Result convention matches the prior IPC path — sin in d0,
+// cos in d1.  Both pipelines share the loaded Dx and the Xconst
+// pointer; range reductions and sign flips are distinct.
+void emit_inline_fsincos(TranslationResult& a1, AssemblerBuffer& buf,
+                          int Xbase, int Wd_top, int Wd_tmp);
+
 }  // namespace TranslatorX87
