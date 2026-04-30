@@ -1,1 +1,1 @@
-add_x86_benchmark(mmo)
+add_x86_sample(mmo)
