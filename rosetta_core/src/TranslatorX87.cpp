@@ -4128,4 +4128,78 @@ auto translate_fbstp(TranslationResult* a1, IRInstr* a2) -> void {
     free_gpr(*a1, Wd_tmp);
 }
 
+// =============================================================================
+// FLDENV — load 28-byte FPU env from memory.
+//
+// Layout (32-bit protected mode):
+//   +0  control_word (16b, padded to 32)
+//   +4  status_word  (16b)  ← TOP at bits [13:11]
+//   +8  tag_word     (16b)
+//   +12 FIP/FCS/FOP/FDP/FDS — historical pointers; we ignore them
+//
+// Cache state: any deferred top/tag/pop/perm bits target memory we're
+// about to overwrite, so discard them (don't flush).  Re-derive Wd_top
+// from the new SW.TOP for the rest of the run.
+// =============================================================================
+auto translate_fldenv(TranslationResult* a1, IRInstr* a2) -> void {
+    AssemblerBuffer& buf = a1->insn_buf;
+    static constexpr int16_t kX87CtrlWordImm12   = kX87ControlWordOff / 2;  // = 0
+    static constexpr int16_t kX87StatusWordImm12 = kX87StatusWordOff / 2;   // = 1
+    static constexpr int16_t kX87TagWordImm12    = kX87TagWordOff / 2;      // = 2
+    static constexpr int16_t kSrcSwImm12 = 2;  // byte 4 → halfword imm12=2
+    static constexpr int16_t kSrcTwImm12 = 4;  // byte 8 → halfword imm12=4
+
+    int Xbase, Wd_top;
+    const bool standalone = (a1->x87_cache.run_remaining == 0);
+    if (standalone) {
+        // Mini-prologue: skip emit_load_top — the existing SW.TOP is about
+        // to be overwritten.  Wd_top register isn't needed in standalone.
+        Xbase = alloc_gpr(*a1, 0);
+        emit_x87_base(buf, *a1, Xbase);
+        Wd_top = GPR::XZR;
+    } else {
+        auto pair = x87_begin(*a1, buf);
+        Xbase = pair.first;
+        Wd_top = pair.second;
+        // Discard deferred flags — they target SW/TW we're replacing.
+        a1->x87_cache.top_dirty = 0;
+        a1->x87_cache.tag_push_pending = 0;
+        a1->x87_cache.deferred_pop_count = 0;
+        a1->x87_cache.reset_perm();
+    }
+
+    const int Wd_tmp = alloc_gpr(*a1, 2);
+
+    // Source address.
+    const bool addr_is_64 = (a2->operands[0].mem.addr_size == IROperandSize::S64);
+    const int Xaddr = compute_operand_address(*a1, addr_is_64, &a2->operands[0], GPR::XZR);
+
+    // CW: [Xaddr, #0] → [Xbase, #0]
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*LDR=*/1, /*imm12=*/0, Xaddr, Wd_tmp);
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*STR=*/0, kX87CtrlWordImm12, Xbase, Wd_tmp);
+
+    // SW: [Xaddr, #4] → [Xbase, #2].  Re-derive Wd_top from new SW.TOP.
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*LDR=*/1, kSrcSwImm12, Xaddr, Wd_tmp);
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*STR=*/0, kX87StatusWordImm12, Xbase, Wd_tmp);
+    if (!standalone) {
+        // UBFX Wd_top, Wd_tmp, #11, #3
+        emit_bitfield(buf, /*is_64=*/0, /*UBFM=*/2, /*N=*/0, /*immr=*/11, /*imms=*/13,
+                      Wd_tmp, Wd_top);
+    }
+
+    // TW: [Xaddr, #8] → [Xbase, #4]
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*LDR=*/1, kSrcTwImm12, Xaddr, Wd_tmp);
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*STR=*/0, kX87TagWordImm12, Xbase, Wd_tmp);
+
+    free_gpr(*a1, Xaddr);
+
+    if (standalone) {
+        free_gpr(*a1, Wd_tmp);
+        free_gpr(*a1, Xbase);
+    } else {
+        x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp);
+        free_gpr(*a1, Wd_tmp);
+    }
+}
+
 };  // namespace TranslatorX87

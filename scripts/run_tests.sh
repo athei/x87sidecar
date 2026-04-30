@@ -80,6 +80,7 @@ ALL_TESTS=(
     test_fscale
     test_finit
     test_fbstp
+    test_fldenv
 )
 
 RED='\033[0;31m'

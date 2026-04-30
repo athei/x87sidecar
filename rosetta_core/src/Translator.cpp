@@ -203,6 +203,10 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                 TranslatorX87::translate_fbstp(translation_result, cur_instr);
                 break;
 
+            case Opcode::kOpcodeName_fldenv:
+                TranslatorX87::translate_fldenv(translation_result, cur_instr);
+                break;
+
             case Opcode::kOpcodeName_fcom:
             case Opcode::kOpcodeName_fcomp:
             case Opcode::kOpcodeName_fcompp:

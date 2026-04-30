@@ -63,6 +63,7 @@ ALL_BENCHMARKS=(
     bench_fscale
     bench_finit
     bench_fbstp
+    bench_fldenv
 )
 
 RED='\033[0;31m'
