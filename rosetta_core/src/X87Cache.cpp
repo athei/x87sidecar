@@ -84,6 +84,7 @@ static bool is_handled_x87(uint16_t op) {
         case kOpcodeName_fdisi:
         case kOpcodeName_feni:
         case kOpcodeName_fxtract:
+        case kOpcodeName_fscale:
             return true;
         default:
             return false;

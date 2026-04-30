@@ -191,6 +191,10 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                 TranslatorX87::translate_fxtract(translation_result, cur_instr);
                 break;
 
+            case Opcode::kOpcodeName_fscale:
+                TranslatorX87::translate_fscale(translation_result, cur_instr);
+                break;
+
             case Opcode::kOpcodeName_fcom:
             case Opcode::kOpcodeName_fcomp:
             case Opcode::kOpcodeName_fcompp:
