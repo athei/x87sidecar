@@ -1,5 +1,6 @@
 #include "rosetta_core/TranslatorX87.h"
 
+#include <bit>
 #include <utility>
 
 #include "rosetta_config/Config.h"
@@ -3885,6 +3886,246 @@ auto translate_finit(TranslationResult* a1, IRInstr* /*a2*/) -> void {
         x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp);
         free_gpr(*a1, Wd_tmp);
     }
+}
+
+// =============================================================================
+// FBSTP — pop ST(0) and store as 18-digit packed BCD into m80bcd.
+//
+// Memory format (10 bytes, low-to-high):
+//   bytes[0..8] : 18 packed BCD digits (LSD at byte 0 low nibble), 2 per byte
+//   byte[9]     : bit 7 = sign (1 = negative); bits[6:0] reserved zero
+//
+// Indefinite (NaN, ±inf, |rounded| >= 10^18):
+//   { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC0, 0xFF, 0xFF }
+//
+// Codegen:
+//   1.  Compute dest address.
+//   2.  Load ST(0) into Dd_val.
+//   3.  Read CW.RC bits 11:10.
+//   4.  Round per CW.RC: 4-way parallel FRINT[N|P|M|Z] + 3-step FCSEL chain.
+//   5.  Detect indef: |round| >= 1e18 OR round is NaN.
+//   6.  Extract sign from rounded f64 (preserves -0 sign).
+//   7.  FCVTZS to int64 (round is integer-valued, so no further rounding).
+//   8.  Pre-compute |Xint|, sign byte, Xten.
+//   9.  CBNZ Wovf to indef path; else 9-byte BCD divmod (alternating
+//       dividend / quotient registers) + sign byte; B over indef block;
+//       indef block writes the 5-instruction hardcoded pattern.
+//   10. x87_pop ST(0).
+//
+// Branch offsets are hand-counted; constexpr asserts on the layout would
+// be ideal but the body uses a runtime loop so a static_assert isn't easy.
+// =============================================================================
+auto translate_fbstp(TranslationResult* a1, IRInstr* a2) -> void {
+    AssemblerBuffer& buf = a1->insn_buf;
+    static constexpr int16_t kX87CtrlWordImm12 = kX87ControlWordOff / 2;  // = 0
+
+    // Inline encoders for instructions without dedicated helpers.
+    auto emit_udiv64 = [&](int Rd, int Rn, int Rm) {
+        // UDIV Xd, Xn, Xm  (sf=1)  — base 0x9AC00800
+        const uint32_t insn = 0x9AC00800u
+                            | ((uint32_t)(Rm & 0x1F) << 16)
+                            | ((uint32_t)(Rn & 0x1F) << 5)
+                            |  (uint32_t)(Rd & 0x1F);
+        buf.emit(insn);
+    };
+    auto emit_msub64 = [&](int Rd, int Rn, int Rm, int Ra) {
+        // MSUB Xd, Xn, Xm, Xa  (sf=1)  → Xd = Xa - Xn*Xm. Base 0x9B008000.
+        const uint32_t insn = 0x9B008000u
+                            | ((uint32_t)(Rm & 0x1F) << 16)
+                            | ((uint32_t)(Ra & 0x1F) << 10)
+                            | ((uint32_t)(Rn & 0x1F) << 5)
+                            |  (uint32_t)(Rd & 0x1F);
+        buf.emit(insn);
+    };
+    auto emit_csel = [&](int is_64, int Rd, int Rn, int Rm, int cond) {
+        uint32_t insn = 0x1A800000u;
+        insn |= (uint32_t)(is_64 != 0) << 31;
+        insn |= (uint32_t)(Rm   & 0x1F) << 16;
+        insn |= (uint32_t)(cond & 0xF)  << 12;
+        insn |= (uint32_t)(Rn   & 0x1F) << 5;
+        insn |=  (uint32_t)(Rd & 0x1F);
+        buf.emit(insn);
+    };
+
+    auto [Xbase, Wd_top] = x87_begin(*a1, buf);
+    const int Xst_base = x87_get_st_base(*a1);
+
+    int Wd_tmp  = alloc_gpr(*a1, 2);
+    int Wd_tmp2 = alloc_gpr(*a1, 3);
+    const int Dd_val = alloc_free_fpr(*a1);
+
+    // Step 1: dest address.
+    const bool addr_is_64 = (a2->operands[0].mem.addr_size == IROperandSize::S64);
+    const int Xaddr = compute_operand_address(*a1, addr_is_64, &a2->operands[0], GPR::XZR);
+
+    // Step 2: load ST(0).
+    emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Dd_val, Xst_base);
+
+    // Wd_tmp / Wd_tmp2 are dead until x87_pop — free them so the body has
+    // enough scratch GPRs.  Re-allocated at the bottom for x87_pop.
+    free_gpr(*a1, Wd_tmp2);
+    free_gpr(*a1, Wd_tmp);
+
+    // Step 3: CW.RC bits 11:10 → Wd_rc.
+    const int Wd_rc = alloc_free_gpr(*a1);
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*LDR=*/1, kX87CtrlWordImm12, Xbase, Wd_rc);
+    emit_bitfield(buf, /*is_64=*/0, /*UBFM=*/2, /*N=*/0, /*immr=*/10, /*imms=*/11, Wd_rc, Wd_rc);
+
+    // Step 4: 4-way parallel FRINT + FCSEL chain.
+    const int Dn = alloc_free_fpr(*a1);
+    const int Dm = alloc_free_fpr(*a1);
+    const int Dp = alloc_free_fpr(*a1);
+    const int Dz = alloc_free_fpr(*a1);
+
+    emit_fp_dp1(buf, /*type=*/1, /*FRINTN=*/8,  Dn, Dd_val);
+    emit_fp_dp1(buf, /*type=*/1, /*FRINTP=*/9,  Dp, Dd_val);
+    emit_fp_dp1(buf, /*type=*/1, /*FRINTM=*/10, Dm, Dd_val);
+    emit_fp_dp1(buf, /*type=*/1, /*FRINTZ=*/11, Dz, Dd_val);
+
+    // CMP Wd_rc, #1; FCSEL Dn, Dm, Dn, EQ
+    emit_add_imm(buf, /*is_64=*/0, /*sub=*/1, /*S=*/1, /*shift=*/0, /*imm12=*/1, Wd_rc, GPR::XZR);
+    emit_fcsel_f64(buf, Dn, Dm, Dn, /*EQ=*/0);
+    emit_add_imm(buf, /*is_64=*/0, /*sub=*/1, /*S=*/1, /*shift=*/0, /*imm12=*/2, Wd_rc, GPR::XZR);
+    emit_fcsel_f64(buf, Dn, Dp, Dn, /*EQ=*/0);
+    emit_add_imm(buf, /*is_64=*/0, /*sub=*/1, /*S=*/1, /*shift=*/0, /*imm12=*/3, Wd_rc, GPR::XZR);
+    emit_fcsel_f64(buf, Dn, Dz, Dn, /*EQ=*/0);
+    free_fpr(*a1, Dz);
+    free_fpr(*a1, Dp);
+    free_fpr(*a1, Dm);
+    free_gpr(*a1, Wd_rc);
+
+    const int Dd_round = Dn;
+
+    // Step 5: indef detection.
+    const int Dd_thresh = alloc_free_fpr(*a1);
+    const int Dd_abs    = alloc_free_fpr(*a1);
+
+    constexpr uint64_t k1e18_bits = std::bit_cast<uint64_t>(1e18);
+    emit_ldr_literal_f64(buf, Dd_thresh, k1e18_bits);
+    emit_fabs_f64(buf, Dd_abs, Dd_round);
+    emit_fcmp_f64(buf, Dd_abs, Dd_thresh);
+    const int Wovf = alloc_free_gpr(*a1);
+    emit_cset(buf, /*is_64=*/0, /*HS=CS=*/2, Wovf);
+
+    emit_fcmp_f64(buf, Dd_round, Dd_round);
+    const int Wnan = alloc_free_gpr(*a1);
+    emit_cset(buf, /*is_64=*/0, /*VS=*/6, Wnan);
+
+    emit_logical_shifted_reg(buf, /*is_64=*/0, /*ORR=*/1, /*N=*/0, /*LSL=*/0,
+                             /*Rm=*/Wnan, /*shift=*/0, /*Rn=*/Wovf, /*Rd=*/Wovf);
+    free_gpr(*a1, Wnan);
+    free_fpr(*a1, Dd_abs);
+    free_fpr(*a1, Dd_thresh);
+
+    // Step 6: extract sign from Dd_round (preserves sign of rounded -0.0).
+    const int Xbits = alloc_free_gpr(*a1);
+    emit_fmov_d_to_x(buf, Xbits, Dd_round);
+    const int Wsign = alloc_free_gpr(*a1);
+    // UBFX Wsign, Xbits, #63, #1  — i.e. immr=63 imms=63 with N=1 (64-bit)
+    emit_bitfield(buf, /*is_64=*/1, /*UBFM=*/2, /*N=*/1, /*immr=*/63, /*imms=*/63, Xbits, Wsign);
+    free_gpr(*a1, Xbits);
+
+    // Step 7: FCVTZS Xint, Dd_round.  Dd_round is integer-valued so no
+    // further rounding occurs; saturating values are caught by Wovf.
+    const int Xint = alloc_free_gpr(*a1);
+    emit_fcvtzs(buf, /*ftype=*/1, /*is_64bit_int=*/1, Xint, Dd_round);
+    free_fpr(*a1, Dd_round);
+
+    // Step 8: precompute |Xint|, sign byte, Xten.
+    const int Xneg = alloc_free_gpr(*a1);
+    // SUB Xneg, XZR, Xint  (no flags)  → NEG Xneg, Xint
+    emit_add_sub_shifted_reg(buf, /*is_64=*/1, /*sub=*/1, /*S=*/0, /*shift_type=*/0,
+                             /*Rm=*/Xint, /*shift=*/0, /*Rn=*/GPR::XZR, /*Rd=*/Xneg);
+    // CMP Xint, #0  (sets flags via SUBS Rd=XZR, Rn=Xint, imm=0)
+    emit_add_imm(buf, /*is_64=*/1, /*sub=*/1, /*S=*/1, /*shift=*/0, /*imm12=*/0, Xint, GPR::XZR);
+    // CSEL Xint, Xneg, Xint, LT  → Xint = (Xint < 0) ? Xneg : Xint = |Xint|
+    emit_csel(/*is_64=*/1, /*Rd=*/Xint, /*Rn=*/Xneg, /*Rm=*/Xint, /*LT=*/11);
+    free_gpr(*a1, Xneg);
+
+    // Xten = 10
+    const int Xten = alloc_free_gpr(*a1);
+    emit_movn(buf, /*is_64=*/0, /*MOVZ=*/2, /*hw=*/0, /*imm=*/10, Xten);
+
+    // WsignByte = Wsign << 7  via "ORR Rd, WZR, Wsign, LSL #7" (= MOV-shifted)
+    const int WsignByte = alloc_free_gpr(*a1);
+    emit_logical_shifted_reg(buf, /*is_64=*/0, /*ORR=*/1, /*N=*/0, /*LSL=*/0,
+                             /*Rm=*/Wsign, /*shift=*/7, /*Rn=*/GPR::XZR, /*Rd=*/WsignByte);
+    free_gpr(*a1, Wsign);
+
+    // Step 9: branch on Wovf.  Layout (instruction indices relative to CBNZ):
+    //   [0]      CBNZ Wovf, +57       → indef block at +57
+    //   [1..54]  9 × {UDIV, MSUB, UDIV, MSUB, ORR-shifted, STRB} = 54 insns
+    //   [55]     STRB WsignByte, [Xaddr, #9]
+    //   [56]     B +6                 → past indef
+    //   [57..61] 5-insn indef pattern
+    //   [62]     (next; falls through)
+    constexpr int kNonIndefLen = 56;  // 54 digits/bytes + 1 sign STRB + 1 final B
+    constexpr int kIndefLen    = 5;
+    emit_cbz(buf, /*is_64=*/0, /*is_nz=*/1, Wovf, kNonIndefLen + 1);
+    free_gpr(*a1, Wovf);
+
+    // Non-indef block.  Xa = current dividend (gets overwritten each iter
+    // with the next quotient); Xb is scratch for the inner quotient.
+    const int Xa = Xint;
+    const int Xb = alloc_free_gpr(*a1);
+    const int Wlo = alloc_free_gpr(*a1);
+
+    for (int byte_i = 0; byte_i < 9; byte_i++) {
+        // [insn 0,1] Xb = Xa / 10;   Wlo = Xa % 10  (low digit)
+        emit_udiv64(/*Rd=*/Xb,  /*Rn=*/Xa, /*Rm=*/Xten);
+        emit_msub64(/*Rd=*/Wlo, /*Rn=*/Xb, /*Rm=*/Xten, /*Ra=*/Xa);
+
+        // [insn 2,3] Xa = Xb / 10;   Xb = Xb % 10  (high digit; Rd=Ra is OK)
+        emit_udiv64(/*Rd=*/Xa, /*Rn=*/Xb, /*Rm=*/Xten);
+        emit_msub64(/*Rd=*/Xb, /*Rn=*/Xa, /*Rm=*/Xten, /*Ra=*/Xb);
+
+        // [insn 4] ORR Wlo, Wlo, Xb, LSL #4   — pack high digit into upper nibble
+        emit_logical_shifted_reg(buf, /*is_64=*/0, /*ORR=*/1, /*N=*/0, /*LSL=*/0,
+                                 /*Rm=*/Xb, /*shift=*/4, /*Rn=*/Wlo, /*Rd=*/Wlo);
+        // [insn 5] STRB Wlo, [Xaddr, #byte_i]
+        emit_ldr_str_imm(buf, /*size=*/0, /*is_fp=*/0, /*STR=*/0,
+                         /*imm12=*/(int16_t)byte_i, Xaddr, Wlo);
+    }
+
+    free_gpr(*a1, Wlo);
+    free_gpr(*a1, Xb);
+
+    // [insn 54] STRB WsignByte, [Xaddr, #9]
+    emit_ldr_str_imm(buf, /*size=*/0, /*is_fp=*/0, /*STR=*/0,
+                     /*imm12=*/9, Xaddr, WsignByte);
+    free_gpr(*a1, WsignByte);
+
+    // [insn 55] B +6  → skip indef block
+    emit_b(buf, kIndefLen + 1);
+
+    // Indef block: 5 instructions writing { 0,0,0,0,0,0,0,0xC0,0xFF,0xFF }.
+    // [insn 56] STR XZR, [Xaddr]                       — bytes 0..7 = 0
+    emit_ldr_str_imm(buf, /*size=*/3, /*is_fp=*/0, /*STR=*/0, /*imm12=*/0, Xaddr, GPR::XZR);
+    // [insn 57] MOVZ Wt, #0xC000, LSL #16              — Wt = 0xC0000000
+    const int Wt = alloc_free_gpr(*a1);
+    emit_movn(buf, /*is_64=*/0, /*MOVZ=*/2, /*hw=*/1, /*imm=*/0xC000, Wt);
+    // [insn 58] STR Wt, [Xaddr, #4]                    — byte 7 = 0xC0
+    emit_ldr_str_imm(buf, /*size=*/2, /*is_fp=*/0, /*STR=*/0, /*imm12=*/1, Xaddr, Wt);
+    // [insn 59] MOVN Wt, #0                            — Wt = 0xFFFFFFFF
+    emit_movn(buf, /*is_64=*/0, /*MOVN=*/0, /*hw=*/0, /*imm=*/0, Wt);
+    // [insn 60] STRH Wt, [Xaddr, #8]                   — bytes 8,9 = 0xFF, 0xFF
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*STR=*/0, /*imm12=*/4, Xaddr, Wt);
+    free_gpr(*a1, Wt);
+
+    free_gpr(*a1, Xint);
+    free_gpr(*a1, Xten);
+    free_gpr(*a1, Xaddr);
+    free_fpr(*a1, Dd_val);
+
+    // Step 10: pop ST(0).  Re-allocate the lane-2/3 scratches.
+    Wd_tmp  = alloc_gpr(*a1, 2);
+    Wd_tmp2 = alloc_gpr(*a1, 3);
+    (void)Wd_tmp2;  // x87_pop allocates its own secondary internally
+    free_gpr(*a1, Wd_tmp2);
+    x87_pop(buf, *a1, Xbase, Wd_top, Wd_tmp);
+
+    x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp);
+    free_gpr(*a1, Wd_tmp);
 }
 
 };  // namespace TranslatorX87

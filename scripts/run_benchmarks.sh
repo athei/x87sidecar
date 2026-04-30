@@ -62,6 +62,7 @@ ALL_BENCHMARKS=(
     bench_fxtract
     bench_fscale
     bench_finit
+    bench_fbstp
 )
 
 RED='\033[0;31m'
