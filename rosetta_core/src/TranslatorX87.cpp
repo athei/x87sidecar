@@ -4389,17 +4389,23 @@ auto translate_fsin(TranslationResult* a1, IRInstr* /*a2*/) -> void {
 }
 
 // =============================================================================
-// FCOS — replace ST(0) with cos(ST(0)).  Mirrors translate_fsin; only
-// the opcode_tag differs.
+// FCOS — replace ST(0) with cos(ST(0)).
+//
+// Inline ARM64 polynomial sharing the sin coefficient block.  Only the
+// range-reduction offset differs: `n = round(x*inv_pi + 0.5) - 0.5`,
+// versus fsin's `n = round(x*inv_pi)`.  See emit_inline_fcos.
+//
+// Same |x| >= 2^23 caveat as fsin: the 3-step Cody-Waite reduction
+// degrades there.  Native x87 is also broken at |x| >= 2^63.
 // =============================================================================
 auto translate_fcos(TranslationResult* a1, IRInstr* /*a2*/) -> void {
     AssemblerBuffer& buf = a1->insn_buf;
     auto [Xbase, Wd_top] = x87_begin(*a1, buf);
     const int Wd_tmp = alloc_gpr(*a1, 2);
 
-    emit_transcendental_ipc(*a1, buf, Xbase, Wd_top, Wd_tmp,
-                            rosetta_core::kTransFcos, /*num_inputs=*/1);
+    emit_inline_fcos(*a1, buf, Xbase, Wd_top, Wd_tmp);
 
+    // d0 holds cos(input).  Replace ST(0) at its current physical depth.
     const int Xst_base = x87_get_st_base(*a1);
     const int depth_st0 = resolve_depth(*a1, 0);
     emit_store_st(buf, Xbase, Wd_top, depth_st0, Wd_tmp, /*Dd=*/0, Xst_base);

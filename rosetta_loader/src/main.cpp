@@ -1157,6 +1157,7 @@ int main(int argc, char* argv[]) {
         consts.sin_c[5] =  0x1.60e277ae07cecp-33;
         consts.sin_c[6] = -0x1.9e9540300a1p-41;
         consts.range_val = 0x1p23;
+        consts.half = 0.5;
         const uint64_t constsEnd = constsAddr + sizeof(consts);
         if (constsEnd > padStartAddr + padBytes) {
             fprintf(stdout,

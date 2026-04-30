@@ -1,6 +1,7 @@
 #include "rosetta_core/TranslatorX87Transcendental.hpp"
 
 #include <cassert>
+#include <cstddef>
 
 #include "rosetta_core/AssemblerHelpers.hpp"
 #include "rosetta_core/TranscendentalHelper.h"
@@ -15,6 +16,187 @@ namespace {
 // Encoding: 1101_0110_0011_1111_0000_00_Rn_00000  →  0xD63F0000 | (Rn << 5)
 inline uint32_t encode_blr(int Rn) {
     return 0xD63F0000u | (uint32_t(Rn & 0x1F) << 5);
+}
+
+// Per-field offsets into TranscendentalConstants, expressed as the
+// imm12 used by `LDR Dt, [Xconst, #imm12*8]` (so byte-offset/8).  Pinned
+// by static_asserts below; updating the struct without updating these
+// is a build error.
+struct ConstOff {
+    static constexpr int InvPi    = 0;
+    static constexpr int Pi1      = 1;
+    static constexpr int Pi2      = 2;
+    static constexpr int Pi3      = 3;
+    static constexpr int SinC0    = 4;
+    static constexpr int SinC1    = 5;
+    static constexpr int SinC2    = 6;
+    static constexpr int SinC3    = 7;
+    static constexpr int SinC4    = 8;
+    static constexpr int SinC5    = 9;
+    static constexpr int SinC6    = 10;
+    static constexpr int RangeVal = 11;
+    static constexpr int Half     = 12;
+};
+
+static_assert(offsetof(rosetta_core::TranscendentalConstants, inv_pi)    == ConstOff::InvPi    * 8, "ConstOff::InvPi drift");
+static_assert(offsetof(rosetta_core::TranscendentalConstants, pi_1)      == ConstOff::Pi1      * 8, "ConstOff::Pi1 drift");
+static_assert(offsetof(rosetta_core::TranscendentalConstants, pi_2)      == ConstOff::Pi2      * 8, "ConstOff::Pi2 drift");
+static_assert(offsetof(rosetta_core::TranscendentalConstants, pi_3)      == ConstOff::Pi3      * 8, "ConstOff::Pi3 drift");
+static_assert(offsetof(rosetta_core::TranscendentalConstants, sin_c)     == ConstOff::SinC0    * 8, "ConstOff::SinC0 drift");
+static_assert(offsetof(rosetta_core::TranscendentalConstants, range_val) == ConstOff::RangeVal * 8, "ConstOff::RangeVal drift");
+static_assert(offsetof(rosetta_core::TranscendentalConstants, half)      == ConstOff::Half     * 8, "ConstOff::Half drift");
+
+enum class TrigReduceMode { Sin, Cos };
+
+// 3-step Cody-Waite range reduction shared by fsin / fcos / fsincos.
+//
+// Sin mode:  n  = round(x * inv_pi);              qn = (s64) n
+// Cos mode:  n' = round(x * inv_pi + 0.5);        qn = (s64) n'   (pre-offset)
+//            n  = n' - 0.5
+//
+// Both then compute  r = x - n*pi_1 - n*pi_2 - n*pi_3   into Dr.
+//
+// Caller pre-allocates Dn, Xqn, Dr, Dtmp from the scratch pools and
+// retains ownership.  On return Dn is dead; Xqn holds the sign-flip
+// qn; Dr holds the reduced argument.
+void emit_trig_range_reduce(AssemblerBuffer& buf, int Xconst, int Dx,
+                             int Dn, int Xqn, int Dr, int Dtmp,
+                             TrigReduceMode mode) {
+    emit_fldr_imm(buf, /*size=*/3, Dn, Xconst, ConstOff::InvPi);
+
+    if (mode == TrigReduceMode::Sin) {
+        emit_fmul_f64(buf, Dn, Dx, Dn);                          // n = x*inv_pi
+    } else {
+        emit_fldr_imm(buf, 3, Dtmp, Xconst, ConstOff::Half);
+        emit_fmadd_f64(buf, Dn, Dx, Dn, Dtmp);                   // n = x*inv_pi + 0.5
+    }
+
+    emit_frinta_f64(buf, Dn, Dn);                                // n = round(n)
+    emit_fcvtzs(buf, /*ftype=*/1, /*is_64bit_int=*/1, Xqn, Dn);  // qn = (s64) n
+
+    if (mode == TrigReduceMode::Cos) {
+        emit_fldr_imm(buf, 3, Dtmp, Xconst, ConstOff::Half);
+        emit_fsub_f64(buf, Dn, Dn, Dtmp);                        // n -= 0.5 (post-qn)
+    }
+
+    emit_fldr_imm(buf, 3, Dtmp, Xconst, ConstOff::Pi1);
+    emit_fmsub_f64(buf, Dr, Dn, Dtmp, Dx);                       // r  = x - n*pi_1
+    emit_fldr_imm(buf, 3, Dtmp, Xconst, ConstOff::Pi2);
+    emit_fmsub_f64(buf, Dr, Dn, Dtmp, Dr);                       // r -= n*pi_2
+    emit_fldr_imm(buf, 3, Dtmp, Xconst, ConstOff::Pi3);
+    emit_fmsub_f64(buf, Dr, Dn, Dtmp, Dr);                       // r -= n*pi_3
+}
+
+// Order-6 Estrin polynomial in r²: y = r + r³ * P(r²) where the
+// coefficients live at Xconst[ConstOff::SinC0..SinC6].  This is the
+// `sin(r)` approximation from advsimd/sin.c (and reused by cos.c, which
+// lists identical c0..c6 coefficients).
+//
+// Allocates 4 scratch FPRs (Dr2, Dr4, Dp2, Dp3) plus reuses Dy_out
+// across the chain.  Dr (the reduced argument) survives — caller keeps
+// ownership and must free it.
+void emit_sin_poly_estrin(TranslationResult& a1, AssemblerBuffer& buf,
+                           int Dy_out, int Dr, int Xconst) {
+    const int Dr2  = alloc_free_fpr(a1);
+    const int Dr4  = alloc_free_fpr(a1);
+    const int Dp2  = alloc_free_fpr(a1);
+    const int Dp3  = alloc_free_fpr(a1);
+    const int Dtmp = alloc_free_fpr(a1);
+
+    emit_fmul_f64(buf, Dr2, Dr, Dr);                             // r2 = r*r
+    emit_fmul_f64(buf, Dr4, Dr2, Dr2);                           // r4 = r2*r2
+
+    // p01 = c0 + r2 * c1
+    emit_fldr_imm(buf, 3, Dy_out, Xconst, ConstOff::SinC0);
+    emit_fldr_imm(buf, 3, Dtmp,   Xconst, ConstOff::SinC1);
+    emit_fmadd_f64(buf, Dy_out, Dr2, Dtmp, Dy_out);
+
+    // p23 = c2 + r2 * c3
+    emit_fldr_imm(buf, 3, Dp2,  Xconst, ConstOff::SinC2);
+    emit_fldr_imm(buf, 3, Dtmp, Xconst, ConstOff::SinC3);
+    emit_fmadd_f64(buf, Dp2, Dr2, Dtmp, Dp2);
+
+    // p45 = c4 + r2 * c5
+    emit_fldr_imm(buf, 3, Dp3,  Xconst, ConstOff::SinC4);
+    emit_fldr_imm(buf, 3, Dtmp, Xconst, ConstOff::SinC5);
+    emit_fmadd_f64(buf, Dp3, Dr2, Dtmp, Dp3);
+
+    // p46 = p45 + r4 * c6
+    emit_fldr_imm(buf, 3, Dtmp, Xconst, ConstOff::SinC6);
+    emit_fmadd_f64(buf, Dp3, Dr4, Dtmp, Dp3);
+    free_fpr(a1, Dtmp);
+
+    // p26 = p23 + r4 * p46
+    emit_fmadd_f64(buf, Dp2, Dr4, Dp3, Dp2);
+    free_fpr(a1, Dp3);
+
+    // p06 = p01 + r4 * p26   (Dy_out := p06)
+    emit_fmadd_f64(buf, Dy_out, Dr4, Dp2, Dy_out);
+    free_fpr(a1, Dp2);
+    free_fpr(a1, Dr4);
+
+    // r3 = r2 * r  (reuse Dr2's slot)
+    emit_fmul_f64(buf, Dr2, Dr2, Dr);                            // Dr2 := r3
+
+    // y = r + r3 * p06   (Dy_out := y)
+    emit_fmadd_f64(buf, Dy_out, Dr2, Dy_out, Dr);
+    free_fpr(a1, Dr2);
+}
+
+// Final sign flip for sin/cos: result_bits = bits(Dy_in) ^ (Xqn << 63).
+// Result lands in Dd_out.  Allocates and frees one GPR scratch.
+void emit_apply_qn_sign(TranslationResult& a1, AssemblerBuffer& buf,
+                         int Dy_in, int Xqn, int Dd_out) {
+    const int Xy = alloc_free_gpr(a1);
+    emit_fmov_d_to_x(buf, Xy, Dy_in);
+    emit_logical_shifted_reg(buf, /*is_64=*/1, /*EOR=*/2, /*n=*/0,
+                             /*shift_type=LSL*/0, /*Rm=*/Xqn,
+                             /*shift_amount=*/63, /*Rn=*/Xy, /*Rd=*/Xy);
+    emit_fmov_x_to_d(buf, Dd_out, Xy);
+    free_gpr(a1, Xy);
+}
+
+// Shared body of fsin/fcos.  Loads ST(0), runs Cody-Waite reduction in
+// `mode`, evaluates the sin polynomial, applies the qn sign flip, and
+// leaves the f64 result in d0 (matching the IPC convention so the
+// caller's emit_store_st(..., Dd=0, ...) Just Works).
+void emit_inline_sin_or_cos(TranslationResult& a1, AssemblerBuffer& buf,
+                             int Xbase, int Wd_top, int Wd_tmp,
+                             TrigReduceMode mode) {
+    const int Xst_base  = x87_get_st_base(a1);
+    const int depth_st0 = resolve_depth(a1, 0);
+
+    // 1. Load ST(0) into a scratch FPR.
+    const int Dx = alloc_free_fpr(a1);
+    emit_load_st(buf, Xbase, Wd_top, depth_st0, Wd_tmp, Dx, Xst_base);
+
+    // 2. Materialise Xconst = &TranscendentalConstants in the trailing pad.
+    const int Xconst = alloc_free_gpr(a1);
+    const uint64_t consts_addr = rosetta_core::get_transcendental_constants_addr();
+    assert(consts_addr != 0 && "transcendental constants not installed; loader should have set address");
+    emit_movz_movk_abs64(buf, Xconst, consts_addr);
+
+    // 3. Range reduction → Dr, Xqn.
+    const int Dn   = alloc_free_fpr(a1);
+    const int Xqn  = alloc_free_gpr(a1);
+    const int Dr   = alloc_free_fpr(a1);
+    const int Dtmp = alloc_free_fpr(a1);
+    emit_trig_range_reduce(buf, Xconst, Dx, Dn, Xqn, Dr, Dtmp, mode);
+    free_fpr(a1, Dtmp);
+    free_fpr(a1, Dn);
+    free_fpr(a1, Dx);
+
+    // 4. y = r + r³ · P(r²).
+    const int Dy = alloc_free_fpr(a1);
+    emit_sin_poly_estrin(a1, buf, Dy, Dr, Xconst);
+    free_fpr(a1, Dr);
+
+    // 5. Sign flip: y ^= qn << 63;  result lands in d0.
+    emit_apply_qn_sign(a1, buf, Dy, Xqn, /*Dd_out=*/0);
+
+    free_gpr(a1, Xqn);
+    free_gpr(a1, Xconst);
+    free_fpr(a1, Dy);
 }
 
 }  // namespace
@@ -58,113 +240,14 @@ void emit_transcendental_ipc(TranslationResult& a1, AssemblerBuffer& buf,
 
 void emit_inline_fsin(TranslationResult& a1, AssemblerBuffer& buf,
                       int Xbase, int Wd_top, int Wd_tmp) {
-    // Source: ARM-software/optimized-routines math/aarch64/advsimd/sin.c,
-    // scalarised.  Worst-case 3.3 ULP in [-pi/2, pi/2], 2.73 ULP in
-    // [-2^23, 2^23].  Beyond |x| >= 2^23 the 3-step Cody-Waite reduction
-    // loses precision; result is junk.  Accepted (no fallback).
-    //
-    // Layout (imm12 = byte-offset / 8, since LDR D uses scaled offsets):
-    //   [0]=inv_pi  [1..3]=pi_1..3  [4..10]=sin_c[0..6]  [11]=range_val.
+    emit_inline_sin_or_cos(a1, buf, Xbase, Wd_top, Wd_tmp,
+                           TrigReduceMode::Sin);
+}
 
-    const int Xst_base = x87_get_st_base(a1);
-    const int depth_st0 = resolve_depth(a1, 0);
-
-    // 1. Load ST(0) into a scratch FPR.
-    const int Dx = alloc_free_fpr(a1);
-    emit_load_st(buf, Xbase, Wd_top, depth_st0, Wd_tmp, Dx, Xst_base);
-
-    // 2. Materialise Xconst = &TranscendentalConstants in the trailing pad.
-    const int Xconst = alloc_free_gpr(a1);
-    const uint64_t consts_addr = rosetta_core::get_transcendental_constants_addr();
-    assert(consts_addr != 0 && "transcendental constants not installed; loader should have set address");
-    emit_movz_movk_abs64(buf, Xconst, consts_addr);
-
-    // 3. n = round_to_nearest_away(x * inv_pi).
-    const int Dn = alloc_free_fpr(a1);
-    emit_fldr_imm(buf, /*size=64*/3, Dn, Xconst, /*imm12=*/0);  // Dn = inv_pi
-    emit_fmul_f64(buf, Dn, Dx, Dn);                              // Dn = x * inv_pi
-    emit_frinta_f64(buf, Dn, Dn);                                // Dn = round(Dn)
-
-    // 4. qn = (int64) n  — kept until the final sign-flip XOR.
-    const int Xqn = alloc_free_gpr(a1);
-    emit_fcvtzs(buf, /*ftype=*/1, /*is_64bit_int=*/1, Xqn, Dn);
-
-    // 5. r = x - n*pi_1 - n*pi_2 - n*pi_3   (3-step Cody-Waite reduction).
-    const int Dr = alloc_free_fpr(a1);
-    const int Dtmp = alloc_free_fpr(a1);
-    emit_fldr_imm(buf, 3, Dtmp, Xconst, /*pi_1=*/1);
-    emit_fmsub_f64(buf, Dr, Dn, Dtmp, Dx);                       // r = x - n*pi_1
-    emit_fldr_imm(buf, 3, Dtmp, Xconst, /*pi_2=*/2);
-    emit_fmsub_f64(buf, Dr, Dn, Dtmp, Dr);                       // r -= n*pi_2
-    emit_fldr_imm(buf, 3, Dtmp, Xconst, /*pi_3=*/3);
-    emit_fmsub_f64(buf, Dr, Dn, Dtmp, Dr);                       // r -= n*pi_3
-
-    free_fpr(a1, Dn);
-    free_fpr(a1, Dx);
-
-    // 6. r2, r4 (defer r3 until after the polynomial — saves an FPR slot).
-    const int Dr2 = alloc_free_fpr(a1);
-    const int Dr4 = alloc_free_fpr(a1);
-    emit_fmul_f64(buf, Dr2, Dr, Dr);                             // r2 = r*r
-    emit_fmul_f64(buf, Dr4, Dr2, Dr2);                           // r4 = r2*r2
-
-    // 7. Estrin polynomial accumulators p1=p01->p06, p2=p23->p26, p3=p45->p46.
-    const int Dp1 = alloc_free_fpr(a1);
-    const int Dp2 = alloc_free_fpr(a1);
-    const int Dp3 = alloc_free_fpr(a1);
-
-    // p01 = c0 + r2 * c1
-    emit_fldr_imm(buf, 3, Dp1, Xconst, /*c0=*/4);
-    emit_fldr_imm(buf, 3, Dtmp, Xconst, /*c1=*/5);
-    emit_fmadd_f64(buf, Dp1, Dr2, Dtmp, Dp1);
-
-    // p23 = c2 + r2 * c3
-    emit_fldr_imm(buf, 3, Dp2, Xconst, /*c2=*/6);
-    emit_fldr_imm(buf, 3, Dtmp, Xconst, /*c3=*/7);
-    emit_fmadd_f64(buf, Dp2, Dr2, Dtmp, Dp2);
-
-    // p45 = c4 + r2 * c5
-    emit_fldr_imm(buf, 3, Dp3, Xconst, /*c4=*/8);
-    emit_fldr_imm(buf, 3, Dtmp, Xconst, /*c5=*/9);
-    emit_fmadd_f64(buf, Dp3, Dr2, Dtmp, Dp3);
-
-    // p46 = p45 + r4 * c6
-    emit_fldr_imm(buf, 3, Dtmp, Xconst, /*c6=*/10);
-    emit_fmadd_f64(buf, Dp3, Dr4, Dtmp, Dp3);
-    free_fpr(a1, Dtmp);
-
-    // p26 = p23 + r4 * p46
-    emit_fmadd_f64(buf, Dp2, Dr4, Dp3, Dp2);
-    free_fpr(a1, Dp3);
-
-    // p06 = p01 + r4 * p26
-    emit_fmadd_f64(buf, Dp1, Dr4, Dp2, Dp1);
-    free_fpr(a1, Dp2);
-    free_fpr(a1, Dr4);
-
-    // 8. r3 = r2 * r  (reuse Dr2's slot now that r2 is no longer needed).
-    emit_fmul_f64(buf, Dr2, Dr2, Dr);                            // Dr2 := r3
-
-    // 9. y = r + r3 * p06   (Dp1 := y, reusing the p06 slot).
-    emit_fmadd_f64(buf, Dp1, Dr2, Dp1, Dr);
-    free_fpr(a1, Dr2);
-    free_fpr(a1, Dr);
-
-    // 10. Sign flip: y = bit_xor(y, qn << 63)
-    const int Xy = alloc_free_gpr(a1);
-    emit_fmov_d_to_x(buf, Xy, Dp1);
-    emit_logical_shifted_reg(buf, /*is_64=*/1, /*EOR=*/2, /*n=*/0,
-                             /*shift_type=LSL*/0, /*Rm=*/Xqn,
-                             /*shift_amount=*/63, /*Rn=*/Xy, /*Rd=*/Xy);
-
-    // 11. Result lands in d0 — matches the post-IPC convention so
-    //     translate_fsin's emit_store_st(..., Dd=0, ...) just works.
-    emit_fmov_x_to_d(buf, /*Dd=*/0, Xy);
-
-    free_gpr(a1, Xy);
-    free_gpr(a1, Xqn);
-    free_gpr(a1, Xconst);
-    free_fpr(a1, Dp1);
+void emit_inline_fcos(TranslationResult& a1, AssemblerBuffer& buf,
+                      int Xbase, int Wd_top, int Wd_tmp) {
+    emit_inline_sin_or_cos(a1, buf, Xbase, Wd_top, Wd_tmp,
+                           TrigReduceMode::Cos);
 }
 
 }  // namespace TranslatorX87

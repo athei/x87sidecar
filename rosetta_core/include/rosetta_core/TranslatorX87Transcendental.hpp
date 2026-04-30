@@ -30,15 +30,22 @@ void emit_transcendental_ipc(TranslationResult& a1, AssemblerBuffer& buf,
                               int Xbase, int Wd_top, int Wd_tmp,
                               uint8_t opcode_tag, int num_inputs);
 
-// Inline ARM64 polynomial approximation of sin(x), replacing the IPC
-// roundtrip for fsin.  Source: ARM-software/optimized-routines'
-// math/aarch64/advsimd/sin.c (scalarised).  ULP <= 3.3 in [-pi/2,pi/2],
-// 2.73 ULP in [-2^23, 2^23].  For |x| >= 2^23 the 3-step Cody-Waite
-// reduction degrades and the result is junk — accepted for now.
+// Inline ARM64 polynomial approximations of sin(x) / cos(x), replacing
+// the IPC roundtrips for fsin / fcos.  Sources:
+// ARM-software/optimized-routines' math/aarch64/advsimd/{sin,cos}.c
+// scalarised.  ULP <= 3.3 in [-pi/2,pi/2], 2.73 ULP in [-2^23, 2^23].
+// For |x| >= 2^23 the 3-step Cody-Waite reduction degrades and the
+// result is junk — accepted (no fallback).
+//
+// Both share three helpers internally (emit_trig_range_reduce,
+// emit_sin_poly_estrin, emit_apply_qn_sign) — see the .cpp.
 //
 // Pre/post conditions match emit_transcendental_ipc: caller has done
 // x87_begin and owns (Xbase, Wd_top, Wd_tmp).  Result lands in d0.
 void emit_inline_fsin(TranslationResult& a1, AssemblerBuffer& buf,
+                      int Xbase, int Wd_top, int Wd_tmp);
+
+void emit_inline_fcos(TranslationResult& a1, AssemblerBuffer& buf,
                       int Xbase, int Wd_top, int Wd_tmp);
 
 }  // namespace TranslatorX87

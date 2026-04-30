@@ -32,10 +32,14 @@ struct alignas(8) TranscendentalConstants {
     double pi_3;       // π low               0x1.c1cd129024e09p-106
 
     // sin polynomial coefficients (Estrin form, c0..c6 in advsimd/sin.c).
+    // Reused by fcos / fsincos: cos.c lists identical c0..c6.
     double sin_c[7];
 
     // 0x1p23 — Cody-Waite reduction loses precision past this threshold.
     double range_val;
+
+    // 0.5 — used by fcos's range-reduction offset (n = round(x*inv_pi + 0.5) - 0.5).
+    double half;
 };
 
 void set_transcendental_constants_addr(uint64_t addr);
