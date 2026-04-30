@@ -111,4 +111,8 @@ auto translate_fldenv(TranslationResult* a1, IRInstr* a2) -> void;
 
 auto translate_fstenv(TranslationResult* a1, IRInstr* a2) -> void;
 
+auto translate_frstor(TranslationResult* a1, IRInstr* a2) -> void;
+
+auto translate_fsave(TranslationResult* a1, IRInstr* a2) -> void;
+
 };  // namespace TranslatorX87

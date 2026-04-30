@@ -242,19 +242,25 @@ auto translate_fld(TranslationResult* a1, IRInstr* a2) -> void {
         const bool addr_is_64 = (a2->operands[0].mem.addr_size == IROperandSize::S64);
         const int Xaddr = compute_operand_address(*a1, addr_is_64, &a2->operands[0], GPR::XZR);
 
-        const int Xmant    = alloc_free_gpr(*a1);
-        const int Wexp     = alloc_free_gpr(*a1);
-        const int Xsign    = alloc_free_gpr(*a1);
-        const int Wd_carry = alloc_free_gpr(*a1);
-        const int Wexp_max = alloc_free_gpr(*a1);
+        // Load 8-byte mantissa + 2-byte sign+exp word into caller-allocated
+        // scratch, then free Xaddr early so the bit-math stage doesn't
+        // exhaust the 8-slot GPR scratch pool.
+        const int Xmant = alloc_free_gpr(*a1);
+        emit_ldr_imm(buf, /*size=*/3, Xmant, Xaddr, /*imm12=*/0);
+        const int Wexp  = alloc_free_gpr(*a1);
+        // LDRH Wexp, [Xaddr, #8] — imm12 scales by 2 for halfword.
+        emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*LDR=*/1,
+                         /*imm12=*/4, Xaddr, Wexp);
+        free_gpr(*a1, Xaddr);
 
-        emit_f80_to_f64(buf, Xaddr, Xmant, Wexp, Xsign, Wd_carry, Wexp_max, Wd_tmp);
+        const int Xsign  = alloc_free_gpr(*a1);
+        const int Wd_aux = alloc_free_gpr(*a1);
 
-        free_gpr(*a1, Wexp_max);
-        free_gpr(*a1, Wd_carry);
+        emit_f80_to_f64_convert(buf, Xmant, Wexp, Xsign, Wd_aux, Wd_tmp);
+
+        free_gpr(*a1, Wd_aux);
         free_gpr(*a1, Xsign);
         free_gpr(*a1, Wexp);
-        free_gpr(*a1, Xaddr);
 
         // FMOV Dd_val, Xmant — move raw bits to FP register, then store.
         emit_fmov_x_to_d(buf, Dd_val, Xmant);
@@ -4095,6 +4101,139 @@ auto translate_fstenv(TranslationResult* a1, IRInstr* a2) -> void {
 
     x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp);
     free_gpr(*a1, Wd_tmp);
+}
+
+// =============================================================================
+// FRSTOR — load 108-byte FPU state from memory.
+//
+// Layout (32-bit protected mode):
+//   +0..27   28-byte env header (CW@0, SW@4, TW@8, FIP/FCS/FOP/FDP/FDS @12..27)
+//   +28..107 8 ST slots in x86 f80 format, 10 bytes each
+//      ST(0) @ 0x1C, ST(1) @ 0x26, ST(2) @ 0x30, ST(3) @ 0x3A,
+//      ST(4) @ 0x44, ST(5) @ 0x4E, ST(6) @ 0x58, ST(7) @ 0x62
+//
+// ST(i) at logical depth i from the new TOP — i.e., physical (TOP+i)&7.
+//
+// Cache state: any deferred top/tag/pop/perm bits target memory we're
+// about to overwrite, so discard them (don't flush).  Re-derive Wd_top
+// from the new SW.TOP for the rest of the run.  FIP/FCS/FOP/FDP/FDS
+// pointer fields are skipped — we don't model them.
+// =============================================================================
+auto translate_frstor(TranslationResult* a1, IRInstr* a2) -> void {
+    AssemblerBuffer& buf = a1->insn_buf;
+    static constexpr int16_t kX87CtrlWordImm12   = kX87ControlWordOff / 2;  // = 0
+    static constexpr int16_t kX87StatusWordImm12 = kX87StatusWordOff / 2;   // = 1
+    static constexpr int16_t kX87TagWordImm12    = kX87TagWordOff / 2;      // = 2
+    static constexpr int16_t kSrcSwImm12 = 2;  // byte 4 -> halfword imm12=2
+    static constexpr int16_t kSrcTwImm12 = 4;  // byte 8 -> halfword imm12=4
+
+    int Xbase, Wd_top;
+    const bool standalone = (a1->x87_cache.run_remaining == 0);
+    if (standalone) {
+        // Mini-prologue: skip emit_load_top — SW.TOP is about to be
+        // replaced.  Wd_top must still be a real register because the
+        // ST-slot store loop indexes through it.
+        Xbase = alloc_gpr(*a1, 0);
+        emit_x87_base(buf, *a1, Xbase);
+        Wd_top = alloc_gpr(*a1, 1);
+    } else {
+        auto pair = x87_begin(*a1, buf);
+        Xbase = pair.first;
+        Wd_top = pair.second;
+        // Discard deferred flags — they target SW/TW/file we're replacing.
+        a1->x87_cache.top_dirty = 0;
+        a1->x87_cache.tag_push_pending = 0;
+        a1->x87_cache.deferred_pop_count = 0;
+        a1->x87_cache.reset_perm();
+    }
+
+    const int Wd_tmp = alloc_gpr(*a1, 2);
+
+    // Source address.
+    const bool addr_is_64 = (a2->operands[0].mem.addr_size == IROperandSize::S64);
+    const int Xaddr = compute_operand_address(*a1, addr_is_64, &a2->operands[0], GPR::XZR);
+
+    // ── Env header (identical to translate_fldenv body) ──
+    // CW: [Xaddr, #0] -> [Xbase, #0]
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*LDR=*/1, /*imm12=*/0, Xaddr, Wd_tmp);
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*STR=*/0, kX87CtrlWordImm12, Xbase, Wd_tmp);
+
+    // SW: [Xaddr, #4] -> [Xbase, #2].  Re-derive Wd_top from new SW.TOP.
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*LDR=*/1, kSrcSwImm12, Xaddr, Wd_tmp);
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*STR=*/0, kX87StatusWordImm12, Xbase, Wd_tmp);
+    // UBFX Wd_top, Wd_tmp, #11, #3
+    emit_bitfield(buf, /*is_64=*/0, /*UBFM=*/2, /*N=*/0, /*immr=*/11, /*imms=*/13,
+                  Wd_tmp, Wd_top);
+
+    // TW: [Xaddr, #8] -> [Xbase, #4]
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*LDR=*/1, kSrcTwImm12, Xaddr, Wd_tmp);
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*STR=*/0, kX87TagWordImm12, Xbase, Wd_tmp);
+
+    // ── 8 ST slots — unrolled f80 -> f64 conversion ──
+    //
+    // Xaddr is mutated in place: bumped by +0x1C before iter 0, then +10
+    // between iterations.  After iter 7 it points past the last slot;
+    // we don't restore it.
+    //
+    // GPR pressure: Xbase + Wd_top + Wd_tmp + Xst_base(cached only) +
+    // Xaddr + Xmant + Wexp + Xsign + Wd_aux = 8 (standalone) or 9 (cached).
+    // The 8-slot scratch pool just fits standalone.  In cached mode we
+    // free Xst_base for the duration of the loop and re-derive it at the
+    // end — emit_store_st falls back to its uncached path (3 extra insns
+    // per slot, which is fine for this correctness-only opcode).
+    int Xst_base = x87_get_st_base(*a1);  // -1 in standalone
+    const bool cached = (Xst_base >= 0);
+    if (cached) {
+        free_gpr(*a1, Xst_base);
+        Xst_base = -1;  // force uncached emit_store_st in the loop
+    }
+
+    const int Xmant  = alloc_free_gpr(*a1);
+    const int Wexp   = alloc_free_gpr(*a1);
+    const int Xsign  = alloc_free_gpr(*a1);
+    const int Wd_aux = alloc_free_gpr(*a1);
+    const int Dd_val = alloc_free_fpr(*a1);
+
+    for (int i = 0; i < 8; ++i) {
+        const int delta = (i == 0) ? 0x1C : 10;
+        // Bump Xaddr to the start of the current slot.
+        emit_add_imm(buf, /*is_64=*/1, /*is_sub=*/0, /*set_flags=*/0,
+                     /*shift=*/0, delta, Xaddr, Xaddr);
+        // LDR Xmant, [Xaddr, #0] — 8-byte mantissa.
+        emit_ldr_imm(buf, /*size=*/3, Xmant, Xaddr, /*imm12=*/0);
+        // LDRH Wexp, [Xaddr, #8] — 2-byte sign+exp word.
+        emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*LDR=*/1,
+                         /*imm12=*/4, Xaddr, Wexp);
+        emit_f80_to_f64_convert(buf, Xmant, Wexp, Xsign, Wd_aux, Wd_tmp);
+        emit_fmov_x_to_d(buf, Dd_val, Xmant);
+        // Store into ST(i) (logical depth i from new TOP).
+        emit_store_st(buf, Xbase, Wd_top, /*stack_depth=*/i, Wd_tmp, Dd_val, Xst_base);
+    }
+
+    free_fpr(*a1, Dd_val);
+    free_gpr(*a1, Wd_aux);
+    free_gpr(*a1, Xsign);
+    free_gpr(*a1, Wexp);
+    free_gpr(*a1, Xmant);
+    free_gpr(*a1, Xaddr);
+
+    if (cached) {
+        // Re-derive Xst_base = Xbase + kX87RegFileOff and put it back in
+        // the cached slot (slot 6 = x28 by convention).
+        const int Xst_base_new = alloc_gpr(*a1, 6);
+        emit_add_imm(buf, /*is_64=*/1, /*is_sub=*/0, /*set_flags=*/0,
+                     /*shift=*/0, kX87RegFileOff, Xbase, Xst_base_new);
+        a1->x87_cache.st_base_gpr = static_cast<int8_t>(Xst_base_new);
+    }
+
+    if (standalone) {
+        free_gpr(*a1, Wd_tmp);
+        free_gpr(*a1, Wd_top);
+        free_gpr(*a1, Xbase);
+    } else {
+        x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp);
+        free_gpr(*a1, Wd_tmp);
+    }
 }
 
 };  // namespace TranslatorX87

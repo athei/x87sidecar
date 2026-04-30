@@ -21,21 +21,29 @@ namespace TranslatorX87 {
 //     synthesis).
 // -----------------------------------------------------------------------------
 
-// Reads 10 bytes of x87 f80 at [Xaddr_slot, #0..#9] and converts to IEEE 754
-// double raw bits in Xmant_out.  Caller does FMOV Dd, Xmant_out afterwards.
+// Convert pre-loaded f80 fields to IEEE 754 double raw bits in Xmant_inout.
+// Caller does FMOV Dd, Xmant_inout afterwards.
 //
-// Branchless (CSEL chain).  All scratch is caller-allocated and must be
-// distinct from each other and from Xaddr_slot.  The helper does not free
-// or reallocate any register; on exit Xmant_out holds the f64 raw bits and
-// the other scratch GPRs are clobbered.
-void emit_f80_to_f64(AssemblerBuffer& buf,
-                     int Xaddr_slot,
-                     int Xmant_out,
-                     int Wexp,
-                     int Xsign,
-                     int Wcarry,
-                     int Wexp_max,
-                     int Wd_tmp);
+// Pre-conditions (caller emits the two loads):
+//   - LDR Xmant_inout, [Xaddr_slot, #0]   ; 8-byte mantissa
+//   - LDRH Wexp, [Xaddr_slot, #8]         ; 2-byte sign+exp word
+// Then the caller is free to release Xaddr_slot and alloc Xsign / Wd_aux
+// before invoking this helper.  This sequencing matches the original
+// inline path in translate_fld m80fp and keeps peak alloc_free GPR count
+// under the 8-slot scratch pool.
+//
+// Branchless (CSEL chain).  All scratch is caller-allocated.
+//
+// Wd_aux plays two roles sequentially: first it captures the rounding-carry
+// flag, then (after the carry is consumed) it holds the 0x7FFF/0x7FF
+// constants for the inf/nan exponent override.  Caller passes one register
+// for both roles since their lifetimes don't overlap.
+void emit_f80_to_f64_convert(AssemblerBuffer& buf,
+                             int Xmant_inout,
+                             int Wexp,
+                             int Xsign,
+                             int Wd_aux,
+                             int Wd_tmp);
 
 // Writes 10 bytes of x87 f80 at [Xaddr_slot, #0..#9] from the IEEE 754 double
 // in Dd_src.  Uses 3 forward branches (CBZ + B.EQ + 2x B) with PC-relative
