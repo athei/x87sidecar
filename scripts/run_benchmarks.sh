@@ -66,6 +66,7 @@ ALL_BENCHMARKS=(
     bench_f2xm1
     bench_fpatan
     bench_fsincos
+    bench_fptan
 )
 
 RED='\033[0;31m'

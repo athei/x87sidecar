@@ -4410,6 +4410,37 @@ auto translate_fcos(TranslationResult* a1, IRInstr* /*a2*/) -> void {
 }
 
 // =============================================================================
+// FPTAN — replace ST(0) with tan(ST(0)); push 1.0.
+//
+// JIT: load ST(0)→d0, IPC returns d0=tan, store d0 at depth=0 (replace
+// ST(0)), then x87_push and store FMOV-immediate 1.0 at new ST(0).
+// =============================================================================
+auto translate_fptan(TranslationResult* a1, IRInstr* /*a2*/) -> void {
+    AssemblerBuffer& buf = a1->insn_buf;
+    auto [Xbase, Wd_top] = x87_begin(*a1, buf);
+    const int Wd_tmp = alloc_gpr(*a1, 2);
+    const int Wd_tmp2 = alloc_free_gpr(*a1);
+
+    emit_transcendental_ipc(*a1, buf, Xbase, Wd_top, Wd_tmp,
+                            rosetta_core::kTransFptan, /*num_inputs=*/1);
+
+    const int Xst_base = x87_get_st_base(*a1);
+    const int depth_st0 = resolve_depth(*a1, 0);
+    // Replace old ST(0) with tan (d0).
+    emit_store_st(buf, Xbase, Wd_top, depth_st0, Wd_tmp, /*Dd=*/0, Xst_base);
+    // Push and write 1.0 at new ST(0).
+    x87_push(buf, *a1, Xbase, Wd_top, Wd_tmp, Wd_tmp2);
+    const int Dd_one = alloc_free_fpr(*a1);
+    emit_fmov_d_one(buf, Dd_one);
+    emit_store_st(buf, Xbase, Wd_top, /*depth=*/0, Wd_tmp, Dd_one, Xst_base);
+    free_fpr(*a1, Dd_one);
+
+    free_gpr(*a1, Wd_tmp2);
+    x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp);
+    free_gpr(*a1, Wd_tmp);
+}
+
+// =============================================================================
 // FSINCOS — replace ST(0) with sin(ST(0)); push cos(ST(0)).
 //
 // JIT: load ST(0)→d0, IPC computes sin/cos returning (d0=sin, d1=cos).
