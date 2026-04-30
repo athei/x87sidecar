@@ -1137,6 +1137,60 @@ int main(int argc, char* argv[]) {
         VERBOSE_LOG("M2: transcendental helper installed at 0x%llx (%zu B)\n",
                     transHelperAddr, transBlob.size());
 
+        // ── Install transcendental polynomial constants ─────────────────────
+        // 8 B aligned, immediately after the IPC trampoline.  JIT-emitted
+        // inline code (translate_fsin etc.) loads coefficients via
+        // `MOVZ/MOVK Xconst, addr; LDR Dt, [Xconst, #off]`.  Source values:
+        // ARM-software/optimized-routines math/aarch64/advsimd/sin.c.
+        const uint64_t constsAddr =
+            (transHelperEnd + 0x7) & ~uint64_t(0x7);
+        rosetta_core::TranscendentalConstants consts = {};
+        consts.inv_pi = 0x1.45f306dc9c883p-2;
+        consts.pi_1   = 0x1.921fb54442d18p+1;
+        consts.pi_2   = 0x1.1a62633145c06p-53;
+        consts.pi_3   = 0x1.c1cd129024e09p-106;
+        consts.sin_c[0] = -0x1.555555555547bp-3;
+        consts.sin_c[1] =  0x1.1111111108a4dp-7;
+        consts.sin_c[2] = -0x1.a01a019936f27p-13;
+        consts.sin_c[3] =  0x1.71de37a97d93ep-19;
+        consts.sin_c[4] = -0x1.ae633919987c6p-26;
+        consts.sin_c[5] =  0x1.60e277ae07cecp-33;
+        consts.sin_c[6] = -0x1.9e9540300a1p-41;
+        consts.range_val = 0x1p23;
+        const uint64_t constsEnd = constsAddr + sizeof(consts);
+        if (constsEnd > padStartAddr + padBytes) {
+            fprintf(stdout,
+                    "M2: transcendental constants (%zu B) don't fit in "
+                    "trailing padding (free %llu B after trampoline at 0x%llx)\n",
+                    sizeof(consts),
+                    padStartAddr + padBytes - transHelperEnd, transHelperEnd);
+            return 1;
+        }
+        if (!dbg.adjustMemoryProtection(
+                constsAddr, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY,
+                sizeof(consts))) {
+            fprintf(stdout,
+                    "M2: failed to make constants padding writable\n");
+            return 1;
+        }
+        if (!dbg.writeMemory(constsAddr, &consts, sizeof(consts))) {
+            fprintf(stdout, "M2: failed to write transcendental constants\n");
+            return 1;
+        }
+        // Restore RX, not just R: the trailing pad is page-granular RX and
+        // the constants live on the same 4 KB page as the IPC trampoline
+        // tail.  Stripping EXECUTE here would kill the trampoline.
+        if (!dbg.adjustMemoryProtection(constsAddr,
+                                        VM_PROT_READ | VM_PROT_EXECUTE,
+                                        sizeof(consts))) {
+            fprintf(stdout,
+                    "M2: failed to restore constants padding protection\n");
+            return 1;
+        }
+        rosetta_core::set_transcendental_constants_addr(constsAddr);
+        VERBOSE_LOG("M2: transcendental constants installed at 0x%llx (%zu B)\n",
+                    constsAddr, sizeof(consts));
+
         // ── DIAGNOSTIC (temporary): replace ENTRY with `mov x0, #0xCAFE; ret`
         // padded with nops so we can tell whether translate_insn is even
         // being called after our patch lands. If test_arith behaves

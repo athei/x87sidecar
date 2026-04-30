@@ -52,6 +52,11 @@ auto emit_bitfield(AssemblerBuffer& buf, int is_64bit, int opc, int N, int8_t im
 // hw:  0..3, effective shift = hw * 16
 auto emit_movn(AssemblerBuffer& buf, int is_64bit, int opc, int hw, uint16_t imm16, int Rd) -> void;
 
+// MOVZ + 3×MOVK chain materializing a full 64-bit absolute address into Rd
+// (4 instructions, unconditional).  Used wherever JIT code needs to load
+// a process-absolute address — trampoline targets, constants tables, etc.
+auto emit_movz_movk_abs64(AssemblerBuffer& buf, int Rd, uint64_t addr) -> void;
+
 // MOV register — emits ADD (SP case) or ORR shifted-reg (general case)
 auto emit_mov_reg(AssemblerBuffer& buf, int is_64bit, int Rd, int Rn) -> void;
 
@@ -153,6 +158,10 @@ auto emit_fmov_f64(AssemblerBuffer& buf, int Dd, int Dn) -> void;
 auto emit_fabs_f64(AssemblerBuffer& buf, int Dd, int Dn) -> void;
 auto emit_fneg_f64(AssemblerBuffer& buf, int Dd, int Dn) -> void;
 auto emit_fsqrt_f64(AssemblerBuffer& buf, int Dd, int Dn) -> void;
+
+// FRINTA Dd, Dn — round to integral, ties-away-from-zero (f64).
+// Matches `vrndaq_f64` used by ARM optimized-routines' sin/cos.
+auto emit_frinta_f64(AssemblerBuffer& buf, int Dd, int Dn) -> void;
 
 // FCMP scalar — sets NZCV, no result register
 // type: 0=f32  1=f64

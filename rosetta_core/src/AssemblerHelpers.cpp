@@ -169,6 +169,23 @@ auto emit_movn(AssemblerBuffer& buf, int is_64bit, int opc, int hw, uint16_t imm
     buf.emit(insn);
 }
 
+auto emit_movz_movk_abs64(AssemblerBuffer& buf, int Rd, uint64_t addr) -> void {
+    // MOVZ Rd, #lo16; MOVK Rd, #mid16, lsl 16; MOVK Rd, #hi16, lsl 32;
+    // MOVK Rd, #top16, lsl 48 — 4 instructions, materialises the full
+    // 64-bit absolute address.  All four are emitted unconditionally so
+    // the code size is uniform regardless of address (the top MOVK is
+    // a no-op-ish movk #0 on macOS userland, but emitting it keeps every
+    // call site the same number of bytes).
+    emit_movn(buf, /*is_64=*/1, /*opc=MOVZ*/2, /*hw=*/0,
+              static_cast<uint16_t>(addr & 0xFFFF), Rd);
+    emit_movn(buf, /*is_64=*/1, /*opc=MOVK*/3, /*hw=*/1,
+              static_cast<uint16_t>((addr >> 16) & 0xFFFF), Rd);
+    emit_movn(buf, /*is_64=*/1, /*opc=MOVK*/3, /*hw=*/2,
+              static_cast<uint16_t>((addr >> 32) & 0xFFFF), Rd);
+    emit_movn(buf, /*is_64=*/1, /*opc=MOVK*/3, /*hw=*/3,
+              static_cast<uint16_t>((addr >> 48) & 0xFFFF), Rd);
+}
+
 auto emit_mov_reg(AssemblerBuffer& buf, int is_64bit, int Rd, int Rn) -> void {
     // SP case: MOV Xd, SP  →  ADD Xd, SP, #0
     if (Rd == GPR::SP || Rn == GPR::SP)
@@ -389,6 +406,10 @@ auto emit_fneg_f64(AssemblerBuffer& buf, int Dd, int Dn) -> void {
 }
 auto emit_fsqrt_f64(AssemblerBuffer& buf, int Dd, int Dn) -> void {
     emit_fp_dp1(buf, /*type=*/1, /*FSQRT=*/3, Dd, Dn);
+}
+auto emit_frinta_f64(AssemblerBuffer& buf, int Dd, int Dn) -> void {
+    // FRINTA: round to integral, ties-away-from-zero.  DP1 opcode 0b001100.
+    emit_fp_dp1(buf, /*type=*/1, /*FRINTA=*/0xC, Dd, Dn);
 }
 
 auto emit_fp_cmp(AssemblerBuffer& buf, int type, int Rn, int Rm) -> void {

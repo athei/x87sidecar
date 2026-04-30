@@ -4359,26 +4359,25 @@ auto translate_fsave(TranslationResult* a1, IRInstr* a2) -> void {
 // =============================================================================
 // FSIN — replace ST(0) with sin(ST(0)).
 //
-// Routes through the parent-side IPC trampoline → sidecar → libm
-// std::sin via TranscendentalHelper.  See TranslatorX87Transcendental.cpp
-// for the BLR emit shape.
+// Inline ARM64 polynomial approximation, no IPC.  Source: ARM-software/
+// optimized-routines math/aarch64/advsimd/sin.c (scalarised).  Worst-case
+// error ~3.3 ULP in [-pi/2, pi/2], 2.73 ULP in [-2^23, 2^23].
 //
 // x87 semantics:
 //   if |ST(0)| < 2^63: ST(0) = sin(ST(0)); C2 = 0
 //   else:              ST(0) unchanged;     C2 = 1
 //   tag word: ST(0) tag updated to Valid (or Special for ±Inf/NaN)
 //
-// Simplification: we always compute via libm regardless of magnitude,
-// and don't update C0..C3 in status_word.  Sidecar logs a one-shot
-// warning on first |ST(0)| >= 2^63.  See plan §"Known simplifications".
+// Simplifications: (a) we don't update C0..C3 in status_word; (b) for
+// |ST(0)| >= 2^23 the 3-step Cody-Waite reduction loses precision and
+// the result is junk — accepted, no fallback.
 // =============================================================================
 auto translate_fsin(TranslationResult* a1, IRInstr* /*a2*/) -> void {
     AssemblerBuffer& buf = a1->insn_buf;
     auto [Xbase, Wd_top] = x87_begin(*a1, buf);
     const int Wd_tmp = alloc_gpr(*a1, 2);
 
-    emit_transcendental_ipc(*a1, buf, Xbase, Wd_top, Wd_tmp,
-                            rosetta_core::kTransFsin, /*num_inputs=*/1);
+    emit_inline_fsin(*a1, buf, Xbase, Wd_top, Wd_tmp);
 
     // d0 holds sin(input).  Replace ST(0) at its current physical depth.
     const int Xst_base = x87_get_st_base(*a1);
