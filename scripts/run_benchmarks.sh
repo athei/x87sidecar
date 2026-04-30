@@ -169,9 +169,9 @@ for bench in "${ALL_BENCHMARKS[@]}"; do
             vs_nat_int=0; vs_nat_frac=0; vs_nat_pct=0
         fi
 
-        # Color: green > 1.10x, white 0.90–1.10x, red < 0.90x
-        if   [[ $vs_nat_pct -ge 110 ]]; then spd_color="$GREEN"
-        elif [[ $vs_nat_pct -ge 90  ]]; then spd_color="$WHITE"
+        # Color: green >= 2.00x, white 1.00–2.00x, red < 1.00x (regression vs native)
+        if   [[ $vs_nat_pct -ge 200 ]]; then spd_color="$GREEN"
+        elif [[ $vs_nat_pct -ge 100 ]]; then spd_color="$WHITE"
         else                                  spd_color="$RED"
         fi
 
