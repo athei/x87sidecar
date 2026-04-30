@@ -382,8 +382,13 @@ StubBlobs build(uint64_t handlerAddr, uint64_t translateInsnAddr,
     //        the message buffer's leftover msgh_id which is whatever).
     //   The buffer at sp+64..sp+192 holds the reply: header at +64..+88,
     //                                                body at +88..end.
-    //   msgh_id (sp+84) tells us what to do: 0 = None (fall through),
+    //   msgh_id (sp+84) tells us what to do: 0 = None (abort parent),
     //                                        1 = Some, body[0] = result.
+    // Note: NONE no longer falls through to STASH for a stock translation.
+    // Composing our emit with stock's emit on the same x87 block produces
+    // invalid code (deferred-state ABI mismatch on x22:w23, f80↔f64), so
+    // we BRK the parent instead. STASH/STASH_JUMP remain reachable from
+    // the FILTER prologue's non-x87 abs-jump.
     //
     // Read msgh_id into w9.
     emit(ipc, ldr_w_offset(9, SP, 84));         // w9 = msgh_id
@@ -402,11 +407,12 @@ StubBlobs build(uint64_t handlerAddr, uint64_t translateInsnAddr,
     emit(ipc, 0xD65F03C0u);                     // ret  (= BR x30)
 
     // ── NONE PATH ───────────────────────────────────────────────────────────
-    // Restore caller regs then fall through to STASH below.
-    emit(ipc, ldp_offset(16, LR, SP, 48));
-    emit(ipc, ldp_offset(4, 5, SP, 32));
-    emit(ipc, ldp_offset(2, 3, SP, 16));
-    emit(ipc, ldp_postindex(0, 1, SP, FRAME_SIZE));
+    // Sidecar declined an x87 opcode. Composition with stock would produce
+    // invalid code; abort the parent here. The CrashReporter log will pin
+    // PC inside libRosettaRuntime's __TEXT (our installed handler) with a
+    // BRK imm16 of 0xCD64 — a recognisable rosetta-jit fallback marker.
+    // Caller regs are intentionally not restored: the parent is dying.
+    emit(ipc, brk_imm(0xCD64));
 
     // ──── FILTER prologue ───────────────────────────────────────────────────
     // Bypass the IPC entirely for non-x87 opcodes — translate_insn fires for

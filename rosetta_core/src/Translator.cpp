@@ -363,27 +363,17 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                 TranslatorX87::translate_fprem1(translation_result, cur_instr);
                 break;
 
-            case Opcode::kOpcodeName_fxsave:
-            case Opcode::kOpcodeName_fxrstor:
-                // fxsave/fxrstor touch x87 state (env header + 8 ST slots
-                // overlap fsave's 108-byte layout) plus XMM0..15 + MXCSR.
-                // We want to inline them eventually, but XMM↔V mapping and
-                // NEON 128 b emit don't yet exist in this codebase. Print
-                // a one-line diagnostic so we notice if a workload starts
-                // using them, then fall through to stock.
-                fprintf(stdout,
-                        "[rosettax87] %s not yet handled (opcode 0x%x); "
-                        "deferring to stock\n",
-                        kOpcodeNames[opcode], static_cast<unsigned>(opcode));
-                [[fallthrough]];
             default:
-                // Hand translation back to stock for opcodes we don't
-                // support — currently just the transcendentals, which are
-                // already broken at the our-emit/stock-emit boundary
-                // (ABI mismatch on x22:w23, f80↔f64 representation gap).
-                // No flush of deferred state is emitted: stock would
-                // misread it, and the transcendentals are slated to
-                // route through sidecar IPC instead.
+                // Returning nullopt means "I have no handler for this
+                // opcode." In the runtime/sidecar flow, the stub's FILTER
+                // prologue routes only x87 opcodes to us, so reaching here
+                // means an unhandled x87 op — the sidecar logs and the
+                // stub's NONE-reply path BRKs the parent (composition with
+                // stock's emit on partial deferred state produces invalid
+                // code). In the offline AOT flow (CustomTranslationHook),
+                // every non-x87 op also reaches here; that path falls
+                // back to stock translate_insn unchanged. We stay silent
+                // so the AOT path isn't spammed.
                 translation_result->free_gpr_mask = kGprScratchMask;
                 translation_result->free_fpr_mask =
                     translation_result->_unoccupied_temporary_fprs_for_xmm_scalars;

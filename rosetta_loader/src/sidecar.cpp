@@ -14,6 +14,7 @@
 
 #include "rosetta_core/Fixup.h"
 #include "rosetta_core/IRInstr.h"
+#include "rosetta_core/Opcode.h"
 #include "rosetta_core/ThreadContextOffsets.h"
 #include "rosetta_core/TranscendentalHelper.h"
 #include "rosetta_core/TranslationResult.h"
@@ -447,6 +448,20 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask,
     if (result.has_value()) {
         out.reply_some = true;
         out.value      = result.value();
+    } else {
+        // The stub's FILTER prologue routes only x87 opcodes to us, so
+        // reaching nullopt means an unhandled x87 op. Composition with
+        // stock's emit on partial deferred state produces invalid code,
+        // so the stub's NONE-reply path BRKs the parent. Surface the
+        // offending opcode so we know what to handle next.
+        const uint16_t op = localIR[req.insn_idx].opcode;
+        const char* name = (op < kOpcodeNames.size()) ? kOpcodeNames[op] : "?";
+        fprintf(stdout,
+                "[rosettax87] FATAL: unhandled x87 opcode %s (0x%x) at "
+                "insn_idx=%lld; aborting parent\n",
+                name, static_cast<unsigned>(op),
+                static_cast<long long>(req.insn_idx));
+        fflush(stdout);
     }
     return out;
 }
