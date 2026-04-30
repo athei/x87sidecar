@@ -4510,6 +4510,33 @@ auto translate_fyl2xp1(TranslationResult* a1, IRInstr* /*a2*/) -> void {
 }
 
 // =============================================================================
+// FPREM — ST(0) := fmod(ST(0), ST(1)).  No pop.
+//
+// x87 spec is iterative: each fprem reduces ST(0) by k*ST(1) for some
+// integer k <= 64; sets C2=1 if reduction is incomplete and code must
+// loop until C2=0.  We always complete in one call (libm fmod gives
+// the full remainder directly), so a future code that loops on C2 will
+// see one iteration succeed where stock would've done many.  Sidecar
+// logs a one-shot warning on first call (C2 forced to 0; C0/C1/C3
+// quotient bits zeroed).  See plan §"Known simplifications".
+// =============================================================================
+auto translate_fprem(TranslationResult* a1, IRInstr* /*a2*/) -> void {
+    AssemblerBuffer& buf = a1->insn_buf;
+    auto [Xbase, Wd_top] = x87_begin(*a1, buf);
+    const int Wd_tmp = alloc_gpr(*a1, 2);
+
+    emit_transcendental_ipc(*a1, buf, Xbase, Wd_top, Wd_tmp,
+                            rosetta_core::kTransFprem, /*num_inputs=*/2);
+
+    const int Xst_base = x87_get_st_base(*a1);
+    const int depth_st0 = resolve_depth(*a1, 0);
+    emit_store_st(buf, Xbase, Wd_top, depth_st0, Wd_tmp, /*Dd=*/0, Xst_base);
+
+    x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp);
+    free_gpr(*a1, Wd_tmp);
+}
+
+// =============================================================================
 // F2XM1 — replace ST(0) with 2^ST(0) - 1.  x87 spec says input must be
 // |ST(0)| <= 1; outside that range result is undefined.  We always
 // compute via std::exp2(in) - 1.0 in the sidecar regardless of input.

@@ -85,6 +85,7 @@ ALL_TESTS=(
     test_fptan
     test_fyl2x
     test_fyl2xp1
+    test_fprem
 )
 
 RED='\033[0;31m'
