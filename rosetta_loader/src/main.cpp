@@ -9,6 +9,7 @@
 #include <sys/wait.h>
 #include <sched.h>
 
+#include <cerrno>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -25,7 +26,7 @@
 
 const char* logsEnabled = nullptr;
 
-#define LOG(fmt, ...)                   \
+#define VERBOSE_LOG(fmt, ...)                   \
     do {                                \
         if (logsEnabled) {              \
             printf(fmt, ##__VA_ARGS__); \
@@ -56,21 +57,21 @@ private:
         while (true) {
             int status;
             if (waitpid(childPid_, &status, 0) == -1) {
-                perror("waitpid");
+                fprintf(stdout, "waitpid: %s\n", strerror(errno));
                 return false;
             }
             if (!WIFSTOPPED(status)) {
                 return false;
             }
             int sig = WSTOPSIG(status);
-            LOG("Process stopped signal=%d\n", sig);
+            VERBOSE_LOG("Process stopped signal=%d\n", sig);
             if (expectedSignal == 0 || sig == expectedSignal) {
                 return true;
             }
             // Spurious signal; suppress it and continue
-            LOG("Suppressing unexpected signal %d (waiting for %d)\n", sig, expectedSignal);
+            VERBOSE_LOG("Suppressing unexpected signal %d (waiting for %d)\n", sig, expectedSignal);
             if (ptrace(PT_CONTINUE, childPid_, (caddr_t)1, 0) < 0) {
-                perror("ptrace(PT_CONTINUE suppress)");
+                fprintf(stdout, "ptrace(PT_CONTINUE suppress): %s\n", strerror(errno));
                 return false;
             }
         }
@@ -87,70 +88,70 @@ public:
 
     bool attach(pid_t pid) {
         childPid_ = pid;
-        LOG("Attempting to attach to %d\n", childPid_);
+        VERBOSE_LOG("Attempting to attach to %d\n", childPid_);
 
         // Attach to the target via PT_ATTACH (sends SIGSTOP).
         if (ptrace(PT_ATTACH, childPid_, nullptr, 0) == -1) {
-            perror("ptrace(PT_ATTACH)");
+            fprintf(stdout, "ptrace(PT_ATTACH): %s\n", strerror(errno));
             return false;
         }
         if (!waitForStopped()) {
             return false;
         }
-        LOG("Attached to %d (SIGSTOP)\n", childPid_);
+        VERBOSE_LOG("Attached to %d (SIGSTOP)\n", childPid_);
         return true;
     }
 
     // Continue the traced process and wait for it to stop at execv (SIGTRAP).
     bool waitForExecStop() {
         if (ptrace(PT_CONTINUE, childPid_, (caddr_t)1, 0) < 0) {
-            perror("ptrace(PT_CONTINUE for exec)");
+            fprintf(stdout, "ptrace(PT_CONTINUE for exec): %s\n", strerror(errno));
             return false;
         }
         if (!waitForStopped(SIGTRAP)) {
             return false;
         }
-        LOG("Program stopped due to execv\n");
+        VERBOSE_LOG("Program stopped due to execv\n");
 
         if (task_for_pid(mach_task_self(), childPid_, &taskPort_) != KERN_SUCCESS) {
-            fprintf(stderr, "Failed to get task port for pid %d\n", childPid_);
+            fprintf(stdout, "Failed to get task port for pid %d\n", childPid_);
             return false;
         }
-        LOG("Started debugging process %d using port %d\n", childPid_, taskPort_);
+        VERBOSE_LOG("Started debugging process %d using port %d\n", childPid_, taskPort_);
         return true;
     }
 
     bool continueExecution() {
         if (ptrace(PT_CONTINUE, childPid_, (caddr_t)1, 0) < 0) {
-            perror("ptrace(PT_CONTINUE)");
+            fprintf(stdout, "ptrace(PT_CONTINUE): %s\n", strerror(errno));
             return false;
         }
 
-        LOG("continueExecution...\n");
+        VERBOSE_LOG("continueExecution...\n");
 
         return waitForStopped(SIGTRAP);
     }
 
     bool detach() {
         if (ptrace(PT_DETACH, childPid_, (caddr_t)1, 0) < 0) {
-            perror("ptrace(PT_DETACH)");
+            fprintf(stdout, "ptrace(PT_DETACH): %s\n", strerror(errno));
             return false;
         }
-        LOG("Debugger detached.\n");
+        VERBOSE_LOG("Debugger detached.\n");
         return true;
     }
 
     bool setBreakpoint(uint64_t address) {
         // Verify address is in valid range
         if (address >= MACH_VM_MAX_ADDRESS) {
-            fprintf(stderr, "Invalid address 0x%llx\n", address);
+            fprintf(stdout, "Invalid address 0x%llx\n", address);
             return false;
         }
 
         // Read the original instruction
         uint32_t original;
         if (!readMemory(address, &original, sizeof(uint32_t))) {
-            fprintf(stderr, "Failed to read memory at 0x%llx\n", address);
+            fprintf(stdout, "Failed to read memory at 0x%llx\n", address);
             return false;
         }
 
@@ -162,7 +163,7 @@ public:
 
         // Write breakpoint instruction
         if (!writeMemory(address, &AARCH64_BREAKPOINT, sizeof(uint32_t))) {
-            fprintf(stderr, "Failed to write breakpoint at 0x%llx\n", address);
+            fprintf(stdout, "Failed to write breakpoint at 0x%llx\n", address);
             return false;
         }
 
@@ -171,14 +172,14 @@ public:
         }
 
         breakpoints_[address] = original;
-        LOG("Breakpoint set at address 0x%llx\n", address);
+        VERBOSE_LOG("Breakpoint set at address 0x%llx\n", address);
         return true;
     }
 
     bool removeBreakpoint(uint64_t address) {
         auto it = breakpoints_.find(address);
         if (it == breakpoints_.end()) {
-            fprintf(stderr, "No breakpoint found at address 0x%llx\n", address);
+            fprintf(stdout, "No breakpoint found at address 0x%llx\n", address);
             return false;
         }
 
@@ -189,7 +190,7 @@ public:
 
         // Restore original instruction
         if (!writeMemory(address, &it->second, sizeof(uint32_t))) {
-            fprintf(stderr, "Failed to restore original instruction at 0x%llx\n", address);
+            fprintf(stdout, "Failed to restore original instruction at 0x%llx\n", address);
             return false;
         }
 
@@ -197,7 +198,7 @@ public:
             return false;
         }
         breakpoints_.erase(it);
-        LOG("Breakpoint removed from address 0x%llx\n", address);
+        VERBOSE_LOG("Breakpoint removed from address 0x%llx\n", address);
         return true;
     }
 
@@ -244,7 +245,7 @@ public:
 
         kern_return_t kr = task_threads(taskPort_, &threadList, &threadCount);
         if (kr != KERN_SUCCESS) {
-            fprintf(stderr, "Failed to get threads (error 0x%x: %s)\n", kr, mach_error_string(kr));
+            fprintf(stdout, "Failed to get threads (error 0x%x: %s)\n", kr, mach_error_string(kr));
             return 0;
         }
 
@@ -253,7 +254,7 @@ public:
         kr = thread_get_state(threadList[0], ARM_THREAD_STATE64, (thread_state_t)&state, &count);
 
         if (kr != KERN_SUCCESS) {
-            fprintf(stderr, "Failed to get thread state (error 0x%x: %s)\n", kr,
+            fprintf(stdout, "Failed to get thread state (error 0x%x: %s)\n", kr,
                     mach_error_string(kr));
             return 0;
         }
@@ -279,7 +280,7 @@ public:
                     value = state.__cpsr;
                     break;
                 default: {
-                    fprintf(stderr, "Invalid register\n");
+                    fprintf(stdout, "Invalid register\n");
                     return 0;
                 }
             }
@@ -300,7 +301,7 @@ public:
 
         kern_return_t kr = task_threads(taskPort_, &threadList, &threadCount);
         if (kr != KERN_SUCCESS) {
-            fprintf(stderr, "Failed to get threads (error 0x%x: %s)\n", kr, mach_error_string(kr));
+            fprintf(stdout, "Failed to get threads (error 0x%x: %s)\n", kr, mach_error_string(kr));
             return false;
         }
 
@@ -309,7 +310,7 @@ public:
         kr = thread_get_state(threadList[0], ARM_THREAD_STATE64, (thread_state_t)&state, &count);
 
         if (kr != KERN_SUCCESS) {
-            fprintf(stderr, "Failed to get thread state (error 0x%x: %s)\n", kr,
+            fprintf(stdout, "Failed to get thread state (error 0x%x: %s)\n", kr,
                     mach_error_string(kr));
             return false;
         }
@@ -334,7 +335,7 @@ public:
                     state.__cpsr = value;
                     break;
                 default: {
-                    fprintf(stderr, "Invalid register\n");
+                    fprintf(stdout, "Invalid register\n");
                     return false;
                 }
             }
@@ -343,7 +344,7 @@ public:
         kr = thread_set_state(threadList[0], ARM_THREAD_STATE64, (thread_state_t)&state,
                               ARM_THREAD_STATE64_COUNT);
         if (kr != KERN_SUCCESS) {
-            fprintf(stderr, "Failed to set thread state (error 0x%x: %s)\n", kr,
+            fprintf(stdout, "Failed to set thread state (error 0x%x: %s)\n", kr,
                     mach_error_string(kr));
             return false;
         }
@@ -364,12 +365,12 @@ public:
         mach_vm_address_t region = address & ~(pageSize - 1);
         size = ((address + size + pageSize - 1) & ~(pageSize - 1)) - region;
 
-        LOG("Adjusting memory protection at 0x%llx - 0x%llx\n", (uint64_t)region,
+        VERBOSE_LOG("Adjusting memory protection at 0x%llx - 0x%llx\n", (uint64_t)region,
             (uint64_t)(region + size));
 
         kern_return_t kr = mach_vm_protect(taskPort_, region, size, false, protection);
         if (kr != KERN_SUCCESS) {
-            fprintf(stderr,
+            fprintf(stdout,
                     "Failed to adjust memory protection at 0x%llx - 0x%llx (error 0x%x: %s)\n",
                     (uint64_t)region, (uint64_t)(region + size), kr, mach_error_string(kr));
             return false;
@@ -384,7 +385,7 @@ public:
             mach_vm_read_overwrite(taskPort_, address, size, (mach_vm_address_t)buffer, &readSize);
 
         if (kr != KERN_SUCCESS) {
-            fprintf(stderr, "Failed to read memory at 0x%llx (error 0x%x: %s)\n", address, kr,
+            fprintf(stdout, "Failed to read memory at 0x%llx (error 0x%x: %s)\n", address, kr,
                     mach_error_string(kr));
             return false;
         }
@@ -396,7 +397,7 @@ public:
         kern_return_t kr = mach_vm_write(taskPort_, address, (vm_offset_t)buffer, size);
 
         if (kr != KERN_SUCCESS) {
-            fprintf(stderr, "Failed to write memory at 0x%llx (error 0x%x: %s)\n", address, kr,
+            fprintf(stdout, "Failed to write memory at 0x%llx (error 0x%x: %s)\n", address, kr,
                     mach_error_string(kr));
             return false;
         }
@@ -410,7 +411,7 @@ public:
 
         kern_return_t kr = task_threads(taskPort_, &threadList, &threadCount);
         if (kr != KERN_SUCCESS) {
-            fprintf(stderr, "Failed to get threads (error 0x%x: %s)\n", kr, mach_error_string(kr));
+            fprintf(stdout, "Failed to get threads (error 0x%x: %s)\n", kr, mach_error_string(kr));
             return false;
         }
 
@@ -424,7 +425,7 @@ public:
         vm_deallocate(mach_task_self(), (vm_address_t)threadList, sizeof(thread_t) * threadCount);
 
         if (kr != KERN_SUCCESS) {
-            fprintf(stderr, "Failed to get thread state (error 0x%x: %s)\n", kr,
+            fprintf(stdout, "Failed to get thread state (error 0x%x: %s)\n", kr,
                     mach_error_string(kr));
             return false;
         }
@@ -438,7 +439,7 @@ public:
 
         kern_return_t kr = task_threads(taskPort_, &threadList, &threadCount);
         if (kr != KERN_SUCCESS) {
-            fprintf(stderr, "Failed to get threads (error 0x%x: %s)\n", kr, mach_error_string(kr));
+            fprintf(stdout, "Failed to get threads (error 0x%x: %s)\n", kr, mach_error_string(kr));
             return false;
         }
 
@@ -452,7 +453,7 @@ public:
         vm_deallocate(mach_task_self(), (vm_address_t)threadList, sizeof(thread_t) * threadCount);
 
         if (kr != KERN_SUCCESS) {
-            fprintf(stderr, "Failed to set thread state (error 0x%x: %s)\n", kr,
+            fprintf(stdout, "Failed to set thread state (error 0x%x: %s)\n", kr,
                     mach_error_string(kr));
             return false;
         }
@@ -471,13 +472,13 @@ public:
 
         auto processInfo = _dyld_process_info_create(taskPort_, 0, &kr);
         if (kr != KERN_SUCCESS) {
-            fprintf(stderr, "Failed to get dyld process info (error 0x%x: %s)\n", kr,
+            fprintf(stdout, "Failed to get dyld process info (error 0x%x: %s)\n", kr,
                     mach_error_string(kr));
             return 0;
         }
         _dyld_process_info_for_each_image(processInfo,
                                           ^(uint64_t address, const uuid_t uuid, const char* path) {
-                                            LOG("Module: 0x%llx - %s\n", address, path);
+                                            VERBOSE_LOG("Module: 0x%llx - %s\n", address, path);
                                             moduleList.push_back(address);
                                           });
         _dyld_process_info_release(processInfo);
@@ -582,26 +583,38 @@ static PeArch classifyPE(const std::string& path) {
     }
 }
 
-// Returns true only when argv positively identifies a 64-bit Windows PE
-// (Wine running an x64 .exe — x87 JIT is unnecessary). Anything else,
-// including Mach-O test binaries and unrecognised inputs, falls through
-// to false so the loader attaches by default.
-static bool shouldSkipAttach(int argc, char* argv[]) {
+// Outcome of inspecting argv for a Windows PE. The skip flag drives
+// whether the loader attaches; displayPath carries the resolved native
+// .exe path (when found in argv) so the always-on summary line in main()
+// can show what was actually classified — falling back to argv[1] when
+// no .exe was identified (Mach-O test/bench binaries).
+struct AttachDecision {
+    bool        skip;         // true → execv passthrough, false → attach
+    std::string displayPath;  // resolved Wine native path if found, else empty
+    const char* reason;       // non-null only when skip=true (e.g. "x64 PE")
+};
+
+// Examine argv for a Windows PE. Skip only when argv positively
+// identifies a 64-bit PE (Wine running an x64 .exe — x87 JIT is
+// unnecessary). Anything else — Mach-O test/bench binaries, unknown
+// inputs — falls through and the loader attaches by default.
+static AttachDecision classifyAttachTarget(int argc, char* argv[]) {
     for (int i = 2; i < argc; i++) {
         // Windows-style path (drive letter + colon)
         if (strlen(argv[i]) >= 3 && argv[i][1] == ':') {
             std::string nativePath = resolveWinePath(argv[i]);
             if (nativePath.empty()) {
-                LOG("Could not resolve Wine path '%s', attaching.\n", argv[i]);
-                return false;
+                VERBOSE_LOG("Could not resolve Wine path '%s', attaching.\n", argv[i]);
+                return {false, std::string(argv[i]), nullptr};
             }
-            LOG("Resolved '%s' -> '%s'\n", argv[i], nativePath.c_str());
+            VERBOSE_LOG("Resolved '%s' -> '%s'\n", argv[i], nativePath.c_str());
             PeArch arch = classifyPE(nativePath);
-            LOG("PE architecture: %s\n",
+            VERBOSE_LOG("PE architecture: %s\n",
                 arch == PeArch::X86   ? "x86 (32-bit)"
                 : arch == PeArch::X64 ? "x64 (64-bit)"
                                       : "not a PE");
-            return arch == PeArch::X64;
+            return {arch == PeArch::X64, std::move(nativePath),
+                    arch == PeArch::X64 ? "x64 PE" : nullptr};
         }
 
         // Bare .exe filename — resolve relative to cwd
@@ -609,46 +622,52 @@ static bool shouldSkipAttach(int argc, char* argv[]) {
         if (len >= 4 && strcasecmp(argv[i] + len - 4, ".exe") == 0) {
             PeArch arch = classifyPE(argv[i]);
             if (arch == PeArch::X64) {
-                LOG("'%s' is x64 (64-bit), skipping\n", argv[i]);
-                return true;
+                VERBOSE_LOG("'%s' is x64 (64-bit), skipping\n", argv[i]);
+                return {true, std::string(argv[i]), "x64 PE"};
             }
             // x86 PE or non-PE: keep scanning (file may not exist in cwd).
         }
     }
-    return false;
+    return {false, {}, nullptr};
 }
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
-        fprintf(stderr, "%s <path to program>\n", argv[0]);
+        fprintf(stdout, "%s <path to program>\n", argv[0]);
         return 1;
     }
 
     logsEnabled = getenv("ROSETTA_X87_LOGS");
 
+    AttachDecision decision = classifyAttachTarget(argc, argv);
+    const std::string summaryPath =
+        decision.displayPath.empty() ? std::string(argv[1]) : decision.displayPath;
+
     // Skip debugger attachment for 64-bit Windows programs (no x87 needed)
-    if (!getenv("ROSETTA_X87_FORCE_ATTACH") && shouldSkipAttach(argc, argv)) {
-        LOG("Program is x64 PE, skipping x87 JIT. Passing through.\n");
+    if (!getenv("ROSETTA_X87_FORCE_ATTACH") && decision.skip) {
+        printf("[rosettax87] skipped: %s (%s)\n", summaryPath.c_str(), decision.reason);
+        fflush(stdout);
+        VERBOSE_LOG("Program is x64 PE, skipping x87 JIT. Passing through.\n");
         execv(argv[1], &argv[1]);
-        perror("execv");
+        fprintf(stdout, "execv: %s\n", strerror(errno));
         return 1;
     }
 
-    LOG("Launching debugger.\n");
+    VERBOSE_LOG("Launching debugger.\n");
 
     // Reverse fork: parent execs into wine (keeps original PID for macOS
     // dock/activation tracking), child becomes the debugger.
     pid_t parentPid = getpid();
     int syncPipe[2];
     if (pipe(syncPipe) == -1) {
-        perror("pipe");
+        fprintf(stdout, "pipe: %s\n", strerror(errno));
         return 1;
     }
 
     pid_t child = fork();
 
     if (child == -1) {
-        perror("fork");
+        fprintf(stdout, "fork: %s\n", strerror(errno));
         return 1;
     }
 
@@ -661,9 +680,9 @@ int main(int argc, char* argv[]) {
         close(syncPipe[0]);
         // Child has attached and will catch our exec's SIGTRAP
         waitpid(child, nullptr, WNOHANG);  // reap intermediate double-fork child
-        LOG("parent: launching into program: %s\n", argv[1]);
+        VERBOSE_LOG("parent: launching into program: %s\n", argv[1]);
         execv(argv[1], &argv[1]);
-        perror("parent: execv");
+        fprintf(stdout, "parent: execv: %s\n", strerror(errno));
         return 1;
     }
 
@@ -674,7 +693,7 @@ int main(int argc, char* argv[]) {
     pid_t intermediatePid = getpid();   // valid in C; G inherits via fork copy
     pid_t grandchild = fork();
     if (grandchild == -1) {
-        perror("fork (double-fork)");
+        fprintf(stdout, "fork (double-fork): %s\n", strerror(errno));
         _exit(1);
     }
     if (grandchild != 0) {
@@ -708,19 +727,21 @@ int main(int argc, char* argv[]) {
 
     MuhDebugger dbg;
     if (!dbg.attach(parentPid)) {
-        fprintf(stderr, "Failed to attach to parent process\n");
+        fprintf(stdout, "Failed to attach to parent process\n");
         return 1;
     }
+    printf("[rosettax87] attached: %s\n", summaryPath.c_str());
+    fflush(stdout);
     // Signal parent to proceed with execv
     write(syncPipe[1], "x", 1);
     close(syncPipe[1]);
 
     // Wait for parent's execv to trigger SIGTRAP
     if (!dbg.waitForExecStop()) {
-        fprintf(stderr, "Failed to catch parent's exec\n");
+        fprintf(stdout, "Failed to catch parent's exec\n");
         return 1;
     }
-    LOG("Attached successfully\n");
+    VERBOSE_LOG("Attached successfully\n");
 
     // Set up offsets dynamically
     OffsetFinder offsetFinder;
@@ -728,23 +749,23 @@ int main(int argc, char* argv[]) {
     offsetFinder.setDefaultOffsets();
     // Search the rosetta runtime binary for offsets.
     if (offsetFinder.determineOffsets()) {
-        LOG("Found rosetta runtime offsets successfully!\n");
-        LOG("offset_exports_fetch=%llx offset_svc_call_entry=%llx offset_svc_call_ret=%llx\n",
+        VERBOSE_LOG("Found rosetta runtime offsets successfully!\n");
+        VERBOSE_LOG("offset_exports_fetch=%llx offset_svc_call_entry=%llx offset_svc_call_ret=%llx\n",
             offsetFinder.offsetExportsFetch_, offsetFinder.offsetSvcCallEntry_,
             offsetFinder.offsetSvcCallRet_);
     }
     if (offsetFinder.determineRuntimeOffsets()) {
-        LOG("Found additional rosetta runtime offsets successfully!\n");
-        LOG("offset_translate_insn=%llx offset_transaction_result_size=%llx\n",
+        VERBOSE_LOG("Found additional rosetta runtime offsets successfully!\n");
+        VERBOSE_LOG("offset_translate_insn=%llx offset_transaction_result_size=%llx\n",
             offsetFinder.offsetTranslateInsn_, offsetFinder.offsetTransactionResultSize_);
     }
 
     const auto runtimeBase = dbg.findRuntime();
 
-    LOG("Rosetta runtime base: 0x%lx\n", runtimeBase);
+    VERBOSE_LOG("Rosetta runtime base: 0x%lx\n", runtimeBase);
 
     if (runtimeBase == 0) {
-        fprintf(stderr, "Failed to find Rosetta runtime\n");
+        fprintf(stdout, "Failed to find Rosetta runtime\n");
         return 1;
     }
     uint8_t g_disable_aot_value = 1;
@@ -757,12 +778,12 @@ int main(int argc, char* argv[]) {
     dbg.removeBreakpoint(runtimeBase + offsetFinder.offsetExportsFetch_);
 
     auto rosettaRuntimeExportsAddress = dbg.readRegister(MuhDebugger::Register::X19);
-    LOG("Rosetta runtime exports: 0x%llx\n", rosettaRuntimeExportsAddress);
+    VERBOSE_LOG("Rosetta runtime exports: 0x%llx\n", rosettaRuntimeExportsAddress);
 
     Exports exports;
     dbg.readMemory(rosettaRuntimeExportsAddress, &exports, sizeof(exports));
 
-    LOG("Rosetta version: %llx\n", exports.version);
+    VERBOSE_LOG("Rosetta version: %llx\n", exports.version);
 
     // ── M2: Inline IPC stub install ─────────────────────────────────────────
     //
@@ -785,11 +806,11 @@ int main(int argc, char* argv[]) {
         // live process memory instead.
         mach_header_64 mh{};
         if (!dbg.readMemory(runtimeBase, &mh, sizeof(mh))) {
-            fprintf(stderr, "M2: failed to read parent's mach_header_64\n");
+            fprintf(stdout, "M2: failed to read parent's mach_header_64\n");
             return 1;
         }
         if (mh.magic != MH_MAGIC_64) {
-            fprintf(stderr, "M2: parent's mach_header magic mismatch (0x%x)\n",
+            fprintf(stdout, "M2: parent's mach_header magic mismatch (0x%x)\n",
                     mh.magic);
             return 1;
         }
@@ -798,7 +819,7 @@ int main(int argc, char* argv[]) {
         std::vector<uint8_t> lcBuf(mh.sizeofcmds, 0);
         if (!dbg.readMemory(runtimeBase + sizeof(mh), lcBuf.data(),
                             mh.sizeofcmds)) {
-            fprintf(stderr, "M2: failed to read parent's load commands\n");
+            fprintf(stdout, "M2: failed to read parent's load commands\n");
             return 1;
         }
 
@@ -821,11 +842,11 @@ int main(int argc, char* argv[]) {
             p += lc->cmdsize;
         }
         if (textVmSize == 0) {
-            fprintf(stderr, "M2: parent has no __TEXT segment\n");
+            fprintf(stdout, "M2: parent has no __TEXT segment\n");
             return 1;
         }
         const uint64_t textEndAddr = runtimeBase + textVmSize;
-        LOG("__TEXT range (live): [0x%lx, 0x%lx) (vmaddr=0x%llx vmsize=0x%llx)\n",
+        VERBOSE_LOG("__TEXT range (live): [0x%lx, 0x%lx) (vmaddr=0x%llx vmsize=0x%llx)\n",
             (unsigned long)runtimeBase, (unsigned long)textEndAddr, textVmAddr,
             textVmSize);
 
@@ -842,18 +863,18 @@ int main(int argc, char* argv[]) {
         Export initLibraryExport{};
         if (!dbg.readMemory(uint64_t(exports.x87Exports), &initLibraryExport,
                             sizeof(initLibraryExport))) {
-            fprintf(stderr, "M2: failed to read init_library export entry\n");
+            fprintf(stdout, "M2: failed to read init_library export entry\n");
             return 1;
         }
         uint64_t initLibraryAddr =
             uint64_t(initLibraryExport.address) & 0xFFFFFFFFFFFFULL;
         if (initLibraryAddr == 0) {
-            fprintf(stderr, "M2: init_library export address is null\n");
+            fprintf(stdout, "M2: init_library export address is null\n");
             return 1;
         }
         if (offsetFinder.offsetInitLibrary_ == 0 ||
             offsetFinder.offsetTranslateInsn_ == 0) {
-            fprintf(stderr,
+            fprintf(stdout,
                     "M2: missing init_library_rva or translate_insn_rva from "
                     "offset_finder\n");
             return 1;
@@ -862,7 +883,7 @@ int main(int argc, char* argv[]) {
             initLibraryAddr +
             (uint64_t(offsetFinder.offsetTranslateInsn_) -
              uint64_t(offsetFinder.offsetInitLibrary_));
-        LOG("M2: init_library live=0x%llx rva=0x%llx | translate_insn rva=0x%llx → "
+        VERBOSE_LOG("M2: init_library live=0x%llx rva=0x%llx | translate_insn rva=0x%llx → "
             "live=0x%llx\n",
             initLibraryAddr, (uint64_t)offsetFinder.offsetInitLibrary_,
             (uint64_t)offsetFinder.offsetTranslateInsn_, translateInsnAddr);
@@ -882,7 +903,7 @@ int main(int argc, char* argv[]) {
         // any thread has called translate_insn — so we're safe.
         {
             if (offsetFinder.offsetTransactionResultSize_ == 0) {
-                fprintf(stderr, "M2: missing offsetTransactionResultSize_\n");
+                fprintf(stdout, "M2: missing offsetTransactionResultSize_\n");
                 return 1;
             }
             const uint64_t trSizeAddr =
@@ -896,7 +917,7 @@ int main(int argc, char* argv[]) {
 
             uint32_t origInsn = 0;
             if (!dbg.readMemory(trSizeAddr, &origInsn, sizeof(origInsn))) {
-                fprintf(stderr, "M2: failed to read TR-size MOVZ at 0x%llx\n",
+                fprintf(stdout, "M2: failed to read TR-size MOVZ at 0x%llx\n",
                         trSizeAddr);
                 return 1;
             }
@@ -904,7 +925,7 @@ int main(int argc, char* argv[]) {
             //   fixed bits mask 0xFFE00000, value 0x52800000
             //   imm16 lives in bits [20:5]
             if ((origInsn & 0xFFE00000u) != 0x52800000u) {
-                fprintf(stderr,
+                fprintf(stdout,
                         "M2: TR-size patch site at 0x%llx is not MOVZ "
                         "Wd,#imm (got 0x%08x)\n",
                         trSizeAddr, origInsn);
@@ -917,20 +938,20 @@ int main(int argc, char* argv[]) {
             if (!dbg.adjustMemoryProtection(
                     trSizeAddr, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY,
                     sizeof(newInsn))) {
-                fprintf(stderr, "M2: TR-size patch protect-RW failed\n");
+                fprintf(stdout, "M2: TR-size patch protect-RW failed\n");
                 return 1;
             }
             if (!dbg.writeMemory(trSizeAddr, &newInsn, sizeof(newInsn))) {
-                fprintf(stderr, "M2: TR-size patch write failed\n");
+                fprintf(stdout, "M2: TR-size patch write failed\n");
                 return 1;
             }
             if (!dbg.adjustMemoryProtection(trSizeAddr,
                                             VM_PROT_READ | VM_PROT_EXECUTE,
                                             sizeof(newInsn))) {
-                fprintf(stderr, "M2: TR-size patch protect-RX failed\n");
+                fprintf(stdout, "M2: TR-size patch protect-RX failed\n");
                 return 1;
             }
-            LOG("M2: TR-size MOVZ at 0x%llx patched: 0x%x → 0x%x\n",
+            VERBOSE_LOG("M2: TR-size MOVZ at 0x%llx patched: 0x%x → 0x%x\n",
                 trSizeAddr, origImm, kNewTrSize);
         }
 
@@ -938,12 +959,12 @@ int main(int argc, char* argv[]) {
         uint8_t origPrologue[16];
         if (!dbg.readMemory(translateInsnAddr, origPrologue,
                              sizeof(origPrologue))) {
-            fprintf(stderr,
+            fprintf(stdout,
                     "M2: failed to read translate_insn prologue at 0x%llx\n",
                     translateInsnAddr);
             return 1;
         }
-        LOG("M2: translate_insn prologue: %02x%02x%02x%02x %02x%02x%02x%02x "
+        VERBOSE_LOG("M2: translate_insn prologue: %02x%02x%02x%02x %02x%02x%02x%02x "
             "%02x%02x%02x%02x %02x%02x%02x%02x\n",
             origPrologue[0], origPrologue[1], origPrologue[2], origPrologue[3],
             origPrologue[4], origPrologue[5], origPrologue[6], origPrologue[7],
@@ -964,14 +985,14 @@ int main(int argc, char* argv[]) {
                            VM_REGION_BASIC_INFO_64,
                            reinterpret_cast<vm_region_info_t>(&regInfo),
                            &regCount, &regObj) != KERN_SUCCESS) {
-            fprintf(stderr,
+            fprintf(stdout,
                     "M2: mach_vm_region(translate_insn=0x%llx) failed\n",
                     translateInsnAddr);
             return 1;
         }
         if (translateInsnAddr < regAddr ||
             translateInsnAddr >= regAddr + regSize) {
-            fprintf(stderr,
+            fprintf(stdout,
                     "M2: translate_insn (0x%llx) not in region [0x%llx, "
                     "0x%llx)\n",
                     translateInsnAddr, (uint64_t)regAddr,
@@ -980,7 +1001,7 @@ int main(int argc, char* argv[]) {
         }
         const uint64_t codeRegStart = uint64_t(regAddr);
         const uint64_t codeRegEnd = uint64_t(regAddr + regSize);
-        LOG("M2: code region containing translate_insn: [0x%llx, 0x%llx) "
+        VERBOSE_LOG("M2: code region containing translate_insn: [0x%llx, 0x%llx) "
             "size=0x%llx prot=0x%x\n",
             codeRegStart, codeRegEnd, codeRegEnd - codeRegStart,
             regInfo.protection);
@@ -994,7 +1015,7 @@ int main(int argc, char* argv[]) {
         uint64_t scanStart = codeRegEnd - scanWindow;
         std::vector<uint8_t> tail(scanWindow, 0);
         if (!dbg.readMemory(scanStart, tail.data(), scanWindow)) {
-            fprintf(stderr,
+            fprintf(stdout,
                     "M2: failed to read code-region tail at 0x%llx\n",
                     scanStart);
             return 1;
@@ -1007,13 +1028,13 @@ int main(int argc, char* argv[]) {
             }
         }
         if (lastNonZero < 0) {
-            fprintf(stderr, "M2: code-region tail is all zeros, refusing\n");
+            fprintf(stdout, "M2: code-region tail is all zeros, refusing\n");
             return 1;
         }
         uint64_t padStartOff = (uint64_t(lastNonZero + 1) + 3) & ~uint64_t(3);
         uint64_t padStartAddr = scanStart + padStartOff;
         uint64_t padBytes = codeRegEnd - padStartAddr;
-        LOG("M2: __TEXT trailing padding starts at 0x%llx, %llu bytes free\n",
+        VERBOSE_LOG("M2: __TEXT trailing padding starts at 0x%llx, %llu bytes free\n",
             padStartAddr, padBytes);
 
         // ── Install Mach service port in parent ─────────────────────────────
@@ -1023,10 +1044,10 @@ int main(int argc, char* argv[]) {
         if (!sidecar::installPortInParent(dbg.taskPort(), &servicePort,
                                            &parentReqName,
                                            &parentReplyName)) {
-            fprintf(stderr, "M2: sidecar::installPortInParent failed\n");
+            fprintf(stdout, "M2: sidecar::installPortInParent failed\n");
             return 1;
         }
-        LOG("M2: parent req port 0x%x  reply port 0x%x  local service 0x%x\n",
+        VERBOSE_LOG("M2: parent req port 0x%x  reply port 0x%x  local service 0x%x\n",
             parentReqName, parentReplyName, servicePort);
 
         // ── Assemble stub bytes ─────────────────────────────────────────────
@@ -1036,40 +1057,40 @@ int main(int argc, char* argv[]) {
                                       origPrologue, parentReqName,
                                       parentReplyName);
         if (blobs.entry.size() != 16) {
-            fprintf(stderr,
+            fprintf(stdout,
                     "M2: stub_asm::build returned wrong entry size %zu\n",
                     blobs.entry.size());
             return 1;
         }
         if (blobs.handler.size() > padBytes) {
-            fprintf(stderr,
+            fprintf(stdout,
                     "M2: handler blob (%zu bytes) doesn't fit in trailing "
                     "padding (%llu bytes)\n",
                     blobs.handler.size(), padBytes);
             return 1;
         }
-        LOG("M2: handler blob = %zu bytes (fits in %llu padding)\n",
+        VERBOSE_LOG("M2: handler blob = %zu bytes (fits in %llu padding)\n",
             blobs.handler.size(), padBytes);
 
         // ── Write OUR_HANDLER + STASH + STASH_JUMP into trailing padding ───
         if (!dbg.adjustMemoryProtection(
                 padStartAddr, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY,
                 blobs.handler.size())) {
-            fprintf(stderr, "M2: failed to make padding writable\n");
+            fprintf(stdout, "M2: failed to make padding writable\n");
             return 1;
         }
         if (!dbg.writeMemory(padStartAddr, blobs.handler.data(),
                              blobs.handler.size())) {
-            fprintf(stderr, "M2: failed to write handler blob\n");
+            fprintf(stdout, "M2: failed to write handler blob\n");
             return 1;
         }
         if (!dbg.adjustMemoryProtection(padStartAddr,
                                         VM_PROT_READ | VM_PROT_EXECUTE,
                                         blobs.handler.size())) {
-            fprintf(stderr, "M2: failed to restore padding protection\n");
+            fprintf(stdout, "M2: failed to restore padding protection\n");
             return 1;
         }
-        LOG("M2: handler installed at 0x%llx\n", padStartAddr);
+        VERBOSE_LOG("M2: handler installed at 0x%llx\n", padStartAddr);
 
         // ── DIAGNOSTIC (temporary): replace ENTRY with `mov x0, #0xCAFE; ret`
         // padded with nops so we can tell whether translate_insn is even
@@ -1088,35 +1109,35 @@ int main(int argc, char* argv[]) {
                 blobs.entry.push_back(uint8_t(insn >> 16));
                 blobs.entry.push_back(uint8_t(insn >> 24));
             }
-            LOG("M2: DIAG_ENTRY_RET active — entry replaced with mov x0,#0xCAFE; ret\n");
+            VERBOSE_LOG("M2: DIAG_ENTRY_RET active — entry replaced with mov x0,#0xCAFE; ret\n");
         }
 
         // ── Patch translate_insn[0..16] with the abs-jump ENTRY ────────────
         if (!dbg.adjustMemoryProtection(
                 translateInsnAddr, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY,
                 blobs.entry.size())) {
-            fprintf(stderr, "M2: failed to make translate_insn writable\n");
+            fprintf(stdout, "M2: failed to make translate_insn writable\n");
             return 1;
         }
         if (!dbg.writeMemory(translateInsnAddr, blobs.entry.data(),
                              blobs.entry.size())) {
-            fprintf(stderr, "M2: failed to write translate_insn entry\n");
+            fprintf(stdout, "M2: failed to write translate_insn entry\n");
             return 1;
         }
         if (!dbg.adjustMemoryProtection(translateInsnAddr,
                                         VM_PROT_READ | VM_PROT_EXECUTE,
                                         blobs.entry.size())) {
-            fprintf(stderr, "M2: failed to restore translate_insn protection\n");
+            fprintf(stdout, "M2: failed to restore translate_insn protection\n");
             return 1;
         }
-        LOG("M2: translate_insn entry patched (abs-jump to 0x%llx)\n",
+        VERBOSE_LOG("M2: translate_insn entry patched (abs-jump to 0x%llx)\n",
             padStartAddr);
 
         // Read-back verification: confirm the patch actually landed, and
         // dump the FULL handler so we can decode each instruction post-mortem.
         uint8_t verifyEntry[16];
         if (dbg.readMemory(translateInsnAddr, verifyEntry, 16)) {
-            LOG("M2: post-patch translate_insn[0..16]: %02x%02x%02x%02x "
+            VERBOSE_LOG("M2: post-patch translate_insn[0..16]: %02x%02x%02x%02x "
                 "%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x\n",
                 verifyEntry[0], verifyEntry[1], verifyEntry[2], verifyEntry[3],
                 verifyEntry[4], verifyEntry[5], verifyEntry[6], verifyEntry[7],
@@ -1127,10 +1148,10 @@ int main(int argc, char* argv[]) {
         std::vector<uint8_t> verifyHandler(blobs.handler.size(), 0);
         if (dbg.readMemory(padStartAddr, verifyHandler.data(),
                             verifyHandler.size())) {
-            LOG("M2: handler full dump (%zu bytes), 4 insns/line:\n",
+            VERBOSE_LOG("M2: handler full dump (%zu bytes), 4 insns/line:\n",
                 verifyHandler.size());
             for (size_t i = 0; i < verifyHandler.size(); i += 16) {
-                LOG("  +0x%03zx: %02x%02x%02x%02x %02x%02x%02x%02x "
+                VERBOSE_LOG("  +0x%03zx: %02x%02x%02x%02x %02x%02x%02x%02x "
                     "%02x%02x%02x%02x %02x%02x%02x%02x\n",
                     i,
                     verifyHandler[i + 0], verifyHandler[i + 1],
@@ -1166,10 +1187,10 @@ int main(int argc, char* argv[]) {
         // any in-flight tickle messages from the parent get drained while
         // we sit on kqueue. Detached thread; cleaned up on process exit.
         if (!sidecar::spawnReceiveThread(servicePort, parentTaskPort)) {
-            fprintf(stderr, "M2: failed to spawn receive thread\n");
+            fprintf(stdout, "M2: failed to spawn receive thread\n");
             return 1;
         }
-        LOG("M2: receive thread running; entering kqueue wait\n");
+        VERBOSE_LOG("M2: receive thread running; entering kqueue wait\n");
 
         // Self-test: send a tickle message from this process to our own
         // service port. If the receive thread picks it up, the receive
@@ -1185,7 +1206,7 @@ int main(int argc, char* argv[]) {
                 mach_msg(&selfMsg, MACH_SEND_MSG, sizeof(selfMsg), 0,
                          MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE,
                          MACH_PORT_NULL);
-            LOG("M2: self-test mach_msg send → 0x%x (%s)\n", kr,
+            VERBOSE_LOG("M2: self-test mach_msg send → 0x%x (%s)\n", kr,
                 mach_error_string(kr));
         }
     }

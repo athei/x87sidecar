@@ -1,6 +1,5 @@
 add_library(rosetta_core STATIC
     src/CoreConfig.cpp
-    src/CoreLog.cpp
     src/CustomTranslationHook.cpp
     src/hook.cpp
     src/AssemblerHelpers.cpp

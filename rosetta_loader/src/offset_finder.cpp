@@ -51,7 +51,7 @@ auto OffsetFinder::determineOffsets() -> bool {
     // Check if we were successfully able to load the file, if not abort and use default offsets
     if (!file) {
         fprintf(
-            stderr,
+            stdout,
             "Problem accessing rosetta runtime to determine offsets automatically.\nFalling back "
             "to macOS 26.0 defaults (This WILL crash your app if they are not correct!)\n");
         return false;
@@ -67,7 +67,7 @@ auto OffsetFinder::determineOffsets() -> bool {
 
     // read into the buffer
     if (!file.read(reinterpret_cast<char*>(buffer.data()), size)) {
-        fprintf(stderr,
+        fprintf(stdout,
                 "Problem reading rosetta runtime to determine offsets automatically.\nFalling back "
                 "to macOS 26.0 defaults (This WILL crash your app if they are not correct!)\n");
         return false;
@@ -79,7 +79,7 @@ auto OffsetFinder::determineOffsets() -> bool {
         const std::boyer_moore_searcher searcher(offset.begin(), offset.end());
         const auto it = std::search(buffer.begin(), buffer.end(), searcher);
         if (it == buffer.end()) {
-            fprintf(stderr, "Offset not found in rosetta runtime binary\n");
+            fprintf(stdout, "Offset not found in rosetta runtime binary\n");
             results.push_back(-1);
         } else {
             results.push_back((std::uint64_t)std::distance(buffer.begin(), it));
@@ -88,7 +88,7 @@ auto OffsetFinder::determineOffsets() -> bool {
 
     // If we've stored -1 in any offset, error out and fall back to non-accelerated x87 handles.
     if ((int)results[0] <= -1 || (int)results[1] <= -1 || (int)results[2] <= -1) {
-        fprintf(stderr,
+        fprintf(stdout,
                 "Problem searching rosetta runtime to determine offsets automatically.\nFalling "
                 "back to macOS 26 defaults (This WILL crash your app if they are not correct!)\n");
         return false;
@@ -141,7 +141,7 @@ auto OffsetFinder::determineRuntimeOffsets() -> bool {
 
     MachoLoader libRosettaRuntimeLoader;
     if (!libRosettaRuntimeLoader.open("/Library/Apple/usr/libexec/oah/libRosettaRuntime")) {
-        fprintf(stderr,
+        fprintf(stdout,
                 "Failed to open libRosettaRuntime Mach-O file to determine runtime offsets "
                 "automatically.\n");
         return false;
@@ -149,7 +149,7 @@ auto OffsetFinder::determineRuntimeOffsets() -> bool {
 
     auto text_section = libRosettaRuntimeLoader.getSection("__TEXT", "__text");
     if (!text_section) {
-        fprintf(stderr,
+        fprintf(stdout,
                 "Failed to find __TEXT.__text section in libRosettaRuntime Mach-O file to "
                 "determine runtime offsets automatically.\n");
         return false;
@@ -161,7 +161,7 @@ auto OffsetFinder::determineRuntimeOffsets() -> bool {
         const auto it = std::search(libRosettaRuntimeLoader.buffer_.begin(),
                                     libRosettaRuntimeLoader.buffer_.end(), searcher);
         if (it == libRosettaRuntimeLoader.buffer_.end()) {
-            fprintf(stderr, "Offset not found in libRosettaRuntime binary\n");
+            fprintf(stdout, "Offset not found in libRosettaRuntime binary\n");
             results.push_back(-1);
         } else {
             results.push_back(
@@ -172,7 +172,7 @@ auto OffsetFinder::determineRuntimeOffsets() -> bool {
     // If we've stored -1 in any offset, error out and fall back to non-accelerated x87 handles.
     if ((int)results[0] <= -1 || (int)results[1] <= -1) {
         fprintf(
-            stderr,
+            stdout,
             "Problem searching libRosettaRuntime to determine runtime offsets automatically.\n");
         return false;
     }
@@ -182,7 +182,7 @@ auto OffsetFinder::determineRuntimeOffsets() -> bool {
 
     auto exports_section = libRosettaRuntimeLoader.getSection("__DATA", "exports");
     if (!exports_section) {
-        fprintf(stderr,
+        fprintf(stdout,
                 "Failed to find __DATA.exports section in libRosettaRuntime Mach-O file to "
                 "determine runtime offsets automatically.\n");
         return false;

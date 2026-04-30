@@ -2,7 +2,6 @@
 
 #include "rosetta_core/AssemblerHelpers.hpp"
 #include "rosetta_core/CoreConfig.h"
-#include "rosetta_core/CoreLog.h"
 #include "rosetta_core/IROperand.h"
 #include "rosetta_core/Register.h"
 #include "rosetta_core/RuntimeRoutine.h"

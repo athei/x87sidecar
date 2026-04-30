@@ -9,8 +9,6 @@
 #include <cstdio>
 #include <cstring>
 
-#include "rosetta_core/CoreLog.h"
-
 #define PATCH_SIZE 16u
 #define AARCH64_PAGE_SIZE 16384u
 
@@ -34,7 +32,7 @@ int make_page_executable(void* addr) {
                          VM_PROT_READ | VM_PROT_EXECUTE);
     if (kr != KERN_SUCCESS) {
         errno = EPERM;
-        CORE_LOG("make_page_executable: vm_protect failed");
+        printf("make_page_executable: vm_protect failed\n");
         return -1;
     }
     return 0;
@@ -55,7 +53,7 @@ int hook_install(void* target, void* hook_fn, void** trampoline) {
     void* tramp = mmap(NULL, AARCH64_PAGE_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC,
                        MAP_PRIVATE | MAP_ANONYMOUS | MAP_JIT, -1, 0);
     if (tramp == MAP_FAILED) {
-        CORE_LOG("hook_install: mmap failed");
+        printf("hook_install: mmap failed\n");
         return -1;
     }
 
@@ -85,7 +83,7 @@ int hook_install(void* target, void* hook_fn, void** trampoline) {
     if (kr != KERN_SUCCESS) {
         munmap(tramp, AARCH64_PAGE_SIZE);
         errno = EPERM;
-        CORE_LOG("hook_install: vm_protect failed");
+        printf("hook_install: vm_protect failed\n");
         return -1;
     }
 
@@ -96,7 +94,7 @@ int hook_install(void* target, void* hook_fn, void** trampoline) {
     if (kr != KERN_SUCCESS) {
         munmap(tramp, AARCH64_PAGE_SIZE);
         errno = EPERM;
-        CORE_LOG("hook_install: vm_protect (exec) failed");
+        printf("hook_install: vm_protect (exec) failed\n");
         return -1;
     }
 
@@ -131,7 +129,7 @@ int patch_movz_imm(void* addr, uint16_t new_imm) {
     // Verify: MOVZ Wd, #imm  (32-bit register, no shift)
     if ((insn & 0xFFE00000u) != 0x52800000u) {
         errno = EINVAL;
-        CORE_LOG("patch_movz_imm: instruction at %p is not MOVZ Wd,#imm (got 0x%08X)", addr, insn);
+        printf("patch_movz_imm: instruction at %p is not MOVZ Wd,#imm (got 0x%08X)\n", addr, insn);
         return -1;
     }
 
@@ -144,7 +142,7 @@ int patch_movz_imm(void* addr, uint16_t new_imm) {
                                   VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
     if (kr != KERN_SUCCESS) {
         errno = EPERM;
-        CORE_LOG("patch_movz_imm: vm_protect (write) failed");
+        printf("patch_movz_imm: vm_protect (write) failed\n");
         return -1;
     }
 
@@ -155,7 +153,7 @@ int patch_movz_imm(void* addr, uint16_t new_imm) {
                     VM_PROT_READ | VM_PROT_EXECUTE);
     if (kr != KERN_SUCCESS) {
         errno = EPERM;
-        CORE_LOG("patch_movz_imm: vm_protect (exec) failed");
+        printf("patch_movz_imm: vm_protect (exec) failed\n");
         return -1;
     }
 

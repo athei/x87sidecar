@@ -339,10 +339,6 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask,
 }
 
 void runReceiveLoop(mach_port_t servicePort, mach_port_t parentTaskPort) {
-    fprintf(stderr,
-            "sidecar: receive loop starting on port 0x%x (parent task=0x%x)\n",
-            servicePort, parentTaskPort);
-
     // Counter file we update on each successful receive — survives process
     // exit so post-mortem can verify whether the loop ever drained anything,
     // AND how many of those hits resulted in a Some vs None reply (i.e. how
@@ -373,7 +369,7 @@ void runReceiveLoop(mach_port_t servicePort, mach_port_t parentTaskPort) {
             mach_msg(hdr, MACH_RCV_MSG, 0, sizeof(buf), servicePort,
                      MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
         if (kr != KERN_SUCCESS) {
-            fprintf(stderr, "sidecar: mach_msg(RCV) returned 0x%x (%s)\n", kr,
+            fprintf(stdout, "sidecar: mach_msg(RCV) returned 0x%x (%s)\n", kr,
                     mach_error_string(kr));
             bumpCounter(hits, someCount, noneCount, uint64_t(kr));
             return;
@@ -419,7 +415,7 @@ void runReceiveLoop(mach_port_t servicePort, mach_port_t parentTaskPort) {
                 MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
             if (kr_send != KERN_SUCCESS) {
                 if (hits <= 5) {
-                    fprintf(stderr,
+                    fprintf(stdout,
                             "sidecar: #%llu reply send failed 0x%x %s\n",
                             hits, kr_send, mach_error_string(kr_send));
                 }
@@ -455,7 +451,7 @@ bool installPortInParent(mach_port_t parentTaskPort,
     kern_return_t kr =
         mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &servicePort);
     if (kr != KERN_SUCCESS) {
-        fprintf(stderr,
+        fprintf(stdout,
                 "sidecar: mach_port_allocate(RECEIVE) failed (0x%x %s)\n",
                 kr, mach_error_string(kr));
         return false;
@@ -466,7 +462,7 @@ bool installPortInParent(mach_port_t parentTaskPort,
     kr = mach_port_insert_right(mach_task_self(), servicePort, servicePort,
                                 MACH_MSG_TYPE_MAKE_SEND);
     if (kr != KERN_SUCCESS) {
-        fprintf(stderr,
+        fprintf(stdout,
                 "sidecar: mach_port_insert_right(SELF, MAKE_SEND) failed (0x%x %s)\n",
                 kr, mach_error_string(kr));
         return false;
@@ -478,7 +474,7 @@ bool installPortInParent(mach_port_t parentTaskPort,
     mach_port_name_t parentName = MACH_PORT_NULL;
     kr = mach_port_allocate(parentTaskPort, MACH_PORT_RIGHT_DEAD_NAME, &parentName);
     if (kr != KERN_SUCCESS) {
-        fprintf(stderr,
+        fprintf(stdout,
                 "sidecar: mach_port_allocate(parent, DEAD_NAME) failed (0x%x %s)\n",
                 kr, mach_error_string(kr));
         return false;
@@ -486,7 +482,7 @@ bool installPortInParent(mach_port_t parentTaskPort,
     // Drop the placeholder so the name slot is free.
     kr = mach_port_deallocate(parentTaskPort, parentName);
     if (kr != KERN_SUCCESS) {
-        fprintf(stderr,
+        fprintf(stdout,
                 "sidecar: mach_port_deallocate(parent placeholder) failed (0x%x %s)\n",
                 kr, mach_error_string(kr));
         return false;
@@ -498,7 +494,7 @@ bool installPortInParent(mach_port_t parentTaskPort,
     kr = mach_port_insert_right(parentTaskPort, parentName, servicePort,
                                 MACH_MSG_TYPE_COPY_SEND);
     if (kr != KERN_SUCCESS) {
-        fprintf(stderr,
+        fprintf(stdout,
                 "sidecar: mach_port_insert_right(parent, COPY_SEND) failed "
                 "(0x%x %s)\n",
                 kr, mach_error_string(kr));
@@ -509,18 +505,9 @@ bool installPortInParent(mach_port_t parentTaskPort,
     mach_port_type_t parentType = 0;
     kr = mach_port_type(parentTaskPort, parentName, &parentType);
     if (kr != KERN_SUCCESS) {
-        fprintf(stderr,
+        fprintf(stdout,
                 "sidecar: mach_port_type(parent,0x%x) failed 0x%x %s\n",
                 parentName, kr, mach_error_string(kr));
-    } else {
-        fprintf(stderr,
-                "sidecar: parent name 0x%x type=0x%x (SEND=%d RECV=%d "
-                "SENDONCE=%d DEAD=%d)\n",
-                parentName, parentType,
-                !!(parentType & MACH_PORT_TYPE_SEND),
-                !!(parentType & MACH_PORT_TYPE_RECEIVE),
-                !!(parentType & MACH_PORT_TYPE_SEND_ONCE),
-                !!(parentType & MACH_PORT_TYPE_DEAD_NAME));
     }
 
     *outServicePort = servicePort;
@@ -535,15 +522,12 @@ bool installPortInParent(mach_port_t parentTaskPort,
     kr = mach_port_allocate(parentTaskPort, MACH_PORT_RIGHT_RECEIVE,
                             &parentReplyName);
     if (kr != KERN_SUCCESS) {
-        fprintf(stderr,
+        fprintf(stdout,
                 "sidecar: mach_port_allocate(parent, RECEIVE) for reply "
                 "failed (0x%x %s)\n",
                 kr, mach_error_string(kr));
         return false;
     }
-    fprintf(stderr,
-            "sidecar: parent reply port name 0x%x (RECEIVE in parent)\n",
-            parentReplyName);
     *outParentReplyName = uint32_t(parentReplyName);
     return true;
 }
@@ -559,7 +543,7 @@ bool spawnReceiveThread(mach_port_t servicePort, mach_port_t parentTaskPort) {
     pthread_attr_destroy(&attr);
     if (rc != 0) {
         delete args;
-        fprintf(stderr, "sidecar: pthread_create failed (%d)\n", rc);
+        fprintf(stdout, "sidecar: pthread_create failed (%d)\n", rc);
         return false;
     }
     return true;

@@ -12,7 +12,6 @@
 #include "rosetta_config/Config.h"
 #include "rosetta_core/CoreConfig.h"
 #include "rosetta_core/X87Cache.h"
-#include "rosetta_core/CoreLog.h"
 
 // Internal helpers from TranslatorX87Internal.hpp that we need.
 namespace TranslatorX87 {
