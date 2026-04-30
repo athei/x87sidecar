@@ -70,6 +70,7 @@ ALL_BENCHMARKS=(
     bench_fyl2x
     bench_fyl2xp1
     bench_fprem
+    bench_fprem1
 )
 
 RED='\033[0;31m'

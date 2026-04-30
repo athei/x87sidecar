@@ -4537,6 +4537,28 @@ auto translate_fprem(TranslationResult* a1, IRInstr* /*a2*/) -> void {
 }
 
 // =============================================================================
+// FPREM1 — ST(0) := IEEE remainder(ST(0), ST(1)).  No pop.  Same emit
+// shape as fprem; sidecar uses std::remainder (which rounds quotient
+// to nearest-even instead of toward-zero).  Same one-shot iterative
+// simplification log.
+// =============================================================================
+auto translate_fprem1(TranslationResult* a1, IRInstr* /*a2*/) -> void {
+    AssemblerBuffer& buf = a1->insn_buf;
+    auto [Xbase, Wd_top] = x87_begin(*a1, buf);
+    const int Wd_tmp = alloc_gpr(*a1, 2);
+
+    emit_transcendental_ipc(*a1, buf, Xbase, Wd_top, Wd_tmp,
+                            rosetta_core::kTransFprem1, /*num_inputs=*/2);
+
+    const int Xst_base = x87_get_st_base(*a1);
+    const int depth_st0 = resolve_depth(*a1, 0);
+    emit_store_st(buf, Xbase, Wd_top, depth_st0, Wd_tmp, /*Dd=*/0, Xst_base);
+
+    x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp);
+    free_gpr(*a1, Wd_tmp);
+}
+
+// =============================================================================
 // F2XM1 — replace ST(0) with 2^ST(0) - 1.  x87 spec says input must be
 // |ST(0)| <= 1; outside that range result is undefined.  We always
 // compute via std::exp2(in) - 1.0 in the sidecar regardless of input.
