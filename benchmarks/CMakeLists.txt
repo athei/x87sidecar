@@ -47,5 +47,6 @@ add_x86_sample(bench_f2xm1)
 add_x86_sample(bench_fpatan)
 add_x86_sample(bench_fsincos)
 add_x86_sample(bench_fptan)
+add_x86_sample(bench_fyl2x)
 
 add_subdirectory(macro)
