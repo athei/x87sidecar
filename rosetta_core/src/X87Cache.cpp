@@ -94,6 +94,7 @@ static bool is_handled_x87(uint16_t op) {
         case kOpcodeName_fsin:
         case kOpcodeName_fcos:
         case kOpcodeName_f2xm1:
+        case kOpcodeName_fpatan:
             return true;
         default:
             return false;

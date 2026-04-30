@@ -4410,6 +4410,30 @@ auto translate_fcos(TranslationResult* a1, IRInstr* /*a2*/) -> void {
 }
 
 // =============================================================================
+// FPATAN — pop ST(0); ST(0) (= old ST(1)) = atan2(old ST(1), old ST(0)).
+//
+// JIT: load ST(0)→d0, ST(1)→d1, IPC computes atan2(in1, in0)→d0,
+// store d0 at depth=1 (old ST(1) slot, becomes new ST(0)), then pop.
+// =============================================================================
+auto translate_fpatan(TranslationResult* a1, IRInstr* /*a2*/) -> void {
+    AssemblerBuffer& buf = a1->insn_buf;
+    auto [Xbase, Wd_top] = x87_begin(*a1, buf);
+    const int Wd_tmp = alloc_gpr(*a1, 2);
+
+    emit_transcendental_ipc(*a1, buf, Xbase, Wd_top, Wd_tmp,
+                            rosetta_core::kTransFpatan, /*num_inputs=*/2);
+
+    const int Xst_base = x87_get_st_base(*a1);
+    const int depth_st1 = resolve_depth(*a1, 1);
+    emit_store_st(buf, Xbase, Wd_top, depth_st1, Wd_tmp, /*Dd=*/0, Xst_base);
+
+    x87_pop(buf, *a1, Xbase, Wd_top, Wd_tmp);
+
+    x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp);
+    free_gpr(*a1, Wd_tmp);
+}
+
+// =============================================================================
 // F2XM1 — replace ST(0) with 2^ST(0) - 1.  x87 spec says input must be
 // |ST(0)| <= 1; outside that range result is undefined.  We always
 // compute via std::exp2(in) - 1.0 in the sidecar regardless of input.
