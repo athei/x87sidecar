@@ -69,11 +69,11 @@ These flags are primarily useful for narrowing down bugs by selectively disablin
 | `ROSETTA_X87_DISABLE_OPS=op1,op2,...` | Disable specific opcodes (comma-separated) |
 | `ROSETTA_X87_DISABLE_FUSIONS=f1,f2,...` | Disable specific fusions (comma-separated) |
 | `ROSETTA_X87_LOGS=1` | Enable verbose logging output from the loader |
-| `ROSETTA_X87_FORCE_ATTACH=1` | Always attach the debugger, bypassing the automatic x64 detection |
+| `ROSETTA_X87_FORCE_ATTACH=1` | Force debugger attach even when argv looks like a 64-bit Windows PE |
 
 ### Automatic x64 Bypass
 
-When used with Wine, `rosettax87` automatically detects whether the Windows executable is 32-bit (x86) or 64-bit (x64) by reading its PE headers. 64-bit programs do not use x87 instructions, so the loader passes them through directly without attaching the debugger.
+When used with Wine, `rosettax87` reads the PE headers of any `.exe` it sees in argv and skips debugger attachment **only** when it positively identifies a 64-bit (x64) PE — those programs do not use x87 instructions. Mach-O binaries (e.g. our own test/bench programs) and anything the loader cannot classify as x64 PE are attached as normal.
 
 ## Usage with Wine
 

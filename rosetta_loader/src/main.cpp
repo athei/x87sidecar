@@ -538,80 +538,83 @@ static std::string resolveWinePath(const char* winPath) {
     return result;
 }
 
-// Read PE headers to determine if a Windows executable is 32-bit (x86).
-// Returns true if the file is a 32-bit PE, false otherwise.
-static bool isX86PE(const std::string& path) {
+// Classify a file by reading its PE header. Returns X86 / X64 for
+// recognised PE machine fields, NotPE for everything else (unreadable,
+// missing MZ/PE signatures, unknown machine, or e.g. a Mach-O binary).
+enum class PeArch { NotPE, X86, X64 };
+
+static PeArch classifyPE(const std::string& path) {
     FILE* f = fopen(path.c_str(), "rb");
     if (!f)
-        return false;
+        return PeArch::NotPE;
 
-    // Read DOS header magic ("MZ")
     uint16_t dosMagic;
     if (fread(&dosMagic, 2, 1, f) != 1 || dosMagic != 0x5A4D) {
         fclose(f);
-        return false;
+        return PeArch::NotPE;
     }
 
-    // Read PE header offset from DOS header at 0x3C
     uint32_t peOffset;
     fseek(f, 0x3C, SEEK_SET);
     if (fread(&peOffset, 4, 1, f) != 1) {
         fclose(f);
-        return false;
+        return PeArch::NotPE;
     }
 
-    // Read PE signature ("PE\0\0") and Machine field
     fseek(f, peOffset, SEEK_SET);
     uint32_t peSig;
     if (fread(&peSig, 4, 1, f) != 1 || peSig != 0x00004550) {
         fclose(f);
-        return false;
+        return PeArch::NotPE;
     }
 
     uint16_t machine;
     if (fread(&machine, 2, 1, f) != 1) {
         fclose(f);
-        return false;
+        return PeArch::NotPE;
     }
     fclose(f);
 
-    return machine == 0x014C; // IMAGE_FILE_MACHINE_I386
+    switch (machine) {
+        case 0x014C: return PeArch::X86;  // IMAGE_FILE_MACHINE_I386
+        case 0x8664: return PeArch::X64;  // IMAGE_FILE_MACHINE_AMD64
+        default:     return PeArch::NotPE;
+    }
 }
 
-// Find a Windows .exe path in argv and check if it's a 32-bit x86 program.
-// Returns true if a 32-bit PE was found (needs x87 JIT), false to bypass.
-static bool needsX87JIT(int argc, char* argv[]) {
+// Returns true only when argv positively identifies a 64-bit Windows PE
+// (Wine running an x64 .exe — x87 JIT is unnecessary). Anything else,
+// including Mach-O test binaries and unrecognised inputs, falls through
+// to false so the loader attaches by default.
+static bool shouldSkipAttach(int argc, char* argv[]) {
     for (int i = 2; i < argc; i++) {
         // Windows-style path (drive letter + colon)
         if (strlen(argv[i]) >= 3 && argv[i][1] == ':') {
             std::string nativePath = resolveWinePath(argv[i]);
             if (nativePath.empty()) {
-                LOG("Could not resolve Wine path '%s', assuming x86.\n", argv[i]);
-                return true;
+                LOG("Could not resolve Wine path '%s', attaching.\n", argv[i]);
+                return false;
             }
             LOG("Resolved '%s' -> '%s'\n", argv[i], nativePath.c_str());
-            bool x86 = isX86PE(nativePath);
-            LOG("PE architecture: %s\n", x86 ? "x86 (32-bit)" : "x64 (64-bit)");
-            return x86;
+            PeArch arch = classifyPE(nativePath);
+            LOG("PE architecture: %s\n",
+                arch == PeArch::X86   ? "x86 (32-bit)"
+                : arch == PeArch::X64 ? "x64 (64-bit)"
+                                      : "not a PE");
+            return arch == PeArch::X64;
         }
 
         // Bare .exe filename — resolve relative to cwd
         size_t len = strlen(argv[i]);
         if (len >= 4 && strcasecmp(argv[i] + len - 4, ".exe") == 0) {
-            if (isX86PE(argv[i])) {
-                LOG("'%s' is x86 (32-bit)\n", argv[i]);
+            PeArch arch = classifyPE(argv[i]);
+            if (arch == PeArch::X64) {
+                LOG("'%s' is x64 (64-bit), skipping\n", argv[i]);
                 return true;
             }
-            FILE* f = fopen(argv[i], "rb");
-            if (f) {
-                fclose(f);
-                LOG("'%s' is x64 (64-bit), skipping\n", argv[i]);
-                return false;
-            }
-            // File not found in cwd, continue scanning
+            // x86 PE or non-PE: keep scanning (file may not exist in cwd).
         }
     }
-    // No exe found in argv, default to skipping
     return false;
 }
 
@@ -624,8 +627,8 @@ int main(int argc, char* argv[]) {
     logsEnabled = getenv("ROSETTA_X87_LOGS");
 
     // Skip debugger attachment for 64-bit Windows programs (no x87 needed)
-    if (!getenv("ROSETTA_X87_FORCE_ATTACH") && !needsX87JIT(argc, argv)) {
-        LOG("Program is x64, skipping x87 JIT. Passing through.\n");
+    if (!getenv("ROSETTA_X87_FORCE_ATTACH") && shouldSkipAttach(argc, argv)) {
+        LOG("Program is x64 PE, skipping x87 JIT. Passing through.\n");
         execv(argv[1], &argv[1]);
         perror("execv");
         return 1;

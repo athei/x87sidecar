@@ -20,12 +20,6 @@ BIN="$BUILD_DIR/bin"
 LOADER="$BIN/rosettax87"
 BENCH_BIN="$BIN/bench"
 
-# Force rosettax87 to attach + install the IPC stub even when argv[1]
-# isn't a 32-bit PE — benchmark binaries are x86_64 Mach-O, which the
-# loader's needsX87JIT() heuristic would otherwise let pass straight to
-# stock Rosetta without exercising the JIT path at all.
-export ROSETTA_X87_FORCE_ATTACH=1
-
 ALL_BENCHMARKS=(
     bench_constants
     bench_load
