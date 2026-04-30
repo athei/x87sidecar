@@ -3352,6 +3352,155 @@ auto translate_fnop(TranslationResult* a1, IRInstr* /*a2*/) -> void {
 }
 
 // =============================================================================
+// FXTRACT — split ST(0) into (significand, unbiased_exp).
+//
+// x87 semantics:
+//   ST(0) ← unbiased_exponent_of_input  (as f64)
+//   push: ST(0) ← significand (sign·1.mantissa scaled to bias 0)
+//   After: ST(0) = significand, ST(1) = exponent.
+//
+// Bit-level f64 derivation (normal case):
+//   sig = (input_bits & ~exp_mask) | (0x3FF << 52)   (sign+mant kept; exp=bias 0)
+//   exp = SCVTF(exp_field - 1023) as f64
+//
+// Special cases (Intel SDM):
+//   ±0  → sig = ±0 (input);     exp = -∞
+//   ±∞  → sig = ±∞ (input);     exp = +∞ (always positive)
+//   NaN → sig = NaN (input);    exp = NaN (input)
+//   Denormal: SDM-defined as a normalised result; we treat as the zero
+//   case (no current workload exercises denormal fxtract).
+//
+// CSEL chain: default = normal-case bits, override to (-∞ / +∞ / input)
+// based on exp_field comparisons and a mantissa-zero ANDS for NaN-vs-Inf.
+// =============================================================================
+auto translate_fxtract(TranslationResult* a1, IRInstr* /*a2*/) -> void {
+    AssemblerBuffer& buf = a1->insn_buf;
+
+    auto [Xbase, Wd_top] = x87_begin(*a1, buf);
+    const int Xst_base = x87_get_st_base(*a1);
+
+    const int Wd_tmp  = alloc_gpr(*a1, 2);
+    const int Wd_tmp2 = alloc_gpr(*a1, 3);
+
+    // Load ST(0) → Dd_v.  Keep this FPR live until the FCSEL chain.
+    const int Dd_v = alloc_free_fpr(*a1);
+    emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Dd_v, Xst_base);
+
+    // FMOV bits to Xv for bit-level work; UBFX exp_field into Wd_e.
+    const int Xv = alloc_free_gpr(*a1);
+    emit_fmov_d_to_x(buf, Xv, Dd_v);
+    const int Wd_e = alloc_free_gpr(*a1);
+    emit_bitfield(buf, /*is_64=*/1, /*UBFM=*/2, /*N=*/1,
+                  /*immr=*/52, /*imms=*/62, Xv, Wd_e);
+
+    // GPR free-pool budget is tight (~3 in cache-active mode), so we serialise
+    // the work: build the exponent in FP-domain via FCSEL first, write back to
+    // memory, then build the significand in GPR.
+
+    // ── Inline GPR CSEL (no helper). Pattern from translate_fxam. ──
+    auto emit_csel = [&](int is_64, int Rd, int Rn, int Rm, int cond) {
+        uint32_t insn = 0x1A800000u;
+        insn |= (uint32_t)(is_64 != 0) << 31;
+        insn |= (uint32_t)(Rm   & 0x1F) << 16;
+        insn |= (uint32_t)(cond & 0xF)  << 12;
+        insn |= (uint32_t)(Rn   & 0x1F) << 5;
+        insn |= (uint32_t)(Rd   & 0x1F);
+        buf.emit(insn);
+    };
+    constexpr int kEQ = 0x0;
+
+    // ── Phase A: build exponent in Dd_exp ─────────────────────────────────
+    // SUB Wd_em (32-bit) = Wd_e - 1023; SCVTF; FMOV → Dd_norm.
+    int Wd_em = alloc_free_gpr(*a1);
+    emit_add_imm(buf, /*is_64=*/0, /*is_sub=*/1, /*set_flags=*/0,
+                 /*shift=*/0, /*imm12=*/1023, Wd_e, Wd_em);
+    const int Dd_norm = alloc_free_fpr(*a1);
+    emit_scvtf(buf, /*is_64bit_int=*/0, /*ftype=*/1 /*f64*/, Dd_norm, Wd_em);
+    free_gpr(*a1, Wd_em);
+
+    // Constants in FPR via Xtemp (one rotating GPR for the 16-bit-shifted MOVZ).
+    const int Xtemp   = alloc_free_gpr(*a1);
+    const int Dd_inf  = alloc_free_fpr(*a1);
+    emit_movn(buf, /*is_64=*/1, /*MOVZ=*/2, /*hw=*/3 /*<<48*/, 0x7FF0, Xtemp);
+    emit_fmov_x_to_d(buf, Dd_inf, Xtemp);
+    const int Dd_minf = alloc_free_fpr(*a1);
+    emit_movn(buf, /*is_64=*/1, /*MOVZ=*/2, /*hw=*/3, 0xFFF0, Xtemp);
+    emit_fmov_x_to_d(buf, Dd_minf, Xtemp);
+    free_gpr(*a1, Xtemp);
+
+    // ANDS XZR, Xv, #0x000FFFFFFFFFFFFF — Z=1 iff mantissa==0.
+    LogicalImmEncoding enc_mant;
+    is_bitmask_immediate(/*is_64=*/true, 0x000FFFFFFFFFFFFFULL, enc_mant);
+    emit_logical_imm(buf, /*is_64=*/1, /*ANDS=*/3,
+                     enc_mant.N, enc_mant.immr, enc_mant.imms,
+                     /*Rn=*/Xv, /*Rd=*/31 /*XZR*/);
+    // FCSEL Dd_pos = (mant==0) ? Dd_inf : Dd_v   (Inf for true-Inf, NaN for NaN)
+    const int Dd_pos = alloc_free_fpr(*a1);
+    emit_fcsel_f64(buf, Dd_pos, Dd_inf, Dd_v, kEQ);
+    free_fpr(*a1, Dd_inf);
+    free_fpr(*a1, Dd_v);
+
+    // CMP Wd_e, #0x7FF
+    emit_add_imm(buf, /*is_64=*/0, /*is_sub=*/1, /*set_flags=*/1,
+                 /*shift=*/0, /*imm12=*/0x7FF, Wd_e, /*Rd=*/31);
+    // FCSEL Dd_exp = (exp==0x7FF) ? Dd_pos : Dd_norm
+    const int Dd_exp = alloc_free_fpr(*a1);
+    emit_fcsel_f64(buf, Dd_exp, Dd_pos, Dd_norm, kEQ);
+    free_fpr(*a1, Dd_pos);
+    free_fpr(*a1, Dd_norm);
+
+    // CMP Wd_e, #0
+    emit_add_imm(buf, /*is_64=*/0, /*is_sub=*/1, /*set_flags=*/1,
+                 /*shift=*/0, /*imm12=*/0, Wd_e, /*Rd=*/31);
+    // FCSEL Dd_exp = (exp==0) ? Dd_minf : Dd_exp
+    emit_fcsel_f64(buf, Dd_exp, Dd_minf, Dd_exp, kEQ);
+    free_fpr(*a1, Dd_minf);
+
+    // Write exp into the OLD ST(0) slot (depth=0 here, becomes depth=1 after push).
+    emit_store_st(buf, Xbase, Wd_top, /*depth=*/0, Wd_tmp, Dd_exp, Xst_base);
+    free_fpr(*a1, Dd_exp);
+
+    // ── Phase B: build significand bits in Xs, FMOV, push, store ──────────
+    // Xs = sign | 0x3FF<<52 | mantissa  (normal case).  Special cases preserve Xv.
+    const int Xs = alloc_free_gpr(*a1);
+    emit_mov_reg(buf, /*is_64=*/1, Xs, Xv);
+    // BFI Xs, XZR, #52, #11 — clear exp field.
+    emit_bitfield(buf, /*is_64=*/1, /*BFM=*/1, /*N=*/1,
+                  /*immr=*/12, /*imms=*/10, /*Rn=*/31, /*Rd=*/Xs);
+    // ORR Xs, Xs, #0x3FF0_0000_0000_0000 — set exp=bias 0.
+    LogicalImmEncoding enc_bias;
+    is_bitmask_immediate(/*is_64=*/true, 0x3FF0000000000000ULL, enc_bias);
+    emit_orr_imm(buf, /*is_64=*/1, /*Rd=*/Xs, /*Rn=*/Xs,
+                 enc_bias.N, enc_bias.immr, enc_bias.imms);
+
+    // CMP Wd_e, #0x7FF; CSEL Xs = (eq) ? Xv : Xs
+    emit_add_imm(buf, /*is_64=*/0, /*is_sub=*/1, /*set_flags=*/1,
+                 /*shift=*/0, /*imm12=*/0x7FF, Wd_e, /*Rd=*/31);
+    emit_csel(/*is_64=*/1, /*Rd=*/Xs, /*Rn=*/Xv, /*Rm=*/Xs, kEQ);
+    // CMP Wd_e, #0; CSEL Xs = (eq) ? Xv : Xs
+    emit_add_imm(buf, /*is_64=*/0, /*is_sub=*/1, /*set_flags=*/1,
+                 /*shift=*/0, /*imm12=*/0, Wd_e, /*Rd=*/31);
+    emit_csel(/*is_64=*/1, /*Rd=*/Xs, /*Rn=*/Xv, /*Rm=*/Xs, kEQ);
+    free_gpr(*a1, Wd_e);
+    free_gpr(*a1, Xv);
+
+    const int Dd_sig = alloc_free_fpr(*a1);
+    emit_fmov_x_to_d(buf, Dd_sig, Xs);
+    free_gpr(*a1, Xs);
+
+    // Push (TOP-=1, mark new ST(0) tag valid).
+    x87_push(buf, *a1, Xbase, Wd_top, Wd_tmp, Wd_tmp2);
+
+    // Store sig at new ST(0).
+    emit_store_st(buf, Xbase, Wd_top, /*depth=*/0, Wd_tmp, Dd_sig, Xst_base);
+    free_fpr(*a1, Dd_sig);
+    free_gpr(*a1, Wd_tmp2);
+
+    x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp);
+    free_gpr(*a1, Wd_tmp);
+}
+
+// =============================================================================
 // FDECSTP — decrement TOP.
 //
 // x87 semantics:

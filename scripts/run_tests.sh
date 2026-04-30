@@ -75,6 +75,7 @@ ALL_TESTS=(
     test_fincstp
     test_ffree
     test_fdisi_feni
+    test_fxtract
 )
 
 RED='\033[0;31m'
