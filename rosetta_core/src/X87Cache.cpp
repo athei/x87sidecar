@@ -88,6 +88,7 @@ static bool is_handled_x87(uint16_t op) {
         case kOpcodeName_finit:
         case kOpcodeName_fbstp:
         case kOpcodeName_fldenv:
+        case kOpcodeName_fstenv:
             return true;
         default:
             return false;

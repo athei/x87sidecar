@@ -4202,4 +4202,69 @@ auto translate_fldenv(TranslationResult* a1, IRInstr* a2) -> void {
     }
 }
 
+// =============================================================================
+// FSTENV / FNSTENV — store 28-byte FPU env to memory.
+//
+// Layout matches translate_fldenv (CW at +0, SW at +4, TW at +8, the rest
+// are FIP/FCS/FOP/FDP/FDS pointer fields that we don't track — they're
+// written as zero).
+//
+// Cache state: deferred top/tag/pop bits must be flushed to memory before
+// reading CW/SW/TW from Xbase, otherwise the stored env reflects stale
+// metadata.  perm_dirty doesn't affect SW/TW (it only permutes the f64
+// register file), so we skip it.
+//
+// Codegen:
+//   - x87_flush_top + x87_flush_tags (the latter also flushes deferred pops).
+//   - 3 × {LDRH 16-bit, STR 32-bit} for CW/SW/TW (LDRH zero-extends so the
+//     32-bit STR writes the field plus the 2-byte reserved padding in one go).
+//   - 3 × STR XZR for the 16-byte FIP/FCS/FOP/FDP/FDS tail (4 + 8 + 4 bytes
+//     at offsets 12 / 16 / 24 — exploits 16's 8-byte alignment for one
+//     X-sized store).
+// =============================================================================
+auto translate_fstenv(TranslationResult* a1, IRInstr* a2) -> void {
+    AssemblerBuffer& buf = a1->insn_buf;
+    static constexpr int16_t kX87CtrlWordImm12   = kX87ControlWordOff / 2;  // = 0
+    static constexpr int16_t kX87StatusWordImm12 = kX87StatusWordOff / 2;   // = 1
+    static constexpr int16_t kX87TagWordImm12    = kX87TagWordOff / 2;      // = 2
+
+    auto [Xbase, Wd_top] = x87_begin(*a1, buf);
+    const int Wd_tmp  = alloc_gpr(*a1, 2);
+    const int Wd_tmp2 = alloc_gpr(*a1, 3);
+
+    // Make in-memory SW/TW coherent.  perm_dirty doesn't touch SW/TW.
+    x87_flush_top(buf, *a1, Xbase, Wd_top, Wd_tmp);
+    x87_flush_tags(buf, *a1, Xbase, Wd_top, Wd_tmp, Wd_tmp2);
+
+    // Release Wd_tmp2 — body uses Wd_tmp only.
+    free_gpr(*a1, Wd_tmp2);
+
+    // Destination address.
+    const bool addr_is_64 = (a2->operands[0].mem.addr_size == IROperandSize::S64);
+    const int Xaddr = compute_operand_address(*a1, addr_is_64, &a2->operands[0], GPR::XZR);
+
+    // CW: [Xbase, #0] → [Xaddr, #0..3]   (LDRH zero-extends; 32-bit STR
+    // writes the field + 2 reserved zero bytes in one shot.)
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*LDR=*/1, kX87CtrlWordImm12, Xbase, Wd_tmp);
+    emit_ldr_str_imm(buf, /*size=*/2, /*is_fp=*/0, /*STR=*/0, /*imm12=*/0, Xaddr, Wd_tmp);
+
+    // SW: [Xbase, #2] → [Xaddr, #4..7]
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*LDR=*/1, kX87StatusWordImm12, Xbase, Wd_tmp);
+    emit_ldr_str_imm(buf, /*size=*/2, /*is_fp=*/0, /*STR=*/0, /*imm12=*/1, Xaddr, Wd_tmp);
+
+    // TW: [Xbase, #4] → [Xaddr, #8..11]
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*LDR=*/1, kX87TagWordImm12, Xbase, Wd_tmp);
+    emit_ldr_str_imm(buf, /*size=*/2, /*is_fp=*/0, /*STR=*/0, /*imm12=*/2, Xaddr, Wd_tmp);
+
+    // 16 zero bytes at offsets 12..27 — 3 stores: 4B at 12, 8B at 16, 4B at 24.
+    emit_ldr_str_imm(buf, /*size=*/2, /*is_fp=*/0, /*STR=*/0, /*imm12=*/3, Xaddr, GPR::XZR);
+    emit_ldr_str_imm(buf, /*size=*/3, /*is_fp=*/0, /*STR=*/0, /*imm12=*/2, Xaddr, GPR::XZR);
+    emit_ldr_str_imm(buf, /*size=*/2, /*is_fp=*/0, /*STR=*/0, /*imm12=*/6, Xaddr, GPR::XZR);
+
+    free_gpr(*a1, Xaddr);
+
+    x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp);
+    free_gpr(*a1, Wd_tmp);
+}
+
 };  // namespace TranslatorX87
