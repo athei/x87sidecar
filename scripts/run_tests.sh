@@ -79,6 +79,7 @@ ALL_TESTS=(
     test_fsave
     test_fsin
     test_fcos
+    test_f2xm1
 )
 
 RED='\033[0;31m'
