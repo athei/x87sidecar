@@ -23,6 +23,19 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# Keep assert() active in optimized builds.  Release-only UB has
+# repeatedly bitten us (alloc_free_gpr returning ctz(0)=32 on an empty
+# pool, is_bitmask_immediate's signed-shift UB) — the tiny per-instr
+# cost of leaving asserts in is well worth the safety net.  Strip
+# -DNDEBUG from each optimised config's default flags rather than
+# adding -UNDEBUG via add_compile_options, because cmake orders
+# compile_options BEFORE the per-config flags so a later -DNDEBUG
+# would re-mask the assert.
+foreach(_cfg IN ITEMS RELEASE RELWITHDEBINFO MINSIZEREL)
+    string(REPLACE "-DNDEBUG" "" CMAKE_CXX_FLAGS_${_cfg} "${CMAKE_CXX_FLAGS_${_cfg}}")
+    string(REPLACE "-DNDEBUG" "" CMAKE_C_FLAGS_${_cfg}   "${CMAKE_C_FLAGS_${_cfg}}")
+endforeach()
+
 # Enable LTO globally where supported, for the optimized configurations only.
 include(CheckIPOSupported)
 block()
