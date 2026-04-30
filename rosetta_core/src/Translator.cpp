@@ -339,6 +339,10 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                 TranslatorX87::translate_fpatan(translation_result, cur_instr);
                 break;
 
+            case Opcode::kOpcodeName_fsincos:
+                TranslatorX87::translate_fsincos(translation_result, cur_instr);
+                break;
+
             case Opcode::kOpcodeName_fxsave:
             case Opcode::kOpcodeName_fxrstor:
                 // fxsave/fxrstor touch x87 state (env header + 8 ST slots
