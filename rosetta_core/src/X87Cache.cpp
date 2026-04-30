@@ -90,6 +90,7 @@ static bool is_handled_x87(uint16_t op) {
         case kOpcodeName_fldenv:
         case kOpcodeName_fstenv:
         case kOpcodeName_frstor:
+        case kOpcodeName_fsave:
             return true;
         default:
             return false;

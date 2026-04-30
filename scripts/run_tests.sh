@@ -76,6 +76,7 @@ ALL_TESTS=(
     test_fldenv
     test_fstenv
     test_frstor
+    test_fsave
 )
 
 RED='\033[0;31m'

@@ -4236,4 +4236,113 @@ auto translate_frstor(TranslationResult* a1, IRInstr* a2) -> void {
     }
 }
 
+// =============================================================================
+// FSAVE / FNSAVE — store 108-byte FPU state to memory, then re-initialize.
+//
+// Per Intel SDM Vol 2A:
+//   "FSAVE/FNSAVE stores the current FPU state to the destination, then
+//    initializes the FPU.  The functional equivalent is FSTENV followed by
+//    FINIT."
+//
+// Layout (32-bit protected mode):
+//   +0..27   28-byte env header (CW@0, SW@4, TW@8, FIP/FCS/FOP/FDP/FDS @12..27)
+//   +28..107 8 ST slots in x86 f80 format, 10 bytes each
+//      ST(0) @ 0x1C, ST(1) @ 0x26, ST(2) @ 0x30, ST(3) @ 0x3A,
+//      ST(4) @ 0x44, ST(5) @ 0x4E, ST(6) @ 0x58, ST(7) @ 0x62
+//
+// Cache state: must flush ALL deferred state (top, tags, perm) before
+// reading the register file by physical index — perm specifically because
+// emit_load_st with the cached path uses logical depth, and with perm
+// dirty the depth->physical mapping is permuted.  After saving, we
+// re-initialize FPU memory state (CW=0x37F, SW=0, TW=0xFFFF) and reset
+// Wd_top to 0 so the rest of the run sees the new TOP.
+// =============================================================================
+auto translate_fsave(TranslationResult* a1, IRInstr* a2) -> void {
+    AssemblerBuffer& buf = a1->insn_buf;
+    static constexpr int16_t kX87CtrlWordImm12   = kX87ControlWordOff / 2;  // = 0
+    static constexpr int16_t kX87StatusWordImm12 = kX87StatusWordOff / 2;   // = 1
+    static constexpr int16_t kX87TagWordImm12    = kX87TagWordOff / 2;      // = 2
+
+    auto [Xbase, Wd_top] = x87_begin(*a1, buf);
+    const int Wd_tmp  = alloc_gpr(*a1, 2);
+    const int Wd_tmp2 = alloc_gpr(*a1, 3);
+
+    // Make in-memory state coherent.  Unlike fstenv, we MUST also flush
+    // perm because we'll read the f64 register file by depth below.
+    x87_flush_top(buf, *a1, Xbase, Wd_top, Wd_tmp);
+    x87_flush_tags(buf, *a1, Xbase, Wd_top, Wd_tmp, Wd_tmp2);
+    perm_flush_before_stack_change(buf, *a1, Xbase, Wd_top, Wd_tmp);
+
+    // Release Wd_tmp2 — body uses Wd_tmp + per-slot helper scratches.
+    free_gpr(*a1, Wd_tmp2);
+
+    // Destination address.
+    const bool addr_is_64 = (a2->operands[0].mem.addr_size == IROperandSize::S64);
+    const int Xaddr = compute_operand_address(*a1, addr_is_64, &a2->operands[0], GPR::XZR);
+
+    // ── Env header (identical to translate_fstenv body) ──
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*LDR=*/1, kX87CtrlWordImm12, Xbase, Wd_tmp);
+    emit_ldr_str_imm(buf, /*size=*/2, /*is_fp=*/0, /*STR=*/0, /*imm12=*/0, Xaddr, Wd_tmp);
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*LDR=*/1, kX87StatusWordImm12, Xbase, Wd_tmp);
+    emit_ldr_str_imm(buf, /*size=*/2, /*is_fp=*/0, /*STR=*/0, /*imm12=*/1, Xaddr, Wd_tmp);
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*LDR=*/1, kX87TagWordImm12, Xbase, Wd_tmp);
+    emit_ldr_str_imm(buf, /*size=*/2, /*is_fp=*/0, /*STR=*/0, /*imm12=*/2, Xaddr, Wd_tmp);
+    // 16 zero bytes at offsets 12..27.
+    emit_ldr_str_imm(buf, /*size=*/2, /*is_fp=*/0, /*STR=*/0, /*imm12=*/3, Xaddr, GPR::XZR);
+    emit_ldr_str_imm(buf, /*size=*/3, /*is_fp=*/0, /*STR=*/0, /*imm12=*/2, Xaddr, GPR::XZR);
+    emit_ldr_str_imm(buf, /*size=*/2, /*is_fp=*/0, /*STR=*/0, /*imm12=*/6, Xaddr, GPR::XZR);
+
+    // ── 8 ST slots — unrolled f64 -> f80 conversion ──
+    //
+    // Per-iter: load ST(i) into Dd_src, bump Xaddr to slot i, call
+    // emit_f64_to_f80 (writes 10 bytes at [Xaddr]).  After the loop,
+    // Xaddr points past slot 7 — we don't restore it.
+    //
+    // GPR pressure:
+    //   persistent: Xbase, Wd_top, Wd_tmp, Xst_base(cached only),
+    //               Xaddr, Xbits, Wexp = 6 or 7
+    //   per-iter:   no extra (Dd_src is FPR, no GPR cost)
+    // = 7 worst case (cached).  Pool of 8 fits comfortably.
+    const int Xst_base = x87_get_st_base(*a1);
+    const int Xbits    = alloc_free_gpr(*a1);
+    const int Wexp     = alloc_free_gpr(*a1);
+    const int Dd_src   = alloc_free_fpr(*a1);
+
+    for (int i = 0; i < 8; ++i) {
+        // Load ST(i) (logical depth i from current TOP).
+        emit_load_st(buf, Xbase, Wd_top, /*stack_depth=*/i, Wd_tmp, Dd_src, Xst_base);
+        // Bump Xaddr to the start of the current slot.
+        const int delta = (i == 0) ? 0x1C : 10;
+        emit_add_imm(buf, /*is_64=*/1, /*is_sub=*/0, /*set_flags=*/0,
+                     /*shift=*/0, delta, Xaddr, Xaddr);
+        // Convert and store 10 bytes at [Xaddr, #0..#9].
+        emit_f64_to_f80(buf, Xaddr, Dd_src, Xbits, Wexp, Wd_tmp);
+    }
+
+    free_fpr(*a1, Dd_src);
+    free_gpr(*a1, Wexp);
+    free_gpr(*a1, Xbits);
+    free_gpr(*a1, Xaddr);
+
+    // ── Re-initialize FPU state per Intel SDM (FSAVE = FSTENV + FINIT) ──
+    // CW = 0x037F, SW = 0, TW = 0xFFFF, error pointers already zeroed
+    // by the env-header path above.  Reset Wd_top to 0 to match new SW.TOP
+    // and clear cache flags — the in-memory state is fresh.
+    // CW = 0x037F via MOVZ.
+    emit_movn(buf, /*is_64=*/0, /*MOVZ=*/2, /*hw=*/0, /*imm=*/0x037F, Wd_tmp);
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*STR=*/0, kX87CtrlWordImm12, Xbase, Wd_tmp);
+    // SW = 0.
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*STR=*/0, kX87StatusWordImm12, Xbase, GPR::XZR);
+    // TW = 0xFFFF via MOVN W, #0 (gives 0xFFFFFFFF; STRH writes low 16).
+    emit_movn(buf, /*is_64=*/0, /*MOVN=*/0, /*hw=*/0, /*imm=*/0, Wd_tmp);
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*STR=*/0, kX87TagWordImm12, Xbase, Wd_tmp);
+    // Reset cached Wd_top to 0 (matches new SW.TOP=0).
+    emit_movn(buf, /*is_64=*/0, /*MOVZ=*/2, /*hw=*/0, /*imm=*/0, Wd_top);
+    // Cache flags are already zero (we flushed top/tags/perm earlier; deferred_pop_count is 0).
+    a1->x87_cache.top_dirty = 0;
+
+    x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp);
+    free_gpr(*a1, Wd_tmp);
+}
+
 };  // namespace TranslatorX87
