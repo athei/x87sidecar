@@ -9,6 +9,7 @@ add_library(rosetta_core STATIC
     src/TranslatorHelpers.cpp
     src/Translator.cpp
     src/TranslatorX87.cpp
+    src/TranslatorX87F80.cpp
     src/TranslatorX87Fusion.cpp
     src/TranslatorX87Helpers.cpp
     src/X87Cache.cpp
