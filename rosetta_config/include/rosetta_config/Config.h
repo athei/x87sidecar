@@ -38,7 +38,7 @@ inline bool fusion_is_disabled(const RosettaConfig& cfg, FusionId id) {
 }
 
 // Parse configuration from environment variables.
-// Only call from normal executables (aotinvoke, runtime_loader).
+// Only call from normal executables (aotinvoke, rosettax87).
 // Environment variables:
 //   ROSETTA_X87_DISABLE_CACHE=1          disable X87Cache
 //   ROSETTA_X87_DISABLE_FUSIONS=fld_arithp,fcom_fstsw  disable specific fusions

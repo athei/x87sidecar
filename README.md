@@ -25,7 +25,7 @@ Tests and benchmarks are built automatically as part of the CMake build.
 
 Run the test suite:
 ```bash
-bash scripts/run_tests.sh              # build + test (native Rosetta & runtime_loader)
+bash scripts/run_tests.sh              # build + test (native Rosetta & rosettax87)
 bash scripts/run_tests.sh --no-build   # skip build
 bash scripts/run_tests.sh --native-only # native Rosetta only
 bash scripts/run_tests.sh test_arith   # run a specific test
@@ -73,7 +73,7 @@ These flags are primarily useful for narrowing down bugs by selectively disablin
 
 ### Automatic x64 Bypass
 
-When used with Wine, `runtime_loader` automatically detects whether the Windows executable is 32-bit (x86) or 64-bit (x64) by reading its PE headers. 64-bit programs do not use x87 instructions, so the loader passes them through directly without attaching the debugger.
+When used with Wine, `rosettax87` automatically detects whether the Windows executable is 32-bit (x86) or 64-bit (x64) by reading its PE headers. 64-bit programs do not use x87 instructions, so the loader passes them through directly without attaching the debugger.
 
 ## Usage with Wine
 
@@ -89,7 +89,7 @@ brew install --cask wine@devel
 
 2. To permanently set the environment variable, add the following to your `~/.bashrc` or `~/.zshrc` file:
 ```bash
-export ROSETTA_X87_PATH=/Path/To/runtime_loader
+export ROSETTA_X87_PATH=/Path/To/rosettax87
 ```
 
 3. Run the Windows application

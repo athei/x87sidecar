@@ -24,9 +24,10 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 BUILD_DIR="$ROOT_DIR/build"
 BIN="$BUILD_DIR/bin"
-LOADER="$BIN/runtime_loader"
+LOADER="$BIN/rosettax87"
+TESTS_BIN="$BIN/tests"
 
-# Force runtime_loader to attach + install the IPC stub even when argv[1]
+# Force rosettax87 to attach + install the IPC stub even when argv[1]
 # isn't a 32-bit PE — test binaries are x86_64 Mach-O, which the loader's
 # needsX87JIT() heuristic would otherwise let pass straight to stock
 # Rosetta without exercising the JIT path at all.
@@ -130,7 +131,7 @@ run_one_test() {
     local config_name="$1"
     local envvars="$2"
     local binary_name="$3"
-    local binary="$BIN/$binary_name"
+    local binary="$TESTS_BIN/$binary_name"
 
     TOTAL=$(( TOTAL + 1 ))
 

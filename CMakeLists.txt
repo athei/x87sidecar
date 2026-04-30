@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.27)
 # Must be set before project() to drive per-target deployment-target flags.
 set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "Minimum macOS deployment version")
 
-project(rosetta_aot
+project(rosettax87
     LANGUAGES CXX
     DESCRIPTION "Apple Silicon x87 JIT translation hook for Rosetta 2"
 )

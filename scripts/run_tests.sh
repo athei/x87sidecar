@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
 #
 # run_tests.sh -- run all x87 test binaries under native Rosetta and the
-# custom runtime_loader, checking self-reported PASS/FAIL output.
+# custom rosettax87, checking self-reported PASS/FAIL output.
 #
 # Phases:
 #   1. Native Rosetta (baseline)
-#   2. runtime_loader (IR + fusions enabled, default config)
-#   3. runtime_loader with ROSETTA_X87_DISABLE_IR=1 (direct translator only)
-#   4. runtime_loader with ROSETTA_X87_DISABLE_IR=1 + ROSETTA_X87_DISABLE_ALL_FUSIONS=1
+#   2. rosettax87 (IR + fusions enabled, default config)
+#   3. rosettax87 with ROSETTA_X87_DISABLE_IR=1 (direct translator only)
+#   4. rosettax87 with ROSETTA_X87_DISABLE_IR=1 + ROSETTA_X87_DISABLE_ALL_FUSIONS=1
 #
 # Usage:
 #   bash scripts/run_tests.sh                # build + test (all phases)
 #   bash scripts/run_tests.sh --no-build     # skip build
-#   bash scripts/run_tests.sh --native-only  # Phase 1 only (no runtime_loader)
+#   bash scripts/run_tests.sh --native-only  # Phase 1 only (no rosettax87)
 #   bash scripts/run_tests.sh test_arith     # only run specific test(s)
 
 set -euo pipefail
@@ -21,9 +21,10 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 BUILD_DIR="$ROOT_DIR/build"
 BIN="$BUILD_DIR/bin"
-LOADER="$BIN/runtime_loader"
+LOADER="$BIN/rosettax87"
+TESTS_BIN="$BIN/tests"
 
-# Force runtime_loader to attach + install the IPC stub even when argv[1]
+# Force rosettax87 to attach + install the IPC stub even when argv[1]
 # isn't a 32-bit PE — our test binaries are x86_64 Mach-O, which the
 # loader's needsX87JIT() heuristic would otherwise let pass straight to
 # stock Rosetta without exercising the JIT path at all. (Without this
@@ -139,7 +140,7 @@ check_output() {
 echo -e "${BOLD}=== Phase 1: native Rosetta ===${NC}"
 
 for t in "${TESTS[@]}"; do
-    BINARY="$BIN/$t"
+    BINARY="$TESTS_BIN/$t"
     if [[ ! -x "$BINARY" ]]; then
         echo -e "${YELLOW}SKIP${NC}  $t  (binary not found)"
         ERRORS=$((ERRORS + 1))
@@ -149,13 +150,13 @@ for t in "${TESTS[@]}"; do
     check_output "$t" "$OUT"
 done
 
-# ── Phase 2: runtime_loader ───────────────────────────────────────────────────
+# ── Phase 2: rosettax87 ───────────────────────────────────────────────────
 if [[ $NATIVE_ONLY -eq 0 ]]; then
     echo ""
-    echo -e "${BOLD}=== Phase 2: runtime_loader ===${NC}"
+    echo -e "${BOLD}=== Phase 2: rosettax87 ===${NC}"
 
     for t in "${TESTS[@]}"; do
-        BINARY="$BIN/$t"
+        BINARY="$TESTS_BIN/$t"
         if [[ ! -x "$BINARY" ]]; then
             echo -e "${YELLOW}SKIP${NC}  $t  (binary not found)"
             ERRORS=$((ERRORS + 1))
@@ -166,13 +167,13 @@ if [[ $NATIVE_ONLY -eq 0 ]]; then
     done
 fi
 
-# ── Phase 3: runtime_loader, IR disabled ─────────────────────────────────────
+# ── Phase 3: rosettax87, IR disabled ─────────────────────────────────────
 if [[ $NATIVE_ONLY -eq 0 ]]; then
     echo ""
-    echo -e "${BOLD}=== Phase 3: runtime_loader (IR disabled) ===${NC}"
+    echo -e "${BOLD}=== Phase 3: rosettax87 (IR disabled) ===${NC}"
 
     for t in "${TESTS[@]}"; do
-        BINARY="$BIN/$t"
+        BINARY="$TESTS_BIN/$t"
         if [[ ! -x "$BINARY" ]]; then
             echo -e "${YELLOW}SKIP${NC}  $t  (binary not found)"
             ERRORS=$((ERRORS + 1))
@@ -183,13 +184,13 @@ if [[ $NATIVE_ONLY -eq 0 ]]; then
     done
 fi
 
-# ── Phase 4: runtime_loader, IR disabled + all fusions disabled ──────────────
+# ── Phase 4: rosettax87, IR disabled + all fusions disabled ──────────────
 if [[ $NATIVE_ONLY -eq 0 ]]; then
     echo ""
-    echo -e "${BOLD}=== Phase 4: runtime_loader (IR disabled, fusions disabled) ===${NC}"
+    echo -e "${BOLD}=== Phase 4: rosettax87 (IR disabled, fusions disabled) ===${NC}"
 
     for t in "${TESTS[@]}"; do
-        BINARY="$BIN/$t"
+        BINARY="$TESTS_BIN/$t"
         if [[ ! -x "$BINARY" ]]; then
             echo -e "${YELLOW}SKIP${NC}  $t  (binary not found)"
             ERRORS=$((ERRORS + 1))

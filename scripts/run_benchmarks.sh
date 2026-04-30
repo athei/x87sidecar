@@ -5,7 +5,7 @@
 #
 # Configurations:
 #   1. Native Rosetta    — binary run directly (baseline)
-#   2. Loader optimized  — runtime_loader with all JIT optimizations enabled
+#   2. Loader optimized  — rosettax87 with all JIT optimizations enabled
 #
 # Usage:
 #   bash scripts/run_benchmarks.sh              # build + run
@@ -17,9 +17,10 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 BUILD_DIR="$ROOT_DIR/build"
 BIN="$BUILD_DIR/bin"
-LOADER="$BIN/runtime_loader"
+LOADER="$BIN/rosettax87"
+BENCH_BIN="$BIN/bench"
 
-# Force runtime_loader to attach + install the IPC stub even when argv[1]
+# Force rosettax87 to attach + install the IPC stub even when argv[1]
 # isn't a 32-bit PE — benchmark binaries are x86_64 Mach-O, which the
 # loader's needsX87JIT() heuristic would otherwise let pass straight to
 # stock Rosetta without exercising the JIT path at all.
@@ -109,7 +110,7 @@ echo -e "${BOLD}Running benchmarks...${NC}"
 echo ""
 
 for bench in "${ALL_BENCHMARKS[@]}"; do
-    binary="$BIN/$bench"
+    binary="$BENCH_BIN/$bench"
     if [[ ! -x "$binary" ]]; then
         echo -e "${YELLOW}SKIP${NC}  $bench  (binary not found)"
         continue
@@ -135,7 +136,7 @@ echo ""
 # ── Legend ────────────────────────────────────────────────────────────────────
 echo -e "${BOLD}Columns:${NC}"
 echo "  native    — binary run directly under Rosetta (no loader)"
-echo "  JIT       — runtime_loader with full JIT optimizations enabled"
+echo "  JIT       — rosettax87 with full JIT optimizations enabled"
 echo "  nat_gain  — speedup of JIT over native Rosetta"
 echo ""
 
@@ -153,7 +154,7 @@ total_vs_native_pct=0
 total_count=0
 
 for bench in "${ALL_BENCHMARKS[@]}"; do
-    binary="$BIN/$bench"
+    binary="$BENCH_BIN/$bench"
     [[ -x "$binary" ]] || continue
 
     for key in "${!NATIVE[@]}"; do
@@ -213,7 +214,7 @@ fi
 # WARNING: FAST_ROUND=1 is incorrect for code that uses FLDCW to set non-default
 # rounding modes (e.g. Lua, floor-based coordinate math). Only use it when you
 # have verified the target binary never changes the x87 rounding mode.
-ROUND_BIN="$BIN/bench_round"
+ROUND_BIN="$BENCH_BIN/bench_round"
 if [[ -x "$ROUND_BIN" ]]; then
     echo ""
     echo -e "${BOLD}ROSETTA_X87_FAST_ROUND comparison${NC}  (bench_round)"

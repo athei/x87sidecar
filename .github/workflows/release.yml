@@ -21,21 +21,17 @@ jobs:
         run: cmake -B build
 
       - name: Build
-        run: cmake --build build --target runtime_loader libRuntimeRosettax87 --parallel
+        run: cmake --build build --target rosettax87 --parallel
 
       - name: Verify binaries
         run: |
-          echo "=== runtime_loader ==="
-          file build/bin/runtime_loader
-          echo ""
-          echo "=== libRuntimeRosettax87 ==="
-          file build/bin/libRuntimeRosettax87
+          echo "=== rosettax87 ==="
+          file build/bin/rosettax87
 
       - name: Package artifacts
         run: |
           mkdir -p release
-          cp build/bin/runtime_loader release/
-          cp build/bin/libRuntimeRosettax87 release/
+          cp build/bin/rosettax87 release/
           cd release
           tar czf ../rosettax87-jit-macos-arm64.tar.gz .
 
