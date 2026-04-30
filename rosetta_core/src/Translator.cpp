@@ -284,6 +284,8 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                 break;
 
             case Opcode::kOpcodeName_fnop:
+            case Opcode::kOpcodeName_fdisi:  // 8087 FPU-int disable; NOP on 80287+
+            case Opcode::kOpcodeName_feni:   // 8087 FPU-int enable; NOP on 80287+
                 TranslatorX87::translate_fnop(translation_result, cur_instr);
                 break;
 
