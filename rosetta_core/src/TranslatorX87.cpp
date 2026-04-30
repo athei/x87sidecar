@@ -3820,4 +3820,71 @@ auto translate_fclex(TranslationResult* a1, IRInstr* /*a2*/) -> void {
     }
 }
 
+// =============================================================================
+// FINIT / FNINIT — reset FPU state.
+//
+// x87 semantics:
+//   control_word ← 0x037F   (mask all exceptions, round-nearest, 64-bit prec)
+//   status_word  ← 0x0000   (TOP=0, all condition codes / exception flags clear)
+//   tag_word     ← 0xFFFF   (all 8 slots tagged kEmpty)
+//   The 8 ST register slots themselves are not cleared — tagged-empty suffices.
+//
+// Three stores; no read of existing state.  If finit is the only x87 op in
+// its window we use the same mini-prologue trick as fclex (alloc only Xbase,
+// skip emit_load_top); when in a run we go through x87_begin so the cache
+// stays pinned for subsequent ops, then emit MOV Wd_top, #0 to match the
+// new SW.TOP and discard any deferred flags rather than flushing them
+// (their target memory is gone).
+// =============================================================================
+auto translate_finit(TranslationResult* a1, IRInstr* /*a2*/) -> void {
+    AssemblerBuffer& buf = a1->insn_buf;
+    static constexpr int16_t kX87CtrlWordImm12   = kX87ControlWordOff / 2;  // = 0
+    static constexpr int16_t kX87StatusWordImm12 = kX87StatusWordOff / 2;   // = 1
+    static constexpr int16_t kX87TagWordImm12    = kX87TagWordOff / 2;      // = 2
+
+    int Xbase, Wd_top;
+    const bool standalone = (a1->x87_cache.run_remaining == 0);
+    if (standalone) {
+        Xbase = alloc_gpr(*a1, 0);
+        emit_x87_base(buf, *a1, Xbase);
+        Wd_top = GPR::XZR;          // unused: gprs_valid stays 0
+    } else {
+        auto pair = x87_begin(*a1, buf);
+        Xbase = pair.first;
+        Wd_top = pair.second;
+    }
+
+    const int Wd_tmp = alloc_gpr(*a1, 2);
+
+    // CW <- 0x037F
+    emit_movn(buf, /*is_64=*/0, /*MOVZ opc=*/2, /*hw=*/0, /*imm=*/0x037F, Wd_tmp);
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*STR=*/0,
+                     kX87CtrlWordImm12, Xbase, Wd_tmp);
+
+    // SW <- 0  (also resets SW.TOP to 0)
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*STR=*/0,
+                     kX87StatusWordImm12, Xbase, GPR::XZR);
+
+    // TW <- 0xFFFF
+    emit_movn(buf, /*is_64=*/0, /*MOVZ opc=*/2, /*hw=*/0, /*imm=*/0xFFFF, Wd_tmp);
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*STR=*/0,
+                     kX87TagWordImm12, Xbase, Wd_tmp);
+
+    if (standalone) {
+        free_gpr(*a1, Wd_tmp);
+        free_gpr(*a1, Xbase);
+    } else {
+        // Deferred flags now point at memory we just overwrote — discard.
+        a1->x87_cache.top_dirty = 0;
+        a1->x87_cache.tag_push_pending = 0;
+        a1->x87_cache.deferred_pop_count = 0;
+        a1->x87_cache.reset_perm();
+        // MOVZ Wd_top, #0  — match the new SW.TOP for the rest of the run.
+        emit_movn(buf, /*is_64=*/0, /*MOVZ opc=*/2, /*hw=*/0, /*imm=*/0, Wd_top);
+
+        x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp);
+        free_gpr(*a1, Wd_tmp);
+    }
+}
+
 };  // namespace TranslatorX87

@@ -35,5 +35,6 @@ add_x86_sample(bench_ffree)
 add_x86_sample(bench_fdisi_feni)
 add_x86_sample(bench_fxtract)
 add_x86_sample(bench_fscale)
+add_x86_sample(bench_finit)
 
 add_subdirectory(macro)

@@ -103,4 +103,6 @@ auto translate_fxtract(TranslationResult* a1, IRInstr* a2) -> void;
 
 auto translate_fscale(TranslationResult* a1, IRInstr* a2) -> void;
 
+auto translate_finit(TranslationResult* a1, IRInstr* a2) -> void;
+
 };  // namespace TranslatorX87

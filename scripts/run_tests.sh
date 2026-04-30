@@ -78,6 +78,7 @@ ALL_TESTS=(
     test_fdisi_feni
     test_fxtract
     test_fscale
+    test_finit
 )
 
 RED='\033[0;31m'
