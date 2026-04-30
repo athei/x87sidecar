@@ -124,11 +124,22 @@ ERRORS=0
 check_output() {
     local name="$1"
     local out="$2"
+    local exit_code="$3"
     TOTAL=$((TOTAL + 1))
     if echo "$out" | grep -qE 'FAIL'; then
         echo -e "${RED}FAIL${NC}  $name"
         FAILED=$((FAILED + 1))
         echo "$out" | grep -E 'FAIL' | head -10 | sed 's/^/      /'
+    elif [[ "$exit_code" -ne 0 ]]; then
+        # Silent crash — test exited non-zero with no FAIL line.
+        echo -e "${RED}CRASH${NC} $name  (exit=$exit_code)"
+        FAILED=$((FAILED + 1))
+        echo "$out" | tail -5 | sed 's/^/      /'
+    elif ! echo "$out" | grep -qE '(PASS|[0-9]+ failure)'; then
+        # No PASS lines and no "N failure(s)" summary — test produced
+        # nothing useful, treat as broken.
+        echo -e "${RED}NO-PASS${NC} $name  (no PASS / failure summary line)"
+        FAILED=$((FAILED + 1))
     else
         echo -e "${GREEN}PASS${NC}  $name"
         PASSED=$((PASSED + 1))
@@ -145,11 +156,15 @@ for t in "${TESTS[@]}"; do
         ERRORS=$((ERRORS + 1))
         continue
     fi
-    OUT=$("$BINARY" 2>/dev/null || true)
-    check_output "$t" "$OUT"
+    EXIT=0
+    OUT=$("$BINARY" 2>/dev/null) || EXIT=$?
+    check_output "$t" "$OUT" "$EXIT"
 done
 
 # ── Phase 2: rosettax87 ───────────────────────────────────────────────────
+# pipefail (set -o pipefail above) makes the pipe inherit the loader's
+# non-zero exit, so a silent loader/test crash propagates through
+# `... | filter_runtime_lines` and we capture it in $EXIT.
 if [[ $NATIVE_ONLY -eq 0 ]]; then
     echo ""
     echo -e "${BOLD}=== Phase 2: rosettax87 ===${NC}"
@@ -161,8 +176,9 @@ if [[ $NATIVE_ONLY -eq 0 ]]; then
             ERRORS=$((ERRORS + 1))
             continue
         fi
-        OUT=$("$LOADER" "$BINARY" 2>/dev/null | filter_runtime_lines || true)
-        check_output "$t" "$OUT"
+        EXIT=0
+        OUT=$("$LOADER" "$BINARY" 2>/dev/null | filter_runtime_lines) || EXIT=$?
+        check_output "$t" "$OUT" "$EXIT"
     done
 fi
 
@@ -178,8 +194,9 @@ if [[ $NATIVE_ONLY -eq 0 ]]; then
             ERRORS=$((ERRORS + 1))
             continue
         fi
-        OUT=$(ROSETTA_X87_DISABLE_IR=1 "$LOADER" "$BINARY" 2>/dev/null | filter_runtime_lines || true)
-        check_output "$t" "$OUT"
+        EXIT=0
+        OUT=$(ROSETTA_X87_DISABLE_IR=1 "$LOADER" "$BINARY" 2>/dev/null | filter_runtime_lines) || EXIT=$?
+        check_output "$t" "$OUT" "$EXIT"
     done
 fi
 
@@ -195,8 +212,9 @@ if [[ $NATIVE_ONLY -eq 0 ]]; then
             ERRORS=$((ERRORS + 1))
             continue
         fi
-        OUT=$(ROSETTA_X87_DISABLE_IR=1 ROSETTA_X87_DISABLE_ALL_FUSIONS=1 "$LOADER" "$BINARY" 2>/dev/null | filter_runtime_lines || true)
-        check_output "$t" "$OUT"
+        EXIT=0
+        OUT=$(ROSETTA_X87_DISABLE_IR=1 ROSETTA_X87_DISABLE_ALL_FUSIONS=1 "$LOADER" "$BINARY" 2>/dev/null | filter_runtime_lines) || EXIT=$?
+        check_output "$t" "$OUT" "$EXIT"
     done
 fi
 
