@@ -165,6 +165,23 @@ constexpr uint32_t ldrh_w_offset(uint32_t wt, uint32_t rn, uint32_t imm) {
     return 0x79400000u | (imm12 << 10) | ((rn & 0x1F) << 5) | (wt & 0x1F);
 }
 
+// STR Dt, [Xn|SP, #imm]  (64-bit FP/SIMD store, unsigned offset, scaled by 8)
+//   1111 1101 00 imm12 Rn Rt   — size=11, V=1, opc=00
+constexpr uint32_t str_d_offset(uint32_t dt, uint32_t rn, uint32_t imm) {
+    uint32_t imm12 = (imm / 8) & 0xFFF;
+    return 0xFD000000u | (imm12 << 10) | ((rn & 0x1F) << 5) | (dt & 0x1F);
+}
+
+// LDR Dt, [Xn|SP, #imm]  (64-bit FP/SIMD load, unsigned offset, scaled by 8)
+//   1111 1101 01 imm12 Rn Rt
+constexpr uint32_t ldr_d_offset(uint32_t dt, uint32_t rn, uint32_t imm) {
+    uint32_t imm12 = (imm / 8) & 0xFFF;
+    return 0xFD400000u | (imm12 << 10) | ((rn & 0x1F) << 5) | (dt & 0x1F);
+}
+
+// RET (= BR x30)
+constexpr uint32_t RET_INSN = 0xD65F03C0u;
+
 // MADD Xd, Xn, Xm, Xa     (Xd = Xn * Xm + Xa, 64-bit)
 //   sf=1, op54=00, 11011, op31=000, Rm, o0=0, Ra, Rn, Rd
 constexpr uint32_t madd(uint32_t rd, uint32_t rn, uint32_t rm, uint32_t ra) {
@@ -467,6 +484,155 @@ StubBlobs build(uint64_t handlerAddr, uint64_t translateInsnAddr,
     emit_abs_jump_3movs(h, translateInsnAddr + 16);
 
     return blobs;
+}
+
+// Build the runtime transcendental-IPC trampoline.  Layout:
+//
+//   Stack frame (FRAME_SIZE = 96 bytes):
+//     sp[ 0.. 16] : x29, x30 (saved FP, LR)
+//     sp[16.. 32] : scratch / pad
+//     sp[32.. 56] : mach_msg_header_t
+//     sp[56.. 80] : send body (opcode_tag:u32 + pad:u32 + in0:f64 + in1:f64)
+//                   — kernel overwrites with reply on RCV, so reply
+//                   body[0]=out0 lands at sp+56, body[1]=out1 at sp+64.
+//     sp[80.. 96] : tail pad (alignment + headroom)
+//
+//   On entry (set by JIT-emitted caller):
+//     x0 = opcode_tag (0..9), d0 = ST(0), d1 = ST(1) (or undefined)
+//   On return:
+//     d0 = result1, d1 = result2 (only meaningful for fsincos)
+//   Preserves AAPCS64 callee-saved (x19..x28, d8..d15).
+std::vector<uint8_t> buildTranscendentalHelper(uint32_t sidecarReqName,
+                                                uint32_t parentReplyName) {
+    // Frame layout (FRAME_SIZE = 320 bytes, 16-aligned):
+    //   sp[  0.. 16] : x29, x30 (saved FP, LR)
+    //   sp[ 16..160] : x0..x17 saved (18 GPRs × 8 = 144 B)
+    //                  Translated x86 code uses x0..x21 to hold x86 GPR
+    //                  state (per Translator.cpp's default-case mask
+    //                  reset to kGprScratchMask = x22..x29 only); we
+    //                  save x0..x17 — x18 is kernel-managed, x19..x21
+    //                  are callee-saved by AAPCS64 and our internal code
+    //                  doesn't touch them.
+    //   sp[160..192] : reserved / pad (kept for alignment)
+    //   sp[192..216] : mach_msg_header_t (24 B)
+    //   sp[216..240] : send body (opcode_tag:u32 + pad:u32 + in0:f64 + in1:f64)
+    //                  After mach_msg(SEND|RCV), reply body[0]=out0 lands
+    //                  at sp+216, body[1]=out1 at sp+224.
+    //   sp[240..320] : kernel writes trailer + headroom here (RCV_SIZE=64)
+    //
+    // Why so much saved state: the trampoline runs from JIT-emitted code
+    // at user-program runtime, where x0..x17 hold arbitrary live x86
+    // register values across the BLR.  The mach_msg syscall clobbers
+    // x0..x18 per AAPCS64; without explicit save/restore subsequent
+    // translated x86 instructions read garbage and SIGSEGV on first use.
+    // (FRAME_SIZE=192 without GPR save crashed test_fsin
+    // intermittently — visible signs of x86 state corruption.)
+    constexpr int FRAME_SIZE = 320;
+    constexpr int kHeaderOff = 192;
+    constexpr int kBodyOff   = kHeaderOff + 24;          // = 216
+    constexpr int kIn0Off    = kBodyOff + 8;             // = 224 (after opcode + pad)
+    constexpr int kIn1Off    = kBodyOff + 16;            // = 232
+    constexpr int kOut0Off   = kBodyOff;                 // reply body[0] = out0
+    constexpr int kOut1Off   = kBodyOff + 8;             // reply body[1] = out1
+    constexpr uint32_t MSG_BITS = 0x13u | (0x15u << 8);  // 0x1513
+    constexpr uint32_t MSG_SIZE = 24 + 24;               // header + body (24 B)
+    constexpr uint32_t RCV_SIZE = 80;                    // header (24) + body (16) + trailer (≤32)
+    constexpr uint32_t MSG_ID   = 0x10000002;            // sidecar dispatches on it
+
+    std::vector<uint8_t> out;
+
+    // ── Prologue: stp x29, x30, [sp, #-FRAME_SIZE]! ────────────────────────
+    emit(out, stp_preindex(29, LR, SP, -FRAME_SIZE));
+
+    // Save x0..x17 (caller-saved GPRs that translated x86 code uses for
+    // x86 register state).  Pair-store as nine STPs at sp[16..160].
+    emit(out, stp_offset(0,  1,  SP,  16));
+    emit(out, stp_offset(2,  3,  SP,  32));
+    emit(out, stp_offset(4,  5,  SP,  48));
+    emit(out, stp_offset(6,  7,  SP,  64));
+    emit(out, stp_offset(8,  9,  SP,  80));
+    emit(out, stp_offset(10, 11, SP,  96));
+    emit(out, stp_offset(12, 13, SP, 112));
+    emit(out, stp_offset(14, 15, SP, 128));
+    emit(out, stp_offset(16, 17, SP, 144));
+
+    // ── Build mach_msg_header_t at sp+kHeaderOff ───────────────────────────
+    // Use w9 as scratch for header field values.
+
+    // msgh_bits (0x1513 fits in 16 bits)
+    emit(out, movz(9, MSG_BITS, 0));
+    emit(out, str_w_offset(9, SP, kHeaderOff +  0));
+    // msgh_size = 48
+    emit(out, movz(9, MSG_SIZE, 0));
+    emit(out, str_w_offset(9, SP, kHeaderOff +  4));
+    // msgh_remote_port = sidecarReqName (32-bit)
+    emit_load_imm64(out, 9, sidecarReqName);
+    emit(out, str_w_offset(9, SP, kHeaderOff +  8));
+    // msgh_local_port = parentReplyName (32-bit)
+    emit_load_imm64(out, 9, parentReplyName);
+    emit(out, str_w_offset(9, SP, kHeaderOff + 12));
+    // msgh_voucher_port = 0
+    emit(out, movz(9, 0, 0));
+    emit(out, str_w_offset(9, SP, kHeaderOff + 16));
+    // msgh_id = 0x10000002
+    emit(out, movz(9, uint16_t(MSG_ID & 0xFFFF), 0));
+    emit(out, movk(9, uint16_t((MSG_ID >> 16) & 0xFFFF), 16));
+    emit(out, str_w_offset(9, SP, kHeaderOff + 20));
+
+    // ── Body: opcode_tag at sp+kBodyOff, in0/in1 at +8/+16 ────────────────
+    emit(out, str_w_offset(0, SP, kBodyOff));   // opcode_tag (still in x0)
+    emit(out, str_d_offset(0, SP, kIn0Off));    // d0 = in0
+    emit(out, str_d_offset(1, SP, kIn1Off));    // d1 = in1
+
+    // ── mach_msg_trap arguments ────────────────────────────────────────────
+    //   x0  = msg pointer (sp + kHeaderOff)
+    //   x1  = MACH_SEND_MSG | MACH_RCV_MSG = 0x3
+    //   x2  = send_size = 48
+    //   x3  = rcv_size  = 80
+    //   x4  = rcv_name  = parentReplyName
+    //   x5  = timeout   = 0
+    //   x6  = notify    = 0
+    //   x16 = -31  (mach_msg_trap)
+    emit(out, add_imm(0, SP, kHeaderOff));
+    emit(out, movz(1, 0x0003, 0));            // SEND | RCV
+    emit(out, movz(2, MSG_SIZE, 0));
+    emit(out, movz(3, RCV_SIZE, 0));
+    emit_load_imm64(out, 4, parentReplyName);
+    emit(out, movz(5, 0, 0));
+    emit(out, movz(6, 0, 0));
+    emit(out, movn(16, 30, 0));               // x16 = -31
+    emit(out, svc(0x80));
+
+    // ── Reply parsing ──────────────────────────────────────────────────────
+    // After mach_msg returns, reply body[0..16] lands at sp+kOut0Off,
+    // sp+kOut1Off (where we wrote in0/in1 — kernel overwrites with reply).
+    emit(out, ldr_d_offset(0, SP, kOut0Off));
+    emit(out, ldr_d_offset(1, SP, kOut1Off));
+
+    // ── Restore x0..x17 ────────────────────────────────────────────────────
+    // Reverse-order isn't required (LDP is symmetric with STP), but for
+    // readability mirror the save sequence.  d0/d1 hold our outputs and
+    // are NOT restored from the saved-copy area at sp[16..160] (which
+    // didn't include them — they're FPRs).
+    //
+    // Note: x0/x1 saved at sp+16/sp+24 hold the caller's input opcode_tag
+    // (x0) and whatever surrounding code held in x1; restoring keeps both
+    // intact for the surrounding translated code.
+    emit(out, ldp_offset(0,  1,  SP,  16));
+    emit(out, ldp_offset(2,  3,  SP,  32));
+    emit(out, ldp_offset(4,  5,  SP,  48));
+    emit(out, ldp_offset(6,  7,  SP,  64));
+    emit(out, ldp_offset(8,  9,  SP,  80));
+    emit(out, ldp_offset(10, 11, SP,  96));
+    emit(out, ldp_offset(12, 13, SP, 112));
+    emit(out, ldp_offset(14, 15, SP, 128));
+    emit(out, ldp_offset(16, 17, SP, 144));
+
+    // ── Epilogue ───────────────────────────────────────────────────────────
+    emit(out, ldp_postindex(29, LR, SP, FRAME_SIZE));
+    emit(out, RET_INSN);
+
+    return out;
 }
 
 }  // namespace stub_asm

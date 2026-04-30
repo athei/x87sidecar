@@ -9,10 +9,12 @@
 #include "rosetta_core/Opcode.h"
 #include "rosetta_core/Register.h"
 #include "rosetta_core/RuntimeRoutine.h"
+#include "rosetta_core/TranscendentalHelper.h"
 #include "rosetta_core/TranslationResult.h"
 #include "rosetta_core/TranslatorHelpers.hpp"
 #include "rosetta_core/TranslatorX87F80.hpp"
 #include "rosetta_core/TranslatorX87Helpers.hpp"
+#include "rosetta_core/TranslatorX87Transcendental.hpp"
 #include "TranslatorX87Internal.hpp"
 
 namespace TranslatorX87 {
@@ -4349,6 +4351,39 @@ auto translate_fsave(TranslationResult* a1, IRInstr* a2) -> void {
     emit_movn(buf, /*is_64=*/0, /*MOVZ=*/2, /*hw=*/0, /*imm=*/0, Wd_top);
     // Cache flags are already zero (we flushed top/tags/perm earlier; deferred_pop_count is 0).
     a1->x87_cache.top_dirty = 0;
+
+    x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp);
+    free_gpr(*a1, Wd_tmp);
+}
+
+// =============================================================================
+// FSIN — replace ST(0) with sin(ST(0)).
+//
+// Routes through the parent-side IPC trampoline → sidecar → libm
+// std::sin via TranscendentalHelper.  See TranslatorX87Transcendental.cpp
+// for the BLR emit shape.
+//
+// x87 semantics:
+//   if |ST(0)| < 2^63: ST(0) = sin(ST(0)); C2 = 0
+//   else:              ST(0) unchanged;     C2 = 1
+//   tag word: ST(0) tag updated to Valid (or Special for ±Inf/NaN)
+//
+// Simplification: we always compute via libm regardless of magnitude,
+// and don't update C0..C3 in status_word.  Sidecar logs a one-shot
+// warning on first |ST(0)| >= 2^63.  See plan §"Known simplifications".
+// =============================================================================
+auto translate_fsin(TranslationResult* a1, IRInstr* /*a2*/) -> void {
+    AssemblerBuffer& buf = a1->insn_buf;
+    auto [Xbase, Wd_top] = x87_begin(*a1, buf);
+    const int Wd_tmp = alloc_gpr(*a1, 2);
+
+    emit_transcendental_ipc(*a1, buf, Xbase, Wd_top, Wd_tmp,
+                            rosetta_core::kTransFsin, /*num_inputs=*/1);
+
+    // d0 holds sin(input).  Replace ST(0) at its current physical depth.
+    const int Xst_base = x87_get_st_base(*a1);
+    const int depth_st0 = resolve_depth(*a1, 0);
+    emit_store_st(buf, Xbase, Wd_top, depth_st0, Wd_tmp, /*Dd=*/0, Xst_base);
 
     x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp);
     free_gpr(*a1, Wd_tmp);

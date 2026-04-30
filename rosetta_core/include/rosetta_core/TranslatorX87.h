@@ -115,4 +115,18 @@ auto translate_frstor(TranslationResult* a1, IRInstr* a2) -> void;
 
 auto translate_fsave(TranslationResult* a1, IRInstr* a2) -> void;
 
+// Transcendentals — all 10 ops route through the sidecar IPC trampoline
+// installed at loader time.  Implementation in TranslatorX87.cpp; the
+// shared IPC emit primitive lives in TranslatorX87Transcendental.{hpp,cpp}.
+auto translate_fsin(TranslationResult* a1, IRInstr* a2) -> void;
+auto translate_fcos(TranslationResult* a1, IRInstr* a2) -> void;
+auto translate_f2xm1(TranslationResult* a1, IRInstr* a2) -> void;
+auto translate_fsincos(TranslationResult* a1, IRInstr* a2) -> void;
+auto translate_fptan(TranslationResult* a1, IRInstr* a2) -> void;
+auto translate_fpatan(TranslationResult* a1, IRInstr* a2) -> void;
+auto translate_fyl2x(TranslationResult* a1, IRInstr* a2) -> void;
+auto translate_fyl2xp1(TranslationResult* a1, IRInstr* a2) -> void;
+auto translate_fprem(TranslationResult* a1, IRInstr* a2) -> void;
+auto translate_fprem1(TranslationResult* a1, IRInstr* a2) -> void;
+
 };  // namespace TranslatorX87

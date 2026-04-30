@@ -7,10 +7,12 @@ add_library(rosetta_core STATIC
     src/Opcode.cpp
     src/TranslatorHelpers.cpp
     src/Translator.cpp
+    src/TranscendentalHelper.cpp
     src/TranslatorX87.cpp
     src/TranslatorX87F80.cpp
     src/TranslatorX87Fusion.cpp
     src/TranslatorX87Helpers.cpp
+    src/TranslatorX87Transcendental.cpp
     src/X87Cache.cpp
     src/X87IRBuild.cpp
     src/X87IRLower.cpp

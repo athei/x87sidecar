@@ -19,6 +19,7 @@
 
 #include "macho_loader.hpp"
 #include "offset_finder.hpp"
+#include "rosetta_core/TranscendentalHelper.h"
 #include "rosetta_core/TranslationResult.h"
 #include "sidecar.hpp"
 #include "stub_asm.hpp"
@@ -1091,6 +1092,50 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         VERBOSE_LOG("M2: handler installed at 0x%llx\n", padStartAddr);
+
+        // ── Install transcendental-IPC trampoline ───────────────────────────
+        // Lives in the same trailing pad, immediately following the
+        // translate-time handler (16-byte aligned).  JIT-emitted code
+        // BLRs into this for fsin/fcos/etc.; the trampoline does a
+        // separate Mach IPC roundtrip (msgh_id=0x10000002) to the sidecar
+        // which runs <cmath>'s sin/cos/etc. and replies with the result.
+        const uint64_t transHelperAddr =
+            (padStartAddr + blobs.handler.size() + 0xF) & ~uint64_t(0xF);
+        std::vector<uint8_t> transBlob =
+            stub_asm::buildTranscendentalHelper(parentReqName,
+                                                parentReplyName);
+        const uint64_t transHelperEnd = transHelperAddr + transBlob.size();
+        if (transHelperEnd > padStartAddr + padBytes) {
+            fprintf(stdout,
+                    "M2: transcendental trampoline (%zu B) doesn't fit in "
+                    "trailing padding (free %llu B after handler %zu B)\n",
+                    transBlob.size(),
+                    padBytes - blobs.handler.size(),
+                    blobs.handler.size());
+            return 1;
+        }
+        if (!dbg.adjustMemoryProtection(
+                transHelperAddr, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY,
+                transBlob.size())) {
+            fprintf(stdout,
+                    "M2: failed to make trampoline padding writable\n");
+            return 1;
+        }
+        if (!dbg.writeMemory(transHelperAddr, transBlob.data(),
+                             transBlob.size())) {
+            fprintf(stdout, "M2: failed to write trampoline blob\n");
+            return 1;
+        }
+        if (!dbg.adjustMemoryProtection(transHelperAddr,
+                                        VM_PROT_READ | VM_PROT_EXECUTE,
+                                        transBlob.size())) {
+            fprintf(stdout,
+                    "M2: failed to restore trampoline padding protection\n");
+            return 1;
+        }
+        rosetta_core::set_transcendental_helper_addr(transHelperAddr);
+        VERBOSE_LOG("M2: transcendental helper installed at 0x%llx (%zu B)\n",
+                    transHelperAddr, transBlob.size());
 
         // ── DIAGNOSTIC (temporary): replace ENTRY with `mov x0, #0xCAFE; ret`
         // padded with nops so we can tell whether translate_insn is even

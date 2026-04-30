@@ -61,6 +61,7 @@ ALL_BENCHMARKS=(
     bench_fstenv
     bench_frstor
     bench_fsave
+    bench_fsin
 )
 
 RED='\033[0;31m'
