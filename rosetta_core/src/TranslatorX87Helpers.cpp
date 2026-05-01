@@ -745,14 +745,14 @@ void emit_x87_perm_flush(AssemblerBuffer& buf, int Xbase, int Wd_top, int Wd_tmp
         visited[i] = true;
 
         int j = i;
-        int next = perm[j];
+        int next = static_cast<unsigned char>(perm[j]);
         while (next != i) {
             // ST(j) ← ST(next)
             emit_load_st(buf, Xbase, Wd_top, next, Wd_tmp, Dd_chain, Xst_base);
             emit_store_st(buf, Xbase, Wd_top, j, Wd_tmp, Dd_chain, Xst_base);
             visited[next] = true;
             j = next;
-            next = perm[j];
+            next = static_cast<unsigned char>(perm[j]);
         }
 
         // Close the cycle: ST(j) ← Dd_save

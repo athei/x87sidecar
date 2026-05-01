@@ -13,7 +13,7 @@
 RosettaAotApi g_rosetta_aot;
 
 namespace {
-constexpr std::string_view kRosettaAotPath = "/Library/Apple/usr/lib/libRosettaAot.dylib";
+constexpr const char kRosettaAotPath[] = "/Library/Apple/usr/lib/libRosettaAot.dylib";
 }  // namespace
 
 RosettaAotApi::~RosettaAotApi() {
@@ -107,7 +107,7 @@ bool load_rosetta_aot() {
         return true;
     }
 
-    g_rosetta_aot.handle = dlopen(kRosettaAotPath.data(), RTLD_NOW | RTLD_LOCAL);
+    g_rosetta_aot.handle = dlopen(kRosettaAotPath, RTLD_NOW | RTLD_LOCAL);
     if (g_rosetta_aot.handle == nullptr) {
         std::print("dlopen failed: {}\n", dlerror());
         return false;

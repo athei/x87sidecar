@@ -63,7 +63,7 @@ private:
                 fprintf(stdout, "waitpid: %s\n", strerror(errno));
                 return false;
             }
-            if (!WIFSTOPPED(status)) {
+            if (!WIFSTOPPED(status)) {  // NOLINT(readability-simplify-boolean-expr)
                 return false;
             }
             int sig = WSTOPSIG(status);
@@ -465,7 +465,7 @@ public:
         return true;
     }
 
-    auto findRuntime() const -> uintptr_t {
+    [[nodiscard]] auto findRuntime() const -> uintptr_t {
         mach_vm_address_t address = 0;
         mach_vm_size_t size;
         vm_region_basic_info_data_64_t info;
@@ -638,7 +638,7 @@ static AttachDecision classifyAttachTarget(int argc, char* argv[]) {
     return {.skip=false, .displayPath={}, .reason=nullptr};
 }
 
-int main(int argc, char* argv[]) {
+int main(int argc, char* argv[]) try {
     if (argc < 2) {
         fprintf(stdout, "%s <path to program>\n", argv[0]);
         return 1;
@@ -840,7 +840,7 @@ int main(int argc, char* argv[]) {
             const auto* lc = reinterpret_cast<const load_command*>(p);
             if (lc->cmd == LC_SEGMENT_64) {
                 const auto* seg = reinterpret_cast<const segment_command_64*>(p);
-                if (strncmp(seg->segname, "__TEXT", 16) == 0) {
+                if (memcmp(seg->segname, "__TEXT", sizeof("__TEXT")) == 0) {
                     textVmAddr = seg->vmaddr;
                     textVmSize = seg->vmsize;
                     break;
@@ -1452,4 +1452,7 @@ int main(int argc, char* argv[]) {
     }
 
     return 0;
+} catch (const std::exception& e) {
+    fprintf(stderr, "rosettax87: %s\n", e.what());
+    return 1;
 }

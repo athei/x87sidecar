@@ -1450,7 +1450,7 @@ auto translate_fstsw(TranslationResult* a1, IRInstr* a2) -> void {
     const bool base_cached = (a1->x87_cache.run_remaining > 0 && a1->x87_cache.gprs_valid);
     int Xbase;
     if (base_cached) {
-        Xbase = a1->x87_cache.base_gpr;
+        Xbase = static_cast<unsigned char>(a1->x87_cache.base_gpr);
     } else {
         Xbase = alloc_gpr(*a1, 0);
         emit_x87_base(buf, *a1, Xbase);
@@ -2201,9 +2201,12 @@ auto translate_fistp(TranslationResult* a1, IRInstr* a2) -> void {
     // size=1 → STRH (16-bit, stores low 16 bits of Wd_int)
     // size=2 → STR  (32-bit W)
     // size=3 → STR  (64-bit X — same register number as Wd_int)
-    const int store_size = (int_size == IROperandSize::S16)   ? 1
-                           : (int_size == IROperandSize::S32) ? 2
-                                                              : 3;
+    int store_size = 3;
+    if (int_size == IROperandSize::S16) {
+        store_size = 1;
+    } else if (int_size == IROperandSize::S32) {
+        store_size = 2;
+    }
     emit_str_imm(buf, store_size, Wd_int, addr_reg, /*imm12=*/0);
 
     // Step 5: free addr_reg
@@ -2249,9 +2252,12 @@ auto translate_fisttp(TranslationResult* a1, IRInstr* a2) -> void {
         compute_operand_address(*a1, /*is_64bit=*/true, &a2->operands[0], GPR::XZR);
 
     // Step 4: store integer to memory
-    const int store_size = (int_size == IROperandSize::S16)   ? 1
-                           : (int_size == IROperandSize::S32) ? 2
-                                                              : 3;
+    int store_size = 3;
+    if (int_size == IROperandSize::S16) {
+        store_size = 1;
+    } else if (int_size == IROperandSize::S32) {
+        store_size = 2;
+    }
     emit_str_imm(buf, store_size, Wd_int, addr_reg, /*imm12=*/0);
 
     // Step 5: free addr_reg
@@ -2869,9 +2875,12 @@ auto translate_fist(TranslationResult* a1, IRInstr* a2) -> void {
     // Store integer to memory
     const int addr_reg =
         compute_operand_address(*a1, /*is_64bit=*/true, &a2->operands[0], GPR::XZR);
-    const int store_size = (int_size == IROperandSize::S16)   ? 1
-                           : (int_size == IROperandSize::S32) ? 2
-                                                              : 3;
+    int store_size = 3;
+    if (int_size == IROperandSize::S16) {
+        store_size = 1;
+    } else if (int_size == IROperandSize::S32) {
+        store_size = 2;
+    }
     emit_str_imm(buf, store_size, Wd_int, addr_reg, /*imm12=*/0);
     free_gpr(*a1, addr_reg);
 

@@ -94,7 +94,7 @@ struct FPRState {
         // Prefer inputs[0] (Dn, natural accumulator position)
         for (short in : n.inputs) {
             if (in >= 0 && last_use[in] == i && node_fpr[in] >= 0) {
-                int fpr = node_fpr[in];
+                int fpr = static_cast<unsigned char>(node_fpr[in]);
                 node_fpr[in] = -1;  // claimed — free_dead_inputs will skip
                 return fpr;
             }
@@ -533,9 +533,12 @@ void lower(Context& ctx, TranslationResult* result) {
             int Dd_val = fprs.get(n.inputs[0]);
             int Wd_int = alloc_free_gpr(*result);
             int is_64bit_int = (n.op == Op::StoreI64) ? 1 : 0;
-            int store_size = (n.op == Op::StoreI16) ? 1
-                           : (n.op == Op::StoreI32) ? 2
-                                                    : 3;
+            int store_size = 3;
+            if (n.op == Op::StoreI16) {
+                store_size = 1;
+            } else if (n.op == Op::StoreI32) {
+                store_size = 2;
+            }
 
             if (n.flags & kTruncate) {
                 // FISTTP: always truncate, single FCVTZS.
@@ -884,12 +887,8 @@ int peak_live_gprs(const Context& ctx) {
             transient = 1;
             break;
 
-        // 2 GPRs: addr + Wd_val
-        case Op::LoadI16: case Op::LoadI32: case Op::LoadI64:
-            transient = 2;
-            break;
-
-        // 2 GPRs: Wd_int + addr
+        // 2 GPRs: Loads need addr + Wd_val; stores need Wd_int + addr.
+        case Op::LoadI16:  case Op::LoadI32:  case Op::LoadI64:
         case Op::StoreI16: case Op::StoreI32: case Op::StoreI64:
             transient = 2;
             break;

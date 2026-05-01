@@ -14,13 +14,13 @@ PATCH_SIZE = 16U,
 AARCH64_PAGE_SIZE = 16384U
 };
 
-static void write_abs_jump(void* dst, const void* target) {
+static void write_abs_jump(void* dst, const void* jump_target) {
     uint32_t ldr_x9 = 0x58000049U;  // LDR X9, #8
     uint32_t br_x9 = 0xD61F0120U;   // BR  X9
     auto* p = static_cast<uint8_t*>(dst);
     memcpy(p + 0, &ldr_x9, 4);
     memcpy(p + 4, &br_x9, 4);
-    memcpy(p + 8, &target, 8);
+    memcpy(p + 8, static_cast<const void*>(&jump_target), 8);
 }
 
 static void flush_cache(void* addr, size_t len) {
@@ -89,7 +89,7 @@ int hook_install(void* target, void* hook_fn, void** trampoline) {
         return -1;
     }
 
-    write_abs_jump(target, hook_fn);
+    write_abs_jump(target, hook_fn);  // NOLINT(readability-suspicious-call-argument)
 
     kr = vm_protect(mach_task_self(), page, AARCH64_PAGE_SIZE, FALSE,
                     VM_PROT_READ | VM_PROT_EXECUTE);

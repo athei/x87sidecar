@@ -1,6 +1,7 @@
 #include <sys/mman.h>
 
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -14,7 +15,7 @@
 #include "rosetta_core/hook.h"
 #include <rosetta_config/Config.h>
 
-int main(int argc, char** argv) {
+int main(int argc, char** argv) try {
     RosettaConfig cfg = parse_config_from_env();
     rosetta_set_config(&cfg);
 
@@ -110,4 +111,10 @@ int main(int argc, char** argv) {
     std::print("Written {} bytes -> {}\n", translate_data_size, out_path.string());
 
     return 0;
+} catch (const std::exception& e) {
+    std::fprintf(stderr, "aotinvoke: %s\n", e.what());
+    return 1;
+} catch (...) {
+    std::fprintf(stderr, "aotinvoke: unknown exception\n");
+    return 1;
 }
