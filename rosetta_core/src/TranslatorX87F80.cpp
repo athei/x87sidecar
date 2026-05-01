@@ -14,11 +14,11 @@ namespace TranslatorX87 {
 // these helpers.
 static inline void emit_csel(AssemblerBuffer& buf, int is_64, int Rd, int Rn, int Rm, int cond) {
     uint32_t insn = 0x1A800000U;
-    insn |= (uint32_t)(is_64 != 0) << 31;
-    insn |= (uint32_t)(Rm   & 0x1F) << 16;
-    insn |= (uint32_t)(cond & 0xF)  << 12;
-    insn |= (uint32_t)(Rn   & 0x1F) << 5;
-    insn |= (uint32_t)(Rd   & 0x1F);
+    insn |= static_cast<uint32_t>(is_64 != 0) << 31;
+    insn |= static_cast<uint32_t>(Rm   & 0x1F) << 16;
+    insn |= static_cast<uint32_t>(cond & 0xF)  << 12;
+    insn |= static_cast<uint32_t>(Rn   & 0x1F) << 5;
+    insn |= static_cast<uint32_t>(Rd   & 0x1F);
     buf.emit(insn);
 }
 

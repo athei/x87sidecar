@@ -354,10 +354,10 @@ auto translate_fbld(TranslationResult* a1, IRInstr* a2) -> void {
     //   1 0 0 11011 000 Rm 0 Ra Rn Rd  (sf=1)
     auto emit_madd64 = [&](int Rd, int Rn, int Rm, int Ra) {
         uint32_t insn = 0x9B000000U
-                      | ((uint32_t)(Rm & 0x1F) << 16)
-                      | ((uint32_t)(Ra & 0x1F) << 10)
-                      | ((uint32_t)(Rn & 0x1F) << 5)
-                      |  (uint32_t)(Rd & 0x1F);
+                      | (static_cast<uint32_t>(Rm & 0x1F) << 16)
+                      | (static_cast<uint32_t>(Ra & 0x1F) << 10)
+                      | (static_cast<uint32_t>(Rn & 0x1F) << 5)
+                      |  static_cast<uint32_t>(Rd & 0x1F);
         buf.emit(insn);
     };
 
@@ -377,12 +377,12 @@ auto translate_fbld(TranslationResult* a1, IRInstr* a2) -> void {
         const int lo_lsb = byte_idx * 8;
         // hi nibble
         emit_bitfield(buf, /*is_64=*/1, /*UBFM=*/2, /*N=*/1,
-                      /*immr=*/(int8_t)hi_lsb, /*imms=*/(int8_t)(hi_lsb + 3),
+                      /*immr=*/static_cast<int8_t>(hi_lsb), /*imms=*/static_cast<int8_t>(hi_lsb + 3),
                       Xlow, Wd_tmp);
         emit_madd64(Xacc, Xacc, Wten, Wd_tmp);
         // lo nibble
         emit_bitfield(buf, /*is_64=*/1, /*UBFM=*/2, /*N=*/1,
-                      /*immr=*/(int8_t)lo_lsb, /*imms=*/(int8_t)(lo_lsb + 3),
+                      /*immr=*/static_cast<int8_t>(lo_lsb), /*imms=*/static_cast<int8_t>(lo_lsb + 3),
                       Xlow, Wd_tmp);
         emit_madd64(Xacc, Xacc, Wten, Wd_tmp);
     }
@@ -1590,31 +1590,31 @@ auto translate_fxam(TranslationResult* a1, IRInstr* /*a2*/) -> void {
     auto emit_ands_imm = [&](int is_64, int N, int immr, int imms, int Rn, int Rd) {
         // sf=is_64 | opc=11 | 100100 | N | immr | imms | Rn | Rd
         uint32_t insn = 0x72000000U | (1U << 30) | (1U << 29);  // opc=11
-        insn |= (uint32_t)(is_64 != 0) << 31;
-        insn |= (uint32_t)(N & 1) << 22;
-        insn |= (uint32_t)(immr & 0x3F) << 16;
-        insn |= (uint32_t)(imms & 0x3F) << 10;
-        insn |= (uint32_t)(Rn & 0x1F) << 5;
-        insn |= (uint32_t)(Rd & 0x1F);
+        insn |= static_cast<uint32_t>(is_64 != 0) << 31;
+        insn |= static_cast<uint32_t>(N & 1) << 22;
+        insn |= static_cast<uint32_t>(immr & 0x3F) << 16;
+        insn |= static_cast<uint32_t>(imms & 0x3F) << 10;
+        insn |= static_cast<uint32_t>(Rn & 0x1F) << 5;
+        insn |= static_cast<uint32_t>(Rd & 0x1F);
         buf.emit(insn);
     };
     auto emit_csel = [&](int is_64, int Rd, int Rn, int Rm, int cond) {
         // sf | 0 | 0 | 11010100 | Rm | cond | 00 | Rn | Rd
         uint32_t insn = 0x1A800000U;
-        insn |= (uint32_t)(is_64 != 0) << 31;
-        insn |= (uint32_t)(Rm   & 0x1F) << 16;
-        insn |= (uint32_t)(cond & 0xF)  << 12;
-        insn |= (uint32_t)(Rn   & 0x1F) << 5;
-        insn |= (uint32_t)(Rd   & 0x1F);
+        insn |= static_cast<uint32_t>(is_64 != 0) << 31;
+        insn |= static_cast<uint32_t>(Rm   & 0x1F) << 16;
+        insn |= static_cast<uint32_t>(cond & 0xF)  << 12;
+        insn |= static_cast<uint32_t>(Rn   & 0x1F) << 5;
+        insn |= static_cast<uint32_t>(Rd   & 0x1F);
         buf.emit(insn);
     };
     auto emit_lsrv = [&](int is_64, int Rd, int Rn, int Rm) {
         // sf | 0 | 0 | 11010110 | Rm | 001001 | Rn | Rd
         uint32_t insn = 0x1AC02400U;
-        insn |= (uint32_t)(is_64 != 0) << 31;
-        insn |= (uint32_t)(Rm & 0x1F) << 16;
-        insn |= (uint32_t)(Rn & 0x1F) << 5;
-        insn |= (uint32_t)(Rd & 0x1F);
+        insn |= static_cast<uint32_t>(is_64 != 0) << 31;
+        insn |= static_cast<uint32_t>(Rm & 0x1F) << 16;
+        insn |= static_cast<uint32_t>(Rn & 0x1F) << 5;
+        insn |= static_cast<uint32_t>(Rd & 0x1F);
         buf.emit(insn);
     };
 
@@ -3233,11 +3233,11 @@ auto translate_fscale(TranslationResult* a1, IRInstr* /*a2*/) -> void {
     // CSEL helper (no GPR variant exists in our helpers).
     auto emit_csel = [&](int is_64, int Rd, int Rn, int Rm, int cond) {
         uint32_t insn = 0x1A800000U;
-        insn |= (uint32_t)(is_64 != 0) << 31;
-        insn |= (uint32_t)(Rm   & 0x1F) << 16;
-        insn |= (uint32_t)(cond & 0xF)  << 12;
-        insn |= (uint32_t)(Rn   & 0x1F) << 5;
-        insn |= (uint32_t)(Rd   & 0x1F);
+        insn |= static_cast<uint32_t>(is_64 != 0) << 31;
+        insn |= static_cast<uint32_t>(Rm   & 0x1F) << 16;
+        insn |= static_cast<uint32_t>(cond & 0xF)  << 12;
+        insn |= static_cast<uint32_t>(Rn   & 0x1F) << 5;
+        insn |= static_cast<uint32_t>(Rd   & 0x1F);
         buf.emit(insn);
     };
     constexpr int kGT = 0xC;  // signed greater-than
@@ -3340,11 +3340,11 @@ auto translate_fxtract(TranslationResult* a1, IRInstr* /*a2*/) -> void {
     // ── Inline GPR CSEL (no helper). Pattern from translate_fxam. ──
     auto emit_csel = [&](int is_64, int Rd, int Rn, int Rm, int cond) {
         uint32_t insn = 0x1A800000U;
-        insn |= (uint32_t)(is_64 != 0) << 31;
-        insn |= (uint32_t)(Rm   & 0x1F) << 16;
-        insn |= (uint32_t)(cond & 0xF)  << 12;
-        insn |= (uint32_t)(Rn   & 0x1F) << 5;
-        insn |= (uint32_t)(Rd   & 0x1F);
+        insn |= static_cast<uint32_t>(is_64 != 0) << 31;
+        insn |= static_cast<uint32_t>(Rm   & 0x1F) << 16;
+        insn |= static_cast<uint32_t>(cond & 0xF)  << 12;
+        insn |= static_cast<uint32_t>(Rn   & 0x1F) << 5;
+        insn |= static_cast<uint32_t>(Rd   & 0x1F);
         buf.emit(insn);
     };
     constexpr int kEQ = 0x0;
@@ -3627,27 +3627,27 @@ auto translate_fbstp(TranslationResult* a1, IRInstr* a2) -> void {
     auto emit_udiv64 = [&](int Rd, int Rn, int Rm) {
         // UDIV Xd, Xn, Xm  (sf=1)  — base 0x9AC00800
         const uint32_t insn = 0x9AC00800U
-                            | ((uint32_t)(Rm & 0x1F) << 16)
-                            | ((uint32_t)(Rn & 0x1F) << 5)
-                            |  (uint32_t)(Rd & 0x1F);
+                            | (static_cast<uint32_t>(Rm & 0x1F) << 16)
+                            | (static_cast<uint32_t>(Rn & 0x1F) << 5)
+                            |  static_cast<uint32_t>(Rd & 0x1F);
         buf.emit(insn);
     };
     auto emit_msub64 = [&](int Rd, int Rn, int Rm, int Ra) {
         // MSUB Xd, Xn, Xm, Xa  (sf=1)  → Xd = Xa - Xn*Xm. Base 0x9B008000.
         const uint32_t insn = 0x9B008000U
-                            | ((uint32_t)(Rm & 0x1F) << 16)
-                            | ((uint32_t)(Ra & 0x1F) << 10)
-                            | ((uint32_t)(Rn & 0x1F) << 5)
-                            |  (uint32_t)(Rd & 0x1F);
+                            | (static_cast<uint32_t>(Rm & 0x1F) << 16)
+                            | (static_cast<uint32_t>(Ra & 0x1F) << 10)
+                            | (static_cast<uint32_t>(Rn & 0x1F) << 5)
+                            |  static_cast<uint32_t>(Rd & 0x1F);
         buf.emit(insn);
     };
     auto emit_csel = [&](int is_64, int Rd, int Rn, int Rm, int cond) {
         uint32_t insn = 0x1A800000U;
-        insn |= (uint32_t)(is_64 != 0) << 31;
-        insn |= (uint32_t)(Rm   & 0x1F) << 16;
-        insn |= (uint32_t)(cond & 0xF)  << 12;
-        insn |= (uint32_t)(Rn   & 0x1F) << 5;
-        insn |=  (uint32_t)(Rd & 0x1F);
+        insn |= static_cast<uint32_t>(is_64 != 0) << 31;
+        insn |= static_cast<uint32_t>(Rm   & 0x1F) << 16;
+        insn |= static_cast<uint32_t>(cond & 0xF)  << 12;
+        insn |= static_cast<uint32_t>(Rn   & 0x1F) << 5;
+        insn |=  static_cast<uint32_t>(Rd & 0x1F);
         buf.emit(insn);
     };
 
@@ -3803,7 +3803,7 @@ auto translate_fbstp(TranslationResult* a1, IRInstr* a2) -> void {
                                  /*Rm=*/Xb, /*shift=*/4, /*Rn=*/Wlo, /*Rd=*/Wlo);
         // [insn 5] STRB Wlo, [Xaddr, #byte_i]
         emit_ldr_str_imm(buf, /*size=*/0, /*is_fp=*/0, /*STR=*/0,
-                         /*imm12=*/(int16_t)byte_i, Xaddr, Wlo);
+                         /*imm12=*/static_cast<int16_t>(byte_i), Xaddr, Wlo);
     }
 
     free_gpr(*a1, Wlo);

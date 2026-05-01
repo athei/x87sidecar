@@ -71,7 +71,7 @@ int main(int argc, char** argv) {
     void* blob = mmap(nullptr, 0x1000, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
     std::memcpy(blob, code.data(), code_len);
 
-    int64_t insts_fileoff_range = ((int64_t)code_len << 32) | 0;
+    int64_t insts_fileoff_range = (static_cast<int64_t>(code_len) << 32) | 0;
 
     std::vector<std::uint32_t> inst_targets = {0};
     std::vector<std::uint64_t> data_in_code;
@@ -100,12 +100,12 @@ int main(int argc, char** argv) {
     auto translate_data_size = g_rosetta_aot.translator_get_size(translate_result);
     const auto *translate_data = g_rosetta_aot.translator_get_data(translate_result);
 
-    g_rosetta_aot.apply_internal_fixups(translate_result, 0x1000, (std::uint8_t*)translate_data);
+    g_rosetta_aot.apply_internal_fixups(translate_result, 0x1000, const_cast<std::uint8_t*>(translate_data));
     g_rosetta_aot.apply_segmented_runtime_routine_fixups(translate_result,
-                                                         (std::uint8_t*)translate_data, 0x1000);
+                                                         const_cast<std::uint8_t*>(translate_data), 0x1000);
 
     auto out = std::ofstream(out_path, std::ios::binary);
-    out.write((const char*)translate_data, translate_data_size);
+    out.write(reinterpret_cast<const char*>(translate_data), translate_data_size);
     out.close();
     std::print("Written {} bytes -> {}\n", translate_data_size, out_path.string());
 

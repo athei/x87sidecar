@@ -17,21 +17,21 @@ namespace {
 //   Pattern: 1_10_100101_hw_imm16_Rd
 constexpr uint32_t movz(uint32_t rd, uint16_t imm, uint32_t lsl_shift) {
     uint32_t hw = lsl_shift / 16;  // 0, 1, 2, 3
-    return 0xD2800000U | (hw << 21) | (uint32_t(imm) << 5) | (rd & 0x1F);
+    return 0xD2800000U | (hw << 21) | (static_cast<uint32_t>(imm) << 5) | (rd & 0x1F);
 }
 
 // MOVK Xd, #imm16, lsl #(hw*16)
 //   sf=1, opc=11, 100101, hw, imm16, Rd
 constexpr uint32_t movk(uint32_t rd, uint16_t imm, uint32_t lsl_shift) {
     uint32_t hw = lsl_shift / 16;
-    return 0xF2800000U | (hw << 21) | (uint32_t(imm) << 5) | (rd & 0x1F);
+    return 0xF2800000U | (hw << 21) | (static_cast<uint32_t>(imm) << 5) | (rd & 0x1F);
 }
 
 // MOVN Xd, #imm16, lsl #(hw*16)   (move-with-NOT — used for negative immediates)
 //   sf=1, opc=00, 100101, hw, imm16, Rd
 constexpr uint32_t movn(uint32_t rd, uint16_t imm, uint32_t lsl_shift) {
     uint32_t hw = lsl_shift / 16;
-    return 0x92800000U | (hw << 21) | (uint32_t(imm) << 5) | (rd & 0x1F);
+    return 0x92800000U | (hw << 21) | (static_cast<uint32_t>(imm) << 5) | (rd & 0x1F);
 }
 
 // BR Xn  (unconditional branch via register)
@@ -43,7 +43,7 @@ constexpr uint32_t br(uint32_t rn) {
 // SVC #imm16  (supervisor call — used with imm16=0x80 for syscalls on Darwin)
 //   1101_0100_000_imm16_00001
 constexpr uint32_t svc(uint16_t imm16) {
-    return 0xD4000001U | (uint32_t(imm16) << 5);
+    return 0xD4000001U | (static_cast<uint32_t>(imm16) << 5);
 }
 
 // STP Xt1, Xt2, [Xn|SP, #imm7]!  (pre-index, 64-bit pair store)
@@ -51,7 +51,7 @@ constexpr uint32_t svc(uint16_t imm16) {
 //   10_101_0_011_0_imm7_Rt2_Rn_Rt1
 constexpr uint32_t stp_preindex(uint32_t rt1, uint32_t rt2, uint32_t rn, int32_t imm) {
     int32_t scaled = imm / 8;
-    uint32_t imm7 = uint32_t(scaled) & 0x7F;
+    uint32_t imm7 = static_cast<uint32_t>(scaled) & 0x7F;
     return 0xA9800000U | (imm7 << 15) | ((rt2 & 0x1F) << 10) | ((rn & 0x1F) << 5) |
            (rt1 & 0x1F);
 }
@@ -60,7 +60,7 @@ constexpr uint32_t stp_preindex(uint32_t rt1, uint32_t rt2, uint32_t rn, int32_t
 //   10_101_0_010_0_imm7_Rt2_Rn_Rt1
 constexpr uint32_t stp_offset(uint32_t rt1, uint32_t rt2, uint32_t rn, int32_t imm) {
     int32_t scaled = imm / 8;
-    uint32_t imm7 = uint32_t(scaled) & 0x7F;
+    uint32_t imm7 = static_cast<uint32_t>(scaled) & 0x7F;
     return 0xA9000000U | (imm7 << 15) | ((rt2 & 0x1F) << 10) | ((rn & 0x1F) << 5) |
            (rt1 & 0x1F);
 }
@@ -69,7 +69,7 @@ constexpr uint32_t stp_offset(uint32_t rt1, uint32_t rt2, uint32_t rn, int32_t i
 //   10_101_0_010_1_imm7_Rt2_Rn_Rt1
 constexpr uint32_t ldp_offset(uint32_t rt1, uint32_t rt2, uint32_t rn, int32_t imm) {
     int32_t scaled = imm / 8;
-    uint32_t imm7 = uint32_t(scaled) & 0x7F;
+    uint32_t imm7 = static_cast<uint32_t>(scaled) & 0x7F;
     return 0xA9400000U | (imm7 << 15) | ((rt2 & 0x1F) << 10) | ((rn & 0x1F) << 5) |
            (rt1 & 0x1F);
 }
@@ -78,7 +78,7 @@ constexpr uint32_t ldp_offset(uint32_t rt1, uint32_t rt2, uint32_t rn, int32_t i
 //   10_101_0_001_1_imm7_Rt2_Rn_Rt1
 constexpr uint32_t ldp_postindex(uint32_t rt1, uint32_t rt2, uint32_t rn, int32_t imm) {
     int32_t scaled = imm / 8;
-    uint32_t imm7 = uint32_t(scaled) & 0x7F;
+    uint32_t imm7 = static_cast<uint32_t>(scaled) & 0x7F;
     return 0xA8C00000U | (imm7 << 15) | ((rt2 & 0x1F) << 10) | ((rn & 0x1F) << 5) |
            (rt1 & 0x1F);
 }
@@ -100,13 +100,13 @@ constexpr uint32_t str_x_offset(uint32_t xt, uint32_t rn, uint32_t imm) {
 // CBZ Xt, +imm19*4   (branch if zero — 64-bit). imm19 is signed PC-relative
 //   in 4-byte units.
 constexpr uint32_t cbz(uint32_t rt, int32_t imm19_words) {
-    uint32_t imm19 = uint32_t(imm19_words) & 0x7FFFF;
+    uint32_t imm19 = static_cast<uint32_t>(imm19_words) & 0x7FFFF;
     return 0xB4000000U | (imm19 << 5) | (rt & 0x1F);
 }
 
 // CBZ Wt, +imm19*4   (32-bit variant)
 constexpr uint32_t cbz_w(uint32_t rt, int32_t imm19_words) {
-    uint32_t imm19 = uint32_t(imm19_words) & 0x7FFFF;
+    uint32_t imm19 = static_cast<uint32_t>(imm19_words) & 0x7FFFF;
     return 0x34000000U | (imm19 << 5) | (rt & 0x1F);
 }
 
@@ -126,7 +126,7 @@ constexpr uint32_t ldr_w_offset(uint32_t wt, uint32_t rn, uint32_t imm) {
 
 // BRK #imm16
 constexpr uint32_t brk_imm(uint16_t imm) {
-    return 0xD4200000U | (uint32_t(imm) << 5);
+    return 0xD4200000U | (static_cast<uint32_t>(imm) << 5);
 }
 
 // ADD Xd, Xn, #imm12  (signed-offset, no shift, 64-bit add immediate)
@@ -153,7 +153,7 @@ constexpr uint32_t cmp_imm_w(uint32_t rn, uint32_t imm) {
 // B.cond +imm19*4   (signed PC-relative conditional branch, 4-byte units).
 //   0101_0100_imm19_0_cond
 constexpr uint32_t b_cond(uint32_t cond, int32_t imm19_words) {
-    uint32_t imm19 = uint32_t(imm19_words) & 0x7FFFF;
+    uint32_t imm19 = static_cast<uint32_t>(imm19_words) & 0x7FFFF;
     return 0x54000000U | (imm19 << 5) | (cond & 0xF);
 }
 constexpr uint32_t COND_LS = 0x9;  // unsigned ≤
@@ -198,27 +198,27 @@ constexpr uint32_t LR = 30;
 // ──── helpers ────────────────────────────────────────────────────────────────
 
 void emit(std::vector<uint8_t>& out, uint32_t insn) {
-    out.push_back(uint8_t(insn));
-    out.push_back(uint8_t(insn >> 8));
-    out.push_back(uint8_t(insn >> 16));
-    out.push_back(uint8_t(insn >> 24));
+    out.push_back(static_cast<uint8_t>(insn));
+    out.push_back(static_cast<uint8_t>(insn >> 8));
+    out.push_back(static_cast<uint8_t>(insn >> 16));
+    out.push_back(static_cast<uint8_t>(insn >> 24));
 }
 
 // movz/movk/movk/movk to load a 64-bit address into Xd (4 instructions).
 void emit_load_imm64(std::vector<uint8_t>& out, uint32_t rd, uint64_t imm) {
-    emit(out, movz(rd, uint16_t(imm & 0xFFFF), 0));
-    emit(out, movk(rd, uint16_t((imm >> 16) & 0xFFFF), 16));
-    emit(out, movk(rd, uint16_t((imm >> 32) & 0xFFFF), 32));
-    emit(out, movk(rd, uint16_t((imm >> 48) & 0xFFFF), 48));
+    emit(out, movz(rd, static_cast<uint16_t>(imm & 0xFFFF), 0));
+    emit(out, movk(rd, static_cast<uint16_t>((imm >> 16) & 0xFFFF), 16));
+    emit(out, movk(rd, static_cast<uint16_t>((imm >> 32) & 0xFFFF), 32));
+    emit(out, movk(rd, static_cast<uint16_t>((imm >> 48) & 0xFFFF), 48));
 }
 
 // Build a 16-byte abs-jump to `target` via x16 (3 mov + 1 br = 16 bytes).
 // The high 16 bits are assumed zero, which is true for kernel-managed
 // userland virtual addresses on macOS (top byte zeroed; canonical sub-256TB).
 void emit_abs_jump_3movs(std::vector<uint8_t>& out, uint64_t target) {
-    emit(out, movz(16, uint16_t(target & 0xFFFF), 0));
-    emit(out, movk(16, uint16_t((target >> 16) & 0xFFFF), 16));
-    emit(out, movk(16, uint16_t((target >> 32) & 0xFFFF), 32));
+    emit(out, movz(16, static_cast<uint16_t>(target & 0xFFFF), 0));
+    emit(out, movk(16, static_cast<uint16_t>((target >> 16) & 0xFFFF), 16));
+    emit(out, movk(16, static_cast<uint16_t>((target >> 32) & 0xFFFF), 32));
     emit(out, br(16));
 }
 
@@ -350,8 +350,8 @@ StubBlobs build(uint64_t handlerAddr, uint64_t translateInsnAddr,
     emit(ipc, str_w_offset(9, SP, 80));         // [sp+80]
 
     // msgh_id
-    emit(ipc, movz(9, uint16_t(MSG_ID & 0xFFFF), 0));
-    emit(ipc, movk(9, uint16_t((MSG_ID >> 16) & 0xFFFF), 16));
+    emit(ipc, movz(9, static_cast<uint16_t>(MSG_ID & 0xFFFF), 0));
+    emit(ipc, movk(9, static_cast<uint16_t>((MSG_ID >> 16) & 0xFFFF), 16));
     emit(ipc, str_w_offset(9, SP, 84));         // [sp+84]
 
     // ── Body: five translate_insn args (still in x0..x4 at this point) ──────

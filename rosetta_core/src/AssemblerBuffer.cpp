@@ -19,10 +19,10 @@ void AssemblerBuffer::grow() {
 
     uint32_t* new_data;
     if (this->use_heap) {
-        new_data = (uint32_t*)calloc(1, new_cap);
+        new_data = static_cast<uint32_t*>(calloc(1, new_cap));
     } else {
         // Original uses flags 0xE6 = MAP_PRIVATE | MAP_ANONYMOUS | MAP_JIT (macOS)
-        new_data = (uint32_t*)mmap_anonymous_rw(new_cap, 0xE6);
+        new_data = static_cast<uint32_t*>(mmap_anonymous_rw(new_cap, 0xE6));
         if (new_data == MAP_FAILED) {
             return;
 }

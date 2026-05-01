@@ -17,7 +17,7 @@ AARCH64_PAGE_SIZE = 16384u
 static void write_abs_jump(void* dst, const void* target) {
     uint32_t ldr_x9 = 0x58000049U;  // LDR X9, #8
     uint32_t br_x9 = 0xD61F0120U;   // BR  X9
-    auto* p = (uint8_t*)dst;
+    auto* p = static_cast<uint8_t*>(dst);
     memcpy(p + 0, &ldr_x9, 4);
     memcpy(p + 4, &br_x9, 4);
     memcpy(p + 8, &target, 8);
@@ -29,7 +29,7 @@ static void flush_cache(void* addr, size_t len) {
 }
 
 int make_page_executable(void* addr) {
-    vm_address_t page = (vm_address_t)addr & ~((vm_address_t)AARCH64_PAGE_SIZE - 1);
+    vm_address_t page = (vm_address_t)addr & ~(static_cast<vm_address_t>(AARCH64_PAGE_SIZE) - 1);
     auto kr = vm_protect(mach_task_self(), page, AARCH64_PAGE_SIZE, FALSE,
                          VM_PROT_READ | VM_PROT_EXECUTE);
     if (kr != KERN_SUCCESS) {
@@ -70,7 +70,7 @@ int hook_install(void* target, void* hook_fn, void** trampoline) {
     // ------------------------------------------------------------------
     pthread_jit_write_protect_np(0);
     memcpy(tramp, target, PATCH_SIZE);
-    write_abs_jump((uint8_t*)tramp + PATCH_SIZE, (uint8_t*)target + PATCH_SIZE);
+    write_abs_jump(static_cast<uint8_t*>(tramp) + PATCH_SIZE, static_cast<uint8_t*>(target) + PATCH_SIZE);
     pthread_jit_write_protect_np(1);
 
     flush_cache(tramp, PATCH_SIZE + 16);
@@ -78,7 +78,7 @@ int hook_install(void* target, void* hook_fn, void** trampoline) {
     // ------------------------------------------------------------------
     // 3. Make the target page writable (COW) and patch it.
     // ------------------------------------------------------------------
-    vm_address_t page = (vm_address_t)target & ~((vm_address_t)AARCH64_PAGE_SIZE - 1);
+    vm_address_t page = (vm_address_t)target & ~(static_cast<vm_address_t>(AARCH64_PAGE_SIZE) - 1);
 
     kern_return_t kr = vm_protect(mach_task_self(), page, AARCH64_PAGE_SIZE, FALSE,
                                   VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
@@ -136,10 +136,10 @@ int patch_movz_imm(void* addr, uint16_t new_imm) {
     }
 
     // Build the patched instruction: keep Rd, replace imm16.
-    insn = (insn & ~0x001FFFE0U) | ((uint32_t)new_imm << 5);
+    insn = (insn & ~0x001FFFE0U) | (static_cast<uint32_t>(new_imm) << 5);
 
     // Make the page writable (COW).
-    vm_address_t page = (vm_address_t)addr & ~((vm_address_t)AARCH64_PAGE_SIZE - 1);
+    vm_address_t page = (vm_address_t)addr & ~(static_cast<vm_address_t>(AARCH64_PAGE_SIZE) - 1);
     kern_return_t kr = vm_protect(mach_task_self(), page, AARCH64_PAGE_SIZE, FALSE,
                                   VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
     if (kr != KERN_SUCCESS) {

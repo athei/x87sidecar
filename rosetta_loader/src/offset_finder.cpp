@@ -82,12 +82,12 @@ auto OffsetFinder::determineOffsets() -> bool {
             fprintf(stdout, "Offset not found in rosetta runtime binary\n");
             results.push_back(-1);
         } else {
-            results.push_back((std::uint64_t)std::distance(buffer.begin(), it));
+            results.push_back(static_cast<std::uint64_t>(std::distance(buffer.begin(), it)));
         }
     }
 
     // If we've stored -1 in any offset, error out and fall back to non-accelerated x87 handles.
-    if ((int)results[0] <= -1 || (int)results[1] <= -1 || (int)results[2] <= -1) {
+    if (static_cast<int>(results[0]) <= -1 || static_cast<int>(results[1]) <= -1 || static_cast<int>(results[2]) <= -1) {
         fprintf(stdout,
                 "Problem searching rosetta runtime to determine offsets automatically.\nFalling "
                 "back to macOS 26 defaults (This WILL crash your app if they are not correct!)\n");
@@ -116,7 +116,7 @@ __text:00000000000147B4 08 F1 4F 39                 LDRB            W8, [X8,#dis
     // immlo = bits [30:29], immhi = bits [23:5]
     uint64_t immlo = (adrp_instruction >> 29) & 0x3;
     uint64_t immhi = (adrp_instruction >> 5) & 0x7FFFF;
-    int64_t imm = (int64_t)((immhi << 2) | immlo) << 12;
+    int64_t imm = static_cast<int64_t>((immhi << 2) | immlo) << 12;
     // Sign-extend from 33 bits
     if (imm & (1ULL << 32)) {
         imm |= ~((1ULL << 33) - 1);
@@ -166,12 +166,12 @@ auto OffsetFinder::determineRuntimeOffsets() -> bool {
             results.push_back(-1);
         } else {
             results.push_back(
-                (std::uint64_t)std::distance(libRosettaRuntimeLoader.buffer_.begin(), it));
+                static_cast<std::uint64_t>(std::distance(libRosettaRuntimeLoader.buffer_.begin(), it)));
         }
     }
 
     // If we've stored -1 in any offset, error out and fall back to non-accelerated x87 handles.
-    if ((int)results[0] <= -1 || (int)results[1] <= -1) {
+    if (static_cast<int>(results[0]) <= -1 || static_cast<int>(results[1]) <= -1) {
         fprintf(
             stdout,
             "Problem searching libRosettaRuntime to determine runtime offsets automatically.\n");
@@ -189,13 +189,13 @@ auto OffsetFinder::determineRuntimeOffsets() -> bool {
         return false;
     }
 
-    auto* exports = (Exports*)(libRosettaRuntimeLoader.buffer_.data() + exports_section->offset);
+    auto* exports = reinterpret_cast<Exports*>(libRosettaRuntimeLoader.buffer_.data() + exports_section->offset);
 
     auto x87_exports_rva =
         exports->x87Exports &
         0xFFFFFFFF;  // cut off the upper bits which are used by dyld_chained_ptr_64_rebase
     offsetInitLibrary_ =
-        (*(uint64_t*)(libRosettaRuntimeLoader.buffer_.data() + x87_exports_rva)) & 0xFFFFFFFF;
+        (*reinterpret_cast<uint64_t*>(libRosettaRuntimeLoader.buffer_.data() + x87_exports_rva)) & 0xFFFFFFFF;
 
     return true;
 }

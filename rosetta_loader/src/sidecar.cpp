@@ -106,7 +106,7 @@ mach_vm_address_t allocAndAppendInParent(mach_port_t parentTask,
                                           uint64_t newCap,
                                           const void* tail, uint64_t tailSize) {
     // Round up to page granularity.
-    newCap = (newCap + 0xFFF) & ~uint64_t(0xFFF);
+    newCap = (newCap + 0xFFF) & ~static_cast<uint64_t>(0xFFF);
     mach_vm_address_t parentNew = 0;
     if (mach_vm_allocate(parentTask, &parentNew, newCap, VM_FLAGS_ANYWHERE) !=
         KERN_SUCCESS) {
@@ -225,7 +225,7 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask,
 
     auto result = Translator::translate_instruction(
         &tr, reinterpret_cast<IRBlock*>(req.block),
-        localIR.data(), int64_t(req.num_instrs), int64_t(req.insn_idx));
+        localIR.data(), static_cast<int64_t>(req.num_instrs), static_cast<int64_t>(req.insn_idx));
 
     // Capture growth state. If insn_buf grew, Translator's grow() abandoned
     // localInsnVec for a calloc'd buffer (we own that and must free it).
@@ -237,7 +237,7 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask,
     for (size_t i = 0; i < kListCount; i++) {
         localPushed[i] = lists[i]->begin;
         localPushedBytes[i] =
-            uint64_t((uint8_t*)lists[i]->end - (uint8_t*)lists[i]->begin);
+            static_cast<uint64_t>(reinterpret_cast<uint8_t*>(lists[i]->end) - reinterpret_cast<uint8_t*>(lists[i]->begin));
     }
     struct LocalCleanup {
         uint8_t* insn_buf;       // null if Translator never grew (vec owns)
@@ -305,7 +305,7 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask,
             if (parentNew == 0) { return out;
 }
             finalInsnData = reinterpret_cast<uint32_t*>(parentNew);
-            finalInsnCap  = (newCap + 0xFFF) & ~uint64_t(0xFFF);
+            finalInsnCap  = (newCap + 0xFFF) & ~static_cast<uint64_t>(0xFFF);
         }
         tr.insn_buf.data    = finalInsnData;
         tr.insn_buf.end     = finalInsnEnd;
@@ -315,8 +315,8 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask,
         // split.
         for (size_t i = 0; i < kListCount; i++) {
             const auto& orig    = origLists[i];
-            uint64_t parentLive = (uint8_t*)orig.end - (uint8_t*)orig.begin;
-            uint64_t parentCap  = (uint8_t*)orig.end_cap - (uint8_t*)orig.begin;
+            uint64_t parentLive = reinterpret_cast<uint8_t*>(orig.end) - reinterpret_cast<uint8_t*>(orig.begin);
+            uint64_t parentCap  = reinterpret_cast<uint8_t*>(orig.end_cap) - reinterpret_cast<uint8_t*>(orig.begin);
             uint64_t added      = localPushedBytes[i];
             uint64_t newLive    = parentLive + added;
 
@@ -326,7 +326,7 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask,
                                      localPushed[i], added)) { return out;
 }
                 }
-                lists[i]->end = (Fixup*)((uint8_t*)orig.begin + newLive);
+                lists[i]->end = reinterpret_cast<Fixup*>(reinterpret_cast<uint8_t*>(orig.begin) + newLive);
             } else {
                 uint64_t newCap = std::max(parentCap * 2, newLive);
                 mach_vm_address_t parentNew = allocAndAppendInParent(
@@ -334,7 +334,7 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask,
                     localPushed[i], added);
                 if (parentNew == 0) { return out;
 }
-                uint64_t roundedCap = (newCap + 0xFFF) & ~uint64_t(0xFFF);
+                uint64_t roundedCap = (newCap + 0xFFF) & ~static_cast<uint64_t>(0xFFF);
                 lists[i]->begin   = (Fixup*)parentNew;
                 lists[i]->end     = (Fixup*)(parentNew + newLive);
                 lists[i]->end_cap = (Fixup*)(parentNew + roundedCap);
@@ -427,7 +427,7 @@ void runReceiveLoop(mach_port_t servicePort, mach_port_t parentTaskPort) {
             reply.hdr.msgh_local_port = MACH_PORT_NULL;
             reply.hdr.msgh_id = outcome.reply_some ? 1 : 0;
             reply.result      = outcome.reply_some
-                                    ? uint64_t(outcome.value)
+                                    ? static_cast<uint64_t>(outcome.value)
                                     : 0;
 
             kern_return_t kr_send = mach_msg(
@@ -531,7 +531,7 @@ bool installPortInParent(mach_port_t parentTaskPort,
     }
 
     *outServicePort = servicePort;
-    *outParentReqName = uint32_t(parentName);
+    *outParentReqName = static_cast<uint32_t>(parentName);
 
     // Allocate the parent-owned reply port. Stub names it as
     // msgh_local_port + MAKE_SEND_ONCE, so the kernel hands the sidecar
@@ -548,7 +548,7 @@ bool installPortInParent(mach_port_t parentTaskPort,
                 kr, mach_error_string(kr));
         return false;
     }
-    *outParentReplyName = uint32_t(parentReplyName);
+    *outParentReplyName = static_cast<uint32_t>(parentReplyName);
     return true;
 }
 

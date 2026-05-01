@@ -47,12 +47,12 @@ bool find_patterns(uintptr_t aot_base, uintptr_t& trans_insn_addr,
     // look up __TEXT, __text section
 
     auto* header = (mach_header_64*)aot_base;
-    auto* cmd = (load_command*)(header + 1);
+    auto* cmd = reinterpret_cast<load_command*>(header + 1);
     section_64* text_section = nullptr;
 
     for (auto i = 0; std::cmp_less(i , header->ncmds); i++) {
         if (cmd->cmd == LC_SEGMENT_64) {
-            auto *seg = (segment_command_64*)cmd;
+            auto *seg = reinterpret_cast<segment_command_64*>(cmd);
 
             if (strcmp(seg->segname, "__TEXT") == 0) {
                 auto* sections = (section_64*)(uintptr_t(seg) + sizeof(segment_command_64));

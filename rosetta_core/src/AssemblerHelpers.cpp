@@ -31,10 +31,10 @@ bool is_bitmask_immediate(bool is_64bit, uint64_t value, LogicalImmEncoding& out
         element_size = 64;
     } else {
         // 32-bit: truncate, then same check
-        if ((uint32_t)(value + 1) < 2) {
+        if (static_cast<uint32_t>(value + 1) < 2) {
             return false;
 }
-        value = (uint32_t)value;
+        value = static_cast<uint32_t>(value);
         element_size = 32;
     }
 
@@ -70,8 +70,8 @@ bool is_bitmask_immediate(bool is_64bit, uint64_t value, LogicalImmEncoding& out
         uint64_t filled = (element - 1) | element;
         if (((filled + 1) & filled) == 0) {
             // Yes, contiguous 1s — count trailing zeros for rotation, then run length
-            rotation = (uint8_t)__builtin_ctzll(element);                // RBIT+CLZ
-            run_len = (uint8_t)__builtin_ctzll(~(element >> rotation));  // length of 1-run
+            rotation = static_cast<uint8_t>(__builtin_ctzll(element));                // RBIT+CLZ
+            run_len = static_cast<uint8_t>(__builtin_ctzll(~(element >> rotation)));  // length of 1-run
             goto encode;
         }
     }
@@ -92,9 +92,9 @@ bool is_bitmask_immediate(bool is_64bit, uint64_t value, LogicalImmEncoding& out
         // zeros is contiguous — decode rotation and run length
         // Uses CLZ (not CTZ) — different from the 1s path
         int lz = __builtin_clzll(zeros);                          // leading zeros
-        rotation = (uint8_t)(64 - lz);                            // position of highest set bit + 1
+        rotation = static_cast<uint8_t>(64 - lz);                            // position of highest set bit + 1
         int tz = __builtin_clzll(__builtin_bitreverse64(zeros));  // trailing zeros via RBIT+CLZ
-        run_len = (uint8_t)(lz + tz - (64 - element_size));
+        run_len = static_cast<uint8_t>(lz + tz - (64 - element_size));
     }
 
 encode:
@@ -102,9 +102,9 @@ encode:
     assert(element_size >= rotation && "i should not exceed the element size");
 
     // Step 3: encode (N, immr, imms)
-    auto imms_raw = (uint8_t)((run_len - 1) | (uint8_t)(0xFE * element_size));
+    auto imms_raw = static_cast<uint8_t>((run_len - 1) | static_cast<uint8_t>(0xFE * element_size));
     out.N = (imms_raw & 0x40) == 0;
-    out.immr = (uint8_t)((element_size - rotation) & (element_size - 1));
+    out.immr = static_cast<uint8_t>((element_size - rotation) & (element_size - 1));
     out.imms = imms_raw & 0x3F;
     return true;
 }
@@ -119,13 +119,13 @@ auto emit_add_imm(AssemblerBuffer& buf, int is_64bit, int is_sub, int is_set_fla
     // [31]=sf [30]=op(sub) [29]=S(setflags) [28:24]=10001 [23:22]=shift
     // [21:10]=imm12 [9:5]=Rn [4:0]=Rd
     uint32_t insn = 0x11000000;
-    insn |= (uint32_t)(is_64bit != 0) << 31;
-    insn |= (uint32_t)(is_sub != 0) << 30;
-    insn |= (uint32_t)(is_set_flags != 0) << 29;
-    insn |= (uint32_t)(shift & 0x3) << 22;
-    insn |= (uint32_t)(imm12 & 0xFFF) << 10;
-    insn |= (uint32_t)(Rn & 0x1F) << 5;
-    insn |= (uint32_t)(Rd & 0x1F);
+    insn |= static_cast<uint32_t>(is_64bit != 0) << 31;
+    insn |= static_cast<uint32_t>(is_sub != 0) << 30;
+    insn |= static_cast<uint32_t>(is_set_flags != 0) << 29;
+    insn |= static_cast<uint32_t>(shift & 0x3) << 22;
+    insn |= static_cast<uint32_t>(imm12 & 0xFFF) << 10;
+    insn |= static_cast<uint32_t>(Rn & 0x1F) << 5;
+    insn |= static_cast<uint32_t>(Rd & 0x1F);
     buf.emit(insn);
 }
 
@@ -150,13 +150,13 @@ auto emit_bitfield(AssemblerBuffer& buf, int is_64bit, int opc, int N, int8_t im
     // [31]=sf [30:29]=opc [28:23]=100110 [22]=N [21:16]=immr [15:10]=imms
     // [9:5]=Rn [4:0]=Rd
     uint32_t insn = 0x13000000;
-    insn |= (uint32_t)(is_64bit != 0) << 31;
-    insn |= (uint32_t)(opc & 0x3) << 29;
-    insn |= (uint32_t)(N & 0x1) << 22;
-    insn |= (uint32_t)(immr & 0x3F) << 16;
-    insn |= (uint32_t)(imms & 0x3F) << 10;
-    insn |= (uint32_t)(Rn & 0x1F) << 5;
-    insn |= (uint32_t)(Rd & 0x1F);
+    insn |= static_cast<uint32_t>(is_64bit != 0) << 31;
+    insn |= static_cast<uint32_t>(opc & 0x3) << 29;
+    insn |= static_cast<uint32_t>(N & 0x1) << 22;
+    insn |= static_cast<uint32_t>(immr & 0x3F) << 16;
+    insn |= static_cast<uint32_t>(imms & 0x3F) << 10;
+    insn |= static_cast<uint32_t>(Rn & 0x1F) << 5;
+    insn |= static_cast<uint32_t>(Rd & 0x1F);
     buf.emit(insn);
 }
 
@@ -165,11 +165,11 @@ auto emit_movn(AssemblerBuffer& buf, int is_64bit, int opc, int hw, uint16_t imm
     // MOVN/MOVZ/MOVK: sf | opc | 100101 | hw | imm16 | Rd
     // [31]=sf [30:29]=opc [28:23]=100101 [22:21]=hw [20:5]=imm16 [4:0]=Rd
     uint32_t insn = 0x12800000;
-    insn |= (uint32_t)(is_64bit != 0) << 31;
-    insn |= (uint32_t)(opc & 0x3) << 29;
-    insn |= (uint32_t)(hw & 0x3) << 21;
-    insn |= (uint32_t)imm16 << 5;
-    insn |= (uint32_t)(Rd & 0x1F);
+    insn |= static_cast<uint32_t>(is_64bit != 0) << 31;
+    insn |= static_cast<uint32_t>(opc & 0x3) << 29;
+    insn |= static_cast<uint32_t>(hw & 0x3) << 21;
+    insn |= static_cast<uint32_t>(imm16) << 5;
+    insn |= static_cast<uint32_t>(Rd & 0x1F);
     buf.emit(insn);
 }
 
@@ -203,10 +203,10 @@ auto emit_mov_reg(AssemblerBuffer& buf, int is_64bit, int Rd, int Rn) -> void {
 auto emit_lslv(AssemblerBuffer& buf, int is_64bit, int Rm, int Rn, int Rd) -> void {
     // LSLV: sf | 0 | 0 | 11010110 | Rm | 001000 | Rn | Rd
     uint32_t insn = 0x1AC02000;
-    insn |= (uint32_t)(is_64bit != 0) << 31;
-    insn |= (uint32_t)(Rm & 0x1F) << 16;
-    insn |= (uint32_t)(Rn & 0x1F) << 5;
-    insn |= (uint32_t)(Rd & 0x1F);
+    insn |= static_cast<uint32_t>(is_64bit != 0) << 31;
+    insn |= static_cast<uint32_t>(Rm & 0x1F) << 16;
+    insn |= static_cast<uint32_t>(Rn & 0x1F) << 5;
+    insn |= static_cast<uint32_t>(Rd & 0x1F);
     buf.emit(insn);
 }
 
@@ -221,14 +221,14 @@ auto emit_add_sub_shifted_reg(AssemblerBuffer& buf, int is_64bit, int is_sub, in
     // [31]=sf [30]=op [29]=S [28:24]=01011 [23:22]=shift [21]=0
     // [20:16]=Rm [15:10]=imm6 [9:5]=Rn [4:0]=Rd
     uint32_t insn = 0x0B000000;
-    insn |= (uint32_t)(is_64bit != 0) << 31;
-    insn |= (uint32_t)(is_sub != 0) << 30;
-    insn |= (uint32_t)(is_set_flags != 0) << 29;
-    insn |= (uint32_t)(shift_type & 0x3) << 22;
-    insn |= (uint32_t)(Rm & 0x1F) << 16;
-    insn |= (uint32_t)(shift_amount & 0x3F) << 10;
-    insn |= (uint32_t)(Rn & 0x1F) << 5;
-    insn |= (uint32_t)(Rd & 0x1F);
+    insn |= static_cast<uint32_t>(is_64bit != 0) << 31;
+    insn |= static_cast<uint32_t>(is_sub != 0) << 30;
+    insn |= static_cast<uint32_t>(is_set_flags != 0) << 29;
+    insn |= static_cast<uint32_t>(shift_type & 0x3) << 22;
+    insn |= static_cast<uint32_t>(Rm & 0x1F) << 16;
+    insn |= static_cast<uint32_t>(shift_amount & 0x3F) << 10;
+    insn |= static_cast<uint32_t>(Rn & 0x1F) << 5;
+    insn |= static_cast<uint32_t>(Rd & 0x1F);
     buf.emit(insn);
 }
 
@@ -238,14 +238,14 @@ auto emit_logical_shifted_reg(AssemblerBuffer& buf, int is_64bit, int opc, int n
     // [31]=sf [30:29]=opc [28:24]=01010 [23:22]=shift [21]=N
     // [20:16]=Rm [15:10]=imm6 [9:5]=Rn [4:0]=Rd
     uint32_t insn = 0x0A000000;
-    insn |= (uint32_t)(is_64bit != 0) << 31;
-    insn |= (uint32_t)(opc & 0x3) << 29;
-    insn |= (uint32_t)(shift_type & 0x3) << 22;
-    insn |= (uint32_t)(n & 0x1) << 21;
-    insn |= (uint32_t)(Rm & 0x1F) << 16;
-    insn |= (uint32_t)(shift_amount & 0x3F) << 10;
-    insn |= (uint32_t)(Rn & 0x1F) << 5;
-    insn |= (uint32_t)(Rd & 0x1F);
+    insn |= static_cast<uint32_t>(is_64bit != 0) << 31;
+    insn |= static_cast<uint32_t>(opc & 0x3) << 29;
+    insn |= static_cast<uint32_t>(shift_type & 0x3) << 22;
+    insn |= static_cast<uint32_t>(n & 0x1) << 21;
+    insn |= static_cast<uint32_t>(Rm & 0x1F) << 16;
+    insn |= static_cast<uint32_t>(shift_amount & 0x3F) << 10;
+    insn |= static_cast<uint32_t>(Rn & 0x1F) << 5;
+    insn |= static_cast<uint32_t>(Rd & 0x1F);
     buf.emit(insn);
 }
 
@@ -260,12 +260,12 @@ auto emit_ldr_str_imm(AssemblerBuffer& buf, int size, int is_fp, int opc, int16_
     // [23:22]=opc [21:10]=imm12 [9:5]=Rn [4:0]=Rt
     int effective_opc = (size == 4) ? (opc | 2) : opc;  // 128-bit always sets opc[1]
     uint32_t insn = 0x39000000;
-    insn |= (uint32_t)(size & 0x3) << 30;
-    insn |= (uint32_t)(is_fp & 0x1) << 26;
-    insn |= (uint32_t)(effective_opc & 0x3) << 22;
-    insn |= (uint32_t)((uint16_t)imm12 & 0xFFF) << 10;
-    insn |= (uint32_t)(Rn & 0x1F) << 5;
-    insn |= (uint32_t)(Rt & 0x1F);
+    insn |= static_cast<uint32_t>(size & 0x3) << 30;
+    insn |= static_cast<uint32_t>(is_fp & 0x1) << 26;
+    insn |= static_cast<uint32_t>(effective_opc & 0x3) << 22;
+    insn |= static_cast<uint32_t>(static_cast<uint16_t>(imm12) & 0xFFF) << 10;
+    insn |= static_cast<uint32_t>(Rn & 0x1F) << 5;
+    insn |= static_cast<uint32_t>(Rt & 0x1F);
     buf.emit(insn);
 }
 
@@ -277,13 +277,13 @@ auto emit_ldr_str_reg(AssemblerBuffer& buf, int size, int is_fp, int opc, int Rm
     // [9:5]=Rn [4:0]=Rt
     int effective_opc = (size == 4) ? (opc | 2) : opc;
     uint32_t insn = 0x38206800;
-    insn |= (uint32_t)(size & 0x3) << 30;
-    insn |= (uint32_t)(is_fp & 0x1) << 26;
-    insn |= (uint32_t)(effective_opc & 0x3) << 22;
-    insn |= (uint32_t)(Rm & 0x1F) << 16;
-    insn |= (uint32_t)(shift != 0 ? 1 : 0) << 12;
-    insn |= (uint32_t)(Rn & 0x1F) << 5;
-    insn |= (uint32_t)(Rt & 0x1F);
+    insn |= static_cast<uint32_t>(size & 0x3) << 30;
+    insn |= static_cast<uint32_t>(is_fp & 0x1) << 26;
+    insn |= static_cast<uint32_t>(effective_opc & 0x3) << 22;
+    insn |= static_cast<uint32_t>(Rm & 0x1F) << 16;
+    insn |= static_cast<uint32_t>(shift != 0 ? 1 : 0) << 12;
+    insn |= static_cast<uint32_t>(Rn & 0x1F) << 5;
+    insn |= static_cast<uint32_t>(Rt & 0x1F);
     buf.emit(insn);
 }
 
@@ -292,12 +292,12 @@ auto emit_ldr_str_imm_ext(AssemblerBuffer& buf, int data_size, int write_back, i
     // size | 111 | V=0 | 00 | opc | 0 | imm9 | wb | 0 | Rn | Rt
     int effective_opc = (data_size == 4) ? (extend_mode | 2) : extend_mode;
     uint32_t insn = 0x38000000;
-    insn |= (uint32_t)(data_size & 0x3) << 30;
-    insn |= (uint32_t)(effective_opc & 0x3) << 22;
-    insn |= (uint32_t)(offset & 0x1FF) << 12;
-    insn |= (uint32_t)(write_back & 0x1) << 11;  // 1=pre, 0=post at [11:10]=01/11
-    insn |= (uint32_t)(Rn & 0x1F) << 5;
-    insn |= (uint32_t)(Rt & 0x1F);
+    insn |= static_cast<uint32_t>(data_size & 0x3) << 30;
+    insn |= static_cast<uint32_t>(effective_opc & 0x3) << 22;
+    insn |= static_cast<uint32_t>(offset & 0x1FF) << 12;
+    insn |= static_cast<uint32_t>(write_back & 0x1) << 11;  // 1=pre, 0=post at [11:10]=01/11
+    insn |= static_cast<uint32_t>(Rn & 0x1F) << 5;
+    insn |= static_cast<uint32_t>(Rt & 0x1F);
     buf.emit(insn);
 }
 
@@ -340,11 +340,11 @@ auto emit_fp_dp2(AssemblerBuffer& buf, int type, int opcode, int Rd, int Rn, int
     // type: 00=f32 01=f64
     // opcode[3:0]: 0000=FMUL 0001=FDIV 0010=FADD 0011=FSUB
     uint32_t insn = 0x1E200800;
-    insn |= (uint32_t)(type & 0x3) << 22;
-    insn |= (uint32_t)(Rm & 0x1F) << 16;
-    insn |= (uint32_t)(opcode & 0xF) << 12;
-    insn |= (uint32_t)(Rn & 0x1F) << 5;
-    insn |= (uint32_t)(Rd & 0x1F);
+    insn |= static_cast<uint32_t>(type & 0x3) << 22;
+    insn |= static_cast<uint32_t>(Rm & 0x1F) << 16;
+    insn |= static_cast<uint32_t>(opcode & 0xF) << 12;
+    insn |= static_cast<uint32_t>(Rn & 0x1F) << 5;
+    insn |= static_cast<uint32_t>(Rd & 0x1F);
     buf.emit(insn);
 }
 
@@ -367,13 +367,13 @@ auto emit_fp_dp3(AssemblerBuffer& buf, int type, int o1, int o0, int Rd, int Rn,
     // [31]=M=0 [30]=0 [29]=S=0 [28:24]=11111 [23:22]=type [21]=o1
     // [20:16]=Rm [15]=o0 [14:10]=Ra [9:5]=Rn [4:0]=Rd
     uint32_t insn = 0x1F000000;
-    insn |= (uint32_t)(type & 0x3) << 22;
-    insn |= (uint32_t)(o1 & 0x1) << 21;
-    insn |= (uint32_t)(Rm & 0x1F) << 16;
-    insn |= (uint32_t)(o0 & 0x1) << 15;
-    insn |= (uint32_t)(Ra & 0x1F) << 10;
-    insn |= (uint32_t)(Rn & 0x1F) << 5;
-    insn |= (uint32_t)(Rd & 0x1F);
+    insn |= static_cast<uint32_t>(type & 0x3) << 22;
+    insn |= static_cast<uint32_t>(o1 & 0x1) << 21;
+    insn |= static_cast<uint32_t>(Rm & 0x1F) << 16;
+    insn |= static_cast<uint32_t>(o0 & 0x1) << 15;
+    insn |= static_cast<uint32_t>(Ra & 0x1F) << 10;
+    insn |= static_cast<uint32_t>(Rn & 0x1F) << 5;
+    insn |= static_cast<uint32_t>(Rd & 0x1F);
     buf.emit(insn);
 }
 
@@ -393,10 +393,10 @@ auto emit_fp_dp1(AssemblerBuffer& buf, int type, int opcode, int Rd, int Rn) -> 
     // opcode[5:0]: 000000=FMOV 000001=FABS 000010=FNEG 000011=FSQRT
     //              000100=FCVT(other type — use emit_fcvt instead)
     uint32_t insn = 0x1E204000;
-    insn |= (uint32_t)(type & 0x3) << 22;
-    insn |= (uint32_t)(opcode & 0x3F) << 15;
-    insn |= (uint32_t)(Rn & 0x1F) << 5;
-    insn |= (uint32_t)(Rd & 0x1F);
+    insn |= static_cast<uint32_t>(type & 0x3) << 22;
+    insn |= static_cast<uint32_t>(opcode & 0x3F) << 15;
+    insn |= static_cast<uint32_t>(Rn & 0x1F) << 5;
+    insn |= static_cast<uint32_t>(Rd & 0x1F);
     buf.emit(insn);
 }
 
@@ -429,9 +429,9 @@ auto emit_fp_cmp(AssemblerBuffer& buf, int type, int Rn, int Rm) -> void {
     // FCMP: [31:24]=0x1E [23:22]=type [21]=1 [20:16]=Rm [15:14]=00
     // [13:10]=1000 [9:5]=Rn [4:3]=00 [2:0]=000 (compare with register, no trap)
     uint32_t insn = 0x1E202000;
-    insn |= (uint32_t)(type & 0x3) << 22;
-    insn |= (uint32_t)(Rm & 0x1F) << 16;
-    insn |= (uint32_t)(Rn & 0x1F) << 5;
+    insn |= static_cast<uint32_t>(type & 0x3) << 22;
+    insn |= static_cast<uint32_t>(Rm & 0x1F) << 16;
+    insn |= static_cast<uint32_t>(Rn & 0x1F) << 5;
     buf.emit(insn);
 }
 
@@ -451,9 +451,9 @@ auto emit_fcmp_f64(AssemblerBuffer& buf, int Dn, int Dm) -> void {
 auto emit_cset(AssemblerBuffer& buf, int is_64bit, int cond, int Rd) -> void {
     const uint32_t inv_cond = cond ^ 1;
     uint32_t insn = 0x1A9F07E0U;  // CSINC Rd, XZR, XZR, AL (base with XZR in Rm and Rn)
-    insn |= (uint32_t)(is_64bit & 1) << 31;
+    insn |= static_cast<uint32_t>(is_64bit & 1) << 31;
     insn |= (inv_cond & 0xFU) << 12;
-    insn |= (uint32_t)(Rd & 0x1F);
+    insn |= static_cast<uint32_t>(Rd & 0x1F);
     buf.emit(insn);
 }
 
@@ -465,10 +465,10 @@ auto emit_cset(AssemblerBuffer& buf, int is_64bit, int cond, int Rd) -> void {
 // =============================================================================
 auto emit_fcsel_f64(AssemblerBuffer& buf, int Dd, int Dn, int Dm, int cond) -> void {
     uint32_t insn = 0x1E600C00U;
-    insn |= (uint32_t)(Dm & 0x1F) << 16;
-    insn |= (uint32_t)(cond & 0xF) << 12;
-    insn |= (uint32_t)(Dn & 0x1F) << 5;
-    insn |= (uint32_t)(Dd & 0x1F);
+    insn |= static_cast<uint32_t>(Dm & 0x1F) << 16;
+    insn |= static_cast<uint32_t>(cond & 0xF) << 12;
+    insn |= static_cast<uint32_t>(Dn & 0x1F) << 5;
+    insn |= static_cast<uint32_t>(Dd & 0x1F);
     buf.emit(insn);
 }
 
@@ -480,7 +480,7 @@ auto emit_fcsel_f64(AssemblerBuffer& buf, int Dd, int Dn, int Dm, int cond) -> v
 // =============================================================================
 auto emit_fcmp_zero_f64(AssemblerBuffer& buf, int Dn) -> void {
     uint32_t insn = 0x1E602008U;
-    insn |= (uint32_t)(Dn & 0x1F) << 5;
+    insn |= static_cast<uint32_t>(Dn & 0x1F) << 5;
     buf.emit(insn);
 }
 
@@ -509,13 +509,13 @@ auto emit_fmov_gpr_fpr(AssemblerBuffer& buf, int dir, int gpr, int fpr) -> void 
     if (dir == 0) {
         // Xn → Dd:  type=01, rmode=00, opcode=111  [moves int to float]
         insn = 0x9E670000;
-        insn |= (uint32_t)(gpr & 0x1F) << 5;
-        insn |= (uint32_t)(fpr & 0x1F);
+        insn |= static_cast<uint32_t>(gpr & 0x1F) << 5;
+        insn |= static_cast<uint32_t>(fpr & 0x1F);
     } else {
         // Dn → Xd:  type=01, rmode=00, opcode=110  [moves float to int]
         insn = 0x9E660000;
-        insn |= (uint32_t)(fpr & 0x1F) << 5;
-        insn |= (uint32_t)(gpr & 0x1F);
+        insn |= static_cast<uint32_t>(fpr & 0x1F) << 5;
+        insn |= static_cast<uint32_t>(gpr & 0x1F);
     }
     buf.emit(insn);
 }
@@ -539,7 +539,7 @@ auto emit_movi_d_zero(AssemblerBuffer& buf, int Dd) -> void {
     // Zeroes the entire 128-bit V register (bits[127:64] cleared implicitly).
     // No GPR dependency — can issue independently from the ADD Xbase in the
     // same cycle on Apple M-series (4-wide dispatch).
-    buf.emit(0x2F00E400U | (uint32_t)(Dd & 0x1F));
+    buf.emit(0x2F00E400U | static_cast<uint32_t>(Dd & 0x1F));
 }
 
 auto emit_fmov_d_one(AssemblerBuffer& buf, int Dd) -> void {
@@ -551,7 +551,7 @@ auto emit_fmov_d_one(AssemblerBuffer& buf, int Dd) -> void {
     //   full = 0x1E601000 | (0x70 << 13) | Rd = 0x1E6E1000 | Rd
     // Single instruction, no GPR needed — replaces MOVZ+FMOV (2 insns +
     // cross-domain latency).
-    buf.emit(0x1E6E1000U | (uint32_t)(Dd & 0x1F));
+    buf.emit(0x1E6E1000U | static_cast<uint32_t>(Dd & 0x1F));
 }
 
 auto emit_ldr_literal_f64(AssemblerBuffer& buf, int Dd, uint64_t constant) -> void {
@@ -559,14 +559,14 @@ auto emit_ldr_literal_f64(AssemblerBuffer& buf, int Dd, uint64_t constant) -> vo
     // Encoding (LDR literal, SIMD&FP):
     //   opc=01 (64-bit) | 011 | V=1 | 00 | imm19=2 | Rt
     //   0b01_011_1_00_0000000000000000010_00000 = 0x5C000040
-    buf.emit(0x5C000040U | (uint32_t)(Dd & 0x1F));
+    buf.emit(0x5C000040U | static_cast<uint32_t>(Dd & 0x1F));
 
     // B #3 — skip over the 8 bytes of constant data, land on next real insn
     emit_b(buf, 3);
 
     // .quad constant — 8 bytes of raw data in 2 instruction slots
-    buf.emit((uint32_t)(constant & 0xFFFFFFFFU));
-    buf.emit((uint32_t)(constant >> 32));
+    buf.emit(static_cast<uint32_t>(constant & 0xFFFFFFFFU));
+    buf.emit(static_cast<uint32_t>(constant >> 32));
 }
 
 auto emit_scvtf(AssemblerBuffer& buf, int is_64bit_int, int ftype, int Rd, int Rn) -> void {
@@ -574,10 +574,10 @@ auto emit_scvtf(AssemblerBuffer& buf, int is_64bit_int, int ftype, int Rd, int R
     // [31]=sf [30:24]=0011110 [23:22]=ftype [21]=1 [20:19]=00 [18:16]=010
     // [15:10]=000000 [9:5]=Rn [4:0]=Rd
     uint32_t insn = 0x1E220000;
-    insn |= (uint32_t)(is_64bit_int != 0) << 31;
-    insn |= (uint32_t)(ftype & 0x3) << 22;
-    insn |= (uint32_t)(Rn & 0x1F) << 5;
-    insn |= (uint32_t)(Rd & 0x1F);
+    insn |= static_cast<uint32_t>(is_64bit_int != 0) << 31;
+    insn |= static_cast<uint32_t>(ftype & 0x3) << 22;
+    insn |= static_cast<uint32_t>(Rn & 0x1F) << 5;
+    insn |= static_cast<uint32_t>(Rd & 0x1F);
     buf.emit(insn);
 }
 
@@ -590,10 +590,10 @@ auto emit_fcvtzs(AssemblerBuffer& buf, int ftype, int is_64bit_int, int Rd, int 
     // [31]=sf [30:24]=0011110 [23:22]=ftype [21]=1 [20:19]=11 [18:16]=000
     // [15:10]=000000 [9:5]=Rn [4:0]=Rd
     uint32_t insn = 0x1E380000;
-    insn |= (uint32_t)(is_64bit_int != 0) << 31;
-    insn |= (uint32_t)(ftype & 0x3) << 22;
-    insn |= (uint32_t)(Rn & 0x1F) << 5;
-    insn |= (uint32_t)(Rd & 0x1F);
+    insn |= static_cast<uint32_t>(is_64bit_int != 0) << 31;
+    insn |= static_cast<uint32_t>(ftype & 0x3) << 22;
+    insn |= static_cast<uint32_t>(Rn & 0x1F) << 5;
+    insn |= static_cast<uint32_t>(Rd & 0x1F);
     buf.emit(insn);
 }
 
@@ -605,13 +605,13 @@ auto emit_mrs_nzcv(AssemblerBuffer& buf, int Xd) -> void {
     // MRS Xd, NZCV
     // NZCV sysreg: op0=3, op1=3, CRn=4, CRm=2, op2=0 → encoding 0xD53B4200 | Rt
     // Bit layout: 1101 0101 0011 1011 0100 0010 0000 | Rt
-    buf.emit(0xD53B4200U | (uint32_t)(Xd & 0x1F));
+    buf.emit(0xD53B4200U | static_cast<uint32_t>(Xd & 0x1F));
 }
 
 auto emit_msr_nzcv(AssemblerBuffer& buf, int Xd) -> void {
     // MSR NZCV, Xd
     // Same sysreg as MRS but with L=0 (write): 0xD51B4200 | Rt
-    buf.emit(0xD51B4200U | (uint32_t)(Xd & 0x1F));
+    buf.emit(0xD51B4200U | static_cast<uint32_t>(Xd & 0x1F));
 }
 
 auto emit_cbz(AssemblerBuffer& buf, int is_64bit, int is_nz, int Rt, int imm19) -> void {
@@ -620,45 +620,45 @@ auto emit_cbz(AssemblerBuffer& buf, int is_64bit, int is_nz, int Rt, int imm19) 
     // 32-bit: 0 011 0100 / 0 011 0101   (0x34 / 0x35)
     // 64-bit: 1 011 0100 / 1 011 0101   (0xB4 / 0xB5)
     uint32_t insn = 0x34000000U;
-    insn |= (uint32_t)(is_64bit != 0) << 31;
-    insn |= (uint32_t)(is_nz != 0) << 24;
-    insn |= ((uint32_t)imm19 & 0x7FFFFU) << 5;
-    insn |= (uint32_t)(Rt & 0x1F);
+    insn |= static_cast<uint32_t>(is_64bit != 0) << 31;
+    insn |= static_cast<uint32_t>(is_nz != 0) << 24;
+    insn |= (static_cast<uint32_t>(imm19) & 0x7FFFFU) << 5;
+    insn |= static_cast<uint32_t>(Rt & 0x1F);
     buf.emit(insn);
 }
 
 auto emit_b(AssemblerBuffer& buf, int imm26) -> void {
     // B #imm26
     // Encoding: 0 00101 | imm26
-    buf.emit(0x14000000U | ((uint32_t)imm26 & 0x3FFFFFFU));
+    buf.emit(0x14000000U | (static_cast<uint32_t>(imm26) & 0x3FFFFFFU));
 }
 
 auto emit_b_cond(AssemblerBuffer& buf, int cond, int imm19) -> void {
     // B.cond #imm19
     // Encoding: 0101 0100 | imm19 | 0 | cond[3:0]
     uint32_t insn = 0x54000000U;
-    insn |= ((uint32_t)imm19 & 0x7FFFFU) << 5;
-    insn |= (uint32_t)(cond & 0xF);
+    insn |= (static_cast<uint32_t>(imm19) & 0x7FFFFU) << 5;
+    insn |= static_cast<uint32_t>(cond & 0xF);
     buf.emit(insn);
 }
 
 auto emit_fmov_f64_reg(AssemblerBuffer& buf, int Dd, int Dn) -> void {
     // FMOV Dd, Dn — double-precision FPR-to-FPR copy
     // Encoding: 0x1E604000 | (Rn<<5) | Rd
-    buf.emit(0x1E604000U | ((uint32_t)(Dn & 0x1F) << 5) | (uint32_t)(Dd & 0x1F));
+    buf.emit(0x1E604000U | (static_cast<uint32_t>(Dn & 0x1F) << 5) | static_cast<uint32_t>(Dd & 0x1F));
 }
 
 auto emit_fcvt_fp_to_int(AssemblerBuffer& buf, int sf, int ftype, int rmode, int Rd, int Rn) -> void {
     // FCVT{N,P,M,Z}S — FP to signed integer with explicit rounding mode
     // Encoding: sf | 0 0 11110 | ftype | 1 | rmode | 000 | Rn | Rd
     uint32_t insn = 0x1E200000U;
-    insn |= (uint32_t)(sf != 0) << 31;
-    insn |= (uint32_t)(ftype & 0x3) << 22;
+    insn |= static_cast<uint32_t>(sf != 0) << 31;
+    insn |= static_cast<uint32_t>(ftype & 0x3) << 22;
     insn |= 1U << 21;  // fixed
-    insn |= (uint32_t)(rmode & 0x3) << 19;
+    insn |= static_cast<uint32_t>(rmode & 0x3) << 19;
     // opcode bits [18:16] = 000 (FCVT*S signed)
-    insn |= (uint32_t)(Rn & 0x1F) << 5;
-    insn |= (uint32_t)(Rd & 0x1F);
+    insn |= static_cast<uint32_t>(Rn & 0x1F) << 5;
+    insn |= static_cast<uint32_t>(Rd & 0x1F);
     buf.emit(insn);
 }
 
@@ -668,15 +668,15 @@ auto emit_add_reg(AssemblerBuffer& buf, int is_64bit, int dst, int lhs, int rhs)
         int ext = is_64bit ? 3 : 2;
         // emit_add_sub_ext_reg_inner(buf, is_sub=0, set_flags=0, is_64bit, rhs, ext, lhs, dst&0x1F)
         uint32_t v = 0x0B200000;
-        v |= (uint32_t)(is_64bit != 0) << 29;  // sf in bit29 of ext-reg form
+        v |= static_cast<uint32_t>(is_64bit != 0) << 29;  // sf in bit29 of ext-reg form
         // Full encoding: sf|0|0|01011|00|1|Rm|option|imm3|Rn|Rd
         // option=UXTX(011 for 64-bit) or UXTW(010 for 32-bit), imm3=0
         v = 0x0B200000;
-        v |= (uint32_t)(is_64bit != 0) << 31;
-        v |= (uint32_t)(rhs & 0x1F) << 16;
-        v |= (uint32_t)(ext & 0x7) << 13;
-        v |= (uint32_t)(lhs & 0x1F) << 5;
-        v |= (uint32_t)(dst & 0x1F);
+        v |= static_cast<uint32_t>(is_64bit != 0) << 31;
+        v |= static_cast<uint32_t>(rhs & 0x1F) << 16;
+        v |= static_cast<uint32_t>(ext & 0x7) << 13;
+        v |= static_cast<uint32_t>(lhs & 0x1F) << 5;
+        v |= static_cast<uint32_t>(dst & 0x1F);
         buf.emit(v);
     } else {
         emit_add_sub_shifted_reg(buf, is_64bit, /*is_sub=*/0, /*set_flags=*/0,
@@ -690,13 +690,13 @@ auto emit_logical_imm(AssemblerBuffer& buf, int is_64bit, int opc, int N, int8_t
     assert(Rd != GPR::SP && "emit_logical_imm: SP used in unexpected context");
 
     uint32_t insn = 0x12000000;
-    insn |= (uint32_t)(is_64bit != 0) << 31;
-    insn |= (uint32_t)(opc & 0x3) << 29;
-    insn |= (uint32_t)(N != 0) << 22;
-    insn |= (uint32_t)(immr & 0x3F) << 16;
-    insn |= (uint32_t)(imms & 0x3F) << 10;
-    insn |= (uint32_t)(Rn & 0x1F) << 5;
-    insn |= (uint32_t)(Rd & 0x1F);
+    insn |= static_cast<uint32_t>(is_64bit != 0) << 31;
+    insn |= static_cast<uint32_t>(opc & 0x3) << 29;
+    insn |= static_cast<uint32_t>(N != 0) << 22;
+    insn |= static_cast<uint32_t>(immr & 0x3F) << 16;
+    insn |= static_cast<uint32_t>(imms & 0x3F) << 10;
+    insn |= static_cast<uint32_t>(Rn & 0x1F) << 5;
+    insn |= static_cast<uint32_t>(Rd & 0x1F);
     buf.emit(insn);
 }
 
@@ -713,7 +713,7 @@ auto emit_and_imm(AssemblerBuffer& buf, int is_64bit, int Rd, int N, int64_t imm
                   int Rn) -> void {
     assert((is_64bit == 1 || N == 0) &&
            "emit_and_imm: data_size == DataSize::S64 || N == 0 — invalid value of N");
-    emit_logical_imm(buf, is_64bit, /*opc=*/0, N, (int8_t)immr, (int8_t)imms, Rn, Rd);
+    emit_logical_imm(buf, is_64bit, /*opc=*/0, N, static_cast<int8_t>(immr), static_cast<int8_t>(imms), Rn, Rd);
 }
 
 // ---------------------------------------------------------------------------
@@ -728,7 +728,7 @@ auto emit_orr_imm(AssemblerBuffer& buf, int is_64bit, int Rd, int Rn, int N, int
                   int64_t imms) -> void {
     assert((is_64bit == 1 || N == 0) &&
            "emit_orr_imm: data_size == DataSize::S64 || N == 0 — invalid value of N");
-    emit_logical_imm(buf, is_64bit, /*opc=*/1, N, (int8_t)immr, (int8_t)imms, Rn, Rd);
+    emit_logical_imm(buf, is_64bit, /*opc=*/1, N, static_cast<int8_t>(immr), static_cast<int8_t>(imms), Rn, Rd);
 }
 
 auto emit_adr(AssemblerBuffer& buf, int is_adrp, int Rd, uint32_t imm) -> void {
@@ -741,9 +741,9 @@ auto emit_adr(AssemblerBuffer& buf, int is_adrp, int Rd, uint32_t imm) -> void {
     // [4:0]   = Rd
     // [30:29] = imm[1:0]   (low 2 bits of the offset)
     // [23:5]  = imm[20:2]  (high 19 bits of the offset, shifted right by 2)
-    insn |= (uint32_t)(Rd & 0x1F);
-    insn |= (uint32_t)(imm & 0x3) << 29;
-    insn |= (uint32_t)(imm >> 2 & 0x7FFFF) << 5;
+    insn |= static_cast<uint32_t>(Rd & 0x1F);
+    insn |= (imm & 0x3) << 29;
+    insn |= (imm >> 2 & 0x7FFFF) << 5;
 
     buf.emit(insn);
 }

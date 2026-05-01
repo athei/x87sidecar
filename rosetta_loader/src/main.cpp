@@ -254,7 +254,7 @@ public:
 
         arm_thread_state64_t state;
         mach_msg_type_number_t count = ARM_THREAD_STATE64_COUNT;
-        kr = thread_get_state(threadList[0], ARM_THREAD_STATE64, (thread_state_t)&state, &count);
+        kr = thread_get_state(threadList[0], ARM_THREAD_STATE64, reinterpret_cast<thread_state_t>(&state), &count);
 
         if (kr != KERN_SUCCESS) {
             fprintf(stdout, "Failed to get thread state (error 0x%x: %s)\n", kr,
@@ -310,7 +310,7 @@ public:
 
         arm_thread_state64_t state;
         mach_msg_type_number_t count = ARM_THREAD_STATE64_COUNT;
-        kr = thread_get_state(threadList[0], ARM_THREAD_STATE64, (thread_state_t)&state, &count);
+        kr = thread_get_state(threadList[0], ARM_THREAD_STATE64, reinterpret_cast<thread_state_t>(&state), &count);
 
         if (kr != KERN_SUCCESS) {
             fprintf(stdout, "Failed to get thread state (error 0x%x: %s)\n", kr,
@@ -344,7 +344,7 @@ public:
             }
         }
 
-        kr = thread_set_state(threadList[0], ARM_THREAD_STATE64, (thread_state_t)&state,
+        kr = thread_set_state(threadList[0], ARM_THREAD_STATE64, reinterpret_cast<thread_state_t>(&state),
                               ARM_THREAD_STATE64_COUNT);
         if (kr != KERN_SUCCESS) {
             fprintf(stdout, "Failed to set thread state (error 0x%x: %s)\n", kr,
@@ -375,7 +375,7 @@ public:
         if (kr != KERN_SUCCESS) {
             fprintf(stdout,
                     "Failed to adjust memory protection at 0x%llx - 0x%llx (error 0x%x: %s)\n",
-                    (uint64_t)region, (uint64_t)(region + size), kr, mach_error_string(kr));
+                    static_cast<uint64_t>(region), (region + size), kr, mach_error_string(kr));
             return false;
         }
         return true;
@@ -419,7 +419,7 @@ public:
         }
 
         mach_msg_type_number_t count = ARM_THREAD_STATE64_COUNT;
-        kr = thread_get_state(threadList[0], ARM_THREAD_STATE64, (thread_state_t)&state, &count);
+        kr = thread_get_state(threadList[0], ARM_THREAD_STATE64, reinterpret_cast<thread_state_t>(&state), &count);
 
         // Cleanup
         for (uint i = 0; i < threadCount; i++) {
@@ -488,7 +488,7 @@ public:
 
         while (true) {
             if (mach_vm_region(taskPort_, &address, &size, VM_REGION_BASIC_INFO_64,
-                               (vm_region_info_t)&info, &count, &objectName) != KERN_SUCCESS) {
+                               reinterpret_cast<vm_region_info_t>(&info), &count, &objectName) != KERN_SUCCESS) {
                 break;
             }
 
@@ -836,9 +836,9 @@ int main(int argc, char* argv[]) {
         uint64_t textVmSize = 0;
         const uint8_t* p = lcBuf.data();
         for (uint32_t i = 0; i < mh.ncmds; i++) {
-            const auto* lc = (const load_command*)p;
+            const auto* lc = reinterpret_cast<const load_command*>(p);
             if (lc->cmd == LC_SEGMENT_64) {
-                const auto* seg = (const segment_command_64*)p;
+                const auto* seg = reinterpret_cast<const segment_command_64*>(p);
                 if (strncmp(seg->segname, "__TEXT", 16) == 0) {
                     textVmAddr = seg->vmaddr;
                     textVmSize = seg->vmsize;
@@ -887,8 +887,8 @@ int main(int argc, char* argv[]) {
         }
         uint64_t translateInsnAddr =
             initLibraryAddr +
-            (uint64_t(offsetFinder.offsetTranslateInsn_) -
-             uint64_t(offsetFinder.offsetInitLibrary_));
+            (static_cast<uint64_t>(offsetFinder.offsetTranslateInsn_) -
+             static_cast<uint64_t>(offsetFinder.offsetInitLibrary_));
         VERBOSE_LOG("M2: init_library live=0x%llx rva=0x%llx | translate_insn rva=0x%llx → "
             "live=0x%llx\n",
             initLibraryAddr, (uint64_t)offsetFinder.offsetInitLibrary_,
@@ -914,8 +914,8 @@ int main(int argc, char* argv[]) {
             }
             const uint64_t trSizeAddr =
                 initLibraryAddr +
-                (uint64_t(offsetFinder.offsetTransactionResultSize_) -
-                 uint64_t(offsetFinder.offsetInitLibrary_));
+                (static_cast<uint64_t>(offsetFinder.offsetTransactionResultSize_) -
+                 static_cast<uint64_t>(offsetFinder.offsetInitLibrary_));
 
             constexpr uint32_t kNewTrSize = sizeof(TranslationResult);
             static_assert(kNewTrSize <= 0xFFFFU,
@@ -939,7 +939,7 @@ int main(int argc, char* argv[]) {
             }
             const uint32_t origImm = (origInsn >> 5) & 0xFFFFU;
             const uint32_t newInsn =
-                (origInsn & ~0x001FFFE0U) | (uint32_t(kNewTrSize) << 5);
+                (origInsn & ~0x001FFFE0U) | ((kNewTrSize) << 5);
 
             if (!dbg.adjustMemoryProtection(
                     trSizeAddr, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY,
@@ -1001,12 +1001,12 @@ int main(int argc, char* argv[]) {
             fprintf(stdout,
                     "M2: translate_insn (0x%llx) not in region [0x%llx, "
                     "0x%llx)\n",
-                    translateInsnAddr, (uint64_t)regAddr,
-                    (uint64_t)(regAddr + regSize));
+                    translateInsnAddr, static_cast<uint64_t>(regAddr),
+                    (regAddr + regSize));
             return 1;
         }
-        const auto codeRegStart = uint64_t(regAddr);
-        const auto codeRegEnd = uint64_t(regAddr + regSize);
+        const auto codeRegStart = static_cast<uint64_t>(regAddr);
+        const auto codeRegEnd = (regAddr + regSize);
         VERBOSE_LOG("M2: code region containing translate_insn: [0x%llx, 0x%llx) "
             "size=0x%llx prot=0x%x\n",
             codeRegStart, codeRegEnd, codeRegEnd - codeRegStart,
@@ -1027,7 +1027,7 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         ssize_t lastNonZero = -1;
-        for (ssize_t i = ssize_t(scanWindow) - 1; i >= 0; i--) {
+        for (ssize_t i = static_cast<ssize_t>(scanWindow) - 1; i >= 0; i--) {
             if (tail[i] != 0) {
                 lastNonZero = i;
                 break;
@@ -1037,7 +1037,7 @@ int main(int argc, char* argv[]) {
             fprintf(stdout, "M2: code-region tail is all zeros, refusing\n");
             return 1;
         }
-        uint64_t padStartOff = (uint64_t(lastNonZero + 1) + 3) & ~uint64_t(3);
+        uint64_t padStartOff = (static_cast<uint64_t>(lastNonZero + 1) + 3) & ~static_cast<uint64_t>(3);
         uint64_t padStartAddr = scanStart + padStartOff;
         uint64_t padBytes = codeRegEnd - padStartAddr;
         VERBOSE_LOG("M2: __TEXT trailing padding starts at 0x%llx, %llu bytes free\n",
@@ -1347,7 +1347,7 @@ int main(int argc, char* argv[]) {
             },
         };
         const uint64_t constsAddr =
-            (padStartAddr + blobs.handler.size() + 0x7) & ~uint64_t(0x7);
+            (padStartAddr + blobs.handler.size() + 0x7) & ~static_cast<uint64_t>(0x7);
         const uint64_t constsEnd = constsAddr + sizeof(kTransConstants);
         if (constsEnd > padStartAddr + padBytes) {
             fprintf(stdout,
