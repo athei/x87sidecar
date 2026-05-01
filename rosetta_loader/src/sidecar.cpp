@@ -340,15 +340,19 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask,
         out.value      = result.value();
     } else {
         // The stub's FILTER prologue routes only x87 opcodes to us, so
-        // reaching nullopt means an unhandled x87 op. Composition with
-        // stock's emit on partial deferred state produces invalid code,
-        // so the stub's NONE-reply path BRKs the parent. Surface the
-        // offending opcode so we know what to handle next.
+        // reaching nullopt means an unhandled x87 op. The stub's NONE-
+        // reply path falls through to stock's translate_insn — safe
+        // today because the only unhandled cases are memory-block
+        // opcodes (fxsave/fxrstor) where stock's emit reads coherent
+        // X87State from memory. Log the opcode anyway: a future
+        // helper-using opcode hitting this path would silently compose
+        // with stock and produce wrong code, and this line is the
+        // discoverability signal.
         const uint16_t op = localIR[req.insn_idx].opcode;
         const char* name = (op < kOpcodeNames.size()) ? kOpcodeNames[op] : "?";
         fprintf(stdout,
-                "[rosettax87] FATAL: unhandled x87 opcode %s (0x%x) at "
-                "insn_idx=%lld; aborting parent\n",
+                "[rosettax87] unhandled x87 opcode %s (0x%x) at "
+                "insn_idx=%lld; falling through to stock\n",
                 name, static_cast<unsigned>(op),
                 static_cast<long long>(req.insn_idx));
         fflush(stdout);

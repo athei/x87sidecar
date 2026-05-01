@@ -252,6 +252,12 @@ StubBlobs build(uint64_t handlerAddr, uint64_t translateInsnAddr,
     //      the opcode is outside both x87 ranges.
     //   3. Concatenate filter + ipc + STASH + STASH_JUMP into the handler.
 
+    // Filter size is fixed; declared up here so the IPC body's NONE
+    // path can compute the same stashAddr the filter prologue uses
+    // below at line ~471.
+    constexpr size_t kFilterInstrs = 13;
+    constexpr size_t kFilterBytes  = kFilterInstrs * 4;
+
     std::vector<uint8_t> ipc;
 
     // ──── OUR_HANDLER (RPC version: send + receive) ─────────────────────────
@@ -382,13 +388,21 @@ StubBlobs build(uint64_t handlerAddr, uint64_t translateInsnAddr,
     //        the message buffer's leftover msgh_id which is whatever).
     //   The buffer at sp+64..sp+192 holds the reply: header at +64..+88,
     //                                                body at +88..end.
-    //   msgh_id (sp+84) tells us what to do: 0 = None (abort parent),
+    //   msgh_id (sp+84) tells us what to do: 0 = None (fall through to
+    //                                            stock's translate_insn),
     //                                        1 = Some, body[0] = result.
-    // Note: NONE no longer falls through to STASH for a stock translation.
-    // Composing our emit with stock's emit on the same x87 block produces
-    // invalid code (deferred-state ABI mismatch on x22:w23, f80↔f64), so
-    // we BRK the parent instead. STASH/STASH_JUMP remain reachable from
-    // the FILTER prologue's non-x87 abs-jump.
+    // The NONE path was briefly an _exit(133) trap while helper-using
+    // x87 opcodes (transcendentals) lacked inline handlers — composition
+    // of our emit with stock's helper-call emit broke on the
+    // {x22, w23} f80 ABI mismatch. With every helper-using opcode now
+    // inlined, the only path that ever returns nullopt is unhandled
+    // memory-block opcodes (fxsave, fxrstor) where stock's emit reads
+    // the X87State struct from memory through x22 — the same x22 we
+    // share with stock. is_handled_x87 stops the run before them, so
+    // x87_end has already flushed deferred state to memory by the time
+    // stock takes over. NONE now restores caller registers and abs-
+    // jumps to STASH, the same fall-through path the FILTER prologue
+    // uses for non-x87 opcodes.
     //
     // Read msgh_id into w9.
     emit(ipc, ldr_w_offset(9, SP, 84));         // w9 = msgh_id
@@ -407,18 +421,28 @@ StubBlobs build(uint64_t handlerAddr, uint64_t translateInsnAddr,
     emit(ipc, 0xD65F03C0u);                     // ret  (= BR x30)
 
     // ── NONE PATH ───────────────────────────────────────────────────────────
-    // Sidecar declined an x87 opcode. Composition with stock would produce
-    // invalid code; abort the parent here. We _exit(133) via the BSD
-    // syscall trap — BRK raises EXC_BREAKPOINT, which Rosetta's task-level
-    // Mach exception port catches before the kernel can deliver SIGTRAP
-    // (the stub lives inside libRosettaRuntime's __TEXT pad, registered
-    // code Rosetta manages), so the parent would hang instead of dying.
-    // SVC bypasses exception delivery: the kernel handles syscalls
-    // directly (same trap is used for mach_msg above).
-    // Caller regs are intentionally not restored: the parent is dying.
-    emit(ipc, movz(0, 133, 0));                 // x0 = exit code 133
-    emit(ipc, movz(16, 1, 0));                  // x16 = SYS_exit (BSD #1)
-    emit(ipc, svc(0x80));                       // svc #0x80 → kernel _exit
+    // Sidecar declined the opcode. Restore caller registers and abs-jump
+    // to STASH (stock's original 16-byte translate_insn prologue, which
+    // tail-jumps to translate_insn+16). x0 comes from sp+0 — the SOME
+    // path read from sp+88 (reply body), but for NONE we hand stock the
+    // caller's untouched arguments.
+    emit(ipc, ldr_x_offset(0, SP, 0));          // x0 = caller's TR*
+    emit(ipc, ldr_x_offset(1, SP, 8));          // restore x1
+    emit(ipc, ldp_offset(2, 3, SP, 16));        // restore x2, x3
+    emit(ipc, ldp_offset(4, 5, SP, 32));        // restore x4, x5
+    emit(ipc, ldp_offset(16, LR, SP, 48));      // restore x16, lr
+    emit(ipc, add_imm(SP, SP, FRAME_SIZE));     // sp += FRAME_SIZE
+    // Abs-jump to STASH. STASH lives at the end of the concatenated
+    // handler blob (filter + ipc + STASH + STASH_JUMP), so its address
+    // is handlerAddr + kFilterBytes + ipc.size() once `ipc` is final.
+    // The 4-instruction abs-jump we're about to emit is the IPC body's
+    // final tail, so at this point in the build, the FINAL ipc.size()
+    // will be (current size) + 16. The same value is recomputed at
+    // line ~453 below for the filter's bypass jump — they target the
+    // same address.
+    const uint64_t noneStashAddr =
+        handlerAddr + kFilterBytes + ipc.size() + 16;
+    emit_abs_jump_3movs(ipc, noneStashAddr);
 
     // ──── FILTER prologue ───────────────────────────────────────────────────
     // Bypass the IPC entirely for non-x87 opcodes — translate_insn fires for
@@ -437,8 +461,8 @@ StubBlobs build(uint64_t handlerAddr, uint64_t translateInsnAddr,
     //
     // Uses x9, x10, x11 — caller-saved scratch in AAPCS, so we don't need to
     // preserve them across the filter.
-    constexpr size_t kFilterInstrs = 13;
-    constexpr size_t kFilterBytes  = kFilterInstrs * 4;
+    // (kFilterInstrs / kFilterBytes are declared at the top of build() so
+    // the IPC body's NONE path can compute the same stashAddr.)
     constexpr uint32_t kX87LoLo    = 0x25;
     constexpr uint32_t kX87LoHi    = 0x30;
     constexpr uint32_t kX87HiLo    = 0xBD;
