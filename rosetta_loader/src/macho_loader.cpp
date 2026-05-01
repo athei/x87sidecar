@@ -50,7 +50,7 @@ auto MachoLoader::imageSize() const -> size_t {
     return imageSize;
 }
 
-auto MachoLoader::getSection(const char* segment, const char* section) -> section_64* {
+auto MachoLoader::getSection(const char* segment, const char* section) const -> section_64* {
     auto *header = machHeader();
 
     auto* cmd = (load_command*)(header + 1);
@@ -78,7 +78,7 @@ auto MachoLoader::getSection(const char* segment, const char* section) -> sectio
     return nullptr;
 }
 
-auto MachoLoader::getSegment(const char* segment) -> segment_command_64* {
+auto MachoLoader::getSegment(const char* segment) const -> segment_command_64* {
     auto *header = machHeader();
 
     auto* cmd = (load_command*)(header + 1);
@@ -98,7 +98,7 @@ auto MachoLoader::getSegment(const char* segment) -> segment_command_64* {
     return nullptr;
 }
 
-auto MachoLoader::forEachSegment(const std::function<void(segment_command_64* segm)>& callback) -> void {
+auto MachoLoader::forEachSegment(const std::function<void(segment_command_64* segm)>& callback) const -> void {
     auto *header = machHeader();
 
     auto* cmd = (load_command*)(header + 1);
