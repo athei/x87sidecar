@@ -75,7 +75,7 @@ auto OffsetFinder::determineOffsets() -> bool {
 
     // Do the search and store the results
     std::vector<std::uint64_t> results;
-    for (const auto offset : {exportsFetch, svcCall, disableAot}) {
+    for (const auto& offset : {exportsFetch, svcCall, disableAot}) {
         const std::boyer_moore_searcher searcher(offset.begin(), offset.end());
         const auto it = std::search(buffer.begin(), buffer.end(), searcher);
         if (it == buffer.end()) {
@@ -157,7 +157,7 @@ auto OffsetFinder::determineRuntimeOffsets() -> bool {
     }
 
     std::vector<std::uint64_t> results;
-    for (const auto offset : {translation_result_size_pattern, translation_pattern}) {
+    for (const auto& offset : {translation_result_size_pattern, translation_pattern}) {
         const std::boyer_moore_searcher searcher(offset.begin(), offset.end());
         const auto it = std::search(libRosettaRuntimeLoader.buffer_.begin(),
                                     libRosettaRuntimeLoader.buffer_.end(), searcher);

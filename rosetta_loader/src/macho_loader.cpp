@@ -98,7 +98,7 @@ auto MachoLoader::getSegment(const char* segment) -> segment_command_64* {
     return nullptr;
 }
 
-auto MachoLoader::forEachSegment(std::function<void(segment_command_64* segm)> callback) -> void {
+auto MachoLoader::forEachSegment(const std::function<void(segment_command_64* segm)>& callback) -> void {
     auto *header = machHeader();
 
     auto* cmd = (load_command*)(header + 1);
