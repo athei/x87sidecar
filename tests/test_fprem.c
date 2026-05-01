@@ -52,6 +52,41 @@ static double do_fprem(double x, double y) {
     return r;
 }
 
+/* Sets C2=1 in the status word via FXAM(normal) before FPREM, then
+ * captures SW after FPREM.  The argument-reduction loop pattern wine
+ * uses (`fprem; fstsw ax; test ah, 0x04; jnz loop`) needs FPREM to
+ * clear C2; if it doesn't, the loop spins forever.  This is the
+ * specific bug behind the WoW world-load freeze. */
+static uint16_t do_fprem_sw_after(double x, double y) {
+    uint16_t sw;
+    double r;
+    __asm__ volatile(
+        "fldl  %2\n\t" /* ST(0) = y */
+        "fldl  %3\n\t" /* ST(0) = x; ST(1) = y */
+        "fxam\n\t"     /* x is normal → SW.C2 := 1 */
+        "fprem\n\t"    /* must clear SW.C2 */
+        "fnstsw %%ax\n\t"
+        "movw  %%ax, %0\n\t"
+        "fstpl %1\n\t"      /* pop result */
+        "ffree %%st(0)\n\t" /* drop leftover y */
+        "fincstp\n\t"
+        : "=m"(sw), "=m"(r)
+        : "m"(y), "m"(x)
+        : "ax", "st");
+    (void)r;
+    return sw;
+}
+
+static void check_c2_clear(const char* name, uint16_t sw) {
+    /* SW bit 10 = C2.  After fprem (one-shot complete) it must be 0. */
+    if ((sw & 0x0400U) == 0U) {
+        printf("PASS  %-40s  sw=0x%04x  C2=0\n", name, (unsigned)sw);
+    } else {
+        printf("FAIL  %-40s  sw=0x%04x  C2=1 (fprem must clear C2)\n", name, (unsigned)sw);
+        failures++;
+    }
+}
+
 int main(void) {
     /* Inputs where single-shot fmod and iterative x87 fprem agree —
        ratios with |x/y| <= 2^64 (all our cases) AND where the reduced
@@ -61,6 +96,13 @@ int main(void) {
     check_bitexact_u64("fprem(8, 3)", do_fprem(8.0, 3.0), 0x4000000000000000ULL);   /* 2.0 */
     check_bitexact_u64("fprem(1, 1)", do_fprem(1.0, 1.0), 0x0000000000000000ULL);   /* 0.0 */
     check_bitexact_u64("fprem(-5, 3)", do_fprem(-5.0, 3.0), 0xc000000000000000ULL); /* -2.0 */
+
+    /* Status-word post-condition.  Regression guard for the WoW
+       world-load freeze: wine's argument-reduction loop spun forever
+       when our fprem left a stale C2=1. */
+    check_c2_clear("fprem(5, 3) clears C2", do_fprem_sw_after(5.0, 3.0));
+    check_c2_clear("fprem(7, 3) clears C2", do_fprem_sw_after(7.0, 3.0));
+    check_c2_clear("fprem(-5, 3) clears C2", do_fprem_sw_after(-5.0, 3.0));
 
     printf("\n%d failure(s)\n", failures);
     return failures ? 1 : 0;

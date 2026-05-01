@@ -48,6 +48,38 @@ static double do_fprem1(double x, double y) {
     return r;
 }
 
+/* See test_fprem.c — fprem1 shares the iterative-completion contract
+ * and must clear C2 in the status word, or wine's reduction loop
+ * spins forever (the WoW world-load freeze). */
+static uint16_t do_fprem1_sw_after(double x, double y) {
+    uint16_t sw;
+    double r;
+    __asm__ volatile(
+        "fldl  %2\n\t"
+        "fldl  %3\n\t"
+        "fxam\n\t"   /* x is normal → SW.C2 := 1 */
+        "fprem1\n\t" /* must clear SW.C2 */
+        "fnstsw %%ax\n\t"
+        "movw  %%ax, %0\n\t"
+        "fstpl %1\n\t"
+        "ffree %%st(0)\n\t"
+        "fincstp\n\t"
+        : "=m"(sw), "=m"(r)
+        : "m"(y), "m"(x)
+        : "ax", "st");
+    (void)r;
+    return sw;
+}
+
+static void check_c2_clear(const char* name, uint16_t sw) {
+    if ((sw & 0x0400U) == 0U) {
+        printf("PASS  %-40s  sw=0x%04x  C2=0\n", name, (unsigned)sw);
+    } else {
+        printf("FAIL  %-40s  sw=0x%04x  C2=1 (fprem1 must clear C2)\n", name, (unsigned)sw);
+        failures++;
+    }
+}
+
 int main(void) {
     /* IEEE remainder rounds quotient to nearest-even, so:
        remainder(5, 3) = 5 - round(5/3)*3 = 5 - 2*3 = -1 (vs fmod = 2)
@@ -59,6 +91,10 @@ int main(void) {
     check_bitexact_u64("fprem1(1, 1)", do_fprem1(1.0, 1.0), 0x0000000000000000ULL); /* 0 */
     check_bitexact_u64("fprem1(6, 4)", do_fprem1(6.0, 4.0),
                        0xc000000000000000ULL); /* -2 (round-to-even) */
+
+    check_c2_clear("fprem1(5, 3) clears C2", do_fprem1_sw_after(5.0, 3.0));
+    check_c2_clear("fprem1(7, 3) clears C2", do_fprem1_sw_after(7.0, 3.0));
+    check_c2_clear("fprem1(-5, 3) clears C2", do_fprem1_sw_after(-5.0, 3.0));
 
     printf("\n%d failure(s)\n", failures);
     return failures ? 1 : 0;
