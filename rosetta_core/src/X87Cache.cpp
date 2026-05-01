@@ -9,15 +9,25 @@
 // is_handled_x87 — returns true for opcodes that have a translate_* handler.
 // Used by lookahead to determine consecutive x87 run lengths.
 //
-// A few memory-block x87 opcodes are deliberately *excluded*
-// (fxsave/fxrstor only) even though they're "x87" in the broad sense.
-// Stock's emit for them is pure block memory I/O via the shared x22 =
-// X87State*; native does it at hardware speed.  We let the run break
-// before each one, x87_end flushes deferred state, the stub abs-jumps
-// to STASH, and stock translates them in isolation.  See
-// feedback_no_per_opcode_fallback.md for why this is safe only for
-// memory-block opcodes (transcendentals would clash on stock's
-// {x22, w23} helper-call ABI).
+// A handful of metadata-only and memory-block x87 opcodes are
+// deliberately *excluded* even though they're "x87" in the broad
+// sense:
+//   • fclex / finit / fldenv / fstenv — metadata-only ops touching
+//     CW/SW/TW (16-bit halfwords at offsets 0x00/0x02/0x04 in
+//     X87State).  Inlining gave parity at best (fstenv was a 0.66×
+//     regression).  Composition tests in tests/test_*_compose.c
+//     confirm stock's emit uses the same internal offsets we do —
+//     no m108-style internal-offset bug for these ops.
+//   • fxsave / fxrstor — SSE-era extended save/restore (512 B incl.
+//     8 ST f80 slots + 16 XMM/YMM + MXCSR).  Inlining would inherit
+//     frstor's 0.38× eager-f80 regression; we don't translate SSE.
+//
+// For all six: the run breaks before them, x87_end flushes deferred
+// state, the stub abs-jumps to STASH, and stock translates them in
+// isolation reading coherent X87State via x22.  See
+// feedback_no_per_opcode_fallback.md (transcendentals would clash on
+// stock's {x22, w23} helper-call ABI — that's why this list stays
+// short).
 //
 // fsave / frstor stay INLINE — see translate_fsave / translate_frstor
 // for the full story.  TL;DR: stock's m108 path uses an incompatible
@@ -96,16 +106,12 @@ static bool is_handled_x87(uint16_t op) {
         case kOpcodeName_feni:
         case kOpcodeName_fxam:
         case kOpcodeName_fbld:
-        case kOpcodeName_fclex:
         case kOpcodeName_fdecstp:
         case kOpcodeName_fincstp:
         case kOpcodeName_ffree:
         case kOpcodeName_fxtract:
         case kOpcodeName_fscale:
-        case kOpcodeName_finit:
         case kOpcodeName_fbstp:
-        case kOpcodeName_fldenv:
-        case kOpcodeName_fstenv:
         case kOpcodeName_frstor:
         case kOpcodeName_fsave:
         case kOpcodeName_fsin:

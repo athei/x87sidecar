@@ -172,10 +172,6 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                 TranslatorX87::translate_fxam(translation_result, cur_instr);
                 break;
 
-            case Opcode::kOpcodeName_fclex:
-                TranslatorX87::translate_fclex(translation_result, cur_instr);
-                break;
-
             case Opcode::kOpcodeName_fdecstp:
                 TranslatorX87::translate_fdecstp(translation_result, cur_instr);
                 break;
@@ -196,20 +192,8 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                 TranslatorX87::translate_fscale(translation_result, cur_instr);
                 break;
 
-            case Opcode::kOpcodeName_finit:
-                TranslatorX87::translate_finit(translation_result, cur_instr);
-                break;
-
             case Opcode::kOpcodeName_fbstp:
                 TranslatorX87::translate_fbstp(translation_result, cur_instr);
-                break;
-
-            case Opcode::kOpcodeName_fldenv:
-                TranslatorX87::translate_fldenv(translation_result, cur_instr);
-                break;
-
-            case Opcode::kOpcodeName_fstenv:
-                TranslatorX87::translate_fstenv(translation_result, cur_instr);
                 break;
 
             case Opcode::kOpcodeName_frstor:
@@ -368,15 +352,26 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
             // suppresses the UNHANDLED warning for these opcodes only.
             // Don't merge with default:.
             //
-            // Deliberate fall-through to stock.  These are the SSE-era
-            // extended save/restore — 512 bytes including 8 ST slots in
-            // x86-spec f80 plus 16 XMM/YMM registers and MXCSR.  We
-            // don't translate SSE, and inlining the f80 conversion would
-            // inherit frstor's 0.38× eager-conversion regression for no
-            // benefit.  is_handled_x87 returns false for them, so the
-            // run terminates before this point and the preceding
-            // translate_*'s x87_end has already flushed deferred state
-            // to memory — stock reads coherent X87State via x22.
+            // Deliberate fall-through to stock:
+            //   • fclex/finit/fldenv/fstenv: metadata-only ops with no
+            //     stack-aware path; inlining buys nothing measurable
+            //     (parity at best, fstenv was a 0.66× regression).
+            //     Test coverage in test_*_compose.c confirms no
+            //     m108-style internal-offset bug — see
+            //     project_native_rosetta_lazy_f80.md.
+            //   • fxsave/fxrstor: SSE-era extended save/restore
+            //     (512 B incl. 8 ST f80 slots + 16 XMM/YMM + MXCSR).
+            //     Inlining would inherit frstor's 0.38× eager-f80
+            //     regression; we don't translate SSE.
+            //
+            // For all six: is_handled_x87 returns false, so the run
+            // terminates before this point and the preceding handled
+            // op's x87_end has already flushed deferred state to
+            // memory — stock reads coherent X87State via x22.
+            case Opcode::kOpcodeName_fclex:    // NOLINT(bugprone-branch-clone)
+            case Opcode::kOpcodeName_finit:    // NOLINT(bugprone-branch-clone)
+            case Opcode::kOpcodeName_fldenv:   // NOLINT(bugprone-branch-clone)
+            case Opcode::kOpcodeName_fstenv:   // NOLINT(bugprone-branch-clone)
             case Opcode::kOpcodeName_fxsave:   // NOLINT(bugprone-branch-clone)
             case Opcode::kOpcodeName_fxrstor:  // NOLINT(bugprone-branch-clone)
                 return std::nullopt;

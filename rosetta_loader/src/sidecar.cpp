@@ -383,9 +383,13 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask, const Translate
         //      future helper-using opcode (e.g. a new transcendental)
         //      doesn't silently compose with stock's {x22, w23} ABI and
         //      produce wrong code.
-        static constexpr std::array<uint16_t, 2> kKnownFallThrough = {
-            kOpcodeName_fxsave,
-            kOpcodeName_fxrstor,
+        static constexpr std::array<uint16_t, 6> kKnownFallThrough = {
+            kOpcodeName_fclex,    // metadata-only; inline parity → no win
+            kOpcodeName_finit,    // metadata-only; inline 0.95× → no win
+            kOpcodeName_fldenv,   // metadata-only; inline parity → no win
+            kOpcodeName_fstenv,   // metadata-only; inline 0.66× regression
+            kOpcodeName_fxsave,   // SSE-era extended (8×f80 ST + 16×XMM)
+            kOpcodeName_fxrstor,  // SSE-era extended
         };
         const uint16_t op = localIR[req.insn_idx].opcode;
         const bool deliberate = std::ranges::find(kKnownFallThrough, op) != kKnownFallThrough.end();
