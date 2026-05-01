@@ -19,7 +19,7 @@ static inline bool fusion_disabled(uint64_t mask, FusionId id) {
 // Shared FLD source classification
 // =============================================================================
 
-enum FldSource {
+enum FldSource : std::uint8_t {
     kFldReg,
     kFldM32,
     kFldM64,
@@ -194,7 +194,7 @@ static auto try_fuse_fld_arithp(TranslationResult* a1, IRInstr* fld_instr, IRIns
 
     // ── 2. Classify the popping arithmetic op ────────────────────────────────
 
-    enum ArithOp { kAdd, kSub, kSubR, kMul, kDiv, kDivR };
+    enum ArithOp : std::uint8_t { kAdd, kSub, kSubR, kMul, kDiv, kDivR };
 
     const auto arith_opcode = arithp_instr->opcode;
     ArithOp arith;
@@ -649,7 +649,7 @@ static auto try_fuse_fld_arith_fstp(TranslationResult* a1, IRInstr* fld_instr,
 
     // // ── 2. Classify non-popping arithmetic ──────────────────────────────────
 
-    enum ArithOp { kAdd, kSub, kSubR, kMul, kDiv, kDivR };
+    enum ArithOp : std::uint8_t { kAdd, kSub, kSubR, kMul, kDiv, kDivR };
 
     const auto arith_opcode = arith_instr->opcode;
     ArithOp arith;
@@ -833,7 +833,7 @@ static auto try_fuse_fld_arith_arithp(TranslationResult* a1, IRInstr* fld_instr,
 }
 
     // ── 2. Classify non-popping middle arithmetic ────────────────────────────
-    enum ArithOp { kAdd, kSub, kSubR, kMul, kDiv, kDivR };
+    enum ArithOp : std::uint8_t { kAdd, kSub, kSubR, kMul, kDiv, kDivR };
 
     const auto arith_opcode = arith_instr->opcode;
     ArithOp arith1;
@@ -1495,7 +1495,7 @@ static auto try_fuse_arithp_fstp(TranslationResult* a1, IRInstr* arithp_instr, I
     -> std::optional<int> {
     // ── 1. Classify the popping arithmetic op ────────────────────────────────
 
-    enum ArithOp { kAdd, kSub, kSubR, kMul, kDiv, kDivR };
+    enum ArithOp : std::uint8_t { kAdd, kSub, kSubR, kMul, kDiv, kDivR };
 
     ArithOp arith;
     switch (arithp_instr->opcode) {
@@ -1613,7 +1613,7 @@ static auto try_fuse_arith_fstp(TranslationResult* a1, IRInstr* arith_instr, IRI
     -> std::optional<int> {
     // ── 1. Classify the non-popping arithmetic op ────────────────────────────
 
-    enum ArithOp { kAdd, kSub, kSubR, kMul, kDiv, kDivR };
+    enum ArithOp : std::uint8_t { kAdd, kSub, kSubR, kMul, kDiv, kDivR };
 
     ArithOp arith;
     switch (arith_instr->opcode) {
@@ -1781,7 +1781,7 @@ static auto try_fuse_arith_faddp(TranslationResult* a1, IRInstr* mul_instr, IRIn
     //   FADDP  → FMADD  Dd, Dn, Dm, Da   (Dd = Da + Dn*Dm)
     //   FSUBP  → FMSUB  Dd, Dn, Dm, Da   (Dd = Da - Dn*Dm)
     //   FSUBRP → FNMSUB Dd, Dn, Dm, Da   (Dd = Dn*Dm - Da)
-    enum FmaKind { kFmadd, kFmsub, kFnmsub };
+    enum FmaKind : std::uint8_t { kFmadd, kFmsub, kFnmsub };
     FmaKind kind;
     switch (addp_instr->opcode) {
         case kOpcodeName_faddp:  kind = kFmadd;  break;

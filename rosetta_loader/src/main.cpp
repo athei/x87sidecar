@@ -205,7 +205,7 @@ public:
         return true;
     }
 
-    enum Register {
+    enum Register : std::uint8_t {
         X0,
         X1,
         X2,
@@ -548,7 +548,7 @@ static std::string resolveWinePath(const char* winPath) {
 // Classify a file by reading its PE header. Returns X86 / X64 for
 // recognised PE machine fields, NotPE for everything else (unreadable,
 // missing MZ/PE signatures, unknown machine, or e.g. a Mach-O binary).
-enum class PeArch { NotPE, X86, X64 };
+enum class PeArch : std::uint8_t { NotPE, X86, X64 };
 
 static PeArch classifyPE(const std::string& path) {
     FILE* f = fopen(path.c_str(), "rb");

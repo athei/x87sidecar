@@ -8,6 +8,7 @@ Checks: >
   -bugprone-easily-swappable-parameters,
   -bugprone-narrowing-conversions,
   performance-*,
+  -performance-no-int-to-ptr,
   modernize-*,
   -modernize-use-trailing-return-type,
   -modernize-avoid-c-arrays,

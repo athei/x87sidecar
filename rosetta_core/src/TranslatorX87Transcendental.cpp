@@ -70,40 +70,40 @@ struct ConstOff {
     static constexpr int TanPoly0          = 531;  // poly[0..8] contiguous → P(i) = 531 + i
 };
 
-static_assert(offsetof(rosetta_core::TranscendentalConstants, inv_pi)            == ConstOff::InvPi          * 8, "ConstOff::InvPi drift");
-static_assert(offsetof(rosetta_core::TranscendentalConstants, pi_1)              == ConstOff::Pi1            * 8, "ConstOff::Pi1 drift");
-static_assert(offsetof(rosetta_core::TranscendentalConstants, pi_2)              == ConstOff::Pi2            * 8, "ConstOff::Pi2 drift");
-static_assert(offsetof(rosetta_core::TranscendentalConstants, pi_3)              == ConstOff::Pi3            * 8, "ConstOff::Pi3 drift");
-static_assert(offsetof(rosetta_core::TranscendentalConstants, sin_c)             == ConstOff::SinC0          * 8, "ConstOff::SinC0 drift");
-static_assert(offsetof(rosetta_core::TranscendentalConstants, range_val)         == ConstOff::RangeVal       * 8, "ConstOff::RangeVal drift");
-static_assert(offsetof(rosetta_core::TranscendentalConstants, half)              == ConstOff::Half           * 8, "ConstOff::Half drift");
-static_assert(offsetof(rosetta_core::TranscendentalConstants, exp2m1_log2_hi)    == ConstOff::Exp2m1Log2Hi   * 8, "ConstOff::Exp2m1Log2Hi drift");
-static_assert(offsetof(rosetta_core::TranscendentalConstants, exp2m1_log2_lo)    == ConstOff::Exp2m1Log2Lo   * 8, "ConstOff::Exp2m1Log2Lo drift");
-static_assert(offsetof(rosetta_core::TranscendentalConstants, exp2m1_c1)         == ConstOff::Exp2m1C1       * 8, "ConstOff::Exp2m1C1 drift");
-static_assert(offsetof(rosetta_core::TranscendentalConstants, exp2m1_c6)         == ConstOff::Exp2m1C6       * 8, "ConstOff::Exp2m1C6 drift");
-static_assert(offsetof(rosetta_core::TranscendentalConstants, exp2m1_shift)      == ConstOff::Exp2m1Shift    * 8, "ConstOff::Exp2m1Shift drift");
-static_assert(offsetof(rosetta_core::TranscendentalConstants, exp2m1_rnd2zero)   == ConstOff::Exp2m1Rnd2Zero * 8, "ConstOff::Exp2m1Rnd2Zero drift");
-static_assert(offsetof(rosetta_core::TranscendentalConstants, exp2m1_tablebound) == ConstOff::Exp2m1TableBound * 8, "ConstOff::Exp2m1TableBound drift");
-static_assert(offsetof(rosetta_core::TranscendentalConstants, one)               == ConstOff::One            * 8, "ConstOff::One drift");
+static_assert(offsetof(rosetta_core::TranscendentalConstants, inv_pi)            == ConstOff::InvPi          * std::size_t{8}, "ConstOff::InvPi drift");
+static_assert(offsetof(rosetta_core::TranscendentalConstants, pi_1)              == ConstOff::Pi1            * std::size_t{8}, "ConstOff::Pi1 drift");
+static_assert(offsetof(rosetta_core::TranscendentalConstants, pi_2)              == ConstOff::Pi2            * std::size_t{8}, "ConstOff::Pi2 drift");
+static_assert(offsetof(rosetta_core::TranscendentalConstants, pi_3)              == ConstOff::Pi3            * std::size_t{8}, "ConstOff::Pi3 drift");
+static_assert(offsetof(rosetta_core::TranscendentalConstants, sin_c)             == ConstOff::SinC0          * std::size_t{8}, "ConstOff::SinC0 drift");
+static_assert(offsetof(rosetta_core::TranscendentalConstants, range_val)         == ConstOff::RangeVal       * std::size_t{8}, "ConstOff::RangeVal drift");
+static_assert(offsetof(rosetta_core::TranscendentalConstants, half)              == ConstOff::Half           * std::size_t{8}, "ConstOff::Half drift");
+static_assert(offsetof(rosetta_core::TranscendentalConstants, exp2m1_log2_hi)    == ConstOff::Exp2m1Log2Hi   * std::size_t{8}, "ConstOff::Exp2m1Log2Hi drift");
+static_assert(offsetof(rosetta_core::TranscendentalConstants, exp2m1_log2_lo)    == ConstOff::Exp2m1Log2Lo   * std::size_t{8}, "ConstOff::Exp2m1Log2Lo drift");
+static_assert(offsetof(rosetta_core::TranscendentalConstants, exp2m1_c1)         == ConstOff::Exp2m1C1       * std::size_t{8}, "ConstOff::Exp2m1C1 drift");
+static_assert(offsetof(rosetta_core::TranscendentalConstants, exp2m1_c6)         == ConstOff::Exp2m1C6       * std::size_t{8}, "ConstOff::Exp2m1C6 drift");
+static_assert(offsetof(rosetta_core::TranscendentalConstants, exp2m1_shift)      == ConstOff::Exp2m1Shift    * std::size_t{8}, "ConstOff::Exp2m1Shift drift");
+static_assert(offsetof(rosetta_core::TranscendentalConstants, exp2m1_rnd2zero)   == ConstOff::Exp2m1Rnd2Zero * std::size_t{8}, "ConstOff::Exp2m1Rnd2Zero drift");
+static_assert(offsetof(rosetta_core::TranscendentalConstants, exp2m1_tablebound) == ConstOff::Exp2m1TableBound * std::size_t{8}, "ConstOff::Exp2m1TableBound drift");
+static_assert(offsetof(rosetta_core::TranscendentalConstants, one)               == ConstOff::One            * std::size_t{8}, "ConstOff::One drift");
 static_assert(offsetof(rosetta_core::TranscendentalConstants, exp_table)         == ConstOff::ExpTableByteOff,     "ConstOff::ExpTableByteOff drift");
 static_assert(offsetof(rosetta_core::TranscendentalConstants, exp_scalem1)       == ConstOff::ExpScalem1ByteOff,   "ConstOff::ExpScalem1ByteOff drift");
-static_assert(offsetof(rosetta_core::TranscendentalConstants, log2_off)          == ConstOff::Log2Off          * 8, "ConstOff::Log2Off drift");
-static_assert(offsetof(rosetta_core::TranscendentalConstants, log2_sign_exp_mask)== ConstOff::Log2SignExpMask  * 8, "ConstOff::Log2SignExpMask drift");
-static_assert(offsetof(rosetta_core::TranscendentalConstants, log2_invln2)       == ConstOff::Log2InvLn2       * 8, "ConstOff::Log2InvLn2 drift");
-static_assert(offsetof(rosetta_core::TranscendentalConstants, log2_c0)           == ConstOff::Log2C0           * 8, "ConstOff::Log2C0 drift");
-static_assert(offsetof(rosetta_core::TranscendentalConstants, log2_c4)           == ConstOff::Log2C4           * 8, "ConstOff::Log2C4 drift");
+static_assert(offsetof(rosetta_core::TranscendentalConstants, log2_off)          == ConstOff::Log2Off          * std::size_t{8}, "ConstOff::Log2Off drift");
+static_assert(offsetof(rosetta_core::TranscendentalConstants, log2_sign_exp_mask)== ConstOff::Log2SignExpMask  * std::size_t{8}, "ConstOff::Log2SignExpMask drift");
+static_assert(offsetof(rosetta_core::TranscendentalConstants, log2_invln2)       == ConstOff::Log2InvLn2       * std::size_t{8}, "ConstOff::Log2InvLn2 drift");
+static_assert(offsetof(rosetta_core::TranscendentalConstants, log2_c0)           == ConstOff::Log2C0           * std::size_t{8}, "ConstOff::Log2C0 drift");
+static_assert(offsetof(rosetta_core::TranscendentalConstants, log2_c4)           == ConstOff::Log2C4           * std::size_t{8}, "ConstOff::Log2C4 drift");
 static_assert(offsetof(rosetta_core::TranscendentalConstants, log2_invc)         == ConstOff::Log2InvcByteOff,     "ConstOff::Log2InvcByteOff drift");
 static_assert(offsetof(rosetta_core::TranscendentalConstants, log2_log2c)        == ConstOff::Log2Log2cByteOff,    "ConstOff::Log2Log2cByteOff drift");
-static_assert(offsetof(rosetta_core::TranscendentalConstants, atan2_neg_two)     == ConstOff::Atan2NegTwo      * 8, "ConstOff::Atan2NegTwo drift");
-static_assert(offsetof(rosetta_core::TranscendentalConstants, atan2_pi_over_2)   == ConstOff::Atan2PiOver2     * 8, "ConstOff::Atan2PiOver2 drift");
-static_assert(offsetof(rosetta_core::TranscendentalConstants, atan2_c)           == ConstOff::Atan2C0          * 8, "ConstOff::Atan2C0 drift");
-static_assert(offsetof(rosetta_core::TranscendentalConstants, tan_two_over_pi)   == ConstOff::TanTwoOverPi     * 8, "ConstOff::TanTwoOverPi drift");
-static_assert(offsetof(rosetta_core::TranscendentalConstants, tan_half_pi_hi)    == ConstOff::TanHalfPiHi      * 8, "ConstOff::TanHalfPiHi drift");
-static_assert(offsetof(rosetta_core::TranscendentalConstants, tan_half_pi_lo)    == ConstOff::TanHalfPiLo      * 8, "ConstOff::TanHalfPiLo drift");
-static_assert(offsetof(rosetta_core::TranscendentalConstants, tan_shift)         == ConstOff::TanShift         * 8, "ConstOff::TanShift drift");
-static_assert(offsetof(rosetta_core::TranscendentalConstants, tan_poly)          == ConstOff::TanPoly0         * 8, "ConstOff::TanPoly0 drift");
+static_assert(offsetof(rosetta_core::TranscendentalConstants, atan2_neg_two)     == ConstOff::Atan2NegTwo      * std::size_t{8}, "ConstOff::Atan2NegTwo drift");
+static_assert(offsetof(rosetta_core::TranscendentalConstants, atan2_pi_over_2)   == ConstOff::Atan2PiOver2     * std::size_t{8}, "ConstOff::Atan2PiOver2 drift");
+static_assert(offsetof(rosetta_core::TranscendentalConstants, atan2_c)           == ConstOff::Atan2C0          * std::size_t{8}, "ConstOff::Atan2C0 drift");
+static_assert(offsetof(rosetta_core::TranscendentalConstants, tan_two_over_pi)   == ConstOff::TanTwoOverPi     * std::size_t{8}, "ConstOff::TanTwoOverPi drift");
+static_assert(offsetof(rosetta_core::TranscendentalConstants, tan_half_pi_hi)    == ConstOff::TanHalfPiHi      * std::size_t{8}, "ConstOff::TanHalfPiHi drift");
+static_assert(offsetof(rosetta_core::TranscendentalConstants, tan_half_pi_lo)    == ConstOff::TanHalfPiLo      * std::size_t{8}, "ConstOff::TanHalfPiLo drift");
+static_assert(offsetof(rosetta_core::TranscendentalConstants, tan_shift)         == ConstOff::TanShift         * std::size_t{8}, "ConstOff::TanShift drift");
+static_assert(offsetof(rosetta_core::TranscendentalConstants, tan_poly)          == ConstOff::TanPoly0         * std::size_t{8}, "ConstOff::TanPoly0 drift");
 
-enum class TrigReduceMode { Sin, Cos };
+enum class TrigReduceMode : std::uint8_t { Sin, Cos };
 
 // 3-step Cody-Waite range reduction shared by fsin / fcos / fsincos.
 //

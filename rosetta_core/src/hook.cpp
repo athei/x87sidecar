@@ -9,7 +9,7 @@
 #include <cstdio>
 #include <cstring>
 
-enum {
+enum : uint16_t {
 PATCH_SIZE = 16U,
 AARCH64_PAGE_SIZE = 16384U
 };
