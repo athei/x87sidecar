@@ -172,6 +172,10 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                 TranslatorX87::translate_fxam(translation_result, cur_instr);
                 break;
 
+            case Opcode::kOpcodeName_fclex:
+                TranslatorX87::translate_fclex(translation_result, cur_instr);
+                break;
+
             case Opcode::kOpcodeName_fdecstp:
                 TranslatorX87::translate_fdecstp(translation_result, cur_instr);
                 break;
@@ -192,8 +196,20 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                 TranslatorX87::translate_fscale(translation_result, cur_instr);
                 break;
 
+            case Opcode::kOpcodeName_finit:
+                TranslatorX87::translate_finit(translation_result, cur_instr);
+                break;
+
             case Opcode::kOpcodeName_fbstp:
                 TranslatorX87::translate_fbstp(translation_result, cur_instr);
+                break;
+
+            case Opcode::kOpcodeName_fldenv:
+                TranslatorX87::translate_fldenv(translation_result, cur_instr);
+                break;
+
+            case Opcode::kOpcodeName_fstenv:
+                TranslatorX87::translate_fstenv(translation_result, cur_instr);
                 break;
 
             case Opcode::kOpcodeName_frstor:
@@ -300,6 +316,12 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                 TranslatorX87::translate_fnstcw(translation_result, cur_instr);
                 break;
 
+            case Opcode::kOpcodeName_fnop:
+            case Opcode::kOpcodeName_fdisi:  // 8087 FPU-int disable; NOP on 80287+
+            case Opcode::kOpcodeName_feni:   // 8087 FPU-int enable; NOP on 80287+
+                TranslatorX87::translate_fnop(translation_result, cur_instr);
+                break;
+
             case Opcode::kOpcodeName_fsin:
                 TranslatorX87::translate_fsin(translation_result, cur_instr);
                 break;
@@ -340,21 +362,30 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                 TranslatorX87::translate_fprem1(translation_result, cur_instr);
                 break;
 
+            case Opcode::kOpcodeName_fxsave:
+            case Opcode::kOpcodeName_fxrstor:
+                // Deliberate fall-through to stock.  These are the SSE-era
+                // extended save/restore — 512 bytes including 8 ST slots in
+                // x86-spec f80 plus 16 XMM/YMM registers and MXCSR.  We
+                // don't translate SSE, and inlining the f80 conversion would
+                // inherit frstor's 0.38× eager-conversion regression for no
+                // benefit.  is_handled_x87 returns false for them, so the
+                // run terminates before this point and the preceding
+                // translate_*'s x87_end has already flushed deferred state
+                // to memory — stock reads coherent X87State via x22.  The
+                // sidecar's known-fall-through allowlist suppresses the
+                // "UNHANDLED" warning for these specifically.
+                return std::nullopt;
+
             default:
                 // Returning nullopt means "I have no handler for this
                 // opcode."  In the runtime/sidecar flow, the stub's FILTER
                 // prologue routes only x87 opcodes to us, so reaching here
-                // means an x87 op we deliberately route to stock — the
-                // memory-block / NOP-class set (fnop, fdisi, feni, fclex,
-                // finit, fldenv, fstenv, fxsave, fxrstor).  Stock's
-                // emit for these is pure block memory I/O via the shared
-                // x22 = X87State*, so composition is safe as long as
-                // is_handled_x87 stops the run before them and x87_end
-                // flushes deferred state to memory.  The sidecar logs the
-                // first hit per opcode as a discoverability signal: if a
-                // future helper-using opcode (e.g. a new transcendental)
-                // ever falls through here, that log line catches it before
-                // the {x22, w23} ABI clash silently produces wrong code.
+                // means an x87 op we *forgot* to handle — the sidecar will
+                // log a loud UNHANDLED warning so we notice.  Add a
+                // translate_* and dispatch case, or extend
+                // kKnownFallThrough on the sidecar side if it's a new
+                // deliberate-stock op like fxsave/fxrstor.
                 // In the offline AOT flow (CustomTranslationHook), every
                 // non-x87 op also reaches here; that path falls back to
                 // stock translate_insn unchanged.  We stay silent so the

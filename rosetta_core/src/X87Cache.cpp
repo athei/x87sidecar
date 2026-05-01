@@ -9,9 +9,8 @@
 // is_handled_x87 — returns true for opcodes that have a translate_* handler.
 // Used by lookahead to determine consecutive x87 run lengths.
 //
-// A few memory-block / NOP-class x87 opcodes are deliberately *excluded*
-// (fnop/fdisi/feni/fclex/finit/fldenv/fstenv, plus fxsave/fxrstor) even
-// though they're "x87" in the broad sense.  Stock's emit for them is
+// A few memory-block x87 opcodes are deliberately *excluded*
+// (fxsave/fxrstor only) even though they're "x87" in the broad sense.  Stock's emit for them is
 // pure block memory I/O via the shared x22 = X87State*; native does it
 // at hardware speed (zero ARM instructions for the NOP family,
 // tightly-tuned blocks for the env family).  frstor stays inline
@@ -89,14 +88,21 @@ static bool is_handled_x87(uint16_t op) {
         case kOpcodeName_ficomp:
         case kOpcodeName_fldcw:
         case kOpcodeName_fnstcw:
+        case kOpcodeName_fnop:
+        case kOpcodeName_fdisi:
+        case kOpcodeName_feni:
         case kOpcodeName_fxam:
         case kOpcodeName_fbld:
+        case kOpcodeName_fclex:
         case kOpcodeName_fdecstp:
         case kOpcodeName_fincstp:
         case kOpcodeName_ffree:
         case kOpcodeName_fxtract:
         case kOpcodeName_fscale:
+        case kOpcodeName_finit:
         case kOpcodeName_fbstp:
+        case kOpcodeName_fldenv:
+        case kOpcodeName_fstenv:
         case kOpcodeName_frstor:
         case kOpcodeName_fsave:
         case kOpcodeName_fsin:

@@ -53,6 +53,7 @@ ALL_BENCHMARKS=(
     bench_fincstp
     bench_ffree
     bench_fdisi_feni
+    bench_fnop
     bench_fxtract
     bench_fscale
     bench_finit

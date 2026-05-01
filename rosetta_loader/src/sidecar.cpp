@@ -6,6 +6,7 @@
 #include <pthread.h>
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -370,24 +371,37 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask, const Translate
         out.value = result.value();
     } else {
         // The stub's FILTER prologue routes only x87 opcodes to us, so
-        // reaching nullopt means an x87 op we deliberately route to
-        // stock.  The stub's NONE-reply path falls through to stock's
-        // translate_insn — safe today because the unhandled set is
-        // limited to memory-block / NOP-class opcodes (fxsave, fxrstor,
-        // fnop, fdisi, feni, fclex, finit, fldenv, fstenv)
-        // where stock's emit reads coherent X87State from memory via
-        // the shared x22 (or emits zero ARM instructions for the NOP
-        // family).  Log the opcode anyway: a future helper-using
-        // opcode hitting this path would silently compose with stock's
-        // {x22, w23} ABI and produce wrong code, and this line is the
-        // discoverability signal.
+        // reaching nullopt means the dispatcher returned nullopt for an
+        // x87 op.  Two cases:
+        //   1. Deliberate fall-through (fxsave/fxrstor): explicit `case`
+        //      in Translator.cpp; we don't inline because of the 8 × f80
+        //      ST slots that would inherit frstor's eager-conversion
+        //      regression.  Stock translates them via shared x22.
+        //   2. Forgot-to-handle: an x87 op without a translate_* and
+        //      without an entry in kKnownFallThrough below.  This is the
+        //      discoverability signal — emit a loud UNHANDLED line so a
+        //      future helper-using opcode (e.g. a new transcendental)
+        //      doesn't silently compose with stock's {x22, w23} ABI and
+        //      produce wrong code.
+        static constexpr std::array<uint16_t, 2> kKnownFallThrough = {
+            kOpcodeName_fxsave,
+            kOpcodeName_fxrstor,
+        };
         const uint16_t op = localIR[req.insn_idx].opcode;
-        const char* name = (op < kOpcodeNames.size()) ? kOpcodeNames[op] : "?";
-        fprintf(stdout,
-                "[rosettax87] unhandled x87 opcode %s (0x%x) at "
-                "insn_idx=%lld; falling through to stock\n",
-                name, static_cast<unsigned>(op), static_cast<long long>(req.insn_idx));
-        fflush(stdout);
+        const bool deliberate = std::find(kKnownFallThrough.begin(),
+                                          kKnownFallThrough.end(), op)
+                                != kKnownFallThrough.end();
+        if (!deliberate) {
+            const char* name = (op < kOpcodeNames.size()) ? kOpcodeNames[op] : "?";
+            fprintf(stdout,
+                    "[rosettax87] UNHANDLED x87 opcode %s (0x%x) at "
+                    "insn_idx=%lld; falling through to stock — add a "
+                    "translate_* and dispatch case, or extend "
+                    "kKnownFallThrough if this is a deliberate-stock op\n",
+                    name, static_cast<unsigned>(op),
+                    static_cast<long long>(req.insn_idx));
+            fflush(stdout);
+        }
     }
     return out;
 }

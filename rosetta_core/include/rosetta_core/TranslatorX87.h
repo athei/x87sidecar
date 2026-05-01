@@ -89,6 +89,10 @@ auto translate_fldcw(TranslationResult* a1, IRInstr* a2) -> void;
 
 auto translate_fnstcw(TranslationResult* a1, IRInstr* a2) -> void;
 
+auto translate_fnop(TranslationResult* a1, IRInstr* a2) -> void;
+
+auto translate_fclex(TranslationResult* a1, IRInstr* a2) -> void;
+
 auto translate_fdecstp(TranslationResult* a1, IRInstr* a2) -> void;
 
 auto translate_fincstp(TranslationResult* a1, IRInstr* a2) -> void;
@@ -99,7 +103,13 @@ auto translate_fxtract(TranslationResult* a1, IRInstr* a2) -> void;
 
 auto translate_fscale(TranslationResult* a1, IRInstr* a2) -> void;
 
+auto translate_finit(TranslationResult* a1, IRInstr* a2) -> void;
+
 auto translate_fbstp(TranslationResult* a1, IRInstr* a2) -> void;
+
+auto translate_fldenv(TranslationResult* a1, IRInstr* a2) -> void;
+
+auto translate_fstenv(TranslationResult* a1, IRInstr* a2) -> void;
 
 auto translate_frstor(TranslationResult* a1, IRInstr* a2) -> void;
 
