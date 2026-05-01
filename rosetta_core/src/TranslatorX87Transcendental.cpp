@@ -1012,6 +1012,35 @@ void emit_inline_fptan(TranslationResult& a1, AssemblerBuffer& buf,
     free_gpr(a1, Xconst);
 }
 
+// fprem: ST(0) := fmod(ST(0), ST(1)).  No pop.  Single-shot impl
+// (one call covers what stock x87 does iteratively in k≤64 quotient
+// bits); same simplification the prior IPC sidecar used.  C0/C1/C2/C3
+// flag bits in status_word are not updated (we don't track them).
+//
+// Algorithm:
+//   q = trunc(a / b)        (FDIV + FRINTZ)
+//   result = a - q · b      (FMSUB)
+void emit_inline_fprem(TranslationResult& a1, AssemblerBuffer& buf,
+                        int Xbase, int Wd_top, int Wd_tmp) {
+    const int Xst_base  = x87_get_st_base(a1);
+    const int depth_st0 = resolve_depth(a1, 0);
+    const int depth_st1 = resolve_depth(a1, 1);
+
+    const int Da = alloc_free_fpr(a1);
+    emit_load_st(buf, Xbase, Wd_top, depth_st0, Wd_tmp, Da, Xst_base);
+    const int Db = alloc_free_fpr(a1);
+    emit_load_st(buf, Xbase, Wd_top, depth_st1, Wd_tmp, Db, Xst_base);
+
+    const int Dq = alloc_free_fpr(a1);
+    emit_fdiv_f64(buf, Dq, Da, Db);            // q = a / b
+    emit_frintz_f64(buf, Dq, Dq);              // q = trunc(q)
+    emit_fmsub_f64(buf, /*Dd=*/0, Dq, Db, Da); // d0 = a - q · b
+
+    free_fpr(a1, Dq);
+    free_fpr(a1, Db);
+    free_fpr(a1, Da);
+}
+
 void emit_inline_fyl2xp1(TranslationResult& a1, AssemblerBuffer& buf,
                           int Xbase, int Wd_top, int Wd_tmp) {
     // x86 fyl2xp1: ST(1) := ST(1) * log2(ST(0) + 1); pop.  x87 spec

@@ -86,4 +86,10 @@ void emit_inline_fpatan(TranslationResult& a1, AssemblerBuffer& buf,
 void emit_inline_fptan(TranslationResult& a1, AssemblerBuffer& buf,
                         int Xbase, int Wd_top, int Wd_tmp);
 
+// fprem: ST(0) := fmod(ST(0), ST(1)).  Single-shot via FDIV + FRINTZ
+// + FMSUB (matches the simplification the prior IPC sidecar used —
+// stock x87 is iterative).  Result in d0.
+void emit_inline_fprem(TranslationResult& a1, AssemblerBuffer& buf,
+                        int Xbase, int Wd_top, int Wd_tmp);
+
 }  // namespace TranslatorX87

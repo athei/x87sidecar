@@ -163,6 +163,10 @@ auto emit_fsqrt_f64(AssemblerBuffer& buf, int Dd, int Dn) -> void;
 // Matches `vrndaq_f64` used by ARM optimized-routines' sin/cos.
 auto emit_frinta_f64(AssemblerBuffer& buf, int Dd, int Dn) -> void;
 
+// FRINTZ Dd, Dn — round to integral, toward zero (truncate, f64).
+// Used by fprem to extract the integer quotient of a/b.
+auto emit_frintz_f64(AssemblerBuffer& buf, int Dd, int Dn) -> void;
+
 // FCMP scalar — sets NZCV, no result register
 // type: 0=f32  1=f64
 auto emit_fp_cmp(AssemblerBuffer& buf, int type, int Rn, int Rm) -> void;
