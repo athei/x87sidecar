@@ -148,13 +148,76 @@ constexpr uint32_t cmp_imm_w(uint32_t rn, uint32_t imm) {
     return 0x7100001FU | (imm12 << 10) | ((rn & 0x1F) << 5);
 }
 
+// CMP Wn, Wm   (= SUBS WZR, Wn, Wm — 32-bit register compare).
+//   sf=0, op=1, S=1, 01011, shift=00, 0, Rm, imm6=0, Rn, Rd=11111
+constexpr uint32_t cmp_reg_w(uint32_t rn, uint32_t rm) {
+    return 0x6B00001FU | ((rm & 0x1F) << 16) | ((rn & 0x1F) << 5);
+}
+
+// SUBS Wd, Wn, #imm12  (32-bit subtract immediate, sets NZCV).  Same shape
+// as cmp_imm_w but writes Rd instead of WZR.
+constexpr uint32_t subs_imm_w(uint32_t rd, uint32_t rn, uint32_t imm) {
+    uint32_t imm12 = imm & 0xFFF;
+    return 0x71000000U | (imm12 << 10) | ((rn & 0x1F) << 5) | (rd & 0x1F);
+}
+
+// ADD Wd, Wn, #imm12  (32-bit add immediate, no flags).
+constexpr uint32_t add_imm_w(uint32_t rd, uint32_t rn, uint32_t imm) {
+    uint32_t imm12 = imm & 0xFFF;
+    return 0x11000000U | (imm12 << 10) | ((rn & 0x1F) << 5) | (rd & 0x1F);
+}
+
+// SUB Xd, Xn, #imm12  (64-bit subtract immediate, no flags).
+constexpr uint32_t sub_imm_x(uint32_t rd, uint32_t rn, uint32_t imm) {
+    uint32_t imm12 = imm & 0xFFF;
+    return 0xD1000000U | (imm12 << 10) | ((rn & 0x1F) << 5) | (rd & 0x1F);
+}
+
+// LSR Xd, Xn, #shift   (= UBFM Xd, Xn, #shift, #63).  Logical shift right
+// by an immediate amount, 64-bit register.
+//   sf=1, opc=10, 100110, N=1, immr=shift, imms=63, Rn, Rd
+constexpr uint32_t lsr_imm_x(uint32_t rd, uint32_t rn, uint32_t shift) {
+    return 0xD340FC00U | ((shift & 0x3F) << 16) | ((rn & 0x1F) << 5) | (rd & 0x1F);
+}
+
+// AND Wd, Wn, #0xF   — 32-bit AND with bitmask immediate hardcoded for #0xF
+// (4 LSBs).  Bitmask-imm encoding (N=0, immr=0, imms=0b000011) per the
+// `feedback_is_bitmask_immediate_ub.md` rule about hardcoding known
+// constants instead of computing from is_bitmask_immediate (which has
+// signed-shift UB when inlined into separate-function helpers).
+constexpr uint32_t and_w_imm_0xf(uint32_t rd, uint32_t rn) {
+    return 0x12000C00U | ((rn & 0x1F) << 5) | (rd & 0x1F);
+}
+
+// STRB Wt, [Xn|SP, #imm12]   (8-bit store, unsigned offset, no scaling)
+//   00_111_0_01_00_imm12_Rn_Rt
+constexpr uint32_t strb_w_offset(uint32_t wt, uint32_t rn, uint32_t imm) {
+    uint32_t imm12 = imm & 0xFFF;
+    return 0x39000000U | (imm12 << 10) | ((rn & 0x1F) << 5) | (wt & 0x1F);
+}
+
+// MOV Xd, Xn   (alias for ORR Xd, XZR, Xn).  Note: cannot encode SP as Rd
+// or Rm — use add_imm(rd, SP, 0) for that.
+constexpr uint32_t mov_reg_x(uint32_t rd, uint32_t rm) {
+    return 0xAA0003E0U | ((rm & 0x1F) << 16) | (rd & 0x1F);
+}
+
+// CBNZ Wt, +imm19*4   (32-bit branch-if-non-zero).
+constexpr uint32_t cbnz_w(uint32_t rt, int32_t imm19_words) {
+    uint32_t imm19 = static_cast<uint32_t>(imm19_words) & 0x7FFFF;
+    return 0x35000000U | (imm19 << 5) | (rt & 0x1F);
+}
+
 // B.cond +imm19*4   (signed PC-relative conditional branch, 4-byte units).
 //   0101_0100_imm19_0_cond
 constexpr uint32_t b_cond(uint32_t cond, int32_t imm19_words) {
     uint32_t imm19 = static_cast<uint32_t>(imm19_words) & 0x7FFFF;
     return 0x54000000U | (imm19 << 5) | (cond & 0xF);
 }
+constexpr uint32_t COND_NE = 0x1;  // not equal
 constexpr uint32_t COND_LS = 0x9;  // unsigned ≤
+constexpr uint32_t COND_LT = 0xB;  // signed <
+constexpr uint32_t COND_LE = 0xD;  // signed ≤
 
 // LDRH Wt, [Xn|SP, #imm]   (16-bit load-zero-extend, unsigned offset, scaled by 2)
 //   01_111_0_01_01_imm12_Rn_Rt
@@ -210,6 +273,37 @@ void emit_load_imm64(std::vector<uint8_t>& out, uint32_t rd, uint64_t imm) {
     emit(out, movk(rd, static_cast<uint16_t>((imm >> 48) & 0xFFFF), 48));
 }
 
+// Overwrite a 4-byte instruction at byte offset `off` in an already-emitted
+// blob.  Used to back-patch forward branches and abs-jump targets we
+// couldn't compute when first emitting them.
+void patch_word(std::vector<uint8_t>& v, size_t off, uint32_t insn) {
+    v[off + 0] = static_cast<uint8_t>(insn);
+    v[off + 1] = static_cast<uint8_t>(insn >> 8);
+    v[off + 2] = static_cast<uint8_t>(insn >> 16);
+    v[off + 3] = static_cast<uint8_t>(insn >> 24);
+}
+
+// Patch the 3 movz/movk words of an emit_abs_jump_3movs sequence at byte
+// offset `off` so the abs-jump targets `target`.  The 4th word (br x16) is
+// independent of the target and does not need patching.
+void patch_abs_jump_3movs(std::vector<uint8_t>& v, size_t off, uint64_t target) {
+    patch_word(v, off + 0, movz(16, static_cast<uint16_t>(target & 0xFFFF), 0));
+    patch_word(v, off + 4, movk(16, static_cast<uint16_t>((target >> 16) & 0xFFFF), 16));
+    patch_word(v, off + 8, movk(16, static_cast<uint16_t>((target >> 32) & 0xFFFF), 32));
+}
+
+// Append a placeholder abs-jump (3 movz/movk + br) whose target will be
+// patched in later via patch_abs_jump_3movs.  Returns the byte offset of
+// the first movz, suitable for handing back to the patcher.
+size_t emit_abs_jump_placeholder(std::vector<uint8_t>& out) {
+    size_t pos = out.size();
+    emit(out, movz(16, 0, 0));
+    emit(out, movk(16, 0, 16));
+    emit(out, movk(16, 0, 32));
+    emit(out, br(16));
+    return pos;
+}
+
 // Build a 16-byte abs-jump to `target` via x16 (3 mov + 1 br = 16 bytes).
 // The high 16 bits are assumed zero, which is true for kernel-managed
 // userland virtual addresses on macOS (top byte zeroed; canonical sub-256TB).
@@ -218,6 +312,132 @@ void emit_abs_jump_3movs(std::vector<uint8_t>& out, uint64_t target) {
     emit(out, movk(16, static_cast<uint16_t>((target >> 16) & 0xFFFF), 16));
     emit(out, movk(16, static_cast<uint16_t>((target >> 32) & 0xFFFF), 32));
     emit(out, br(16));
+}
+
+// ──── Abort routine ─────────────────────────────────────────────────────────
+//
+// Called from the IPC body's checkpoint thunks when mach_msg returns a
+// non-zero kr, the reply's msgh_size is too small, or msgh_id doesn't match
+// what we sent (Step 1b).  The routine writes a single fixed-format line
+// to stderr then exits — never returns.
+//
+// Wine prints this line into its launcher log so we can tell, after a freeze
+// repro, exactly which condition tripped and what the failing value was.
+//
+// Caller convention (set up by the IPC thunks):
+//   x0 = diagnostic value (kr / msgh_size / actual msgh_id) — printed as 8 hex
+//   x1 = error kind       (0 = bad-kr, 1 = bad-size, 2 = id-mismatch)
+//   x2 = insn_idx         (caller's translate_insn arg, also printed)
+//
+// The output is exactly 59 bytes:
+//   "rosettax87 stub abort kind=K val=0x........ idx=0x........\n"
+// with K = '0' + kind, and the two `........` slots overwritten in place
+// by 8 hex chars each.
+//
+// We can't write into the routine's own RX-mapped trailing pad — Apple
+// makes the whole region executable + read-only after install (see
+// `feedback_trailing_pad_page_protection.md`).  So we copy the 64-byte
+// template onto the stack first via ldp/stp pairs, patch in place, then
+// write(2) from the stack.
+//
+// Don't use BRK to crash: libRosettaRuntime's __TEXT eats EXC_BREAKPOINT
+// before SIGTRAP is delivered (`feedback_brk_vs_svc_in_rosetta_text.md`).
+// Use sys_write (#4) + sys_exit (#1) syscalls.
+constexpr size_t kAbortRoutineCodeSize = 48UL * 4;  // 48 instructions, 192 B
+constexpr size_t kAbortMsgSize = 64;                // template padded to 64 B
+constexpr size_t kAbortMsgWriteLen = 59;            // bytes actually written
+constexpr size_t kAbortMsgKindOff = 27;
+constexpr size_t kAbortMsgValHexOff = 35;
+constexpr size_t kAbortMsgIdxHexOff = 50;
+
+void emit_abort_hex_loop(std::vector<uint8_t>& out, uint32_t valReg, uint32_t bufStartOff) {
+    // Convert the 8 low nibbles of `valReg` to ASCII hex chars at
+    // [sp, #bufStartOff..bufStartOff+8].  Bottom-up: end pointer in x6,
+    // counter in w7, working copy in x4 (caller is responsible for spilling
+    // valReg first if it overlaps a scratch we'll clobber).
+    emit(out, mov_reg_x(4, valReg));             // x4 = valReg
+    emit(out, add_imm(6, SP, bufStartOff + 8));  // x6 = sp + (off+8)
+    emit(out, movz(7, 8, 0));                    // w7 = 8
+
+    const size_t loop_start = out.size();
+    emit(out, sub_imm_x(6, 6, 1));         // x6 -= 1
+    emit(out, and_w_imm_0xf(8, 4));        // w8 = w4 & 0xF
+    emit(out, add_imm_w(9, 8, '0'));       // w9 = w8 + 0x30
+    emit(out, cmp_imm_w(8, 9));            // cmp w8, #9
+    emit(out, b_cond(COND_LE, 2));         // b.le +2 → strb
+    emit(out, add_imm_w(9, 8, 'a' - 10));  // w9 = w8 + 0x57
+    emit(out, strb_w_offset(9, 6, 0));     // strb w9, [x6]
+    emit(out, lsr_imm_x(4, 4, 4));         // x4 >>= 4
+    emit(out, subs_imm_w(7, 7, 1));        // w7 -= 1, set flags
+    const size_t loop_back_pc = out.size();
+    const auto back_words = -static_cast<int32_t>((loop_back_pc - loop_start) / 4);
+    emit(out, b_cond(COND_NE, back_words));  // b.ne loop_start
+}
+
+void emit_abort_routine(std::vector<uint8_t>& out, uint64_t templateAddr) {
+    const size_t start = out.size();
+
+    // sub sp, sp, #64 — reserve a writable msg buffer
+    emit(out, sub_imm_x(SP, SP, 64));
+
+    // x4 = templateAddr (3 movz/movk; assumes top 16 bits zero, same as
+    // emit_abs_jump_3movs)
+    emit(out, movz(4, static_cast<uint16_t>(templateAddr & 0xFFFF), 0));
+    emit(out, movk(4, static_cast<uint16_t>((templateAddr >> 16) & 0xFFFF), 16));
+    emit(out, movk(4, static_cast<uint16_t>((templateAddr >> 32) & 0xFFFF), 32));
+
+    // Copy 64 bytes from RX template (x4) to stack buffer (sp) via 4×ldp/stp.
+    emit(out, ldp_offset(5, 6, 4, 0));
+    emit(out, stp_offset(5, 6, SP, 0));
+    emit(out, ldp_offset(5, 6, 4, 16));
+    emit(out, stp_offset(5, 6, SP, 16));
+    emit(out, ldp_offset(5, 6, 4, 32));
+    emit(out, stp_offset(5, 6, SP, 32));
+    emit(out, ldp_offset(5, 6, 4, 48));
+    emit(out, stp_offset(5, 6, SP, 48));
+
+    // Patch kind digit at [sp, #kAbortMsgKindOff] from x1.
+    emit(out, add_imm_w(1, 1, '0'));
+    emit(out, strb_w_offset(1, SP, kAbortMsgKindOff));
+
+    // Hex-render val (x0) into [sp, #kAbortMsgValHexOff..+8].
+    emit_abort_hex_loop(out, /*valReg=*/0, kAbortMsgValHexOff);
+    // Hex-render idx (x2) into [sp, #kAbortMsgIdxHexOff..+8].
+    emit_abort_hex_loop(out, /*valReg=*/2, kAbortMsgIdxHexOff);
+
+    // write(2, sp, kAbortMsgWriteLen)
+    emit(out, movz(0, 2, 0));                  // x0 = 2 (stderr)
+    emit(out, add_imm(1, SP, 0));              // x1 = sp (mov xd, sp)
+    emit(out, movz(2, kAbortMsgWriteLen, 0));  // x2 = 59
+    emit(out, movz(16, 4, 0));                 // x16 = 4 (sys_write)
+    emit(out, svc(0x80));
+
+    // exit(137)
+    emit(out, movz(0, 137, 0));  // x0 = 137
+    emit(out, movz(16, 1, 0));   // x16 = 1 (sys_exit)
+    emit(out, svc(0x80));
+
+    if (out.size() - start != kAbortRoutineCodeSize) {
+        // Caller will see oversized handler blob and abort install.  We
+        // can't propagate a richer error from here without complicating
+        // the API; sentinel-corrupt the blob so the caller's size check
+        // catches it.
+        out.clear();
+    }
+}
+
+void append_abort_msg_template(std::vector<uint8_t>& out) {
+    static constexpr char kMsg[] = "rosettax87 stub abort kind=. val=0x........ idx=0x........\n";
+    static_assert(sizeof(kMsg) - 1 == kAbortMsgWriteLen,
+                  "abort message template length must match write() size");
+    const size_t start = out.size();
+    out.insert(out.end(), kMsg, kMsg + kAbortMsgWriteLen);
+    // Pad to kAbortMsgSize so the ldp copy reads aligned 16-B chunks without
+    // overrunning the trailing pad.  These bytes are not written by the
+    // abort routine (write len = 59, not 64).
+    while (out.size() - start < kAbortMsgSize) {
+        out.push_back('\n');
+    }
 }
 
 }  // namespace
@@ -267,16 +487,24 @@ StubBlobs build(uint64_t handlerAddr, uint64_t translateInsnAddr, const uint8_t 
     //   sp[ 40.. 48] : x5   (caller scratch)
     //   sp[ 48.. 56] : x16  (caller scratch / kept for sym with stp)
     //   sp[ 56.. 64] : LR   (return address)
-    //   sp[ 64..192] : 128-byte buffer used for both send (msg ~= 64 B) and
-    //                  receive (kernel writes reply here on RCV).
-    //                  Header (24 B) at sp+64..sp+88.
-    //                  Send body (40 B) at sp+88..sp+128.
-    //                  Reply body lands at sp+88..sp+(64+rcv_size).
+    //   sp[ 64..128] : 64-byte mach_msg buffer.  Send: header (24 B at +64..
+    //                  +88) + 5×8 args body (40 B at +88..+128).  RCV is
+    //                  capped at 64 B too (RCV_SIZE), so the kernel never
+    //                  writes past sp+128 — leaving sp+128.. clear.
+    //                  Reply lands at sp+64..sp+(64+RCV_SIZE).
+    //                  Reply layout: header (24 B) + result (8 B at +88) +
+    //                  some_flag (8 B at +96).
+    //   sp[128..132] : expected msgh_id stash (Step 1b transaction-id check).
+    //   sp[132..192] : currently unused.
     //
     // After mach_msg(SEND|RCV) returns:
-    //   x0 = KERN_RETURN. Reply is in the buffer.
-    //   We read msgh_id (sp+84): 0 = None (fall through), 1 = Some(N).
-    //   For Some, body[0] (sp+88) is the int64_t value to return.
+    //   x0 = KERN_RETURN.
+    //   Reply buffer at sp+64..  Validation order (Step 1a/1b):
+    //     1. kr (x0) == KERN_SUCCESS — abort kind=0 if not
+    //     2. msgh_size (sp+68) >= 40 — abort kind=1 if not
+    //     3. msgh_id (sp+84) == expected (sp+128) — abort kind=2 if not
+    //   Then dispatch on some_flag (sp+96): 0 = None (fall through to STASH),
+    //   1 = Some, return result at sp+88 in x0.
 
     constexpr int FRAME_SIZE = 192;
 
@@ -320,8 +548,25 @@ StubBlobs build(uint64_t handlerAddr, uint64_t translateInsnAddr, const uint8_t 
     //            the sidecar a fresh send-once for the reply)
     constexpr uint32_t MSG_BITS = 0x13U | (0x15U << 8);  // = 0x1513
     constexpr uint32_t MSG_SIZE = 24 + 40;               // header + 5×8 args
-    constexpr uint32_t RCV_SIZE = 128;                   // reply cap
-    constexpr uint32_t MSG_ID = 0x10000001;              // sidecar dispatches on it
+    constexpr uint32_t RCV_SIZE = 64;                    // reply cap (header
+                                                         // 24 + result 8 +
+                                                         // some_flag 8 +
+                                                         // trailer slack);
+                                                         // capped low so
+                                                         // the kernel never
+                                                         // writes past
+                                                         // sp+128 — keeps
+                                                         // sp+128.. free
+                                                         // for the stashed
+                                                         // expected msgh_id.
+    constexpr uint32_t REPLY_SIZE_MIN = 24 + 8 + 8;      // 40 — see sidecar.cpp ReplyMsg
+
+    // Per-call transaction id sentinel byte.  Sidecar dispatches on
+    // (msgh_id & 0xFF000000) == kMsgIdSentinel.  Bottom 24 bits carry a
+    // thread-distinguishing tag derived from SP — different parent threads
+    // have stacks at different VAs, so SP>>20 (megabyte-aligned) gives an
+    // identifier that's stable per-thread within a single call.
+    constexpr uint32_t MSG_ID_SENTINEL = 0x10000000;
 
     // Use x9 as scratch for header field values.
 
@@ -346,10 +591,17 @@ StubBlobs build(uint64_t handlerAddr, uint64_t translateInsnAddr, const uint8_t 
     emit(ipc, movz(9, 0, 0));
     emit(ipc, str_w_offset(9, SP, 80));  // [sp+80]
 
-    // msgh_id
-    emit(ipc, movz(9, static_cast<uint16_t>(MSG_ID & 0xFFFF), 0));
-    emit(ipc, movk(9, static_cast<uint16_t>((MSG_ID >> 16) & 0xFFFF), 16));
-    emit(ipc, str_w_offset(9, SP, 84));  // [sp+84]
+    // msgh_id — per-call transaction id (Step 1b).  Built as
+    //   (sentinel byte 0x10) << 24  |  (SP >> 20) & 0x00FFFFFF
+    // and stashed at sp+128 for post-svc match check.  We replicate the
+    // sentinel byte into bits 16..27 via movk's lsl-16 chunk, so the top
+    // half of msgh_id is always 0x1000_xxxx (where xxxx = SP[35:20]).
+    emit(ipc, add_imm(9, SP, 0));                                    // x9 = sp
+    emit(ipc, lsr_imm_x(9, 9, 20));                                  // x9 = sp >> 20
+    emit(ipc, movk(9, static_cast<uint16_t>(MSG_ID_SENTINEL >> 16),  // top 16 = 0x1000
+                   16));
+    emit(ipc, str_w_offset(9, SP, 84));   // request msgh_id
+    emit(ipc, str_w_offset(9, SP, 128));  // stash expected
 
     // ── Body: five translate_insn args (still in x0..x4 at this point) ──────
     // Header lives at sp+64 .. sp+88. Body lives at sp+88 .. sp+128.
@@ -378,33 +630,54 @@ StubBlobs build(uint64_t handlerAddr, uint64_t translateInsnAddr, const uint8_t 
     emit(ipc, movn(16, 30, 0));                // x16 = -31 (mach_msg_trap)
     emit(ipc, svc(0x80));
 
-    // ── Reply parsing ───────────────────────────────────────────────────────
-    // After mach_msg returns:
-    //   x0 holds the kern_return_t (we ignore non-zero — Wine will hang
-    //        otherwise but for now treat it as fall-through implicitly via
-    //        the message buffer's leftover msgh_id which is whatever).
-    //   The buffer at sp+64..sp+192 holds the reply: header at +64..+88,
-    //                                                body at +88..end.
-    //   msgh_id (sp+84) tells us what to do: 0 = None (fall through to
-    //                                            stock's translate_insn),
-    //                                        1 = Some, body[0] = result.
-    // The NONE path was briefly an _exit(133) trap while helper-using
-    // x87 opcodes (transcendentals) lacked inline handlers — composition
-    // of our emit with stock's helper-call emit broke on the
-    // {x22, w23} f80 ABI mismatch. With every helper-using opcode now
-    // inlined, the only path that ever returns nullopt is the deliberate
-    // memory-block / NOP-class fall-through set:
-    //   fxsave, fxrstor, fnop, fdisi, feni, fclex, finit, fldenv, fstenv.
-    // All share the same property: stock's emit is pure block memory
-    // I/O via x22 = X87State* (or zero instructions for the NOP family),
-    // no helper-call ABI to clash with our cache.  is_handled_x87 stops
-    // the run before each one, so x87_end has already flushed deferred
-    // state to memory by the time stock takes over.  NONE restores
-    // caller registers and abs-jumps to STASH, the same fall-through
-    // path the FILTER prologue uses for non-x87 opcodes.
+    // ── Reply validation (Step 1a) ──────────────────────────────────────────
+    // Every non-success path from here ends in a loud abort + write to
+    // stderr.  We do NOT silently fall through on a bad reply: doing so
+    // hides regressions and previously masked the multi-threaded
+    // reply-port cross-talk that froze WoW on world-load.
     //
-    // Read msgh_id into w9.
-    emit(ipc, ldr_w_offset(9, SP, 84));  // w9 = msgh_id
+    // Three checkpoints, in order:
+    //   1. kr != KERN_SUCCESS         (mach_msg failed)
+    //   2. msgh_size < 32             (reply too small to be a well-formed Some/None)
+    //   3. msgh_id  != expected       (cross-talk — Step 1b adds per-call ids)
+    // Each fails into an in-IPC thunk that sets up
+    //   x0 = diagnostic value, x1 = kind, x2 = insn_idx
+    // and abs-jumps to abort_routine (appended to the handler blob after
+    // STASH_JUMP).  abort_routine writes a fixed 59-byte line to fd 2 and
+    // exit(137)s.
+    //
+    // The conditional branches below are forward-only and use placeholder
+    // imm19 = 0; we patch them after the thunks are emitted (we don't yet
+    // know how far ahead the thunks land).  Same trick for the thunks'
+    // abs-jumps to abort_routine — patched after we know its address.
+
+    // Checkpoint 1: kr != 0 → abort kind=0.  Uses cbnz_w (32-bit) since
+    // kern_return_t is 32-bit and mach_msg_trap zero-extends into x0.
+    const size_t krCbnzPos = ipc.size();
+    emit(ipc, cbnz_w(0, 0));  // patched below
+
+    // Checkpoint 2: msgh_size < REPLY_SIZE_MIN (40) → abort kind=1.
+    // ReplyMsg = mach_msg_header_t (24) + uint64_t result (8) +
+    //            uint64_t some_flag (8).
+    emit(ipc, ldr_w_offset(10, SP, 68));  // w10 = msgh_size
+    emit(ipc, cmp_imm_w(10, REPLY_SIZE_MIN));
+    const size_t sizeBltPos = ipc.size();
+    emit(ipc, b_cond(COND_LT, 0));  // patched below
+
+    // Checkpoint 3: msgh_id != expected → abort kind=2 (cross-talk).
+    // Sidecar echoes the request msgh_id we sent into the reply; if a
+    // different reply got delivered to our parentReplyName receive port
+    // first (multi-threaded parent), the values differ.
+    emit(ipc, ldr_w_offset(11, SP, 84));   // w11 = reply msgh_id
+    emit(ipc, ldr_w_offset(12, SP, 128));  // w12 = expected (stashed pre-svc)
+    emit(ipc, cmp_reg_w(11, 12));
+    const size_t idBnePos = ipc.size();
+    emit(ipc, b_cond(COND_NE, 0));  // patched below
+
+    // Read some_flag into w9 — Step 1b moves the Some/None signal out of
+    // msgh_id (which is now a transaction tag) into a dedicated body word
+    // at sp+96.  0 = None (fall through to STASH), 1 = Some.
+    emit(ipc, ldr_w_offset(9, SP, 96));  // w9 = some_flag
     // CBZ branch is `target = CBZ_addr + imm19*4`. We want to land at the
     // FIRST instruction of NONE path, which is one past the SOME path's
     // last (7th) instruction, i.e., 8 instructions ahead of CBZ.
@@ -431,16 +704,72 @@ StubBlobs build(uint64_t handlerAddr, uint64_t translateInsnAddr, const uint8_t 
     emit(ipc, ldp_offset(4, 5, SP, 32));     // restore x4, x5
     emit(ipc, ldp_offset(16, LR, SP, 48));   // restore x16, lr
     emit(ipc, add_imm(SP, SP, FRAME_SIZE));  // sp += FRAME_SIZE
-    // Abs-jump to STASH. STASH lives at the end of the concatenated
-    // handler blob (filter + ipc + STASH + STASH_JUMP), so its address
-    // is handlerAddr + kFilterBytes + ipc.size() once `ipc` is final.
-    // The 4-instruction abs-jump we're about to emit is the IPC body's
-    // final tail, so at this point in the build, the FINAL ipc.size()
-    // will be (current size) + 16. The same value is recomputed at
-    // line ~453 below for the filter's bypass jump — they target the
-    // same address.
-    const uint64_t noneStashAddr = handlerAddr + kFilterBytes + ipc.size() + 16;
-    emit_abs_jump_3movs(ipc, noneStashAddr);
+    // Abs-jump to STASH (patched once we know the final ipc.size, after
+    // the abort thunks below have been emitted).  STASH lives at the end
+    // of the concatenated handler blob: filter | ipc | STASH | STASH_JUMP
+    // | abort_routine | template.  Its address is
+    //   handlerAddr + kFilterBytes + ipc.size_final.
+    const size_t noneJumpPos = emit_abs_jump_placeholder(ipc);
+
+    // ── Abort thunks ────────────────────────────────────────────────────────
+    // Each thunk runs only when its checkpoint above branched here.  Sets
+    // up x0 = diagnostic value, x1 = kind, x2 = insn_idx (loaded from
+    // sp+32, where the prologue stashed caller's x4), then abs-jumps to
+    // abort_routine.  Targets are patched after we know its address.
+    //
+    // Thunk 0: bad-kr.  x0 already holds kr (the value that triggered
+    // cbnz_w); kind = 0.
+    const size_t krThunkPos = ipc.size();
+    emit(ipc, movz(1, 0, 0));            // x1 = 0 (kind)
+    emit(ipc, ldr_x_offset(2, SP, 32));  // x2 = insn_idx
+    const size_t krJumpPos = emit_abs_jump_placeholder(ipc);
+
+    // Thunk 1: bad-size.  msgh_size sits in w10 (zero-extended into x10
+    // by the ldr_w above); kind = 1.
+    const size_t sizeThunkPos = ipc.size();
+    emit(ipc, mov_reg_x(0, 10));         // x0 = x10 (diag = msgh_size)
+    emit(ipc, movz(1, 1, 0));            // x1 = 1 (kind)
+    emit(ipc, ldr_x_offset(2, SP, 32));  // x2 = insn_idx
+    const size_t sizeJumpPos = emit_abs_jump_placeholder(ipc);
+
+    // Thunk 2: id-mismatch.  Actual reply msgh_id is in w11; kind = 2.
+    const size_t idThunkPos = ipc.size();
+    emit(ipc, mov_reg_x(0, 11));         // x0 = x11 (diag = actual id)
+    emit(ipc, movz(1, 2, 0));            // x1 = 2 (kind)
+    emit(ipc, ldr_x_offset(2, SP, 32));  // x2 = insn_idx
+    const size_t idJumpPos = emit_abs_jump_placeholder(ipc);
+
+    // ── Resolve final addresses and patch placeholders ──────────────────────
+    // ipc.size() is now final.  STASH starts at handlerAddr + kFilterBytes +
+    // ipc.size_final; abort_routine starts at STASH_JUMP_END = STASH + 32.
+    const uint64_t stashAddrFinal = handlerAddr + kFilterBytes + ipc.size();
+    const uint64_t abortRoutineAddr = stashAddrFinal + 32;
+    if ((stashAddrFinal | abortRoutineAddr) & 0xFFFF000000000000ULL) {
+        blobs.entry.clear();
+        return blobs;
+    }
+
+    // Patch NONE's abs-jump → STASH.
+    patch_abs_jump_3movs(ipc, noneJumpPos, stashAddrFinal);
+
+    // Patch checkpoint forward branches → their thunks.
+    {
+        const auto imm = static_cast<int32_t>((krThunkPos - krCbnzPos) / 4);
+        patch_word(ipc, krCbnzPos, cbnz_w(0, imm));
+    }
+    {
+        const auto imm = static_cast<int32_t>((sizeThunkPos - sizeBltPos) / 4);
+        patch_word(ipc, sizeBltPos, b_cond(COND_LT, imm));
+    }
+    {
+        const auto imm = static_cast<int32_t>((idThunkPos - idBnePos) / 4);
+        patch_word(ipc, idBnePos, b_cond(COND_NE, imm));
+    }
+
+    // Patch each thunk's abs-jump → abort_routine.
+    patch_abs_jump_3movs(ipc, krJumpPos, abortRoutineAddr);
+    patch_abs_jump_3movs(ipc, sizeJumpPos, abortRoutineAddr);
+    patch_abs_jump_3movs(ipc, idJumpPos, abortRoutineAddr);
 
     // ──── FILTER prologue ───────────────────────────────────────────────────
     // Bypass the IPC entirely for non-x87 opcodes — translate_insn fires for
@@ -469,12 +798,9 @@ StubBlobs build(uint64_t handlerAddr, uint64_t translateInsnAddr, const uint8_t 
     static_assert(sizeof(IRInstr) == 0x50, "stub filter assumes IRInstr stride 0x50");
     static_assert(offsetof(IRInstr, opcode) == 0x4, "stub filter assumes IRInstr.opcode at +4");
 
-    // STASH lives right after the IPC body in the final blob.
-    const uint64_t stashAddr = handlerAddr + kFilterBytes + ipc.size();
-    if (stashAddr & 0xFFFF000000000000ULL) {
-        blobs.entry.clear();
-        return blobs;
-    }
+    // STASH lives right after the IPC body in the final blob — same address
+    // we just computed above for the NONE path.
+    const uint64_t stashAddr = stashAddrFinal;
 
     std::vector<uint8_t> filter;
     filter.reserve(kFilterBytes);
@@ -505,15 +831,33 @@ StubBlobs build(uint64_t handlerAddr, uint64_t translateInsnAddr, const uint8_t 
         return blobs;
     }
 
-    // ──── Concatenate: filter + IPC + STASH + STASH_JUMP ───────────────────
+    // ──── Concatenate: filter + IPC + STASH + STASH_JUMP + abort + msg ─────
     auto& h = blobs.handler;
-    h.reserve(filter.size() + ipc.size() + 16 + 16);
+    h.reserve(filter.size() + ipc.size() + 16 + 16 + kAbortRoutineCodeSize + kAbortMsgSize);
     h.insert(h.end(), filter.begin(), filter.end());
     h.insert(h.end(), ipc.begin(), ipc.end());
     // STASH (4 instructions = original 16 bytes of translate_insn).
     h.insert(h.end(), origPrologue16, origPrologue16 + 16);
     // STASH_JUMP (abs-jump to translate_insn + 16).
     emit_abs_jump_3movs(h, translateInsnAddr + 16);
+
+    // Abort routine + message template.  Address must equal abortRoutineAddr
+    // (= stashAddrFinal + 32) computed above; if emit_abort_routine ever
+    // grows beyond kAbortRoutineCodeSize, the IPC's pre-patched abs-jumps
+    // would land on the wrong instruction, so it self-checks and clears
+    // its output on size mismatch.  Abort install on that.
+    const size_t abortStart = h.size();
+    if (handlerAddr + abortStart != abortRoutineAddr) {
+        blobs.entry.clear();
+        return blobs;
+    }
+    const uint64_t templateAddr = abortRoutineAddr + kAbortRoutineCodeSize;
+    emit_abort_routine(h, templateAddr);
+    if (h.size() != abortStart + kAbortRoutineCodeSize) {
+        blobs.entry.clear();
+        return blobs;
+    }
+    append_abort_msg_template(h);
 
     return blobs;
 }

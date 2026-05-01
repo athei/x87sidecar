@@ -432,12 +432,17 @@ void runReceiveLoop(mach_port_t servicePort, mach_port_t parentTaskPort) {
         // Args are TR*, IRBlock*, IRInstr*, num_instrs, insn_idx — the
         // five translate_insn parameters in register order (x0..x4).
         // Reply path: stub provided a SEND_ONCE on msgh_remote_port (via
-        // MAKE_SEND_ONCE on the local-port disposition). msgh_id=1 +
-        // body[0]=result returns Some(N) to the stub; msgh_id=0 falls
-        // through to stock translate_insn.
+        // MAKE_SEND_ONCE on the local-port disposition).  We echo the
+        // request's msgh_id back so the stub can detect cross-talk
+        // (Step 1b) and put the Some/None signal into a dedicated body
+        // word (some_flag) so msgh_id is purely a transaction tag.
+        //
+        // Dispatch on the top-byte sentinel (0x10) rather than an exact
+        // msgh_id match — the bottom 24 bits now carry per-call data.
         mach_port_t replyPort = hdr->msgh_remote_port;
-        if (hdr->msgh_size >= 24 + 40 && hdr->msgh_id == 0x10000001 &&
+        if (hdr->msgh_size >= 24 + 40 && (hdr->msgh_id & 0xFF000000U) == 0x10000000U &&
             replyPort != MACH_PORT_NULL) {
+            const uint32_t reqId = hdr->msgh_id;
             TranslateRequest req{};
             std::memcpy(&req, buf.bytes + 24, sizeof(req));
 
@@ -446,13 +451,15 @@ void runReceiveLoop(mach_port_t servicePort, mach_port_t parentTaskPort) {
             struct ReplyMsg {
                 mach_msg_header_t hdr;
                 uint64_t result;
+                uint64_t some_flag;  // 1 = Some(result), 0 = None (fall through)
             } reply{};
             reply.hdr.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_MOVE_SEND_ONCE, 0);
             reply.hdr.msgh_size = sizeof(reply);
             reply.hdr.msgh_remote_port = replyPort;
             reply.hdr.msgh_local_port = MACH_PORT_NULL;
-            reply.hdr.msgh_id = outcome.reply_some ? 1 : 0;
+            reply.hdr.msgh_id = reqId;  // echo for transaction match
             reply.result = outcome.reply_some ? static_cast<uint64_t>(outcome.value) : 0;
+            reply.some_flag = outcome.reply_some ? 1U : 0U;
 
             kern_return_t kr_send = mach_msg(&reply.hdr, MACH_SEND_MSG, sizeof(reply), 0,
                                              MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
