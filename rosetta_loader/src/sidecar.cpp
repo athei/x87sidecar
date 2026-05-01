@@ -7,10 +7,12 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <vector>
 
 #include "rosetta_core/Fixup.h"
@@ -34,6 +36,11 @@ struct ThreadArgs {
     mach_port_t servicePort;
     mach_port_t parentTaskPort;
 };
+
+// Bumped once per processed translate_insn request.  Read by the reporter
+// thread to log throughput so we can tell "stuck" from "just slow" while
+// big workloads (e.g. WoW world-load) churn through cold translation.
+std::atomic<uint64_t> g_hits{0};
 
 // ── Cross-process marshalling helpers ───────────────────────────────────────
 // Translator + its helpers grow `insn_buf` (mmap/calloc) and append to six
@@ -412,7 +419,7 @@ void runReceiveLoop(mach_port_t servicePort, mach_port_t parentTaskPort) {
         uint8_t bytes[kRecvBufferSize];
     } buf;
 
-    uint64_t hits = 0;
+    uint64_t send_failures = 0;
     for (;;) {
         auto* hdr = reinterpret_cast<mach_msg_header_t*>(buf.bytes);
         hdr->msgh_local_port = servicePort;
@@ -426,7 +433,7 @@ void runReceiveLoop(mach_port_t servicePort, mach_port_t parentTaskPort) {
             return;
         }
 
-        hits++;
+        const uint64_t hits = g_hits.fetch_add(1, std::memory_order_relaxed) + 1;
 
         // M3 payload: header (24 B) + 5 × 8-byte args (40 B) = 64 B.
         // Args are TR*, IRBlock*, IRInstr*, num_instrs, insn_idx — the
@@ -464,8 +471,9 @@ void runReceiveLoop(mach_port_t servicePort, mach_port_t parentTaskPort) {
             kern_return_t kr_send = mach_msg(&reply.hdr, MACH_SEND_MSG, sizeof(reply), 0,
                                              MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
             if (kr_send != KERN_SUCCESS) {
-                if (hits <= 5) {
-                    fprintf(stdout, "sidecar: #%llu reply send failed 0x%x %s\n", hits, kr_send,
+                if (++send_failures <= 5) {
+                    fprintf(stdout, "sidecar: #%llu reply send failed 0x%x %s\n",
+                            static_cast<unsigned long long>(hits), kr_send,
                             mach_error_string(kr_send));
                 }
                 // mach_msg consumes the SEND_ONCE on success; on failure
@@ -486,6 +494,40 @@ void* threadEntry(void* arg) {
     runReceiveLoop(a->servicePort, a->parentTaskPort);
     delete a;
     return nullptr;
+}
+
+// Periodic throughput reporter — every kReporterPeriodSec seconds, log
+// requests-per-period and the running total.  Quiet during idle: print
+// one transition line when the sidecar goes idle (delta=0 after an
+// active period), then suppress further "0 req/s" lines until activity
+// resumes.  Long-running games at steady-state shouldn't spam the log.
+constexpr unsigned kReporterPeriodSec = 2;
+
+void* reporterEntry(void* /*arg*/) {
+    pthread_setname_np("rosettax87-reporter");
+    uint64_t prev_total = 0;
+    bool printed_idle = false;
+    for (;;) {
+        const struct timespec ts = {.tv_sec = kReporterPeriodSec, .tv_nsec = 0};
+        nanosleep(&ts, nullptr);
+        const uint64_t cur = g_hits.load(std::memory_order_relaxed);
+        const uint64_t delta = cur - prev_total;
+        prev_total = cur;
+        if (delta == 0) {
+            if (!printed_idle && cur > 0) {
+                fprintf(stdout, "[rosettax87] sidecar: idle (total %llu)\n",
+                        static_cast<unsigned long long>(cur));
+                fflush(stdout);
+                printed_idle = true;
+            }
+            continue;
+        }
+        printed_idle = false;
+        fprintf(stdout, "[rosettax87] sidecar: %llu req/s (total %llu)\n",
+                static_cast<unsigned long long>(delta / kReporterPeriodSec),
+                static_cast<unsigned long long>(cur));
+        fflush(stdout);
+    }
 }
 
 }  // namespace
@@ -583,6 +625,23 @@ bool spawnReceiveThread(mach_port_t servicePort, mach_port_t parentTaskPort) {
         delete args;
         fprintf(stdout, "sidecar: pthread_create failed (%d)\n", rc);
         return false;
+    }
+
+    // Spawn the throughput reporter too — same detached lifetime as the
+    // receive thread; both die with the loader process when the parent
+    // exits.  Failure to spawn the reporter is non-fatal: we still want
+    // the receive loop running, just without diagnostics.
+    pthread_t rthr;
+    pthread_attr_t rattr;
+    pthread_attr_init(&rattr);
+    pthread_attr_setdetachstate(&rattr, PTHREAD_CREATE_DETACHED);
+    int rrc = pthread_create(&rthr, &rattr, reporterEntry, nullptr);
+    pthread_attr_destroy(&rattr);
+    if (rrc != 0) {
+        fprintf(stdout,
+                "sidecar: reporter pthread_create failed (%d) — "
+                "throughput logging disabled\n",
+                rrc);
     }
     return true;
 }
