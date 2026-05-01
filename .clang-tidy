@@ -24,4 +24,4 @@ WarningsAsErrors: ''
 # spams system / SDK headers reached via transitive includes.
 HeaderFilterRegex: '^(rosetta_core|rosetta_loader|rosetta_config|aotinvoke)/.*'
 
-FormatStyle: file
+FormatStyle: none
