@@ -528,5 +528,5 @@ std::array<const char*, 0x64> g_runtime_routine_names = {
 // 0x174, 0xA0>
 
 ThreadContextOffsets g_thread_context_offsets = {
-    0x118, 0x220, 0x180, 0, 0x174, 0xA0,
+    .field_0=0x118, .field_4=0x220, .field_8=0x180, .field_C=0, .field_10=0x174, .x87_state_offset=0xA0,
 };

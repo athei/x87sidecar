@@ -525,8 +525,8 @@ auto compute_operand_address(TranslationResult& result, int is_64bit, IROperand*
             const int tls_tmp = alloc_gpr(result, 7);  // kGprScratchPool[7] = X29
 
             // Emit BL #0 patched by a Branch26 fixup to kRuntimeRoutine_get_tls_base
-            result._fixups.push_back(Fixup{FixupKind::Branch26, (uint32_t)result.insn_buf.end,
-                                           (uint32_t)kRuntimeRoutine_get_tls_base});
+            result._fixups.push_back(Fixup{.kind=FixupKind::Branch26, .insn_offset=(uint32_t)result.insn_buf.end,
+                                           .target=(uint32_t)kRuntimeRoutine_get_tls_base});
             result.insn_buf.emit(0x94000000U);  // BL placeholder
 
             // In JIT mode (translator_variant==1): dereference the TLS block pointer
@@ -589,12 +589,12 @@ auto compute_operand_address(TranslationResult& result, int is_64bit, IROperand*
 
         // Emit ADRP out_reg, <page>   [patched by Arm64Page21 fixup]
         result.external_fixups.push_back(
-            Fixup{FixupKind::Arm64Page21, (uint32_t)result.insn_buf.end, (uint32_t)fixup_target});
+            Fixup{.kind=FixupKind::Arm64Page21, .insn_offset=(uint32_t)result.insn_buf.end, .target=(uint32_t)fixup_target});
         emit_adr(result.insn_buf, /*is_adrp=*/1, out_reg, 0);
 
         // Emit ADD out_reg, out_reg, #<page_offset>   [patched by Arm64PageOffset12]
         result.external_fixups.push_back(Fixup{
-            FixupKind::Arm64PageOffset12, (uint32_t)result.insn_buf.end, (uint32_t)fixup_target});
+            .kind=FixupKind::Arm64PageOffset12, .insn_offset=(uint32_t)result.insn_buf.end, .target=(uint32_t)fixup_target});
         emit_add_imm(result.insn_buf, addr_size_is_64, 0, 0, 0, 0, out_reg, out_reg);
 
         // If bit0 of mem_flags is CLEAR, the immediate also carries a runtime

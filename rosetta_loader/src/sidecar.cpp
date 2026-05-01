@@ -134,7 +134,7 @@ mach_vm_address_t allocAndAppendInParent(mach_port_t parentTask,
 // otherwise returns None (the stub falls through to stock translate_insn).
 TranslateOutcome processTranslateRequest(mach_port_t parentTask,
                                          const TranslateRequest& req) {
-    TranslateOutcome out{false, 0};
+    TranslateOutcome out{.reply_some=false, .value=0};
 
     constexpr uint64_t kMaxNumInstrs = 0x10000;
     if (req.num_instrs == 0 || req.num_instrs > kMaxNumInstrs) { return out;
@@ -178,8 +178,8 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask,
         uint64_t _size;
     } origLists[kListCount];
     for (size_t i = 0; i < kListCount; i++) {
-        origLists[i] = {lists[i]->begin, lists[i]->end, lists[i]->end_cap,
-                        lists[i]->_size};
+        origLists[i] = {.begin=lists[i]->begin, .end=lists[i]->end, .end_cap=lists[i]->end_cap,
+                        ._size=lists[i]->_size};
     }
 
     // Read IR array + ThreadContextOffsets.
@@ -250,8 +250,8 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask,
 }
             }
         }
-    } _cleanup{insnGrew ? localInsnData : nullptr,
-               {localPushed[0], localPushed[1], localPushed[2],
+    } _cleanup{.insn_buf=insnGrew ? localInsnData : nullptr,
+               .lists={localPushed[0], localPushed[1], localPushed[2],
                 localPushed[3], localPushed[4], localPushed[5]}};
 
     // We always write the TR back, even on None — Translator's default case
@@ -558,7 +558,7 @@ bool spawnReceiveThread(mach_port_t servicePort, mach_port_t parentTaskPort) {
     pthread_attr_init(&attr);
     pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
 
-    auto* args = new ThreadArgs{servicePort, parentTaskPort};
+    auto* args = new ThreadArgs{.servicePort=servicePort, .parentTaskPort=parentTaskPort};
     int rc = pthread_create(&thr, &attr, threadEntry, args);
     pthread_attr_destroy(&attr);
     if (rc != 0) {

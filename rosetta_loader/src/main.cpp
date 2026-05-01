@@ -609,7 +609,7 @@ static AttachDecision classifyAttachTarget(int argc, char* argv[]) {
             std::string nativePath = resolveWinePath(argv[i]);
             if (nativePath.empty()) {
                 VERBOSE_LOG("Could not resolve Wine path '%s', attaching.\n", argv[i]);
-                return {false, std::string(argv[i]), nullptr};
+                return {.skip=false, .displayPath=std::string(argv[i]), .reason=nullptr};
             }
             VERBOSE_LOG("Resolved '%s' -> '%s'\n", argv[i], nativePath.c_str());
             PeArch arch = classifyPE(nativePath);
@@ -617,8 +617,8 @@ static AttachDecision classifyAttachTarget(int argc, char* argv[]) {
                 arch == PeArch::X86   ? "x86 (32-bit)"
                 : arch == PeArch::X64 ? "x64 (64-bit)"
                                       : "not a PE");
-            return {arch == PeArch::X64, std::move(nativePath),
-                    arch == PeArch::X64 ? "x64 PE" : nullptr};
+            return {.skip=arch == PeArch::X64, .displayPath=std::move(nativePath),
+                    .reason=arch == PeArch::X64 ? "x64 PE" : nullptr};
         }
 
         // Bare .exe filename — resolve relative to cwd
@@ -627,12 +627,12 @@ static AttachDecision classifyAttachTarget(int argc, char* argv[]) {
             PeArch arch = classifyPE(argv[i]);
             if (arch == PeArch::X64) {
                 VERBOSE_LOG("'%s' is x64 (64-bit), skipping\n", argv[i]);
-                return {true, std::string(argv[i]), "x64 PE"};
+                return {.skip=true, .displayPath=std::string(argv[i]), .reason="x64 PE"};
             }
             // x86 PE or non-PE: keep scanning (file may not exist in cwd).
         }
     }
-    return {false, {}, nullptr};
+    return {.skip=false, .displayPath={}, .reason=nullptr};
 }
 
 int main(int argc, char* argv[]) {
@@ -719,7 +719,7 @@ int main(int argc, char* argv[]) {
             EV_SET(&ev, intermediatePid, EVFILT_PROC, EV_ADD | EV_ONESHOT,
                    NOTE_EXIT, 0, nullptr);
             struct kevent out;
-            struct timespec ts = {2, 0};   // generous; C's path is ~2 insns
+            struct timespec ts = {.tv_sec=2, .tv_nsec=0};   // generous; C's path is ~2 insns
             (void)kevent(kq, &ev, 1, &out, 1, &ts);
             close(kq);
         }
