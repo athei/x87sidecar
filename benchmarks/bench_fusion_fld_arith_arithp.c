@@ -10,13 +10,14 @@
  * Build: clang -arch x86_64 -O2 -o bench_fusion_fld_arith_arithp \
  *        bench_fusion_fld_arith_arithp.c
  */
-#include <stdio.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <time.h>
+
 #include "bench_timing.h"
 
 #define TIMES 1000000
-#define RUNS  5
+#define RUNS 5
 
 /*
  * Scenario 1: FLD m64 + FMUL ST(0),ST(1) + FADDP — primary FMA target.
@@ -35,7 +36,8 @@ static bench_ns_t bench_fma_reg_faddp(void) {
             "fmul  %%st(1), %%st\n\t"
             "faddp\n\t"
             "fstpl %0\n"
-            : "=m"(r) : "m"(a), "m"(src));
+            : "=m"(r)
+            : "m"(a), "m"(src));
     return bench_now_ns() - start;
 }
 
@@ -57,7 +59,8 @@ static bench_ns_t bench_fma_reg_fsubp(void) {
             "fmul  %%st(1), %%st\n\t"
             "fsubp\n\t"
             "fstpl %0\n"
-            : "=m"(r) : "m"(a), "m"(src));
+            : "=m"(r)
+            : "m"(a), "m"(src));
     return bench_now_ns() - start;
 }
 
@@ -78,7 +81,8 @@ static bench_ns_t bench_fma_mem_faddp(void) {
             "fmull %3\n\t"
             "faddp\n\t"
             "fstpl %0\n"
-            : "=m"(r) : "m"(a), "m"(src), "m"(mul_val));
+            : "=m"(r)
+            : "m"(a), "m"(src), "m"(mul_val));
     return bench_now_ns() - start;
 }
 
@@ -99,7 +103,8 @@ static bench_ns_t bench_nonfma_fadd_faddp(void) {
             "fadd  %%st(1), %%st\n\t"
             "faddp\n\t"
             "fstpl %0\n"
-            : "=m"(r) : "m"(a), "m"(src));
+            : "=m"(r)
+            : "m"(a), "m"(src));
     return bench_now_ns() - start;
 }
 
@@ -131,23 +136,25 @@ static bench_ns_t bench_dot3_fma(void) {
             "fmull %6\n\t"
             "faddp\n\t"
             "fstpl %0\n"
-            : "=m"(r) : "m"(a0), "m"(a1), "m"(a2),
-                        "m"(b0), "m"(b1), "m"(b2));
+            : "=m"(r)
+            : "m"(a0), "m"(a1), "m"(a2), "m"(b0), "m"(b1), "m"(b2));
     return bench_now_ns() - start;
 }
 
 int main(void) {
-    struct { const char *name; bench_ns_t (*fn)(void); } benches[] = {
-        {"fma_reg_faddp",     bench_fma_reg_faddp},
-        {"fma_reg_fsubp",     bench_fma_reg_fsubp},
-        {"fma_mem_faddp",     bench_fma_mem_faddp},
-        {"nonfma_fadd_faddp", bench_nonfma_fadd_faddp},
-        {"dot3_fma",          bench_dot3_fma},
+    struct {
+        const char* name;
+        bench_ns_t (*fn)(void);
+    } benches[] = {
+        {"fma_reg_faddp", bench_fma_reg_faddp}, {"fma_reg_fsubp", bench_fma_reg_fsubp},
+        {"fma_mem_faddp", bench_fma_mem_faddp}, {"nonfma_fadd_faddp", bench_nonfma_fadd_faddp},
+        {"dot3_fma", bench_dot3_fma},
     };
     int n = (int)(sizeof(benches) / sizeof(benches[0]));
     for (int i = 0; i < n; i++) {
         bench_ns_t sum = 0;
-        for (int r = 0; r < RUNS; r++) sum += benches[i].fn();
+        for (int r = 0; r < RUNS; r++)
+            sum += benches[i].fn();
         printf("BENCH %s %lu\n", benches[i].name, (unsigned long)(sum / RUNS));
     }
     return 0;

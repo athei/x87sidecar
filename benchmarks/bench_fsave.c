@@ -9,10 +9,11 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <time.h>
+
 #include "bench_timing.h"
 
 #define TIMES 2000000
-#define RUNS  5
+#define RUNS 5
 
 static bench_ns_t bench_fsave_loop(void) {
     uint8_t buf[108] __attribute__((aligned(16))) = {0};
@@ -23,7 +24,7 @@ static bench_ns_t bench_fsave_loop(void) {
         /* Re-fill stack: 8 fld's bring the stack back to fully populated.
          * %0..%7 are v[0..7] inputs; %8 is buf output.  fnsave clears
          * the FPU after writing, so each iter starts fresh. */
-        __asm__ volatile (
+        __asm__ volatile(
             "fldl %1\n\t"
             "fldl %2\n\t"
             "fldl %3\n\t"
@@ -34,21 +35,24 @@ static bench_ns_t bench_fsave_loop(void) {
             "fldl %8\n\t"
             "fnsave %0"
             : "=m"(buf)
-            : "m"(v[0]), "m"(v[1]), "m"(v[2]), "m"(v[3]),
-              "m"(v[4]), "m"(v[5]), "m"(v[6]), "m"(v[7])
+            : "m"(v[0]), "m"(v[1]), "m"(v[2]), "m"(v[3]), "m"(v[4]), "m"(v[5]), "m"(v[6]), "m"(v[7])
             : "memory");
     }
     return bench_now_ns() - start;
 }
 
 int main(void) {
-    struct { const char *name; bench_ns_t (*fn)(void); } benches[] = {
+    struct {
+        const char* name;
+        bench_ns_t (*fn)(void);
+    } benches[] = {
         {"fsave_loop", bench_fsave_loop},
     };
     int n = (int)(sizeof(benches) / sizeof(benches[0]));
     for (int i = 0; i < n; i++) {
         bench_ns_t sum = 0;
-        for (int r = 0; r < RUNS; r++) sum += benches[i].fn();
+        for (int r = 0; r < RUNS; r++)
+            sum += benches[i].fn();
         printf("BENCH %-15s %lu\n", benches[i].name, (unsigned long)(sum / RUNS));
     }
     return 0;

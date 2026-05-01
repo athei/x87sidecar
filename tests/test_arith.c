@@ -10,15 +10,19 @@
  *
  * Build: gcc -O0 -mfpmath=387 -o test_arith test_arith.c -lm
  */
-#include <stdio.h>
-#include <stdint.h>
-#include <string.h>
 #include <math.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
 
 static int failures = 0;
-static uint64_t as_u64(double d) { uint64_t u; memcpy(&u, &d, 8); return u; }
+static uint64_t as_u64(double d) {
+    uint64_t u;
+    memcpy(&u, &d, 8);
+    return u;
+}
 
-static void check(const char *name, double got, double expected) {
+static void check(const char* name, double got, double expected) {
     if (as_u64(got) != as_u64(expected)) {
         printf("FAIL  %-55s  got=%.17g  expected=%.17g\n", name, got, expected);
         failures++;
@@ -36,10 +40,11 @@ static void check(const char *name, double got, double expected) {
 static double fadd_st0_st1(void) {
     double r;
     __asm__ volatile(
-        "fld1\n fld1\n faddp\n"    /* ST(0)=2 */
-        "fld1\n"                    /* ST(0)=1, ST(1)=2 */
-        "fadd %%st(1), %%st(0)\n"  /* ST(0)=1+2=3 */
-        "fstpl %0\n fstp %%st(0)\n" : "=m"(r));
+        "fld1\n fld1\n faddp\n"   /* ST(0)=2 */
+        "fld1\n"                  /* ST(0)=1, ST(1)=2 */
+        "fadd %%st(1), %%st(0)\n" /* ST(0)=1+2=3 */
+        "fstpl %0\n fstp %%st(0)\n"
+        : "=m"(r));
     return r;
 }
 
@@ -47,23 +52,26 @@ static double fadd_st0_st1(void) {
 static double fadd_sti_st0(void) {
     double r;
     __asm__ volatile(
-        "fld1\n fld1\n faddp\n"    /* ST(0)=2 */
-        "fld1\n"                    /* ST(0)=1, ST(1)=2 */
-        "fadd %%st(0), %%st(1)\n"  /* ST(1)=2+1=3 */
-        "fstp %%st(0)\n fstpl %0\n" : "=m"(r));
+        "fld1\n fld1\n faddp\n"   /* ST(0)=2 */
+        "fld1\n"                  /* ST(0)=1, ST(1)=2 */
+        "fadd %%st(0), %%st(1)\n" /* ST(1)=2+1=3 */
+        "fstp %%st(0)\n fstpl %0\n"
+        : "=m"(r));
     return r;
 }
 
 /* FADD m32fp — D8 /0 */
 static double fadd_m32(void) {
-    double r; float mem = 2.5f;
+    double r;
+    float mem = 2.5f;
     __asm__ volatile("fld1\n fadds %1\n fstpl %0\n" : "=m"(r) : "m"(mem));
     return r;
 }
 
 /* FADD m64fp — DC /0 */
 static double fadd_m64(void) {
-    double r; double mem = 3.75;
+    double r;
+    double mem = 3.75;
     __asm__ volatile("fld1\n faddl %1\n fstpl %0\n" : "=m"(r) : "m"(mem));
     return r;
 }
@@ -72,24 +80,27 @@ static double fadd_m64(void) {
 static double faddp_st1(void) {
     double r;
     __asm__ volatile(
-        "fld1\n fld1\n faddp\n fld1\n faddp\n"  /* 3 */
-        "fld1\n fld1\n faddp\n"                   /* 2 */
+        "fld1\n fld1\n faddp\n fld1\n faddp\n" /* 3 */
+        "fld1\n fld1\n faddp\n"                /* 2 */
         /* ST(0)=2, ST(1)=3 */
         "faddp\n" /* 3+2=5 */
-        "fstpl %0\n" : "=m"(r));
+        "fstpl %0\n"
+        : "=m"(r));
     return r;
 }
 
 /* FIADD m32int — DA /0 */
 static double fiadd_m32(void) {
-    double r; int32_t v = 7;
+    double r;
+    int32_t v = 7;
     __asm__ volatile("fld1\n fiaddl %1\n fstpl %0\n" : "=m"(r) : "m"(v));
     return r;
 }
 
 /* FIADD m16int — DE /0 */
 static double fiadd_m16(void) {
-    double r; int16_t v = -3;
+    double r;
+    int16_t v = -3;
     __asm__ volatile("fld1\n fiadds %1\n fstpl %0\n" : "=m"(r) : "m"(v));
     return r;
 }
@@ -100,11 +111,12 @@ static double fiadd_m16(void) {
 static double fsub_st0_sti(void) {
     double r;
     __asm__ volatile(
-        "fld1\n fld1\n faddp\n"    /* 2 */
-        "fld1\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n"  /* 5 */
+        "fld1\n fld1\n faddp\n"                                              /* 2 */
+        "fld1\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n" /* 5 */
         /* ST(0)=5, ST(1)=2 */
-        "fsub %%st(1), %%st(0)\n"  /* 5-2=3 */
-        "fstpl %0\n fstp %%st(0)\n" : "=m"(r));
+        "fsub %%st(1), %%st(0)\n" /* 5-2=3 */
+        "fstpl %0\n fstp %%st(0)\n"
+        : "=m"(r));
     return r;
 }
 
@@ -112,29 +124,36 @@ static double fsub_st0_sti(void) {
 static double fsubr_st0_sti(void) {
     double r;
     __asm__ volatile(
-        "fld1\n fld1\n faddp\n"   /* 2 */
+        "fld1\n fld1\n faddp\n"                                              /* 2 */
         "fld1\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n" /* 5 */
         /* ST(0)=5, ST(1)=2 */
         "fsubr %%st(1), %%st(0)\n" /* 2-5=-3 */
-        "fstpl %0\n fstp %%st(0)\n" : "=m"(r));
+        "fstpl %0\n fstp %%st(0)\n"
+        : "=m"(r));
     return r;
 }
 
 /* FSUB m32fp — D8 /4: ST(0) = ST(0) - m32 */
 static double fsub_m32(void) {
-    double r; float mem = 1.5f;
+    double r;
+    float mem = 1.5f;
     __asm__ volatile(
         "fld1\n fld1\n faddp\n fld1\n faddp\n" /* 3 */
-        "fsubs %1\n fstpl %0\n" : "=m"(r) : "m"(mem));
+        "fsubs %1\n fstpl %0\n"
+        : "=m"(r)
+        : "m"(mem));
     return r;
 }
 
 /* FSUBR m64fp — DC /5: ST(0) = m64 - ST(0) */
 static double fsubr_m64(void) {
-    double r; double mem = 10.0;
+    double r;
+    double mem = 10.0;
     __asm__ volatile(
         "fld1\n fld1\n faddp\n fld1\n faddp\n" /* 3 */
-        "fsubrl %1\n fstpl %0\n" : "=m"(r) : "m"(mem));
+        "fsubrl %1\n fstpl %0\n"
+        : "=m"(r)
+        : "m"(mem));
     return r;
 }
 
@@ -142,11 +161,12 @@ static double fsubr_m64(void) {
 static double fsubp_gas(void) {
     double r;
     __asm__ volatile(
-        "fld1\n fld1\n faddp\n"  /* 2 */
+        "fld1\n fld1\n faddp\n"                                              /* 2 */
         "fld1\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n" /* 5 */
         /* ST(0)=5, ST(1)=2 */
-        "fsubp\n"  /* GAS=FSUBRP: ST(0)-ST(1) = 5-2 = 3 */
-        "fstpl %0\n" : "=m"(r));
+        "fsubp\n" /* GAS=FSUBRP: ST(0)-ST(1) = 5-2 = 3 */
+        "fstpl %0\n"
+        : "=m"(r));
     return r;
 }
 
@@ -154,11 +174,12 @@ static double fsubp_gas(void) {
 static double fsubrp_gas(void) {
     double r;
     __asm__ volatile(
-        "fld1\n fld1\n faddp\n"  /* 2 */
+        "fld1\n fld1\n faddp\n"                                              /* 2 */
         "fld1\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n" /* 5 */
         /* ST(0)=5, ST(1)=2 */
-        "fsubrp\n"  /* GAS=FSUBP: ST(1)-ST(0) = 2-5 = -3 */
-        "fstpl %0\n" : "=m"(r));
+        "fsubrp\n" /* GAS=FSUBP: ST(1)-ST(0) = 2-5 = -3 */
+        "fstpl %0\n"
+        : "=m"(r));
     return r;
 }
 
@@ -169,18 +190,22 @@ static double fmul_st0_sti(void) {
     double r;
     __asm__ volatile(
         "fld1\n fld1\n faddp\n fld1\n faddp\n" /* 3 */
-        "fld1\n fld1\n faddp\n"                  /* 2 */
-        "fmul %%st(1), %%st(0)\n" /* 2*3=6 */
-        "fstpl %0\n fstp %%st(0)\n" : "=m"(r));
+        "fld1\n fld1\n faddp\n"                /* 2 */
+        "fmul %%st(1), %%st(0)\n"              /* 2*3=6 */
+        "fstpl %0\n fstp %%st(0)\n"
+        : "=m"(r));
     return r;
 }
 
 /* FMUL m32fp */
 static double fmul_m32(void) {
-    double r; float mem = 4.0f;
+    double r;
+    float mem = 4.0f;
     __asm__ volatile(
         "fld1\n fld1\n faddp\n fld1\n faddp\n" /* 3 */
-        "fmuls %1\n fstpl %0\n" : "=m"(r) : "m"(mem));
+        "fmuls %1\n fstpl %0\n"
+        : "=m"(r)
+        : "m"(mem));
     return r;
 }
 
@@ -188,28 +213,35 @@ static double fmul_m32(void) {
 static double fmulp_st1(void) {
     double r;
     __asm__ volatile(
-        "fld1\n fld1\n faddp\n fld1\n faddp\n"  /* 3 */
-        "fld1\n fld1\n faddp\n"                   /* 2 */
-        "fmulp\n" /* 3*2=6 */
-        "fstpl %0\n" : "=m"(r));
+        "fld1\n fld1\n faddp\n fld1\n faddp\n" /* 3 */
+        "fld1\n fld1\n faddp\n"                /* 2 */
+        "fmulp\n"                              /* 3*2=6 */
+        "fstpl %0\n"
+        : "=m"(r));
     return r;
 }
 
 /* FIMUL m32int */
 static double fimul_m32(void) {
-    double r; int32_t v = 5;
+    double r;
+    int32_t v = 5;
     __asm__ volatile(
         "fld1\n fld1\n faddp\n fld1\n faddp\n" /* 3 */
-        "fimull %1\n fstpl %0\n" : "=m"(r) : "m"(v));
+        "fimull %1\n fstpl %0\n"
+        : "=m"(r)
+        : "m"(v));
     return r;
 }
 
 /* FIMUL m16int */
 static double fimul_m16(void) {
-    double r; int16_t v = -2;
+    double r;
+    int16_t v = -2;
     __asm__ volatile(
         "fld1\n fld1\n faddp\n" /* 2 */
-        "fimuls %1\n fstpl %0\n" : "=m"(r) : "m"(v));
+        "fimuls %1\n fstpl %0\n"
+        : "=m"(r)
+        : "m"(v));
     return r;
 }
 
@@ -219,11 +251,12 @@ static double fimul_m16(void) {
 static double fdiv_st0_sti(void) {
     double r;
     __asm__ volatile(
-        "fld1\n fld1\n faddp\n"  /* 2 */
-        "fld1\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n"  /* 6 */
+        "fld1\n fld1\n faddp\n"                                                             /* 2 */
+        "fld1\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n" /* 6 */
         /* ST(0)=6, ST(1)=2 */
         "fdiv %%st(1), %%st(0)\n" /* 6/2=3 */
-        "fstpl %0\n fstp %%st(0)\n" : "=m"(r));
+        "fstpl %0\n fstp %%st(0)\n"
+        : "=m"(r));
     return r;
 }
 
@@ -231,11 +264,12 @@ static double fdiv_st0_sti(void) {
 static double fdivr_st0_sti(void) {
     double r;
     __asm__ volatile(
-        "fld1\n fld1\n faddp\n"  /* 2 */
-        "fld1\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n"  /* 6 */
+        "fld1\n fld1\n faddp\n"                                                             /* 2 */
+        "fld1\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n" /* 6 */
         /* ST(0)=6, ST(1)=2 */
         "fdivr %%st(1), %%st(0)\n" /* 2/6=0.333... */
-        "fstpl %0\n fstp %%st(0)\n" : "=m"(r));
+        "fstpl %0\n fstp %%st(0)\n"
+        : "=m"(r));
     return r;
 }
 
@@ -243,8 +277,11 @@ static double fdivr_st0_sti(void) {
 static double fdiv_m64(void) {
     double r, mem = 4.0;
     __asm__ volatile(
-        "fld1\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n" /* 8 */
-        "fdivl %1\n fstpl %0\n" : "=m"(r) : "m"(mem));
+        "fld1\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n "
+        "faddp\n fld1\n faddp\n" /* 8 */
+        "fdivl %1\n fstpl %0\n"
+        : "=m"(r)
+        : "m"(mem));
     return r;
 }
 
@@ -252,11 +289,12 @@ static double fdiv_m64(void) {
 static double fdivp_gas(void) {
     double r;
     __asm__ volatile(
-        "fld1\n fld1\n faddp\n fld1\n faddp\n" /* 3 */
+        "fld1\n fld1\n faddp\n fld1\n faddp\n"                                              /* 3 */
         "fld1\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n" /* 6 */
         /* ST(0)=6, ST(1)=3 */
         "fdivp\n" /* GAS=FDIVRP: ST(0)/ST(1) = 6/3 = 2 */
-        "fstpl %0\n" : "=m"(r));
+        "fstpl %0\n"
+        : "=m"(r));
     return r;
 }
 
@@ -264,38 +302,48 @@ static double fdivp_gas(void) {
 static double fdivrp_gas(void) {
     double r;
     __asm__ volatile(
-        "fld1\n fld1\n faddp\n fld1\n faddp\n" /* 3 */
+        "fld1\n fld1\n faddp\n fld1\n faddp\n"                                              /* 3 */
         "fld1\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n" /* 6 */
         /* ST(0)=6, ST(1)=3 */
         "fdivrp\n" /* GAS=FDIVP: ST(1)/ST(0) = 3/6 = 0.5 */
-        "fstpl %0\n" : "=m"(r));
+        "fstpl %0\n"
+        : "=m"(r));
     return r;
 }
 
 /* FIDIV m32int */
 static double fidiv_m32(void) {
-    double r; int32_t v = 3;
+    double r;
+    int32_t v = 3;
     __asm__ volatile(
         "fld1\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n" /* 6 */
-        "fidivl %1\n fstpl %0\n" : "=m"(r) : "m"(v));
+        "fidivl %1\n fstpl %0\n"
+        : "=m"(r)
+        : "m"(v));
     return r;
 }
 
 /* FIDIVR m32int: ST(0) = m32 / ST(0) */
 static double fidivr_m32(void) {
-    double r; int32_t v = 12;
+    double r;
+    int32_t v = 12;
     __asm__ volatile(
         "fld1\n fld1\n faddp\n fld1\n faddp\n" /* 3 */
-        "fidivrl %1\n fstpl %0\n" : "=m"(r) : "m"(v));
+        "fidivrl %1\n fstpl %0\n"
+        : "=m"(r)
+        : "m"(v));
     return r;
 }
 
 /* FISUB m32int: ST(0) = ST(0) - m32 */
 static double fisub_m32(void) {
-    double r; int32_t v = 3;
+    double r;
+    int32_t v = 3;
     __asm__ volatile(
         "fld1\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n" /* 5 */
-        "fisubl %1\n fstpl %0\n" : "=m"(r) : "m"(v));
+        "fisubl %1\n fstpl %0\n"
+        : "=m"(r)
+        : "m"(v));
     return r;
 }
 
@@ -326,7 +374,7 @@ int main(void) {
 
     printf("\n=== FDIV / FDIVR variants ===\n");
     check("FDIV ST(0),ST(1)  6/2=3", fdiv_st0_sti(), 3.0);
-    check("FDIVR ST(0),ST(1)  2/6=0.333", fdivr_st0_sti(), 2.0/6.0);
+    check("FDIVR ST(0),ST(1)  2/6=0.333", fdivr_st0_sti(), 2.0 / 6.0);
     check("FDIV m64fp  8/4=2", fdiv_m64(), 2.0);
     check("FDIVP (GAS=FDIVRP)  6/3=2", fdivp_gas(), 2.0);
     check("FDIVRP (GAS=FDIVP)  3/6=0.5", fdivrp_gas(), 0.5);
@@ -334,8 +382,7 @@ int main(void) {
     check("FIDIVR m32  12/3=4", fidivr_m32(), 4.0);
     check("FISUB m32  5-3=2", fisub_m32(), 2.0);
 
-    printf("\n%s  (%d failure%s)\n",
-           failures == 0 ? "ALL PASS" : "SOME FAILURES",
-           failures, failures == 1 ? "" : "s");
+    printf("\n%s  (%d failure%s)\n", failures == 0 ? "ALL PASS" : "SOME FAILURES", failures,
+           failures == 1 ? "" : "s");
     return failures ? 1 : 0;
 }

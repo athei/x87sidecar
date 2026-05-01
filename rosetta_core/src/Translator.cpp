@@ -2,6 +2,8 @@
 
 #include <cstdio>
 
+#include "TranslatorX87Internal.hpp"
+#include "rosetta_config/Config.h"
 #include "rosetta_core/CoreConfig.h"
 #include "rosetta_core/IRInstr.h"
 #include "rosetta_core/Opcode.h"
@@ -10,14 +12,11 @@
 #include "rosetta_core/TranslatorX87Fusion.h"
 #include "rosetta_core/X87Cache.h"
 #include "rosetta_core/X87IR.h"
-#include "rosetta_config/Config.h"
-#include "TranslatorX87Internal.hpp"
-
 
 auto Translator::translate_instruction(TranslationResult* translation_result, IRBlock* block,
                                        IRInstr* instr_array, int64_t num_instrs, int64_t insn_idx)
     -> std::optional<int64_t> {
-    auto *const cur_instr = &instr_array[insn_idx];
+    auto* const cur_instr = &instr_array[insn_idx];
     const auto opcode = cur_instr->opcode;
     auto& cache = translation_result->x87_cache;
 
@@ -52,15 +51,14 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
     // fusion), and lowers directly to AArch64.
     {
         const bool ir_disabled = g_rosetta_config && g_rosetta_config->disable_x87_ir;
-        if (!ir_disabled && cache.active() && cache.run_remaining >= 3 &&
-            cache.top_dirty == 0 && cache.tag_push_pending == 0 &&
-            cache.deferred_pop_count == 0 && !cache.perm_dirty) {
-            const int ir_consumed = X87IR::compile_run(
-                translation_result, instr_array, num_instrs, insn_idx, cache.run_remaining);
+        if (!ir_disabled && cache.active() && cache.run_remaining >= 3 && cache.top_dirty == 0 &&
+            cache.tag_push_pending == 0 && cache.deferred_pop_count == 0 && !cache.perm_dirty) {
+            const int ir_consumed = X87IR::compile_run(translation_result, instr_array, num_instrs,
+                                                       insn_idx, cache.run_remaining);
             if (ir_consumed > 0) {
                 for (int i = 0; i < ir_consumed; i++) {
                     cache.tick();
-}
+                }
                 if (cache.active()) {
                     translation_result->free_gpr_mask = kGprScratchMask & ~cache.pinned_mask();
                 } else {
@@ -76,9 +74,8 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
 
     // ── Peephole: try 2-instruction fusion patterns ─────────────────────────
     const uint64_t fusions_mask = g_rosetta_config ? g_rosetta_config->disabled_fusions_mask : 0;
-    const auto fused =
-        TranslatorX87::try_peephole(translation_result, instr_array, num_instrs, insn_idx,
-                                    fusions_mask);
+    const auto fused = TranslatorX87::try_peephole(translation_result, instr_array, num_instrs,
+                                                   insn_idx, fusions_mask);
 
     if (!fused) {
         switch (opcode) {

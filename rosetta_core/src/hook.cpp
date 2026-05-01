@@ -1,18 +1,15 @@
 #include "rosetta_core/hook.h"
 
-#include <cerrno>
 #include <libkern/OSCacheControl.h>
 #include <mach/mach.h>
 #include <pthread.h>
 #include <sys/mman.h>
 
+#include <cerrno>
 #include <cstdio>
 #include <cstring>
 
-enum : uint16_t {
-PATCH_SIZE = 16U,
-AARCH64_PAGE_SIZE = 16384U
-};
+enum : uint16_t { PATCH_SIZE = 16U, AARCH64_PAGE_SIZE = 16384U };
 
 static void write_abs_jump(void* dst, const void* jump_target) {
     uint32_t ldr_x9 = 0x58000049U;  // LDR X9, #8
@@ -29,7 +26,8 @@ static void flush_cache(void* addr, size_t len) {
 }
 
 int make_page_executable(void* addr) {
-    vm_address_t page = reinterpret_cast<vm_address_t>(addr) & ~(static_cast<vm_address_t>(AARCH64_PAGE_SIZE) - 1);
+    vm_address_t page =
+        reinterpret_cast<vm_address_t>(addr) & ~(static_cast<vm_address_t>(AARCH64_PAGE_SIZE) - 1);
     auto kr = vm_protect(mach_task_self(), page, AARCH64_PAGE_SIZE, FALSE,
                          VM_PROT_READ | VM_PROT_EXECUTE);
     if (kr != KERN_SUCCESS) {
@@ -70,7 +68,8 @@ int hook_install(void* target, void* hook_fn, void** trampoline) {
     // ------------------------------------------------------------------
     pthread_jit_write_protect_np(0);
     memcpy(tramp, target, PATCH_SIZE);
-    write_abs_jump(static_cast<uint8_t*>(tramp) + PATCH_SIZE, static_cast<uint8_t*>(target) + PATCH_SIZE);
+    write_abs_jump(static_cast<uint8_t*>(tramp) + PATCH_SIZE,
+                   static_cast<uint8_t*>(target) + PATCH_SIZE);
     pthread_jit_write_protect_np(1);
 
     flush_cache(tramp, PATCH_SIZE + 16);
@@ -78,7 +77,8 @@ int hook_install(void* target, void* hook_fn, void** trampoline) {
     // ------------------------------------------------------------------
     // 3. Make the target page writable (COW) and patch it.
     // ------------------------------------------------------------------
-    vm_address_t page = reinterpret_cast<vm_address_t>(target) & ~(static_cast<vm_address_t>(AARCH64_PAGE_SIZE) - 1);
+    vm_address_t page = reinterpret_cast<vm_address_t>(target) &
+                        ~(static_cast<vm_address_t>(AARCH64_PAGE_SIZE) - 1);
 
     kern_return_t kr = vm_protect(mach_task_self(), page, AARCH64_PAGE_SIZE, FALSE,
                                   VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
@@ -139,7 +139,8 @@ int patch_movz_imm(void* addr, uint16_t new_imm) {
     insn = (insn & ~0x001FFFE0U) | (static_cast<uint32_t>(new_imm) << 5);
 
     // Make the page writable (COW).
-    vm_address_t page = reinterpret_cast<vm_address_t>(addr) & ~(static_cast<vm_address_t>(AARCH64_PAGE_SIZE) - 1);
+    vm_address_t page =
+        reinterpret_cast<vm_address_t>(addr) & ~(static_cast<vm_address_t>(AARCH64_PAGE_SIZE) - 1);
     kern_return_t kr = vm_protect(mach_task_self(), page, AARCH64_PAGE_SIZE, FALSE,
                                   VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
     if (kr != KERN_SUCCESS) {

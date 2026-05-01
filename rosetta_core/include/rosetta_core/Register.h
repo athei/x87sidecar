@@ -86,12 +86,13 @@ enum FPR : uint8_t {
 
 // Scratch pool lookup tables — mirrors of Rosetta's byte_43BC8 / byte_43BD0
 static constexpr uint8_t kGprScratchPool[8] = {22, 23, 24, 25, 26, 27, 28, 29};
-static constexpr uint8_t kFprScratchPool[8]  = {24, 25, 26, 27, 28, 29, 30, 31};
-static constexpr uint8_t kFprScratchPoolExtended[16] = {24, 25, 26, 27, 28, 29, 30, 31, 16, 17, 18, 19, 20, 21, 22, 23};
+static constexpr uint8_t kFprScratchPool[8] = {24, 25, 26, 27, 28, 29, 30, 31};
+static constexpr uint8_t kFprScratchPoolExtended[16] = {24, 25, 26, 27, 28, 29, 30, 31,
+                                                        16, 17, 18, 19, 20, 21, 22, 23};
 
 // Bitmasks of scratch registers in the free_gpr_mask / free_fpr_mask fields
-static constexpr uint32_t kGprScratchMask    = 0x3FC00000u;  // bits 22–29
-static constexpr uint32_t kFprScratchMask    = 0xFF000000u;  // bits 24–31 (default, 8 regs)
+static constexpr uint32_t kGprScratchMask = 0x3FC00000u;     // bits 22–29
+static constexpr uint32_t kFprScratchMask = 0xFF000000u;     // bits 24–31 (default, 8 regs)
 static constexpr uint32_t kFprScratchMaskExt = 0xFFFF0000u;  // bits 16–31 (extended, 16 regs)
 
 // ── x86 Register encoding ────────────────────────────────────────────────────

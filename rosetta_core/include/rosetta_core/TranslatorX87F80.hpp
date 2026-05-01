@@ -38,21 +38,13 @@ namespace TranslatorX87 {
 // flag, then (after the carry is consumed) it holds the 0x7FFF/0x7FF
 // constants for the inf/nan exponent override.  Caller passes one register
 // for both roles since their lifetimes don't overlap.
-void emit_f80_to_f64_convert(AssemblerBuffer& buf,
-                             int Xmant_inout,
-                             int Wexp,
-                             int Xsign,
-                             int Wd_aux,
+void emit_f80_to_f64_convert(AssemblerBuffer& buf, int Xmant_inout, int Wexp, int Xsign, int Wd_aux,
                              int Wd_tmp);
 
 // Writes 10 bytes of x87 f80 at [Xaddr_slot, #0..#9] from the IEEE 754 double
 // in Dd_src.  Uses 3 forward branches (CBZ + B.EQ + 2x B) with PC-relative
 // offsets — replicate-safe.  All scratch is caller-allocated.
-void emit_f64_to_f80(AssemblerBuffer& buf,
-                     int Xaddr_slot,
-                     int Dd_src,
-                     int Xbits,
-                     int Wexp,
+void emit_f64_to_f80(AssemblerBuffer& buf, int Xaddr_slot, int Dd_src, int Xbits, int Wexp,
                      int Wd_tmp);
 
 };  // namespace TranslatorX87

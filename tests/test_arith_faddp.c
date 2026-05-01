@@ -8,14 +8,18 @@
  *
  * Build: clang -arch x86_64 -O0 -g -o test_arith_faddp test_arith_faddp.c
  */
-#include <stdio.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 static int failures = 0;
-static uint64_t as_u64(double d) { uint64_t u; memcpy(&u, &d, 8); return u; }
+static uint64_t as_u64(double d) {
+    uint64_t u;
+    memcpy(&u, &d, 8);
+    return u;
+}
 
-static void check(const char *name, double got, double expected) {
+static void check(const char* name, double got, double expected) {
     if (as_u64(got) != as_u64(expected)) {
         printf("FAIL  %-55s  got=%.17g  expected=%.17g\n", name, got, expected);
         failures++;
@@ -49,7 +53,8 @@ static double fmul_reg_faddp(void) {
         "faddp\n\t"              /* ST(0) = 5+15 = 20, ST(1) = 2 */
         "fstpl %0\n\t"           /* r = 20, pop -> ST(0) = 2 */
         "fstp %%st(0)\n"         /* clean stack */
-        : "=m"(r) : "m"((double){2.0}), "m"((double){5.0}), "m"((double){3.0}));
+        : "=m"(r)
+        : "m"((double){2.0}), "m"((double){5.0}), "m"((double){3.0}));
     return r;
 }
 
@@ -69,7 +74,8 @@ static double fmul_reg_fsubp(void) {
         "fsubp\n\t"              /* GAS fsubp = Intel fsubrp: ST(1)=ST(0)-ST(1)=15-5=10, pop */
         "fstpl %0\n\t"
         "fstp %%st(0)\n"
-        : "=m"(r) : "m"((double){100.0}), "m"((double){5.0}), "m"((double){3.0}));
+        : "=m"(r)
+        : "m"((double){100.0}), "m"((double){5.0}), "m"((double){3.0}));
     return r;
 }
 
@@ -89,7 +95,8 @@ static double fmul_reg_fsubrp(void) {
         "fsubrp\n\t"             /* GAS fsubrp = Intel fsubp: ST(1)=ST(1)-ST(0)=5-15=-10, pop */
         "fstpl %0\n\t"
         "fstp %%st(0)\n"
-        : "=m"(r) : "m"((double){100.0}), "m"((double){5.0}), "m"((double){3.0}));
+        : "=m"(r)
+        : "m"((double){100.0}), "m"((double){5.0}), "m"((double){3.0}));
     return r;
 }
 
@@ -102,12 +109,13 @@ static double fmul_mem32_faddp(void) {
      * FADDP: ST(1) = 7+40 = 47, pop
      */
     __asm__ volatile(
-        "fldl %1\n\t"          /* ST(0) = 7 */
-        "fldl %2\n\t"          /* ST(0) = 10, ST(1) = 7 */
-        "fmuls %3\n\t"         /* ST(0) = 10*4 = 40, ST(1) = 7 */
-        "faddp\n\t"            /* ST(0) = 7+40 = 47 */
+        "fldl %1\n\t"  /* ST(0) = 7 */
+        "fldl %2\n\t"  /* ST(0) = 10, ST(1) = 7 */
+        "fmuls %3\n\t" /* ST(0) = 10*4 = 40, ST(1) = 7 */
+        "faddp\n\t"    /* ST(0) = 7+40 = 47 */
         "fstpl %0\n"
-        : "=m"(r) : "m"((double){7.0}), "m"((double){10.0}), "m"(f32_val));
+        : "=m"(r)
+        : "m"((double){7.0}), "m"((double){10.0}), "m"(f32_val));
     return r;
 }
 
@@ -120,17 +128,18 @@ static double fmul_mem64_faddp(void) {
      * FADDP: ST(1) = 2+15 = 17, pop
      */
     __asm__ volatile(
-        "fldl %1\n\t"          /* ST(0) = 2 */
-        "fldl %2\n\t"          /* ST(0) = 5, ST(1) = 2 */
-        "fmull %3\n\t"         /* ST(0) = 15, ST(1) = 2 */
-        "faddp\n\t"            /* ST(0) = 17 */
+        "fldl %1\n\t"  /* ST(0) = 2 */
+        "fldl %2\n\t"  /* ST(0) = 5, ST(1) = 2 */
+        "fmull %3\n\t" /* ST(0) = 15, ST(1) = 2 */
+        "faddp\n\t"    /* ST(0) = 17 */
         "fstpl %0\n"
-        : "=m"(r) : "m"((double){2.0}), "m"((double){5.0}), "m"(f64_val));
+        : "=m"(r)
+        : "m"((double){2.0}), "m"((double){5.0}), "m"(f64_val));
     return r;
 }
 
 /* ==== Stack depth preserved: deeper values survive ==== */
-static void stack_depth(double *out_result, double *out_remaining) {
+static void stack_depth(double* out_result, double* out_remaining) {
     /* ST(0)=3, ST(1)=5, ST(2)=100
      * FMUL ST(0),ST(1): ST(0) = 15
      * FADDP: ST(0) = 5+15 = 20, ST(1) = 100
@@ -148,7 +157,7 @@ static void stack_depth(double *out_result, double *out_remaining) {
 }
 
 /* ==== Consecutive FMUL+FADDP pairs ==== */
-static void consecutive_pairs(double *out0, double *out1) {
+static void consecutive_pairs(double* out0, double* out1) {
     __asm__ volatile(
         /* First pair: 3*5 + 2 = 17 */
         "fldl %2\n\t"            /* ST(0) = 2 */
@@ -167,8 +176,8 @@ static void consecutive_pairs(double *out0, double *out1) {
         "fstpl %1\n\t"           /* out1 = 10 */
         "fstp %%st(0)\n"
         : "=m"(*out0), "=m"(*out1)
-        : "m"((double){2.0}), "m"((double){5.0}), "m"((double){3.0}),
-          "m"((double){10.0}), "m"((double){2.0}), "m"((double){4.0}));
+        : "m"((double){2.0}), "m"((double){5.0}), "m"((double){3.0}), "m"((double){10.0}),
+          "m"((double){2.0}), "m"((double){4.0}));
 }
 
 /* ==== FMUL ST(0),ST(1) + FADDP: mul source == accumulator (both ST(1)) ==== */
@@ -184,7 +193,8 @@ static double mul_src_eq_accum(void) {
         "fmul %%st(1), %%st\n\t" /* ST(0) = 15, ST(1) = 5 */
         "faddp\n\t"              /* ST(0) = 20 */
         "fstpl %0\n"
-        : "=m"(r) : "m"((double){5.0}), "m"((double){3.0}));
+        : "=m"(r)
+        : "m"((double){5.0}), "m"((double){3.0}));
     return r;
 }
 
@@ -201,7 +211,8 @@ static double fmul_st0_st0_faddp(void) {
         "fmul %%st(0), %%st\n\t" /* ST(0) = 16, ST(1) = 10 */
         "faddp\n\t"              /* ST(0) = 26 */
         "fstpl %0\n"
-        : "=m"(r) : "m"((double){10.0}), "m"((double){4.0}));
+        : "=m"(r)
+        : "m"((double){10.0}), "m"((double){4.0}));
     return r;
 }
 
@@ -219,7 +230,8 @@ static double fmul_mem64_fsubp(void) {
         "fmull %3\n\t"
         "fsubp\n\t"
         "fstpl %0\n"
-        : "=m"(r) : "m"((double){2.0}), "m"((double){5.0}), "m"(f64_val));
+        : "=m"(r)
+        : "m"((double){2.0}), "m"((double){5.0}), "m"(f64_val));
     return r;
 }
 
@@ -238,7 +250,8 @@ static double fmul_deep_reg_faddp(void) {
         "faddp\n\t"              /* ST(0) = 26, ST(1) = 7 */
         "fstpl %0\n\t"
         "fstp %%st(0)\n"
-        : "=m"(r) : "m"((double){7.0}), "m"((double){5.0}), "m"((double){3.0}));
+        : "=m"(r)
+        : "m"((double){7.0}), "m"((double){5.0}), "m"((double){3.0}));
     return r;
 }
 

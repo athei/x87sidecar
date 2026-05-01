@@ -1,8 +1,8 @@
 #include "rosetta_core/X87Cache.h"
 
+#include "rosetta_config/Config.h"
 #include "rosetta_core/IRInstr.h"
 #include "rosetta_core/Opcode.h"
-#include "rosetta_config/Config.h"
 
 // =============================================================================
 // is_handled_x87 — returns true for opcodes that have a translate_* handler.
@@ -139,7 +139,7 @@ void X87Cache::invalidate(uint32_t& free_gpr_mask, uint32_t scratch_mask) {
 void X87Cache::set_run(int run_length) {
     if (run_length >= 2) {
         run_remaining = static_cast<int16_t>(run_length);
-}
+    }
 }
 
 void X87Cache::tick() {
@@ -157,15 +157,16 @@ void X87Cache::tick() {
 void X87Cache::reset_perm() {
     for (int i = 0; i < 8; i++) {
         perm[i] = static_cast<int8_t>(i);
-}
+    }
     perm_dirty = 0;
 }
 
 bool X87Cache::perm_is_identity() const {
     for (int i = 0; i < 8; i++) {
-        if (perm[i] != i) { return false;
-}
-}
+        if (perm[i] != i) {
+            return false;
+        }
+    }
     return true;
 }
 
@@ -184,7 +185,7 @@ int X87Cache::lookahead(IRInstr* instr_array, int64_t num_instrs, int64_t insn_i
     for (int64_t i = insn_idx; i < num_instrs; i++) {
         if (!is_handled_x87(instr_array[i].opcode)) {
             break;
-}
+        }
         count++;
     }
     return count;

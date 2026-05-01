@@ -11,13 +11,14 @@
  *
  * Compare with ROSETTA_X87_DISABLE_DEFERRED_FXCH=1 to measure the benefit.
  */
-#include <stdio.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <time.h>
+
 #include "bench_timing.h"
 
 #define TIMES 1000000
-#define RUNS  5
+#define RUNS 5
 
 /* Bare FXCH ST(1) -- the rename sweet spot.
  * Push two values, exchange, pop both.  The FXCH itself should be free. */
@@ -25,10 +26,10 @@ static bench_ns_t bench_fxch_st1(void) {
     bench_ns_t start = bench_now_ns();
     volatile double r;
     for (int i = 0; i < TIMES; i++)
-        __asm__ volatile (
+        __asm__ volatile(
             "fld1\n\t"
-            "fld1\n\t fld1\n\t faddp\n\t"  /* ST(0)=2, ST(1)=1 */
-            "fxch %%st(1)\n\t"              /* swap: ST(0)=1, ST(1)=2 */
+            "fld1\n\t fld1\n\t faddp\n\t" /* ST(0)=2, ST(1)=1 */
+            "fxch %%st(1)\n\t"            /* swap: ST(0)=1, ST(1)=2 */
             "fstpl %0\n\t"
             "fstp %%st(0)\n"
             : "=m"(r));
@@ -40,12 +41,12 @@ static bench_ns_t bench_fxch_st2(void) {
     bench_ns_t start = bench_now_ns();
     volatile double r;
     for (int i = 0; i < TIMES; i++)
-        __asm__ volatile (
-            "fld1\n\t"                      /* 1 */
-            "fld1\n\t fld1\n\t faddp\n\t"  /* 2 */
-            "fld1\n\t fld1\n\t faddp\n\t fld1\n\t faddp\n\t"  /* 3 */
+        __asm__ volatile(
+            "fld1\n\t"                                       /* 1 */
+            "fld1\n\t fld1\n\t faddp\n\t"                    /* 2 */
+            "fld1\n\t fld1\n\t faddp\n\t fld1\n\t faddp\n\t" /* 3 */
             /* ST(0)=3, ST(1)=2, ST(2)=1 */
-            "fxch %%st(2)\n\t"              /* ST(0)=1, ST(1)=2, ST(2)=3 */
+            "fxch %%st(2)\n\t" /* ST(0)=1, ST(1)=2, ST(2)=3 */
             "fstpl %0\n\t"
             "fstp %%st(0)\n\t"
             "fstp %%st(0)\n"
@@ -58,7 +59,7 @@ static bench_ns_t bench_fxch_st3(void) {
     bench_ns_t start = bench_now_ns();
     volatile double r;
     for (int i = 0; i < TIMES; i++)
-        __asm__ volatile (
+        __asm__ volatile(
             "fld1\n\t"
             "fld1\n\t fld1\n\t faddp\n\t"
             "fld1\n\t fld1\n\t faddp\n\t fld1\n\t faddp\n\t"
@@ -76,11 +77,11 @@ static bench_ns_t bench_fxch_double(void) {
     bench_ns_t start = bench_now_ns();
     volatile double r;
     for (int i = 0; i < TIMES; i++)
-        __asm__ volatile (
+        __asm__ volatile(
             "fld1\n\t"
-            "fld1\n\t fld1\n\t faddp\n\t"  /* ST(0)=2, ST(1)=1 */
-            "fxch %%st(1)\n\t"              /* swap */
-            "fxch %%st(1)\n\t"              /* swap back */
+            "fld1\n\t fld1\n\t faddp\n\t" /* ST(0)=2, ST(1)=1 */
+            "fxch %%st(1)\n\t"            /* swap */
+            "fxch %%st(1)\n\t"            /* swap back */
             "fstpl %0\n\t"
             "fstp %%st(0)\n"
             : "=m"(r));
@@ -92,7 +93,7 @@ static bench_ns_t bench_fxch_triple(void) {
     bench_ns_t start = bench_now_ns();
     volatile double r;
     for (int i = 0; i < TIMES; i++)
-        __asm__ volatile (
+        __asm__ volatile(
             "fld1\n\t"
             "fld1\n\t fld1\n\t faddp\n\t"
             "fld1\n\t fld1\n\t faddp\n\t fld1\n\t faddp\n\t"
@@ -111,11 +112,11 @@ static bench_ns_t bench_fxch_add(void) {
     bench_ns_t start = bench_now_ns();
     volatile double r;
     for (int i = 0; i < TIMES; i++)
-        __asm__ volatile (
+        __asm__ volatile(
             "fld1\n\t"
-            "fld1\n\t fld1\n\t faddp\n\t"  /* ST(0)=2, ST(1)=1 */
+            "fld1\n\t fld1\n\t faddp\n\t" /* ST(0)=2, ST(1)=1 */
             "fxch %%st(1)\n\t"
-            "faddp\n\t"                     /* 2+1=3 */
+            "faddp\n\t" /* 2+1=3 */
             "fstpl %0\n"
             : "=m"(r));
     return bench_now_ns() - start;
@@ -126,11 +127,11 @@ static bench_ns_t bench_fxch_fstp(void) {
     bench_ns_t start = bench_now_ns();
     volatile double r;
     for (int i = 0; i < TIMES; i++)
-        __asm__ volatile (
+        __asm__ volatile(
             "fld1\n\t"
-            "fld1\n\t fld1\n\t faddp\n\t"  /* ST(0)=2, ST(1)=1 */
+            "fld1\n\t fld1\n\t faddp\n\t" /* ST(0)=2, ST(1)=1 */
             "fxch %%st(1)\n\t"
-            "fstp %%st(0)\n\t"              /* discard swapped top */
+            "fstp %%st(0)\n\t" /* discard swapped top */
             "fstpl %0\n"
             : "=m"(r));
     return bench_now_ns() - start;
@@ -141,9 +142,9 @@ static bench_ns_t bench_fxch_loop(void) {
     bench_ns_t start = bench_now_ns();
     volatile double r;
     for (int i = 0; i < TIMES; i++)
-        __asm__ volatile (
+        __asm__ volatile(
             "fld1\n\t"
-            "fld1\n\t fld1\n\t faddp\n\t"  /* ST(0)=2, ST(1)=1 */
+            "fld1\n\t fld1\n\t faddp\n\t" /* ST(0)=2, ST(1)=1 */
             "fxch %%st(1)\n\t"
             "fxch %%st(1)\n\t"
             "fxch %%st(1)\n\t"
@@ -159,20 +160,20 @@ static bench_ns_t bench_fxch_loop(void) {
 }
 
 int main(void) {
-    struct { const char *name; bench_ns_t (*fn)(void); } benches[] = {
-        {"fxch_st1",       bench_fxch_st1},
-        {"fxch_st2",       bench_fxch_st2},
-        {"fxch_st3",       bench_fxch_st3},
-        {"fxch_double",    bench_fxch_double},
-        {"fxch_triple",    bench_fxch_triple},
-        {"fxch_add",       bench_fxch_add},
-        {"fxch_fstp",      bench_fxch_fstp},
-        {"fxch_loop_8x",   bench_fxch_loop},
+    struct {
+        const char* name;
+        bench_ns_t (*fn)(void);
+    } benches[] = {
+        {"fxch_st1", bench_fxch_st1},       {"fxch_st2", bench_fxch_st2},
+        {"fxch_st3", bench_fxch_st3},       {"fxch_double", bench_fxch_double},
+        {"fxch_triple", bench_fxch_triple}, {"fxch_add", bench_fxch_add},
+        {"fxch_fstp", bench_fxch_fstp},     {"fxch_loop_8x", bench_fxch_loop},
     };
     int n = (int)(sizeof(benches) / sizeof(benches[0]));
     for (int i = 0; i < n; i++) {
         bench_ns_t sum = 0;
-        for (int r = 0; r < RUNS; r++) sum += benches[i].fn();
+        for (int r = 0; r < RUNS; r++)
+            sum += benches[i].fn();
         printf("BENCH %s %lu\n", benches[i].name, (unsigned long)(sum / RUNS));
     }
     return 0;

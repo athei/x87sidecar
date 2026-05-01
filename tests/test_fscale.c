@@ -26,12 +26,12 @@ static double do_fscale(double a, double b) {
      * fstpl pops ST(0); fstpl pops ST(1)=b. */
     double r;
     double drained;
-    __asm__ volatile (
-        "fldl  %2\n\t"        /* push b → ST(0)=b */
-        "fldl  %3\n\t"        /* push a → ST(0)=a, ST(1)=b */
+    __asm__ volatile(
+        "fldl  %2\n\t" /* push b → ST(0)=b */
+        "fldl  %3\n\t" /* push a → ST(0)=a, ST(1)=b */
         "fscale\n\t"
-        "fstpl %0\n\t"        /* pop result */
-        "fstpl %1\n\t"        /* pop b */
+        "fstpl %0\n\t" /* pop result */
+        "fstpl %1\n\t" /* pop b */
         : "=m"(r), "=m"(drained)
         : "m"(b), "m"(a)
         : "st");
@@ -39,16 +39,16 @@ static double do_fscale(double a, double b) {
     return r;
 }
 
-static void check(const char *name, double a, double b, double expected) {
+static void check(const char* name, double a, double b, double expected) {
     double got = do_fscale(a, b);
     uint64_t g, e;
     memcpy(&g, &got, 8);
     memcpy(&e, &expected, 8);
     /* For NaN we accept any NaN bit pattern (don't compare bit-exact). */
-    int both_nan = ((g & 0x7FF0000000000000ULL) == 0x7FF0000000000000ULL &&
-                    (g & 0x000FFFFFFFFFFFFFULL) != 0) &&
-                   ((e & 0x7FF0000000000000ULL) == 0x7FF0000000000000ULL &&
-                    (e & 0x000FFFFFFFFFFFFFULL) != 0);
+    int both_nan =
+        ((g & 0x7FF0000000000000ULL) == 0x7FF0000000000000ULL &&
+         (g & 0x000FFFFFFFFFFFFFULL) != 0) &&
+        ((e & 0x7FF0000000000000ULL) == 0x7FF0000000000000ULL && (e & 0x000FFFFFFFFFFFFFULL) != 0);
     int ok = (g == e) || both_nan;
     if (ok) {
         printf("PASS  %s  fscale(%.17g, %.17g) = %.17g\n", name, a, b, got);
@@ -62,30 +62,30 @@ static void check(const char *name, double a, double b, double expected) {
 
 int main(void) {
     /* Normal cases. */
-    check("fscale(2.0, 3.0)",     2.0,    3.0,   16.0);
-    check("fscale(1.0, -2.0)",    1.0,   -2.0,    0.25);
-    check("fscale(3.0, 0.0)",     3.0,    0.0,    3.0);
-    check("fscale(1.5, 1.0)",     1.5,    1.0,    3.0);
-    check("fscale(-2.0, 4.0)",   -2.0,    4.0,  -32.0);
-    check("fscale(2.0, 1.7)",     2.0,    1.7,    4.0);     /* trunc(1.7)=1 */
-    check("fscale(2.0, -1.5)",    2.0,   -1.5,    1.0);     /* trunc(-1.5)=-1 */
-    check("fscale(2.0, -1.999)",  2.0,   -1.999,  1.0);     /* trunc(-1.999)=-1 */
+    check("fscale(2.0, 3.0)", 2.0, 3.0, 16.0);
+    check("fscale(1.0, -2.0)", 1.0, -2.0, 0.25);
+    check("fscale(3.0, 0.0)", 3.0, 0.0, 3.0);
+    check("fscale(1.5, 1.0)", 1.5, 1.0, 3.0);
+    check("fscale(-2.0, 4.0)", -2.0, 4.0, -32.0);
+    check("fscale(2.0, 1.7)", 2.0, 1.7, 4.0);       /* trunc(1.7)=1 */
+    check("fscale(2.0, -1.5)", 2.0, -1.5, 1.0);     /* trunc(-1.5)=-1 */
+    check("fscale(2.0, -1.999)", 2.0, -1.999, 1.0); /* trunc(-1.999)=-1 */
 
     /* ST(0) zero — preserve sign. */
     {
         double neg_zero;
         uint64_t bits = 0x8000000000000000ULL;
         memcpy(&neg_zero, &bits, 8);
-        check("fscale(+0, 5)",  0.0,      5.0,  0.0);
-        check("fscale(-0, 5)",  neg_zero, 5.0,  neg_zero);
+        check("fscale(+0, 5)", 0.0, 5.0, 0.0);
+        check("fscale(-0, 5)", neg_zero, 5.0, neg_zero);
     }
 
     /* ST(0) ±Inf. */
     {
-        double pos_inf =  1.0 / 0.0;
+        double pos_inf = 1.0 / 0.0;
         double neg_inf = -1.0 / 0.0;
-        check("fscale(+Inf, 1)",  pos_inf,  1.0, pos_inf);
-        check("fscale(-Inf, 1)",  neg_inf,  1.0, neg_inf);
+        check("fscale(+Inf, 1)", pos_inf, 1.0, pos_inf);
+        check("fscale(-Inf, 1)", neg_inf, 1.0, neg_inf);
         /* Inf * 2^-Inf = NaN. */
         double nan_v = 0.0 / 0.0;
         check("fscale(+Inf, -Inf)", pos_inf, neg_inf, nan_v);
@@ -95,7 +95,7 @@ int main(void) {
     {
         double pos_inf = 1.0 / 0.0;
         double neg_inf = -1.0 / 0.0;
-        check("fscale(2.0, +Inf)",   2.0, pos_inf, pos_inf);
+        check("fscale(2.0, +Inf)", 2.0, pos_inf, pos_inf);
         check("fscale(-3.0, +Inf)", -3.0, pos_inf, neg_inf);
     }
 
@@ -105,7 +105,7 @@ int main(void) {
         double neg_zero;
         uint64_t bits = 0x8000000000000000ULL;
         memcpy(&neg_zero, &bits, 8);
-        check("fscale(2.0, -Inf)",   2.0, neg_inf, 0.0);
+        check("fscale(2.0, -Inf)", 2.0, neg_inf, 0.0);
         check("fscale(-3.0, -Inf)", -3.0, neg_inf, neg_zero);
     }
 
@@ -129,8 +129,8 @@ int main(void) {
     /* Out-of-range k → overflow / underflow. */
     {
         double pos_inf = 1.0 / 0.0;
-        check("fscale(2.0, 2000.0)",   2.0,  2000.0, pos_inf);   /* overflow → +Inf */
-        check("fscale(2.0, -2000.0)",  2.0, -2000.0,  0.0);      /* underflow → 0 */
+        check("fscale(2.0, 2000.0)", 2.0, 2000.0, pos_inf); /* overflow → +Inf */
+        check("fscale(2.0, -2000.0)", 2.0, -2000.0, 0.0);   /* underflow → 0 */
     }
 
     printf("\n%d failure(s)\n", failures);

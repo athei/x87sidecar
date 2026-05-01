@@ -22,10 +22,18 @@
 
 static int failures = 0;
 
-static uint32_t as_u32(float f)  { uint32_t u; memcpy(&u, &f, 4); return u; }
-static uint64_t as_u64(double d) { uint64_t u; memcpy(&u, &d, 8); return u; }
+static uint32_t as_u32(float f) {
+    uint32_t u;
+    memcpy(&u, &f, 4);
+    return u;
+}
+static uint64_t as_u64(double d) {
+    uint64_t u;
+    memcpy(&u, &d, 8);
+    return u;
+}
 
-static void check_u16(const char *name, uint16_t got, uint16_t expected) {
+static void check_u16(const char* name, uint16_t got, uint16_t expected) {
     if (got != expected) {
         printf("FAIL  %-60s  got=0x%04x  expected=0x%04x\n", name, got, expected);
         failures++;
@@ -34,17 +42,17 @@ static void check_u16(const char *name, uint16_t got, uint16_t expected) {
     }
 }
 
-static void check_f32(const char *name, float got, float expected) {
+static void check_f32(const char* name, float got, float expected) {
     if (as_u32(got) != as_u32(expected)) {
-        printf("FAIL  %-60s  got=%.10g (0x%08x)  expected=%.10g (0x%08x)\n",
-               name, got, as_u32(got), expected, as_u32(expected));
+        printf("FAIL  %-60s  got=%.10g (0x%08x)  expected=%.10g (0x%08x)\n", name, got, as_u32(got),
+               expected, as_u32(expected));
         failures++;
     } else {
         printf("PASS  %s\n", name);
     }
 }
 
-static void check_f64(const char *name, double got, double expected) {
+static void check_f64(const char* name, double got, double expected) {
     if (as_u64(got) != as_u64(expected)) {
         printf("FAIL  %-60s  got=%.15g  expected=%.15g\n", name, got, expected);
         failures++;
@@ -62,56 +70,64 @@ static void check_f64(const char *name, double got, double expected) {
 /* GT: FLD [5.0] / FCOMPS [3.0f] -> 5 > 3 -> GT (0x0000) */
 static uint16_t test_fld_fcomps_m32_gt(void) {
     double val = 5.0;
-    float  cmp = 3.0f;
+    float cmp = 3.0f;
     uint16_t sw;
     __asm__ volatile(
         "fldl %1\n"
         "fcomps %2\n"
         "fnstsw %%ax\n"
         "movw %%ax, %0\n"
-        : "=m"(sw) : "m"(val), "m"(cmp) : "ax");
+        : "=m"(sw)
+        : "m"(val), "m"(cmp)
+        : "ax");
     return sw & 0x4500;
 }
 
 /* LT: FLD [1.0] / FCOMPS [3.0f] -> 1 < 3 -> LT (0x0100) */
 static uint16_t test_fld_fcomps_m32_lt(void) {
     double val = 1.0;
-    float  cmp = 3.0f;
+    float cmp = 3.0f;
     uint16_t sw;
     __asm__ volatile(
         "fldl %1\n"
         "fcomps %2\n"
         "fnstsw %%ax\n"
         "movw %%ax, %0\n"
-        : "=m"(sw) : "m"(val), "m"(cmp) : "ax");
+        : "=m"(sw)
+        : "m"(val), "m"(cmp)
+        : "ax");
     return sw & 0x4500;
 }
 
 /* EQ: FLD [3.0] / FCOMPS [3.0f] -> 3 == 3 -> EQ (0x4000) */
 static uint16_t test_fld_fcomps_m32_eq(void) {
     double val = 3.0;
-    float  cmp = 3.0f;
+    float cmp = 3.0f;
     uint16_t sw;
     __asm__ volatile(
         "fldl %1\n"
         "fcomps %2\n"
         "fnstsw %%ax\n"
         "movw %%ax, %0\n"
-        : "=m"(sw) : "m"(val), "m"(cmp) : "ax");
+        : "=m"(sw)
+        : "m"(val), "m"(cmp)
+        : "ax");
     return sw & 0x4500;
 }
 
 /* UN: FLD [NaN] / FCOMPS [1.0f] -> unordered (0x4500) */
 static uint16_t test_fld_fcomps_m32_un(void) {
     double val = __builtin_nan("");
-    float  cmp = 1.0f;
+    float cmp = 1.0f;
     uint16_t sw;
     __asm__ volatile(
         "fldl %1\n"
         "fcomps %2\n"
         "fnstsw %%ax\n"
         "movw %%ax, %0\n"
-        : "=m"(sw) : "m"(val), "m"(cmp) : "ax");
+        : "=m"(sw)
+        : "m"(val), "m"(cmp)
+        : "ax");
     return sw & 0x4500;
 }
 
@@ -127,7 +143,9 @@ static uint16_t test_fld_fcompl_m64_gt(void) {
         "fcompl %2\n"
         "fnstsw %%ax\n"
         "movw %%ax, %0\n"
-        : "=m"(sw) : "m"(val), "m"(cmp) : "ax");
+        : "=m"(sw)
+        : "m"(val), "m"(cmp)
+        : "ax");
     return sw & 0x4500;
 }
 
@@ -141,7 +159,9 @@ static uint16_t test_fld_fcompl_m64_lt(void) {
         "fcompl %2\n"
         "fnstsw %%ax\n"
         "movw %%ax, %0\n"
-        : "=m"(sw) : "m"(val), "m"(cmp) : "ax");
+        : "=m"(sw)
+        : "m"(val), "m"(cmp)
+        : "ax");
     return sw & 0x4500;
 }
 
@@ -155,7 +175,9 @@ static uint16_t test_fld_fcompl_m64_eq(void) {
         "fcompl %2\n"
         "fnstsw %%ax\n"
         "movw %%ax, %0\n"
-        : "=m"(sw) : "m"(val), "m"(cmp) : "ax");
+        : "=m"(sw)
+        : "m"(val), "m"(cmp)
+        : "ax");
     return sw & 0x4500;
 }
 
@@ -169,7 +191,9 @@ static uint16_t test_fld_fcompl_m64_un(void) {
         "fcompl %2\n"
         "fnstsw %%ax\n"
         "movw %%ax, %0\n"
-        : "=m"(sw) : "m"(val), "m"(cmp) : "ax");
+        : "=m"(sw)
+        : "m"(val), "m"(cmp)
+        : "ax");
     return sw & 0x4500;
 }
 
@@ -185,7 +209,9 @@ static uint16_t test_flds_fcomps_m32_gt(void) {
         "fcomps %2\n"
         "fnstsw %%ax\n"
         "movw %%ax, %0\n"
-        : "=m"(sw) : "m"(val), "m"(cmp) : "ax");
+        : "=m"(sw)
+        : "m"(val), "m"(cmp)
+        : "ax");
     return sw & 0x4500;
 }
 
@@ -199,7 +225,9 @@ static uint16_t test_flds_fcomps_m32_lt(void) {
         "fcomps %2\n"
         "fnstsw %%ax\n"
         "movw %%ax, %0\n"
-        : "=m"(sw) : "m"(val), "m"(cmp) : "ax");
+        : "=m"(sw)
+        : "m"(val), "m"(cmp)
+        : "ax");
     return sw & 0x4500;
 }
 
@@ -216,7 +244,9 @@ static uint16_t test_fld_reg_fcomps_m32_gt(void) {
         "fnstsw %%ax\n"
         "movw %%ax, %0\n"
         "fstp %%st(0)\n"
-        : "=m"(sw) : "m"(cmp) : "ax");
+        : "=m"(sw)
+        : "m"(cmp)
+        : "ax");
     return sw & 0x4500;
 }
 
@@ -231,7 +261,9 @@ static uint16_t test_fld_reg_fcomps_m32_lt(void) {
         "fnstsw %%ax\n"
         "movw %%ax, %0\n"
         "fstp %%st(0)\n"
-        : "=m"(sw) : "m"(cmp) : "ax");
+        : "=m"(sw)
+        : "m"(cmp)
+        : "ax");
     return sw & 0x4500;
 }
 
@@ -246,7 +278,9 @@ static uint16_t test_fld1_fcomps_m32_gt(void) {
         "fcomps %1\n"
         "fnstsw %%ax\n"
         "movw %%ax, %0\n"
-        : "=m"(sw) : "m"(cmp) : "ax");
+        : "=m"(sw)
+        : "m"(cmp)
+        : "ax");
     return sw & 0x4500;
 }
 
@@ -259,7 +293,9 @@ static uint16_t test_fldz_fcomps_m32_lt(void) {
         "fcomps %1\n"
         "fnstsw %%ax\n"
         "movw %%ax, %0\n"
-        : "=m"(sw) : "m"(cmp) : "ax");
+        : "=m"(sw)
+        : "m"(cmp)
+        : "ax");
     return sw & 0x4500;
 }
 
@@ -272,7 +308,9 @@ static uint16_t test_fldz_fcomps_m32_eq(void) {
         "fcomps %1\n"
         "fnstsw %%ax\n"
         "movw %%ax, %0\n"
-        : "=m"(sw) : "m"(cmp) : "ax");
+        : "=m"(sw)
+        : "m"(cmp)
+        : "ax");
     return sw & 0x4500;
 }
 
@@ -288,7 +326,9 @@ static uint16_t test_fild_fcomps_m32_gt(void) {
         "fcomps %2\n"
         "fnstsw %%ax\n"
         "movw %%ax, %0\n"
-        : "=m"(sw) : "m"(ival), "m"(cmp) : "ax");
+        : "=m"(sw)
+        : "m"(ival), "m"(cmp)
+        : "ax");
     return sw & 0x4500;
 }
 
@@ -296,7 +336,7 @@ static uint16_t test_fild_fcomps_m32_gt(void) {
 
 /* FLD [2.5f] + FCOMPL [2.5] + FNSTSW -> EQ */
 static uint16_t test_flds_fcompl_m64_eq(void) {
-    float  val = 2.5f;
+    float val = 2.5f;
     double cmp = 2.5;
     uint16_t sw;
     __asm__ volatile(
@@ -304,7 +344,9 @@ static uint16_t test_flds_fcompl_m64_eq(void) {
         "fcompl %2\n"
         "fnstsw %%ax\n"
         "movw %%ax, %0\n"
-        : "=m"(sw) : "m"(val), "m"(cmp) : "ax");
+        : "=m"(sw)
+        : "m"(val), "m"(cmp)
+        : "ax");
     return sw & 0x4500;
 }
 
@@ -314,17 +356,17 @@ static uint16_t test_flds_fcompl_m64_eq(void) {
  * After fusion, ST(0) should be 99.0 (net zero stack effect). */
 static double test_fld_fcomps_stack_intact(void) {
     double base = 99.0;
-    double val  = 5.0;
-    float  cmp  = 3.0f;
+    double val = 5.0;
+    float cmp = 3.0f;
     double result;
     uint16_t sw;
     __asm__ volatile(
-        "fldl %2\n"       /* push 99.0 */
-        "fldl %3\n"       /* push 5.0 -- will be consumed by fusion */
-        "fcomps %4\n"     /* compare 5.0 vs 3.0f, pop */
+        "fldl %2\n"   /* push 99.0 */
+        "fldl %3\n"   /* push 5.0 -- will be consumed by fusion */
+        "fcomps %4\n" /* compare 5.0 vs 3.0f, pop */
         "fnstsw %%ax\n"
         "movw %%ax, %1\n"
-        "fstpl %0\n"      /* should read 99.0 */
+        "fstpl %0\n" /* should read 99.0 */
         : "=m"(result), "=m"(sw)
         : "m"(base), "m"(val), "m"(cmp)
         : "ax");
@@ -334,17 +376,17 @@ static double test_fld_fcomps_stack_intact(void) {
 /* Same for FCOMPL m64 */
 static double test_fld_fcompl_stack_intact(void) {
     double base = 77.0;
-    double val  = 2.0;
-    double cmp  = 9.0;
+    double val = 2.0;
+    double cmp = 9.0;
     double result;
     uint16_t sw;
     __asm__ volatile(
-        "fldl %2\n"       /* push 77.0 */
-        "fldl %3\n"       /* push 2.0 */
-        "fcompl %4\n"     /* compare 2.0 vs 9.0, pop */
+        "fldl %2\n"   /* push 77.0 */
+        "fldl %3\n"   /* push 2.0 */
+        "fcompl %4\n" /* compare 2.0 vs 9.0, pop */
         "fnstsw %%ax\n"
         "movw %%ax, %1\n"
-        "fstpl %0\n"      /* should read 77.0 */
+        "fstpl %0\n" /* should read 77.0 */
         : "=m"(result), "=m"(sw)
         : "m"(base), "m"(val), "m"(cmp)
         : "ax");
@@ -372,11 +414,12 @@ static float test_optd_chain_fld_faddp(void) {
         "fld1\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n"
         "fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n"
         /* three consecutive FLD+FADDP pairs -- OPT-D should cancel each */
-        "fldl %1\n faddp %%st, %%st(1)\n"  /* +2 = 12 */
-        "fldl %2\n faddp %%st, %%st(1)\n"  /* +3 = 15 */
-        "fldl %3\n faddp %%st, %%st(1)\n"  /* +5 = 20 */
+        "fldl %1\n faddp %%st, %%st(1)\n" /* +2 = 12 */
+        "fldl %2\n faddp %%st, %%st(1)\n" /* +3 = 15 */
+        "fldl %3\n faddp %%st, %%st(1)\n" /* +5 = 20 */
         "fstps %0\n"
-        : "=m"(result) : "m"(a), "m"(b), "m"(c));
+        : "=m"(result)
+        : "m"(a), "m"(b), "m"(c));
     return result;
 }
 
@@ -389,11 +432,12 @@ static float test_optd_chain_fld_fmulp(void) {
     float result;
     double a = 3.0, b = 4.0;
     __asm__ volatile(
-        "fld1\n fld1\n faddp\n" /* 2.0 */
-        "fldl %1\n fmulp %%st, %%st(1)\n"  /* *3 = 6 */
-        "fldl %2\n fmulp %%st, %%st(1)\n"  /* *4 = 24 */
+        "fld1\n fld1\n faddp\n"           /* 2.0 */
+        "fldl %1\n fmulp %%st, %%st(1)\n" /* *3 = 6 */
+        "fldl %2\n fmulp %%st, %%st(1)\n" /* *4 = 24 */
         "fstps %0\n"
-        : "=m"(result) : "m"(a), "m"(b));
+        : "=m"(result)
+        : "m"(a), "m"(b));
     return result;
 }
 
@@ -414,7 +458,8 @@ static float test_optd_chain_mixed_arithp(void) {
         "fldl %2\n fsubrp %%st, %%st(1)\n" /* 17-5 = 12 */
         "fldl %3\n faddp %%st, %%st(1)\n"  /* +3 = 15 */
         "fstps %0\n"
-        : "=m"(result) : "m"(a), "m"(b), "m"(c));
+        : "=m"(result)
+        : "m"(a), "m"(b), "m"(c));
     return result;
 }
 
@@ -423,14 +468,15 @@ static float test_optd_chain_mixed_arithp(void) {
  * ST(0)=original=42.0.  FLD ST(0)/FSTP m64 copies to mem without
  * disturbing ST(0).  Do it twice.
  */
-static void test_optd_chain_fld_fstp(double *dst1, double *dst2) {
+static void test_optd_chain_fld_fstp(double* dst1, double* dst2) {
     double original = 42.0;
     __asm__ volatile(
-        "fldl %2\n"                        /* ST(0) = 42.0 */
-        "fld %%st(0)\n fstpl %0\n"         /* copy #1 */
-        "fld %%st(0)\n fstpl %1\n"         /* copy #2 */
-        "fstp %%st(0)\n"                   /* clean up */
-        : "=m"(*dst1), "=m"(*dst2) : "m"(original));
+        "fldl %2\n"                /* ST(0) = 42.0 */
+        "fld %%st(0)\n fstpl %0\n" /* copy #1 */
+        "fld %%st(0)\n fstpl %1\n" /* copy #2 */
+        "fstp %%st(0)\n"           /* clean up */
+        : "=m"(*dst1), "=m"(*dst2)
+        : "m"(original));
 }
 
 /*
@@ -438,7 +484,7 @@ static void test_optd_chain_fld_fstp(double *dst1, double *dst2) {
  * ST(0)=10.0, ST(1)=100.0.  FLD [5.0]/FADDP -> ST(0)=15.0, ST(1)=100.0.
  * Verify both registers.
  */
-static void test_optd_preserves_st1(float *r0, float *r1) {
+static void test_optd_preserves_st1(float* r0, float* r1) {
     double five = 5.0;
     __asm__ volatile(
         /* build stack: ST(0)=10, ST(1)=100 */
@@ -447,15 +493,16 @@ static void test_optd_preserves_st1(float *r0, float *r1) {
         "fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n"
         "fld1\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n"
         "fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n"
-        "fmulp %%st, %%st(1)\n"   /* 10 * 10 = 100 */
+        "fmulp %%st, %%st(1)\n" /* 10 * 10 = 100 */
         /* push 10 on top */
         "fld1\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n"
         "fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n"
         /* ST(0)=10, ST(1)=100 */
-        "fldl %2\n faddp %%st, %%st(1)\n"  /* ST(0) = 10+5 = 15 */
-        "fstps %0\n"  /* ST(0) -> r0, pop -> ST(0)=100 */
-        "fstps %1\n"  /* ST(0) -> r1, pop */
-        : "=m"(*r0), "=m"(*r1) : "m"(five));
+        "fldl %2\n faddp %%st, %%st(1)\n" /* ST(0) = 10+5 = 15 */
+        "fstps %0\n"                      /* ST(0) -> r0, pop -> ST(0)=100 */
+        "fstps %1\n"                      /* ST(0) -> r1, pop */
+        : "=m"(*r0), "=m"(*r1)
+        : "m"(five));
 }
 
 /* ========================================================================= */
@@ -477,11 +524,12 @@ static double test_netzero_surrounded_fld_arithp(void) {
     double a = 7.0, b = 3.0;
     double result;
     __asm__ volatile(
-        "fldl %1\n"                         /* unfused FLD: push A=7 */
-        "fldl %2\n"                         /* fused FLD+FADDP: push B=3 */
-        "faddp %%st, %%st(1)\n"             /* ST(0) = 7+3 = 10, pop */
-        "fstpl %0\n"                        /* unfused FSTP: store 10, pop */
-        : "=m"(result) : "m"(a), "m"(b));
+        "fldl %1\n"             /* unfused FLD: push A=7 */
+        "fldl %2\n"             /* fused FLD+FADDP: push B=3 */
+        "faddp %%st, %%st(1)\n" /* ST(0) = 7+3 = 10, pop */
+        "fstpl %0\n"            /* unfused FSTP: store 10, pop */
+        : "=m"(result)
+        : "m"(a), "m"(b));
     return result;
 }
 
@@ -492,14 +540,15 @@ static double test_netzero_surrounded_fld_arithp(void) {
  * The middle FLD+FSTP is a net-zero copy fusion.
  * After: first dst = B, second dst = A.
  */
-static void test_netzero_surrounded_fld_fstp(double *dst1, double *dst2) {
+static void test_netzero_surrounded_fld_fstp(double* dst1, double* dst2) {
     double a = 11.0, b = 22.0;
     __asm__ volatile(
-        "fldl %2\n"                         /* unfused FLD: push A=11 */
-        "fldl %3\n"                         /* fused FLD+FSTP: push B=22 */
-        "fstpl %0\n"                        /* store 22 to dst1, pop */
-        "fstpl %1\n"                        /* unfused FSTP: store 11 to dst2, pop */
-        : "=m"(*dst1), "=m"(*dst2) : "m"(a), "m"(b));
+        "fldl %2\n"  /* unfused FLD: push A=11 */
+        "fldl %3\n"  /* fused FLD+FSTP: push B=22 */
+        "fstpl %0\n" /* store 22 to dst1, pop */
+        "fstpl %1\n" /* unfused FSTP: store 11 to dst2, pop */
+        : "=m"(*dst1), "=m"(*dst2)
+        : "m"(a), "m"(b));
 }
 
 /*
@@ -519,14 +568,15 @@ static float test_netzero_surrounded_fld_arithp_faddp(void) {
         "fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n"
         "fld1\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n"
         "fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n"
-        "fmulp %%st, %%st(1)\n"  /* 10*10 = 100 */
+        "fmulp %%st, %%st(1)\n" /* 10*10 = 100 */
         /* now: ST(0)=100 */
-        "fldl %1\n"                          /* unfused FLD: push 3 */
-        "fldl %2\n"                          /* fused FLD+FMULP */
-        "fmulp %%st, %%st(1)\n"             /* ST(0) = 3*5 = 15 */
-        "faddp %%st, %%st(1)\n"             /* unfused FADDP: ST(0) = 100+15 = 115 */
+        "fldl %1\n"             /* unfused FLD: push 3 */
+        "fldl %2\n"             /* fused FLD+FMULP */
+        "fmulp %%st, %%st(1)\n" /* ST(0) = 3*5 = 15 */
+        "faddp %%st, %%st(1)\n" /* unfused FADDP: ST(0) = 100+15 = 115 */
         "fstps %0\n"
-        : "=m"(result) : "m"(a), "m"(b));
+        : "=m"(result)
+        : "m"(a), "m"(b));
     return result;
 }
 
@@ -540,11 +590,12 @@ static float test_netzero_consecutive(void) {
     float result;
     double a = 2.0, b = 4.0;
     __asm__ volatile(
-        "fld1\n"                             /* 1.0 */
-        "fldl %1\n faddp %%st, %%st(1)\n"   /* 1+2 = 3 */
-        "fldl %2\n fmulp %%st, %%st(1)\n"   /* 3*4 = 12 */
+        "fld1\n"                          /* 1.0 */
+        "fldl %1\n faddp %%st, %%st(1)\n" /* 1+2 = 3 */
+        "fldl %2\n fmulp %%st, %%st(1)\n" /* 3*4 = 12 */
         "fstps %0\n"
-        : "=m"(result) : "m"(a), "m"(b));
+        : "=m"(result)
+        : "m"(a), "m"(b));
     return result;
 }
 
@@ -564,18 +615,19 @@ static float test_netzero_2deep_stack(void) {
         "fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n"
         "fld1\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n"
         "fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n"
-        "fmulp %%st, %%st(1)\n"  /* 10*10 = 100 */
+        "fmulp %%st, %%st(1)\n" /* 10*10 = 100 */
         /* 20 on top: 10*2 */
         "fld1\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n"
         "fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n"
-        "fld1\n fld1\n faddp\n"  /* 2.0 */
-        "fmulp %%st, %%st(1)\n"  /* 10*2 = 20 */
+        "fld1\n fld1\n faddp\n" /* 2.0 */
+        "fmulp %%st, %%st(1)\n" /* 10*2 = 20 */
         /* ST(0)=20, ST(1)=100 */
-        "fldl %1\n"                          /* FLD 8 -> fused with FSUBRP */
-        "fsubrp %%st, %%st(1)\n"             /* ST(0) = 20-8 = 12 */
-        "faddp %%st, %%st(1)\n"              /* ST(0) = 100+12 = 112 */
+        "fldl %1\n"              /* FLD 8 -> fused with FSUBRP */
+        "fsubrp %%st, %%st(1)\n" /* ST(0) = 20-8 = 12 */
+        "faddp %%st, %%st(1)\n"  /* ST(0) = 100+12 = 112 */
         "fstps %0\n"
-        : "=m"(result) : "m"(eight));
+        : "=m"(result)
+        : "m"(eight));
     return result;
 }
 
@@ -584,76 +636,56 @@ static float test_netzero_2deep_stack(void) {
 /* ========================================================================= */
 
 int main(void) {
-
     /* --- Section A: FLD + FCOMPS/FCOMPL mem + FNSTSW --- */
 
     printf("=== A1: FLD m64 + FCOMPS m32 + FNSTSW ===\n");
-    check_u16("FLD m64 + FCOMPS m32  GT  5>3=0x0000",
-              test_fld_fcomps_m32_gt(), 0x0000);
-    check_u16("FLD m64 + FCOMPS m32  LT  1<3=0x0100",
-              test_fld_fcomps_m32_lt(), 0x0100);
-    check_u16("FLD m64 + FCOMPS m32  EQ  3=3=0x4000",
-              test_fld_fcomps_m32_eq(), 0x4000);
-    check_u16("FLD m64 + FCOMPS m32  UN  NaN=0x4500",
-              test_fld_fcomps_m32_un(), 0x4500);
+    check_u16("FLD m64 + FCOMPS m32  GT  5>3=0x0000", test_fld_fcomps_m32_gt(), 0x0000);
+    check_u16("FLD m64 + FCOMPS m32  LT  1<3=0x0100", test_fld_fcomps_m32_lt(), 0x0100);
+    check_u16("FLD m64 + FCOMPS m32  EQ  3=3=0x4000", test_fld_fcomps_m32_eq(), 0x4000);
+    check_u16("FLD m64 + FCOMPS m32  UN  NaN=0x4500", test_fld_fcomps_m32_un(), 0x4500);
 
     printf("\n=== A2: FLD m64 + FCOMPL m64 + FNSTSW ===\n");
-    check_u16("FLD m64 + FCOMPL m64  GT  7>2=0x0000",
-              test_fld_fcompl_m64_gt(), 0x0000);
-    check_u16("FLD m64 + FCOMPL m64  LT  2<7=0x0100",
-              test_fld_fcompl_m64_lt(), 0x0100);
-    check_u16("FLD m64 + FCOMPL m64  EQ  4.5=4.5=0x4000",
-              test_fld_fcompl_m64_eq(), 0x4000);
-    check_u16("FLD m64 + FCOMPL m64  UN  NaN=0x4500",
-              test_fld_fcompl_m64_un(), 0x4500);
+    check_u16("FLD m64 + FCOMPL m64  GT  7>2=0x0000", test_fld_fcompl_m64_gt(), 0x0000);
+    check_u16("FLD m64 + FCOMPL m64  LT  2<7=0x0100", test_fld_fcompl_m64_lt(), 0x0100);
+    check_u16("FLD m64 + FCOMPL m64  EQ  4.5=4.5=0x4000", test_fld_fcompl_m64_eq(), 0x4000);
+    check_u16("FLD m64 + FCOMPL m64  UN  NaN=0x4500", test_fld_fcompl_m64_un(), 0x4500);
 
     printf("\n=== A3: FLD m32 + FCOMPS m32 + FNSTSW ===\n");
-    check_u16("FLD m32 + FCOMPS m32  GT  9>2=0x0000",
-              test_flds_fcomps_m32_gt(), 0x0000);
-    check_u16("FLD m32 + FCOMPS m32  LT  1<5=0x0100",
-              test_flds_fcomps_m32_lt(), 0x0100);
+    check_u16("FLD m32 + FCOMPS m32  GT  9>2=0x0000", test_flds_fcomps_m32_gt(), 0x0000);
+    check_u16("FLD m32 + FCOMPS m32  LT  1<5=0x0100", test_flds_fcomps_m32_lt(), 0x0100);
 
     printf("\n=== A4: FLD ST(i) + FCOMPS m32 + FNSTSW ===\n");
-    check_u16("FLD ST(0) + FCOMPS m32  GT  5>3=0x0000",
-              test_fld_reg_fcomps_m32_gt(), 0x0000);
-    check_u16("FLD ST(0) + FCOMPS m32  LT  2<8=0x0100",
-              test_fld_reg_fcomps_m32_lt(), 0x0100);
+    check_u16("FLD ST(0) + FCOMPS m32  GT  5>3=0x0000", test_fld_reg_fcomps_m32_gt(), 0x0000);
+    check_u16("FLD ST(0) + FCOMPS m32  LT  2<8=0x0100", test_fld_reg_fcomps_m32_lt(), 0x0100);
 
     printf("\n=== A5: FLD1/FLDZ + FCOMPS m32 + FNSTSW ===\n");
-    check_u16("FLD1 + FCOMPS m32  GT  1>0.5=0x0000",
-              test_fld1_fcomps_m32_gt(), 0x0000);
-    check_u16("FLDZ + FCOMPS m32  LT  0<1=0x0100",
-              test_fldz_fcomps_m32_lt(), 0x0100);
-    check_u16("FLDZ + FCOMPS m32  EQ  0=0=0x4000",
-              test_fldz_fcomps_m32_eq(), 0x4000);
+    check_u16("FLD1 + FCOMPS m32  GT  1>0.5=0x0000", test_fld1_fcomps_m32_gt(), 0x0000);
+    check_u16("FLDZ + FCOMPS m32  LT  0<1=0x0100", test_fldz_fcomps_m32_lt(), 0x0100);
+    check_u16("FLDZ + FCOMPS m32  EQ  0=0=0x4000", test_fldz_fcomps_m32_eq(), 0x4000);
 
     printf("\n=== A6: FILD + FCOMPS m32 + FNSTSW ===\n");
-    check_u16("FILD m32 + FCOMPS m32  GT  10>3=0x0000",
-              test_fild_fcomps_m32_gt(), 0x0000);
+    check_u16("FILD m32 + FCOMPS m32  GT  10>3=0x0000", test_fild_fcomps_m32_gt(), 0x0000);
 
     printf("\n=== A7: FLD m32 + FCOMPL m64 + FNSTSW ===\n");
-    check_u16("FLD m32 + FCOMPL m64  EQ  2.5=2.5=0x4000",
-              test_flds_fcompl_m64_eq(), 0x4000);
+    check_u16("FLD m32 + FCOMPL m64  EQ  2.5=2.5=0x4000", test_flds_fcompl_m64_eq(), 0x4000);
 
     printf("\n=== A8: Stack correctness after FLD+FCOMP_mem+FNSTSW ===\n");
-    check_f64("FLD+FCOMPS+FNSTSW net-zero: ST(0)=99.0 intact",
-              test_fld_fcomps_stack_intact(), 99.0);
-    check_f64("FLD+FCOMPL+FNSTSW net-zero: ST(0)=77.0 intact",
-              test_fld_fcompl_stack_intact(), 77.0);
+    check_f64("FLD+FCOMPS+FNSTSW net-zero: ST(0)=99.0 intact", test_fld_fcomps_stack_intact(),
+              99.0);
+    check_f64("FLD+FCOMPL+FNSTSW net-zero: ST(0)=77.0 intact", test_fld_fcompl_stack_intact(),
+              77.0);
 
     /* --- Section B: OPT-D tag cancellation --- */
 
     printf("\n=== B1: Chained FLD+FADDP (OPT-D cancellation) ===\n");
-    check_f32("3x FLD+FADDP chain: 10+2+3+5=20",
-              test_optd_chain_fld_faddp(), 20.0f);
+    check_f32("3x FLD+FADDP chain: 10+2+3+5=20", test_optd_chain_fld_faddp(), 20.0f);
 
     printf("\n=== B2: Chained FLD+FMULP ===\n");
-    check_f32("2x FLD+FMULP chain: 2*3*4=24",
-              test_optd_chain_fld_fmulp(), 24.0f);
+    check_f32("2x FLD+FMULP chain: 2*3*4=24", test_optd_chain_fld_fmulp(), 24.0f);
 
     printf("\n=== B3: Mixed FADDP/FSUBP chain ===\n");
-    check_f32("FLD+FADDP, FLD+FSUBP, FLD+FADDP: 10+7-5+3=15",
-              test_optd_chain_mixed_arithp(), 15.0f);
+    check_f32("FLD+FADDP, FLD+FSUBP, FLD+FADDP: 10+7-5+3=15", test_optd_chain_mixed_arithp(),
+              15.0f);
 
     printf("\n=== B4: Chained FLD+FSTP (copy pairs) ===\n");
     {
@@ -674,8 +706,8 @@ int main(void) {
     /* --- Section C: Net-zero fusions in OPT-D context --- */
 
     printf("\n=== C1: unfused FLD -> fused FLD+FADDP -> unfused FSTP ===\n");
-    check_f64("FLD A / {FLD B + FADDP} / FSTP = 7+3=10",
-              test_netzero_surrounded_fld_arithp(), 10.0);
+    check_f64("FLD A / {FLD B + FADDP} / FSTP = 7+3=10", test_netzero_surrounded_fld_arithp(),
+              10.0);
 
     printf("\n=== C2: unfused FLD -> fused FLD+FSTP -> unfused FSTP ===\n");
     {
@@ -686,19 +718,15 @@ int main(void) {
     }
 
     printf("\n=== C3: unfused FLD -> fused FLD+FMULP -> unfused FADDP ===\n");
-    check_f32("base + A*B = 100 + 3*5 = 115",
-              test_netzero_surrounded_fld_arithp_faddp(), 115.0f);
+    check_f32("base + A*B = 100 + 3*5 = 115", test_netzero_surrounded_fld_arithp_faddp(), 115.0f);
 
     printf("\n=== C4: Two consecutive net-zero fusions ===\n");
-    check_f32("1 + 2 = 3, * 4 = 12",
-              test_netzero_consecutive(), 12.0f);
+    check_f32("1 + 2 = 3, * 4 = 12", test_netzero_consecutive(), 12.0f);
 
     printf("\n=== C5: Net-zero fusion with 2-deep stack ===\n");
-    check_f32("(20-8) + 100 = 112",
-              test_netzero_2deep_stack(), 112.0f);
+    check_f32("(20-8) + 100 = 112", test_netzero_2deep_stack(), 112.0f);
 
-    printf("\n%s  (%d failure%s)\n",
-           failures == 0 ? "ALL PASS" : "SOME FAILURES",
-           failures, failures == 1 ? "" : "s");
+    printf("\n%s  (%d failure%s)\n", failures == 0 ? "ALL PASS" : "SOME FAILURES", failures,
+           failures == 1 ? "" : "s");
     return failures ? 1 : 0;
 }

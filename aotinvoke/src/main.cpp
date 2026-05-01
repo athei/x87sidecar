@@ -1,3 +1,4 @@
+#include <rosetta_config/Config.h>
 #include <sys/mman.h>
 
 #include <cstdint>
@@ -13,7 +14,6 @@
 #include "rosetta_core/CoreConfig.h"
 #include "rosetta_core/CustomTranslationHook.h"
 #include "rosetta_core/hook.h"
-#include <rosetta_config/Config.h>
 
 int main(int argc, char** argv) try {
     RosettaConfig cfg = parse_config_from_env();
@@ -31,15 +31,15 @@ int main(int argc, char** argv) try {
         return 1;
     }
 
-    init_custom_translation_hook(g_rosetta_aot.translate_insn_addr, 
-        g_rosetta_aot.transaction_result_size_addr);
+    init_custom_translation_hook(g_rosetta_aot.translate_insn_addr,
+                                 g_rosetta_aot.transaction_result_size_addr);
 
     auto version = g_rosetta_aot.version();
-    int offset_size = version >= kAotVersion ? g_runtime_routine_offsets.size() : g_runtime_routine_offsets.size() - 2;
+    int offset_size = version >= kAotVersion ? g_runtime_routine_offsets.size()
+                                             : g_runtime_routine_offsets.size() - 2;
 
     g_rosetta_aot.register_runtime_routine_offsets(g_runtime_routine_offsets.data(),
-                                                   g_runtime_routine_names.data(),
-                                                   offset_size);
+                                                   g_runtime_routine_names.data(), offset_size);
 
     g_rosetta_aot.register_thread_context_offsets(&g_thread_context_offsets);
 
@@ -77,33 +77,32 @@ int main(int argc, char** argv) try {
     std::vector<std::uint32_t> inst_targets = {0};
     std::vector<std::uint64_t> data_in_code;
 
-    auto* module_result =
-        g_rosetta_aot.ir_create(reinterpret_cast<uintptr_t>(blob),  // absolute mapped base = "file offset 0"
-                                0,                // min_vmaddr   — irrelevant
-                                0,                // max_vmaddr   — irrelevant
-                                0,                // text_vmaddr_range — irrelevant
-                                0,                // data_vmaddr_range — irrelevant
-                                insts_fileoff_range,
-                                0,   // a7_null
-                                -1,  // a8_negative_1
-                                0,   // stubs_fileoff_range — no stubs
-                                0,   // stub_size           — no stubs
-                                inst_targets, data_in_code);
-
+    auto* module_result = g_rosetta_aot.ir_create(
+        reinterpret_cast<uintptr_t>(blob),  // absolute mapped base = "file offset 0"
+        0,                                  // min_vmaddr   — irrelevant
+        0,                                  // max_vmaddr   — irrelevant
+        0,                                  // text_vmaddr_range — irrelevant
+        0,                                  // data_vmaddr_range — irrelevant
+        insts_fileoff_range,
+        0,   // a7_null
+        -1,  // a8_negative_1
+        0,   // stubs_fileoff_range — no stubs
+        0,   // stub_size           — no stubs
+        inst_targets, data_in_code);
 
     if (verbose) {
         g_rosetta_aot.module_print(module_result, 1);
     }
 
-    auto *translate_result = g_rosetta_aot.translate(module_result);
-
+    auto* translate_result = g_rosetta_aot.translate(module_result);
 
     auto translate_data_size = g_rosetta_aot.translator_get_size(translate_result);
-    const auto *translate_data = g_rosetta_aot.translator_get_data(translate_result);
+    const auto* translate_data = g_rosetta_aot.translator_get_data(translate_result);
 
-    g_rosetta_aot.apply_internal_fixups(translate_result, 0x1000, const_cast<std::uint8_t*>(translate_data));
-    g_rosetta_aot.apply_segmented_runtime_routine_fixups(translate_result,
-                                                         const_cast<std::uint8_t*>(translate_data), 0x1000);
+    g_rosetta_aot.apply_internal_fixups(translate_result, 0x1000,
+                                        const_cast<std::uint8_t*>(translate_data));
+    g_rosetta_aot.apply_segmented_runtime_routine_fixups(
+        translate_result, const_cast<std::uint8_t*>(translate_data), 0x1000);
 
     auto out = std::ofstream(out_path, std::ios::binary);
     out.write(reinterpret_cast<const char*>(translate_data), translate_data_size);

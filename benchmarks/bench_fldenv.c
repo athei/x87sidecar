@@ -7,34 +7,39 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <time.h>
+
 #include "bench_timing.h"
 
 #define TIMES 2000000
-#define RUNS  5
+#define RUNS 5
 
 static bench_ns_t bench_fldenv_loop(void) {
     /* Build a self-consistent env once. */
     uint8_t env[28] __attribute__((aligned(16))) = {0};
-    __asm__ volatile (".byte 0xDB, 0xE3");           /* FNINIT */
-    __asm__ volatile ("fnstenv %0" : "=m"(env) :: "memory");
+    __asm__ volatile(".byte 0xDB, 0xE3"); /* FNINIT */
+    __asm__ volatile("fnstenv %0" : "=m"(env)::"memory");
     /* Set TOP=3 in SW. */
     env[5] = (env[5] & ~0x38) | (3 << 3);
 
     bench_ns_t start = bench_now_ns();
     for (int i = 0; i < TIMES; i++) {
-        __asm__ volatile ("fldenv %0" : : "m"(env) : "memory");
+        __asm__ volatile("fldenv %0" : : "m"(env) : "memory");
     }
     return bench_now_ns() - start;
 }
 
 int main(void) {
-    struct { const char *name; bench_ns_t (*fn)(void); } benches[] = {
+    struct {
+        const char* name;
+        bench_ns_t (*fn)(void);
+    } benches[] = {
         {"fldenv_loop", bench_fldenv_loop},
     };
     int n = (int)(sizeof(benches) / sizeof(benches[0]));
     for (int i = 0; i < n; i++) {
         bench_ns_t sum = 0;
-        for (int r = 0; r < RUNS; r++) sum += benches[i].fn();
+        for (int r = 0; r < RUNS; r++)
+            sum += benches[i].fn();
         printf("BENCH %-15s %lu\n", benches[i].name, (unsigned long)(sum / RUNS));
     }
     return 0;

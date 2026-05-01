@@ -16,35 +16,45 @@ static void pass_dse(Context& ctx) {
     for (short d : ctx.slot_val) {
         if (d >= 0 && d < ctx.num_nodes) {
             use_count[d]++;
-}
+        }
     }
 
     // Forward pass to count uses from non-dead nodes.
     for (int i = 0; i < ctx.num_nodes; i++) {
         auto& n = ctx.nodes[i];
-        if (n.flags & kDead) { continue;
-}
+        if (n.flags & kDead) {
+            continue;
+        }
         for (short input : n.inputs) {
             if (input >= 0) {
                 use_count[input]++;
-}
+            }
         }
     }
 
     // Backward pass: mark dead nodes (pure-value nodes with zero uses).
     for (int i = ctx.num_nodes - 1; i >= 0; i--) {
         auto& n = ctx.nodes[i];
-        if (n.flags & kDead) { continue;
-}
+        if (n.flags & kDead) {
+            continue;
+        }
 
         // Side-effect nodes are never dead.
         switch (n.op) {
-            case Op::StoreF64: case Op::StoreF32:
-            case Op::StoreI16: case Op::StoreI32: case Op::StoreI64:
-            case Op::FCmp: case Op::FTst: case Op::FStsw: case Op::FComI:
-            case Op::StoreCW: case Op::LoadCW:
+            case Op::StoreF64:
+            case Op::StoreF32:
+            case Op::StoreI16:
+            case Op::StoreI32:
+            case Op::StoreI64:
+            case Op::FCmp:
+            case Op::FTst:
+            case Op::FStsw:
+            case Op::FComI:
+            case Op::StoreCW:
+            case Op::LoadCW:
                 continue;
-            default: break;
+            default:
+                break;
         }
 
         if (use_count[i] == 0) {
@@ -53,7 +63,7 @@ static void pass_dse(Context& ctx) {
             for (short input : n.inputs) {
                 if (input >= 0) {
                     use_count[input]--;
-}
+                }
             }
         }
     }
@@ -61,22 +71,31 @@ static void pass_dse(Context& ctx) {
     // Second backward pass to catch cascading dead nodes.
     for (int i = ctx.num_nodes - 1; i >= 0; i--) {
         auto& n = ctx.nodes[i];
-        if (n.flags & kDead) { continue;
-}
+        if (n.flags & kDead) {
+            continue;
+        }
         switch (n.op) {
-            case Op::StoreF64: case Op::StoreF32:
-            case Op::StoreI16: case Op::StoreI32: case Op::StoreI64:
-            case Op::FCmp: case Op::FTst: case Op::FStsw: case Op::FComI:
-            case Op::StoreCW: case Op::LoadCW:
+            case Op::StoreF64:
+            case Op::StoreF32:
+            case Op::StoreI16:
+            case Op::StoreI32:
+            case Op::StoreI64:
+            case Op::FCmp:
+            case Op::FTst:
+            case Op::FStsw:
+            case Op::FComI:
+            case Op::StoreCW:
+            case Op::LoadCW:
                 continue;
-            default: break;
+            default:
+                break;
         }
         if (use_count[i] == 0) {
             n.flags |= kDead;
             for (short input : n.inputs) {
                 if (input >= 0) {
                     use_count[input]--;
-}
+                }
             }
         }
     }
@@ -98,24 +117,28 @@ static void pass_fma(Context& ctx) {
     for (short d : ctx.slot_val) {
         if (d >= 0 && d < ctx.num_nodes) {
             use_count[d]++;
-}
+        }
     }
     for (int i = 0; i < ctx.num_nodes; i++) {
         auto& n = ctx.nodes[i];
-        if (n.flags & kDead) { continue;
-}
+        if (n.flags & kDead) {
+            continue;
+        }
         for (short input : n.inputs) {
-            if (input >= 0) { use_count[input]++;
-}
+            if (input >= 0) {
+                use_count[input]++;
+            }
         }
     }
 
     for (int i = 0; i < ctx.num_nodes; i++) {
         auto& n = ctx.nodes[i];
-        if (n.flags & kDead) { continue;
-}
-        if (n.op != Op::FAdd && n.op != Op::FSub) { continue;
-}
+        if (n.flags & kDead) {
+            continue;
+        }
+        if (n.op != Op::FAdd && n.op != Op::FSub) {
+            continue;
+        }
 
         int16_t in0 = n.inputs[0];
         int16_t in1 = n.inputs[1];
@@ -124,15 +147,19 @@ static void pass_fma(Context& ctx) {
         auto try_fuse = [&](int mul_input_idx, int other_input_idx) -> bool {
             int16_t mul_id = (mul_input_idx == 0) ? in0 : in1;
             int16_t other_id = (other_input_idx == 0) ? in0 : in1;
-            if (mul_id < 0 || mul_id >= ctx.num_nodes) { return false;
-}
+            if (mul_id < 0 || mul_id >= ctx.num_nodes) {
+                return false;
+            }
             auto& mul_node = ctx.nodes[mul_id];
-            if (mul_node.op != Op::FMul) { return false;
-}
-            if (mul_node.flags & kDead) { return false;
-}
-            if (use_count[mul_id] != 1) { return false;
-}
+            if (mul_node.op != Op::FMul) {
+                return false;
+            }
+            if (mul_node.flags & kDead) {
+                return false;
+            }
+            if (use_count[mul_id] != 1) {
+                return false;
+            }
 
             // Determine FMA variant.
             Op fma_op;
@@ -157,17 +184,19 @@ static void pass_fma(Context& ctx) {
             mul_node.flags |= kDead;
             use_count[mul_id] = 0;
             // Update use counts for the rewritten inputs.
-            if (mul_node.inputs[0] >= 0) { use_count[mul_node.inputs[0]]++;
-}
-            if (mul_node.inputs[1] >= 0) { use_count[mul_node.inputs[1]]++;
-}
+            if (mul_node.inputs[0] >= 0) {
+                use_count[mul_node.inputs[0]]++;
+            }
+            if (mul_node.inputs[1] >= 0) {
+                use_count[mul_node.inputs[1]]++;
+            }
             // other_id already had its use from the original node; no change needed.
             return true;
         };
 
         if (!try_fuse(0, 1)) {
             try_fuse(1, 0);
-}
+        }
     }
 }
 
@@ -180,24 +209,29 @@ static void pass_fma(Context& ctx) {
 static void pass_fcom_fstsw_fusion(Context& ctx) {
     for (int i = 0; i < ctx.num_nodes; i++) {
         auto& n = ctx.nodes[i];
-        if (n.flags & kDead) { continue;
-}
-        if (n.op != Op::FStsw) { continue;
-}
+        if (n.flags & kDead) {
+            continue;
+        }
+        if (n.op != Op::FStsw) {
+            continue;
+        }
 
         int16_t fcmp_id = n.inputs[0];
-        if (fcmp_id < 0 || fcmp_id >= ctx.num_nodes) { continue;
-}
+        if (fcmp_id < 0 || fcmp_id >= ctx.num_nodes) {
+            continue;
+        }
         auto& fcmp_node = ctx.nodes[fcmp_id];
-        if (fcmp_node.op != Op::FCmp && fcmp_node.op != Op::FTst) { continue;
-}
+        if (fcmp_node.op != Op::FCmp && fcmp_node.op != Op::FTst) {
+            continue;
+        }
 
         // Check no intervening CC-modifying instruction between fcmp and fstsw.
         bool clean = true;
         for (int j = fcmp_id + 1; j < i; j++) {
             auto& between = ctx.nodes[j];
-            if (between.flags & kDead) { continue;
-}
+            if (between.flags & kDead) {
+                continue;
+            }
             if (between.op == Op::FCmp || between.op == Op::FTst) {
                 clean = false;
                 break;

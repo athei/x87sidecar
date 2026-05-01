@@ -5,23 +5,24 @@
  *
  * NOTE: GAS AT&T: fsubp=Intel FSUBRP, fdivp=Intel FDIVRP
  */
-#include <stdio.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <time.h>
+
 #include "bench_timing.h"
 
 #define TIMES 1000000
-#define RUNS  5
+#define RUNS 5
 
 static bench_ns_t bench_fxch_faddp(void) {
     bench_ns_t start = bench_now_ns();
     volatile double r;
     for (int i = 0; i < TIMES; i++)
-        __asm__ volatile (
+        __asm__ volatile(
             "fld1\n\t"
-            "fld1\n\t fld1\n\t faddp\n\t"  /* ST(0)=2, ST(1)=1 */
-            "fxch %%st(1)\n\t"              /* ST(0)=1, ST(1)=2 */
-            "faddp\n\t"                     /* ST(1)=2+1=3, pop -> ST(0)=3 */
+            "fld1\n\t fld1\n\t faddp\n\t" /* ST(0)=2, ST(1)=1 */
+            "fxch %%st(1)\n\t"            /* ST(0)=1, ST(1)=2 */
+            "faddp\n\t"                   /* ST(1)=2+1=3, pop -> ST(0)=3 */
             "fstpl %0\n"
             : "=m"(r));
     return bench_now_ns() - start;
@@ -32,11 +33,11 @@ static bench_ns_t bench_fxch_fsubp(void) {
     bench_ns_t start = bench_now_ns();
     volatile double r;
     for (int i = 0; i < TIMES; i++)
-        __asm__ volatile (
+        __asm__ volatile(
             "fld1\n\t"
-            "fld1\n\t fld1\n\t faddp\n\t"  /* ST(0)=2, ST(1)=1 */
-            "fxch %%st(1)\n\t"              /* ST(0)=1, ST(1)=2 */
-            "fsubp\n\t"                     /* GAS=FSUBRP: ST(1)=1-2=-1, pop -> ST(0)=-1 */
+            "fld1\n\t fld1\n\t faddp\n\t" /* ST(0)=2, ST(1)=1 */
+            "fxch %%st(1)\n\t"            /* ST(0)=1, ST(1)=2 */
+            "fsubp\n\t"                   /* GAS=FSUBRP: ST(1)=1-2=-1, pop -> ST(0)=-1 */
             "fstpl %0\n"
             : "=m"(r));
     return bench_now_ns() - start;
@@ -46,11 +47,11 @@ static bench_ns_t bench_fxch_fmulp(void) {
     bench_ns_t start = bench_now_ns();
     volatile double r;
     for (int i = 0; i < TIMES; i++)
-        __asm__ volatile (
-            "fld1\n\t fld1\n\t faddp\n\t"                     /* ST(0)=2 */
-            "fld1\n\t fld1\n\t faddp\n\t fld1\n\t faddp\n\t"  /* ST(0)=3, ST(1)=2 */
-            "fxch %%st(1)\n\t"                                 /* ST(0)=2, ST(1)=3 */
-            "fmulp\n\t"                                        /* ST(1)=3*2=6, pop -> ST(0)=6 */
+        __asm__ volatile(
+            "fld1\n\t fld1\n\t faddp\n\t"                    /* ST(0)=2 */
+            "fld1\n\t fld1\n\t faddp\n\t fld1\n\t faddp\n\t" /* ST(0)=3, ST(1)=2 */
+            "fxch %%st(1)\n\t"                               /* ST(0)=2, ST(1)=3 */
+            "fmulp\n\t"                                      /* ST(1)=3*2=6, pop -> ST(0)=6 */
             "fstpl %0\n"
             : "=m"(r));
     return bench_now_ns() - start;
@@ -61,18 +62,22 @@ static bench_ns_t bench_fxch_fdivp(void) {
     bench_ns_t start = bench_now_ns();
     volatile double r;
     for (int i = 0; i < TIMES; i++)
-        __asm__ volatile (
-            "fld1\n\t fld1\n\t faddp\n\t"                                          /* ST(0)=2 */
-            "fld1\n\t fld1\n\t faddp\n\t fld1\n\t faddp\n\t fld1\n\t faddp\n\t"  /* ST(0)=4, ST(1)=2 */
-            "fxch %%st(1)\n\t"                                                     /* ST(0)=2, ST(1)=4 */
-            "fdivp\n\t"                                                            /* GAS=FDIVRP: ST(1)=2/4=0.5, pop */
+        __asm__ volatile(
+            "fld1\n\t fld1\n\t faddp\n\t"                                       /* ST(0)=2 */
+            "fld1\n\t fld1\n\t faddp\n\t fld1\n\t faddp\n\t fld1\n\t faddp\n\t" /* ST(0)=4, ST(1)=2
+                                                                                 */
+            "fxch %%st(1)\n\t" /* ST(0)=2, ST(1)=4 */
+            "fdivp\n\t"        /* GAS=FDIVRP: ST(1)=2/4=0.5, pop */
             "fstpl %0\n"
             : "=m"(r));
     return bench_now_ns() - start;
 }
 
 int main(void) {
-    struct { const char *name; bench_ns_t (*fn)(void); } benches[] = {
+    struct {
+        const char* name;
+        bench_ns_t (*fn)(void);
+    } benches[] = {
         {"fxch_faddp", bench_fxch_faddp},
         {"fxch_fsubp", bench_fxch_fsubp},
         {"fxch_fmulp", bench_fxch_fmulp},
@@ -81,7 +86,8 @@ int main(void) {
     int n = (int)(sizeof(benches) / sizeof(benches[0]));
     for (int i = 0; i < n; i++) {
         bench_ns_t sum = 0;
-        for (int r = 0; r < RUNS; r++) sum += benches[i].fn();
+        for (int r = 0; r < RUNS; r++)
+            sum += benches[i].fn();
         printf("BENCH %s %lu\n", benches[i].name, (unsigned long)(sum / RUNS));
     }
     return 0;

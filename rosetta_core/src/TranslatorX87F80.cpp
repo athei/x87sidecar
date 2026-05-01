@@ -15,10 +15,10 @@ namespace TranslatorX87 {
 static inline void emit_csel(AssemblerBuffer& buf, int is_64bit, int Rd, int Rn, int Rm, int cond) {
     uint32_t insn = 0x1A800000U;
     insn |= static_cast<uint32_t>(is_64bit != 0) << 31;
-    insn |= static_cast<uint32_t>(Rm   & 0x1F) << 16;
-    insn |= static_cast<uint32_t>(cond & 0xF)  << 12;
-    insn |= static_cast<uint32_t>(Rn   & 0x1F) << 5;
-    insn |= static_cast<uint32_t>(Rd   & 0x1F);
+    insn |= static_cast<uint32_t>(Rm & 0x1F) << 16;
+    insn |= static_cast<uint32_t>(cond & 0xF) << 12;
+    insn |= static_cast<uint32_t>(Rn & 0x1F) << 5;
+    insn |= static_cast<uint32_t>(Rd & 0x1F);
     buf.emit(insn);
 }
 
@@ -41,11 +41,7 @@ static inline void emit_csel(AssemblerBuffer& buf, int is_64bit, int Rd, int Rn,
 // 15360 = 16383 (f80 bias) - 1023 (f64 bias).  Doesn't fit in imm12/imm12<<12,
 // so we do SUB #16384 + ADD #1024 to subtract it without burning a register.
 // =============================================================================
-void emit_f80_to_f64_convert(AssemblerBuffer& buf,
-                             int Xmant_inout,
-                             int Wexp,
-                             int Xsign,
-                             int Wd_aux,
+void emit_f80_to_f64_convert(AssemblerBuffer& buf, int Xmant_inout, int Wexp, int Xsign, int Wd_aux,
                              int Wd_tmp) {
     // Wd_aux holds the rounding-carry first, then is reused for the
     // 0x7FFF/0x7FF constants — the carry is consumed before the override
@@ -56,8 +52,7 @@ void emit_f80_to_f64_convert(AssemblerBuffer& buf,
                   /*immr=*/15, /*imms=*/15, Wexp, Xsign);
     LogicalImmEncoding enc_15bits;
     is_bitmask_immediate(/*is_64bit=*/false, 0x7FFFU, enc_15bits);
-    emit_and_imm(buf, /*is_64bit=*/0, Wexp,
-                 enc_15bits.N, enc_15bits.immr, enc_15bits.imms, Wexp);
+    emit_and_imm(buf, /*is_64bit=*/0, Wexp, enc_15bits.N, enc_15bits.immr, enc_15bits.imms, Wexp);
 
     // Pre-round: add 0x400 (= half of the 11-bit slack we'll truncate)
     // before LSR 11 to implement round-half-up.  Without this, sqrt(2)
@@ -77,8 +72,8 @@ void emit_f80_to_f64_convert(AssemblerBuffer& buf,
                   /*immr=*/11, /*imms=*/63, Xmant_inout, Xmant_inout);
     LogicalImmEncoding enc_mant52;
     is_bitmask_immediate(/*is_64bit=*/true, 0x000FFFFFFFFFFFFFULL, enc_mant52);
-    emit_and_imm(buf, /*is_64bit=*/1, Xmant_inout,
-                 enc_mant52.N, enc_mant52.immr, enc_mant52.imms, Xmant_inout);
+    emit_and_imm(buf, /*is_64bit=*/1, Xmant_inout, enc_mant52.N, enc_mant52.immr, enc_mant52.imms,
+                 Xmant_inout);
 
     // If exp_low == 0 (zero/denormal): zero out mantissa.
     // CMP Wexp, #0; CSEL Xmant_inout, XZR, Xmant_inout, EQ.
@@ -119,7 +114,7 @@ void emit_f80_to_f64_convert(AssemblerBuffer& buf,
     emit_bitfield(buf, /*is_64bit=*/1, /*opc=*/1 /*BFM*/, /*N=*/1,
                   /*immr=*/12, /*imms=*/10, Wd_tmp, Xmant_inout);
     emit_bitfield(buf, /*is_64bit=*/1, /*opc=*/1 /*BFM*/, /*N=*/1,
-                  /*immr=*/1,  /*imms=*/0,  Xsign,  Xmant_inout);
+                  /*immr=*/1, /*imms=*/0, Xsign, Xmant_inout);
 }
 
 // =============================================================================
@@ -139,18 +134,13 @@ void emit_f80_to_f64_convert(AssemblerBuffer& buf,
 // All branch displacements are PC-relative (instruction units), so this
 // helper is safe to invoke any number of times back-to-back in one block.
 // =============================================================================
-void emit_f64_to_f80(AssemblerBuffer& buf,
-                     int Xaddr_slot,
-                     int Dd_src,
-                     int Xbits,
-                     int Wexp,
+void emit_f64_to_f80(AssemblerBuffer& buf, int Xaddr_slot, int Dd_src, int Xbits, int Wexp,
                      int Wd_tmp) {
     // [0] FMOV Xbits, Dd_src — raw double bits to GPR
     emit_fmov_d_to_x(buf, Xbits, Dd_src);
 
     // [1] UBFX Xexp, Xbits, #52, #11 — extract 11-bit exponent
-    emit_bitfield(buf, /*is_64bit=*/1, /*opc=*/2, /*N=*/1, /*immr=*/52, /*imms=*/62,
-                  Xbits, Wexp);
+    emit_bitfield(buf, /*is_64bit=*/1, /*opc=*/2, /*N=*/1, /*immr=*/52, /*imms=*/62, Xbits, Wexp);
 
     // [2] LSR Wd_tmp, Xbits, #48 — shift sign from bit 63 to bit 15
     emit_bitfield(buf, 1, 2, 1, 48, 63, Xbits, Wd_tmp);
@@ -186,8 +176,8 @@ void emit_f64_to_f80(AssemblerBuffer& buf,
     emit_add_imm(buf, 0, 0, 0, 0, 0xC00, Wexp, Wexp);
 
     // [11] ORR Wexp, Wexp, Wd_tmp — combine biased exponent + sign
-    emit_logical_shifted_reg(buf, 0, /*opc=*/1, /*n=*/0, /*shift_type=*/0,
-                             Wd_tmp, /*shift_amount=*/0, Wexp, Wexp);
+    emit_logical_shifted_reg(buf, 0, /*opc=*/1, /*n=*/0, /*shift_type=*/0, Wd_tmp,
+                             /*shift_amount=*/0, Wexp, Wexp);
 
     // [12] STR Xbits, [Xaddr_slot] — 8-byte mantissa
     emit_str_imm(buf, /*size=*/3, Xbits, Xaddr_slot, /*imm12=*/0);

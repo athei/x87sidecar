@@ -29,15 +29,15 @@ auto MachoLoader::machHeader() const -> mach_header_64* {
 }
 
 auto MachoLoader::imageSize() const -> size_t {
-    auto *header = machHeader();
+    auto* header = machHeader();
 
     size_t imageSize = 0;
 
     auto* cmd = reinterpret_cast<load_command*>(header + 1);
 
-    for (auto i = 0; std::cmp_less(i , header->ncmds); i++) {
+    for (auto i = 0; std::cmp_less(i, header->ncmds); i++) {
         if (cmd->cmd == LC_SEGMENT_64) {
-            auto *seg = reinterpret_cast<segment_command_64*>(cmd);
+            auto* seg = reinterpret_cast<segment_command_64*>(cmd);
 
             uint64_t segEnd = seg->vmaddr + seg->vmsize;
             imageSize = std::max<uint64_t>(segEnd, imageSize);
@@ -51,18 +51,18 @@ auto MachoLoader::imageSize() const -> size_t {
 }
 
 auto MachoLoader::getSection(const char* segment, const char* section) const -> section_64* {
-    auto *header = machHeader();
+    auto* header = machHeader();
 
     auto* cmd = reinterpret_cast<load_command*>(header + 1);
 
-    for (auto i = 0; std::cmp_less(i , header->ncmds); i++) {
+    for (auto i = 0; std::cmp_less(i, header->ncmds); i++) {
         if (cmd->cmd == LC_SEGMENT_64) {
-            auto *seg = reinterpret_cast<segment_command_64*>(cmd);
+            auto* seg = reinterpret_cast<segment_command_64*>(cmd);
 
             if (strcmp(seg->segname, segment) == 0) {
                 auto* sect = reinterpret_cast<section_64*>(seg + 1);
 
-                for (auto j = 0; std::cmp_less(j , seg->nsects); j++) {
+                for (auto j = 0; std::cmp_less(j, seg->nsects); j++) {
                     if (strcmp(sect->sectname, section) == 0) {
                         return sect;
                     }
@@ -79,13 +79,13 @@ auto MachoLoader::getSection(const char* segment, const char* section) const -> 
 }
 
 auto MachoLoader::getSegment(const char* segment) const -> segment_command_64* {
-    auto *header = machHeader();
+    auto* header = machHeader();
 
     auto* cmd = reinterpret_cast<load_command*>(header + 1);
 
-    for (auto i = 0; std::cmp_less(i , header->ncmds); i++) {
+    for (auto i = 0; std::cmp_less(i, header->ncmds); i++) {
         if (cmd->cmd == LC_SEGMENT_64) {
-            auto *seg = reinterpret_cast<segment_command_64*>(cmd);
+            auto* seg = reinterpret_cast<segment_command_64*>(cmd);
 
             if (strcmp(seg->segname, segment) == 0) {
                 return seg;
@@ -98,14 +98,15 @@ auto MachoLoader::getSegment(const char* segment) const -> segment_command_64* {
     return nullptr;
 }
 
-auto MachoLoader::forEachSegment(const std::function<void(segment_command_64* segm)>& callback) const -> void {
-    auto *header = machHeader();
+auto MachoLoader::forEachSegment(
+    const std::function<void(segment_command_64* segm)>& callback) const -> void {
+    auto* header = machHeader();
 
     auto* cmd = reinterpret_cast<load_command*>(header + 1);
 
-    for (auto i = 0; std::cmp_less(i , header->ncmds); i++) {
+    for (auto i = 0; std::cmp_less(i, header->ncmds); i++) {
         if (cmd->cmd == LC_SEGMENT_64) {
-            auto *seg = reinterpret_cast<segment_command_64*>(cmd);
+            auto* seg = reinterpret_cast<segment_command_64*>(cmd);
 
             // Skip __PAGEZERO and any other unmapped segments (initprot=NONE, no file backing)
             if (seg->initprot != VM_PROT_NONE) {

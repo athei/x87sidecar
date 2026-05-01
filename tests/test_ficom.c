@@ -19,80 +19,77 @@
  *   gcc -O0 -m32 -o test_ficom test_ficom.c && ./test_ficom
  */
 
-#include <stdio.h>
 #include <stdint.h>
+#include <stdio.h>
 
 /* Read x87 status-word CC bits after a compare. */
-#define READ_SW(var)                                   \
-    uint16_t var;                                      \
-    __asm__ volatile (                                 \
-        "fnstsw %%ax\n"                                \
-        "andw $0x4500, %%ax\n"                         \
-        "movw %%ax, %0\n"                              \
-        : "=m" (var) : : "ax"                          \
-    )
+#define READ_SW(var)           \
+    uint16_t var;              \
+    __asm__ volatile(          \
+        "fnstsw %%ax\n"        \
+        "andw $0x4500, %%ax\n" \
+        "movw %%ax, %0\n"      \
+        : "=m"(var)            \
+        :                      \
+        : "ax")
 
 /* ===========================================================================
  * FICOM m16int  —  DE /2  —  compare ST(0) with int16 memory, no pop
  * =========================================================================== */
 
 /* 3.0 > 1 — expected 0x0000 */
-static uint16_t test_ficom_m16_gt(void)
-{
+static uint16_t test_ficom_m16_gt(void) {
     double st0 = 3.0;
     int16_t src = 1;
-    __asm__ volatile (
+    __asm__ volatile(
         "fldl  %0\n"
         "ficoms %1\n"
-        : : "m" (st0), "m" (src)
-    );
+        :
+        : "m"(st0), "m"(src));
     READ_SW(cc);
-    __asm__ volatile ("fstp %%st(0)\n" : : : "st");
+    __asm__ volatile("fstp %%st(0)\n" : : : "st");
     return cc;
 }
 
 /* 1.0 < 3 — expected 0x0100 */
-static uint16_t test_ficom_m16_lt(void)
-{
+static uint16_t test_ficom_m16_lt(void) {
     double st0 = 1.0;
     int16_t src = 3;
-    __asm__ volatile (
+    __asm__ volatile(
         "fldl  %0\n"
         "ficoms %1\n"
-        : : "m" (st0), "m" (src)
-    );
+        :
+        : "m"(st0), "m"(src));
     READ_SW(cc);
-    __asm__ volatile ("fstp %%st(0)\n" : : : "st");
+    __asm__ volatile("fstp %%st(0)\n" : : : "st");
     return cc;
 }
 
 /* 2.0 = 2 — expected 0x4000 */
-static uint16_t test_ficom_m16_eq(void)
-{
+static uint16_t test_ficom_m16_eq(void) {
     double st0 = 2.0;
     int16_t src = 2;
-    __asm__ volatile (
+    __asm__ volatile(
         "fldl  %0\n"
         "ficoms %1\n"
-        : : "m" (st0), "m" (src)
-    );
+        :
+        : "m"(st0), "m"(src));
     READ_SW(cc);
-    __asm__ volatile ("fstp %%st(0)\n" : : : "st");
+    __asm__ volatile("fstp %%st(0)\n" : : : "st");
     return cc;
 }
 
 /* NaN vs 1 — expected 0x4500 */
-static uint16_t test_ficom_m16_un(void)
-{
+static uint16_t test_ficom_m16_un(void) {
     double nan_val = __builtin_nan("");
     int16_t src = 1;
-    __asm__ volatile (
+    __asm__ volatile(
         "fldl  %0\n"
         "ficoms %1\n"
-        : : "m" (nan_val), "m" (src)
-    );
+        :
+        : "m"(nan_val), "m"(src));
     READ_SW(cc);
-    __asm__ volatile ("fstp %%st(0)\n" : : : "st");
+    __asm__ volatile("fstp %%st(0)\n" : : : "st");
     return cc;
 }
 
@@ -101,62 +98,58 @@ static uint16_t test_ficom_m16_un(void)
  * =========================================================================== */
 
 /* 3.0 > 1 — expected 0x0000 */
-static uint16_t test_ficom_m32_gt(void)
-{
+static uint16_t test_ficom_m32_gt(void) {
     double st0 = 3.0;
     int32_t src = 1;
-    __asm__ volatile (
+    __asm__ volatile(
         "fldl  %0\n"
         "ficoml %1\n"
-        : : "m" (st0), "m" (src)
-    );
+        :
+        : "m"(st0), "m"(src));
     READ_SW(cc);
-    __asm__ volatile ("fstp %%st(0)\n" : : : "st");
+    __asm__ volatile("fstp %%st(0)\n" : : : "st");
     return cc;
 }
 
 /* 1.0 < 3 — expected 0x0100 */
-static uint16_t test_ficom_m32_lt(void)
-{
+static uint16_t test_ficom_m32_lt(void) {
     double st0 = 1.0;
     int32_t src = 3;
-    __asm__ volatile (
+    __asm__ volatile(
         "fldl  %0\n"
         "ficoml %1\n"
-        : : "m" (st0), "m" (src)
-    );
+        :
+        : "m"(st0), "m"(src));
     READ_SW(cc);
-    __asm__ volatile ("fstp %%st(0)\n" : : : "st");
+    __asm__ volatile("fstp %%st(0)\n" : : : "st");
     return cc;
 }
 
 /* 2.0 = 2 — expected 0x4000 */
-static uint16_t test_ficom_m32_eq(void)
-{
+static uint16_t test_ficom_m32_eq(void) {
     double st0 = 2.0;
     int32_t src = 2;
-    __asm__ volatile (
+    __asm__ volatile(
         "fldl  %0\n"
         "ficoml %1\n"
-        : : "m" (st0), "m" (src)
-    );
+        :
+        : "m"(st0), "m"(src));
     READ_SW(cc);
-    __asm__ volatile ("fstp %%st(0)\n" : : : "st");
+    __asm__ volatile("fstp %%st(0)\n" : : : "st");
     return cc;
 }
 
 /* NaN vs 1 — expected 0x4500 */
-static uint16_t test_ficom_m32_un(void)
-{
+static uint16_t test_ficom_m32_un(void) {
     double nan_val = __builtin_nan("");
     int32_t src = 1;
-    __asm__ volatile (
+    __asm__ volatile(
         "fldl  %0\n"
         "ficoml %1\n"
-        : : "m" (nan_val), "m" (src)
-    );
+        :
+        : "m"(nan_val), "m"(src));
     READ_SW(cc);
-    __asm__ volatile ("fstp %%st(0)\n" : : : "st");
+    __asm__ volatile("fstp %%st(0)\n" : : : "st");
     return cc;
 }
 
@@ -166,57 +159,53 @@ static uint16_t test_ficom_m32_un(void)
  * =========================================================================== */
 
 /* 3.0 > 1 — expected 0x0000 */
-static uint16_t test_ficomp_m16_gt(void)
-{
+static uint16_t test_ficomp_m16_gt(void) {
     double st0 = 3.0;
     int16_t src = 1;
-    __asm__ volatile (
+    __asm__ volatile(
         "fldl   %0\n"
         "ficomps %1\n"
-        : : "m" (st0), "m" (src)
-    );
+        :
+        : "m"(st0), "m"(src));
     READ_SW(cc);
     return cc;
 }
 
 /* 1.0 < 3 — expected 0x0100 */
-static uint16_t test_ficomp_m16_lt(void)
-{
+static uint16_t test_ficomp_m16_lt(void) {
     double st0 = 1.0;
     int16_t src = 3;
-    __asm__ volatile (
+    __asm__ volatile(
         "fldl   %0\n"
         "ficomps %1\n"
-        : : "m" (st0), "m" (src)
-    );
+        :
+        : "m"(st0), "m"(src));
     READ_SW(cc);
     return cc;
 }
 
 /* 2.0 = 2 — expected 0x4000 */
-static uint16_t test_ficomp_m16_eq(void)
-{
+static uint16_t test_ficomp_m16_eq(void) {
     double st0 = 2.0;
     int16_t src = 2;
-    __asm__ volatile (
+    __asm__ volatile(
         "fldl   %0\n"
         "ficomps %1\n"
-        : : "m" (st0), "m" (src)
-    );
+        :
+        : "m"(st0), "m"(src));
     READ_SW(cc);
     return cc;
 }
 
 /* NaN vs 1 — expected 0x4500 */
-static uint16_t test_ficomp_m16_un(void)
-{
+static uint16_t test_ficomp_m16_un(void) {
     double nan_val = __builtin_nan("");
     int16_t src = 1;
-    __asm__ volatile (
+    __asm__ volatile(
         "fldl   %0\n"
         "ficomps %1\n"
-        : : "m" (nan_val), "m" (src)
-    );
+        :
+        : "m"(nan_val), "m"(src));
     READ_SW(cc);
     return cc;
 }
@@ -226,57 +215,53 @@ static uint16_t test_ficomp_m16_un(void)
  * =========================================================================== */
 
 /* 3.0 > 1 — expected 0x0000 */
-static uint16_t test_ficomp_m32_gt(void)
-{
+static uint16_t test_ficomp_m32_gt(void) {
     double st0 = 3.0;
     int32_t src = 1;
-    __asm__ volatile (
+    __asm__ volatile(
         "fldl   %0\n"
         "ficompl %1\n"
-        : : "m" (st0), "m" (src)
-    );
+        :
+        : "m"(st0), "m"(src));
     READ_SW(cc);
     return cc;
 }
 
 /* 1.0 < 3 — expected 0x0100 */
-static uint16_t test_ficomp_m32_lt(void)
-{
+static uint16_t test_ficomp_m32_lt(void) {
     double st0 = 1.0;
     int32_t src = 3;
-    __asm__ volatile (
+    __asm__ volatile(
         "fldl   %0\n"
         "ficompl %1\n"
-        : : "m" (st0), "m" (src)
-    );
+        :
+        : "m"(st0), "m"(src));
     READ_SW(cc);
     return cc;
 }
 
 /* 2.0 = 2 — expected 0x4000 */
-static uint16_t test_ficomp_m32_eq(void)
-{
+static uint16_t test_ficomp_m32_eq(void) {
     double st0 = 2.0;
     int32_t src = 2;
-    __asm__ volatile (
+    __asm__ volatile(
         "fldl   %0\n"
         "ficompl %1\n"
-        : : "m" (st0), "m" (src)
-    );
+        :
+        : "m"(st0), "m"(src));
     READ_SW(cc);
     return cc;
 }
 
 /* NaN vs 1 — expected 0x4500 */
-static uint16_t test_ficomp_m32_un(void)
-{
+static uint16_t test_ficomp_m32_un(void) {
     double nan_val = __builtin_nan("");
     int32_t src = 1;
-    __asm__ volatile (
+    __asm__ volatile(
         "fldl   %0\n"
         "ficompl %1\n"
-        : : "m" (nan_val), "m" (src)
-    );
+        :
+        : "m"(nan_val), "m"(src));
     READ_SW(cc);
     return cc;
 }
@@ -285,37 +270,36 @@ static uint16_t test_ficomp_m32_un(void)
  * Test table and harness
  * =========================================================================== */
 typedef struct {
-    const char    *name;
-    uint16_t     (*fn)(void);
-    uint16_t       expected;
+    const char* name;
+    uint16_t (*fn)(void);
+    uint16_t expected;
 } TestCase;
 
-int main(void)
-{
+int main(void) {
     TestCase tests[] = {
         /* FICOM m16int */
-        { "ficom  m16int  DE /2  GT  3.0>1",   test_ficom_m16_gt,    0x0000 },
-        { "ficom  m16int  DE /2  LT  1.0<3",   test_ficom_m16_lt,    0x0100 },
-        { "ficom  m16int  DE /2  EQ  2.0=2",   test_ficom_m16_eq,    0x4000 },
-        { "ficom  m16int  DE /2  UN  NaN,1",   test_ficom_m16_un,    0x4500 },
+        {"ficom  m16int  DE /2  GT  3.0>1", test_ficom_m16_gt, 0x0000},
+        {"ficom  m16int  DE /2  LT  1.0<3", test_ficom_m16_lt, 0x0100},
+        {"ficom  m16int  DE /2  EQ  2.0=2", test_ficom_m16_eq, 0x4000},
+        {"ficom  m16int  DE /2  UN  NaN,1", test_ficom_m16_un, 0x4500},
 
         /* FICOM m32int */
-        { "ficom  m32int  DA /2  GT  3.0>1",   test_ficom_m32_gt,    0x0000 },
-        { "ficom  m32int  DA /2  LT  1.0<3",   test_ficom_m32_lt,    0x0100 },
-        { "ficom  m32int  DA /2  EQ  2.0=2",   test_ficom_m32_eq,    0x4000 },
-        { "ficom  m32int  DA /2  UN  NaN,1",   test_ficom_m32_un,    0x4500 },
+        {"ficom  m32int  DA /2  GT  3.0>1", test_ficom_m32_gt, 0x0000},
+        {"ficom  m32int  DA /2  LT  1.0<3", test_ficom_m32_lt, 0x0100},
+        {"ficom  m32int  DA /2  EQ  2.0=2", test_ficom_m32_eq, 0x4000},
+        {"ficom  m32int  DA /2  UN  NaN,1", test_ficom_m32_un, 0x4500},
 
         /* FICOMP m16int */
-        { "ficomp m16int  DE /3  GT  3.0>1",   test_ficomp_m16_gt,   0x0000 },
-        { "ficomp m16int  DE /3  LT  1.0<3",   test_ficomp_m16_lt,   0x0100 },
-        { "ficomp m16int  DE /3  EQ  2.0=2",   test_ficomp_m16_eq,   0x4000 },
-        { "ficomp m16int  DE /3  UN  NaN,1",   test_ficomp_m16_un,   0x4500 },
+        {"ficomp m16int  DE /3  GT  3.0>1", test_ficomp_m16_gt, 0x0000},
+        {"ficomp m16int  DE /3  LT  1.0<3", test_ficomp_m16_lt, 0x0100},
+        {"ficomp m16int  DE /3  EQ  2.0=2", test_ficomp_m16_eq, 0x4000},
+        {"ficomp m16int  DE /3  UN  NaN,1", test_ficomp_m16_un, 0x4500},
 
         /* FICOMP m32int */
-        { "ficomp m32int  DA /3  GT  3.0>1",   test_ficomp_m32_gt,   0x0000 },
-        { "ficomp m32int  DA /3  LT  1.0<3",   test_ficomp_m32_lt,   0x0100 },
-        { "ficomp m32int  DA /3  EQ  2.0=2",   test_ficomp_m32_eq,   0x4000 },
-        { "ficomp m32int  DA /3  UN  NaN,1",   test_ficomp_m32_un,   0x4500 },
+        {"ficomp m32int  DA /3  GT  3.0>1", test_ficomp_m32_gt, 0x0000},
+        {"ficomp m32int  DA /3  LT  1.0<3", test_ficomp_m32_lt, 0x0100},
+        {"ficomp m32int  DA /3  EQ  2.0=2", test_ficomp_m32_eq, 0x4000},
+        {"ficomp m32int  DA /3  UN  NaN,1", test_ficomp_m32_un, 0x4500},
     };
 
     int pass = 0, fail = 0;
@@ -323,9 +307,8 @@ int main(void)
     for (int i = 0; i < n; i++) {
         uint16_t got = tests[i].fn();
         int ok = (got == tests[i].expected);
-        printf("%s  got=0x%04x  expected=0x%04x  %s\n",
-               tests[i].name, (unsigned)got, (unsigned)tests[i].expected,
-               ok ? "PASS" : "FAIL");
+        printf("%s  got=0x%04x  expected=0x%04x  %s\n", tests[i].name, (unsigned)got,
+               (unsigned)tests[i].expected, ok ? "PASS" : "FAIL");
         ok ? pass++ : fail++;
     }
 

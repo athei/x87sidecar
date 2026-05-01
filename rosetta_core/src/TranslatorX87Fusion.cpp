@@ -1,13 +1,13 @@
 #include "rosetta_core/TranslatorX87Fusion.h"
 
+#include "TranslatorX87Internal.hpp"
+#include "rosetta_config/Config.h"
 #include "rosetta_core/IRInstr.h"
 #include "rosetta_core/Opcode.h"
 #include "rosetta_core/Register.h"
 #include "rosetta_core/TranslationResult.h"
 #include "rosetta_core/TranslatorHelpers.hpp"
 #include "rosetta_core/TranslatorX87.h"
-#include "TranslatorX87Internal.hpp"
-#include "rosetta_config/Config.h"
 
 namespace TranslatorX87 {
 
@@ -51,7 +51,7 @@ static FldClassification classify_fld_source(IRInstr* fld_instr) {
                 cls.source = kFldM32;
             } else if (fld_instr->operands[0].mem.size == IROperandSize::S64) {
                 cls.source = kFldM64;
-}
+            }
             // else m80 — kFldInvalid
             break;
         case kOpcodeName_fild:
@@ -61,7 +61,7 @@ static FldClassification classify_fld_source(IRInstr* fld_instr) {
                 cls.source = kFildM32;
             } else {
                 cls.source = kFildM64;
-}
+            }
             break;
         case kOpcodeName_fldz:
             cls.source = kFldZero;
@@ -103,11 +103,12 @@ static FldClassification classify_fld_source(IRInstr* fld_instr) {
 // =============================================================================
 
 static void emit_fld_value(AssemblerBuffer& buf, TranslationResult& a1,
-                           const FldClassification& cls, IRInstr* fld_instr,
-                           int Xbase, int Wd_top, int Wd_tmp, int Dd_val, int Xst_base) {
+                           const FldClassification& cls, IRInstr* fld_instr, int Xbase, int Wd_top,
+                           int Wd_tmp, int Dd_val, int Xst_base) {
     switch (cls.source) {
         case kFldReg:
-            emit_load_st(buf, Xbase, Wd_top, resolve_depth(a1, cls.reg_depth), Wd_tmp, Dd_val, Xst_base);
+            emit_load_st(buf, Xbase, Wd_top, resolve_depth(a1, cls.reg_depth), Wd_tmp, Dd_val,
+                         Xst_base);
             break;
 
         case kFldM32: {
@@ -190,7 +191,7 @@ static auto try_fuse_fld_arithp(TranslationResult* a1, IRInstr* fld_instr, IRIns
     auto cls = classify_fld_source(fld_instr);
     if (cls.source == kFldInvalid) {
         return std::nullopt;
-}
+    }
 
     // ── 2. Classify the popping arithmetic op ────────────────────────────────
 
@@ -225,7 +226,7 @@ static auto try_fuse_fld_arithp(TranslationResult* a1, IRInstr* fld_instr, IRIns
     // Must target ST(1) — that's old_ST(0) after the FLD push.
     if (arithp_instr->operands[0].reg.reg.index() != 1) {
         return std::nullopt;
-}
+    }
 
     // ── 3. Emit fused code ───────────────────────────────────────────────────
 
@@ -237,7 +238,7 @@ static auto try_fuse_fld_arithp(TranslationResult* a1, IRInstr* fld_instr, IRIns
     // OPT-D: net-zero-stack fusion — skip flush to preserve full cancellation.
     if (!(a1->x87_cache.tag_push_pending && a1->x87_cache.top_dirty)) {
         x87_flush_top(buf, *a1, Xbase, Wd_top, Wd_tmp);
-}
+    }
 
     const int Dd_st0 = alloc_free_fpr(*a1);
     const int Dd_fld = alloc_free_fpr(*a1);
@@ -248,7 +249,8 @@ static auto try_fuse_fld_arithp(TranslationResult* a1, IRInstr* fld_instr, IRIns
 
     // ── 3b: Load old ST(0) → Dd_st0  (Wd_tmp now holds ST(0) key) ──────────
 
-    const int Wk24 = emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Dd_st0, Xst_base);
+    const int Wk24 =
+        emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Dd_st0, Xst_base);
 
     // ── 3c: Arithmetic ──────────────────────────────────────────────────────
 
@@ -301,10 +303,10 @@ static auto try_fuse_fxch_arithp(TranslationResult* a1, IRInstr* fxch_instr, IRI
     -> std::optional<int> {
     if (fxch_instr->opcode != kOpcodeName_fxch) {
         return std::nullopt;
-}
+    }
     if (fxch_instr->operands[1].reg.reg.index() != 1) {
         return std::nullopt;
-}
+    }
 
     const auto next_op = next_instr->opcode;
     bool is_popping_arith = false;
@@ -322,10 +324,10 @@ static auto try_fuse_fxch_arithp(TranslationResult* a1, IRInstr* fxch_instr, IRI
     }
     if (!is_popping_arith) {
         return std::nullopt;
-}
+    }
     if (next_instr->operands[0].reg.reg.index() != 1) {
         return std::nullopt;
-}
+    }
 
     // The FXCH is absorbed (no code emitted), but it consumes one tick.
     // Pre-decrement run_remaining so the delegated translate function's
@@ -333,7 +335,7 @@ static auto try_fuse_fxch_arithp(TranslationResult* a1, IRInstr* fxch_instr, IRI
     // state when the fusion is at the end of a cache run.
     if (a1->x87_cache.run_remaining > 0) {
         a1->x87_cache.run_remaining--;
-}
+    }
 
     switch (next_op) {
         case kOpcodeName_faddp:
@@ -389,24 +391,24 @@ static auto try_fuse_fld_fstp(TranslationResult* a1, IRInstr* fld_instr, IRInstr
     -> std::optional<int> {
     if (fstp_instr->opcode != kOpcodeName_fstp && fstp_instr->opcode != kOpcodeName_fstp_stack) {
         return std::nullopt;
-}
+    }
 
     const bool fstp_is_reg = (fstp_instr->operands[0].kind == IROperandKind::Register);
 
     if (fstp_is_reg) {
         if (fstp_instr->operands[0].reg.reg.index() != 1) {
             return std::nullopt;
-}
+        }
     } else {
         if (fstp_instr->operands[0].mem.size == IROperandSize::S80) {
             return std::nullopt;
-}
+        }
     }
 
     auto cls = classify_fld_source(fld_instr);
     if (cls.source == kFldInvalid) {
         return std::nullopt;
-}
+    }
 
     // ── Emit fused code ──────────────────────────────────────────────────────
 
@@ -418,7 +420,7 @@ static auto try_fuse_fld_fstp(TranslationResult* a1, IRInstr* fld_instr, IRInstr
     // OPT-D: net-zero-stack fusion — skip flush to preserve full cancellation.
     if (!(a1->x87_cache.tag_push_pending && a1->x87_cache.top_dirty)) {
         x87_flush_top(buf, *a1, Xbase, Wd_top, Wd_tmp);
-}
+    }
 
     const int Dd_val = alloc_free_fpr(*a1);
 
@@ -434,7 +436,7 @@ static auto try_fuse_fld_fstp(TranslationResult* a1, IRInstr* fld_instr, IRInstr
         const bool is_f32 = (fstp_instr->operands[0].mem.size == IROperandSize::S32);
         if (is_f32) {
             emit_fcvt_d_to_s(buf, Dd_val, Dd_val);
-}
+        }
 
         const int addr =
             compute_operand_address(*a1, /*is_64bit=*/true, &fstp_instr->operands[0], GPR::XZR);
@@ -462,20 +464,20 @@ static auto try_fuse_fxch_fstp(TranslationResult* a1, IRInstr* fxch_instr, IRIns
     -> std::optional<int> {
     if (fxch_instr->opcode != kOpcodeName_fxch) {
         return std::nullopt;
-}
+    }
     if (fxch_instr->operands[1].reg.reg.index() != 1) {
         return std::nullopt;
-}
+    }
 
     if (fstp_instr->opcode != kOpcodeName_fstp_stack) {
         return std::nullopt;
-}
+    }
     if (fstp_instr->operands[0].kind != IROperandKind::Register) {
         return std::nullopt;
-}
+    }
     if (fstp_instr->operands[0].reg.reg.index() != 1) {
         return std::nullopt;
-}
+    }
 
     AssemblerBuffer& buf = a1->insn_buf;
     auto [Xbase, Wd_top] = x87_begin(*a1, buf);
@@ -518,15 +520,15 @@ static auto try_fuse_fcom_fstsw(TranslationResult* a1, IRInstr* fcom_instr, IRIn
     // The second instruction must be FSTSW with a register (AX) destination.
     if (fstsw_instr->opcode != kOpcodeName_fstsw) {
         return std::nullopt;
-}
+    }
     if (fstsw_instr->operands[0].kind != IROperandKind::Register) {
         return std::nullopt;
-}
+    }
 
     const auto fcom_op = fcom_instr->opcode;
     const bool is_double_pop = (fcom_op == kOpcodeName_fcompp || fcom_op == kOpcodeName_fucompp);
-    const bool is_popping = is_double_pop ||
-                            (fcom_op == kOpcodeName_fcomp || fcom_op == kOpcodeName_fucomp);
+    const bool is_popping =
+        is_double_pop || (fcom_op == kOpcodeName_fcomp || fcom_op == kOpcodeName_fucomp);
 
     AssemblerBuffer& buf = a1->insn_buf;
     auto [Xbase, Wd_top] = x87_begin(*a1, buf);
@@ -557,7 +559,7 @@ static auto try_fuse_fcom_fstsw(TranslationResult* a1, IRInstr* fcom_instr, IRIn
         free_gpr(*a1, addr_reg);
         if (is_f32) {
             emit_fcvt_s_to_d(buf, Dd_src, Dd_src);
-}
+        }
     }
 
     // ── MRS save NZCV, FCMP, branchless CC mapping, MSR restore ─────────────
@@ -607,7 +609,7 @@ static auto try_fuse_fcom_fstsw(TranslationResult* a1, IRInstr* fcom_instr, IRIn
             x87_pop_n(buf, *a1, Xbase, Wd_top, Wd_tmp, 2);
         } else {
             x87_pop(buf, *a1, Xbase, Wd_top, Wd_tmp);
-}
+        }
         // AX was BFI'd before the pop — TOP bits [13:11] are stale (pre-pop).
         // Patch in the post-pop TOP value (correct for both single and double pop).
         // BFI W_ax, Wd_top, #11, #3  →  BFM immr=21, imms=2
@@ -636,16 +638,14 @@ static auto try_fuse_fcom_fstsw(TranslationResult* a1, IRInstr* fcom_instr, IRIn
 // Returns 3 (instructions consumed) if fused, std::nullopt otherwise.
 // =============================================================================
 
-
-static auto try_fuse_fld_arith_fstp(TranslationResult* a1, IRInstr* fld_instr,
-                                    IRInstr* arith_instr, IRInstr* fstp_instr)
-    -> std::optional<int> {
+static auto try_fuse_fld_arith_fstp(TranslationResult* a1, IRInstr* fld_instr, IRInstr* arith_instr,
+                                    IRInstr* fstp_instr) -> std::optional<int> {
     // ── 1. Classify FLD source ──────────────────────────────────────────────
 
     auto cls = classify_fld_source(fld_instr);
     if (cls.source == kFldInvalid) {
         return std::nullopt;
-}
+    }
 
     // // ── 2. Classify non-popping arithmetic ──────────────────────────────────
 
@@ -685,17 +685,17 @@ static auto try_fuse_fld_arith_fstp(TranslationResult* a1, IRInstr* fld_instr,
         // FSTP store destination would reference shifted indices — not worth it.
         if (arith_instr->operands[0].reg.reg.index() != 0) {
             return std::nullopt;
-}
+        }
         if (arith_instr->operands[1].reg.reg.index() != 1) {
             return std::nullopt;
-}
+        }
     }
 
     // ── 3. Validate FSTP ────────────────────────────────────────────────────
 
     if (fstp_instr->opcode != kOpcodeName_fstp && fstp_instr->opcode != kOpcodeName_fstp_stack) {
         return std::nullopt;
-}
+    }
 
     const bool fstp_is_reg = (fstp_instr->operands[0].kind == IROperandKind::Register);
 
@@ -704,11 +704,11 @@ static auto try_fuse_fld_arith_fstp(TranslationResult* a1, IRInstr* fld_instr,
         // Net: ST(0) = result.
         if (fstp_instr->operands[0].reg.reg.index() != 1) {
             return std::nullopt;
-}
+        }
     } else {
         if (fstp_instr->operands[0].mem.size == IROperandSize::S80) {
             return std::nullopt;
-}
+        }
     }
     // // ── 4. Emit fused code ──────────────────────────────────────────────────
 
@@ -720,7 +720,7 @@ static auto try_fuse_fld_arith_fstp(TranslationResult* a1, IRInstr* fld_instr,
     // OPT-D: net-zero-stack fusion — skip flush to preserve full cancellation.
     if (!(a1->x87_cache.tag_push_pending && a1->x87_cache.top_dirty)) {
         x87_flush_top(buf, *a1, Xbase, Wd_top, Wd_tmp);
-}
+    }
 
     const int Dd_fld = alloc_free_fpr(*a1);
     const int Dd_src = alloc_free_fpr(*a1);
@@ -742,7 +742,7 @@ static auto try_fuse_fld_arith_fstp(TranslationResult* a1, IRInstr* fld_instr,
         free_gpr(*a1, addr_reg);
         if (is_f32) {
             emit_fcvt_s_to_d(buf, Dd_src, Dd_src);
-}
+        }
     } else {
         // Register-register: src = ST(1) = old ST(0).  Load it and capture the
         // byte-offset key in case FSTP stores back to ST(1).
@@ -790,7 +790,7 @@ static auto try_fuse_fld_arith_fstp(TranslationResult* a1, IRInstr* fld_instr,
         const bool is_f32 = (fstp_instr->operands[0].mem.size == IROperandSize::S32);
         if (is_f32) {
             emit_fcvt_d_to_s(buf, Dd_fld, Dd_fld);
-}
+        }
 
         const int addr =
             compute_operand_address(*a1, /*is_64bit=*/true, &fstp_instr->operands[0], GPR::XZR);
@@ -824,13 +824,13 @@ static auto try_fuse_fld_arith_fstp(TranslationResult* a1, IRInstr* fld_instr,
 // =============================================================================
 
 static auto try_fuse_fld_arith_arithp(TranslationResult* a1, IRInstr* fld_instr,
-                                       IRInstr* arith_instr, IRInstr* arithp_instr)
+                                      IRInstr* arith_instr, IRInstr* arithp_instr)
     -> std::optional<int> {
     // ── 1. Classify FLD source ──────────────────────────────────────────────
     auto cls = classify_fld_source(fld_instr);
     if (cls.source == kFldInvalid) {
         return std::nullopt;
-}
+    }
 
     // ── 2. Classify non-popping middle arithmetic ────────────────────────────
     enum ArithOp : std::uint8_t { kAdd, kSub, kSubR, kMul, kDiv, kDivR };
@@ -838,13 +838,26 @@ static auto try_fuse_fld_arith_arithp(TranslationResult* a1, IRInstr* fld_instr,
     const auto arith_opcode = arith_instr->opcode;
     ArithOp arith1;
     switch (arith_opcode) {
-        case kOpcodeName_fadd:  arith1 = kAdd;  break;
-        case kOpcodeName_fsub:  arith1 = kSub;  break;
-        case kOpcodeName_fsubr: arith1 = kSubR; break;
-        case kOpcodeName_fmul:  arith1 = kMul;  break;
-        case kOpcodeName_fdiv:  arith1 = kDiv;  break;
-        case kOpcodeName_fdivr: arith1 = kDivR; break;
-        default: return std::nullopt;
+        case kOpcodeName_fadd:
+            arith1 = kAdd;
+            break;
+        case kOpcodeName_fsub:
+            arith1 = kSub;
+            break;
+        case kOpcodeName_fsubr:
+            arith1 = kSubR;
+            break;
+        case kOpcodeName_fmul:
+            arith1 = kMul;
+            break;
+        case kOpcodeName_fdiv:
+            arith1 = kDiv;
+            break;
+        case kOpcodeName_fdivr:
+            arith1 = kDivR;
+            break;
+        default:
+            return std::nullopt;
     }
 
     const bool arith1_is_mem = (arith_instr->operands[0].kind != IROperandKind::Register);
@@ -852,29 +865,42 @@ static auto try_fuse_fld_arith_arithp(TranslationResult* a1, IRInstr* fld_instr,
         // Register form: after FLD push, must be ST(0) op ST(1).
         if (arith_instr->operands[0].reg.reg.index() != 0) {
             return std::nullopt;
-}
+        }
         if (arith_instr->operands[1].reg.reg.index() != 1) {
             return std::nullopt;
-}
+        }
     }
 
     // ── 3. Classify popping final arithmetic ────────────────────────────────
     const auto arithp_opcode = arithp_instr->opcode;
     ArithOp arith2;
     switch (arithp_opcode) {
-        case kOpcodeName_faddp:  arith2 = kAdd;  break;
-        case kOpcodeName_fsubp:  arith2 = kSub;  break;
-        case kOpcodeName_fsubrp: arith2 = kSubR; break;
-        case kOpcodeName_fmulp:  arith2 = kMul;  break;
-        case kOpcodeName_fdivp:  arith2 = kDiv;  break;
-        case kOpcodeName_fdivrp: arith2 = kDivR; break;
-        default: return std::nullopt;
+        case kOpcodeName_faddp:
+            arith2 = kAdd;
+            break;
+        case kOpcodeName_fsubp:
+            arith2 = kSub;
+            break;
+        case kOpcodeName_fsubrp:
+            arith2 = kSubR;
+            break;
+        case kOpcodeName_fmulp:
+            arith2 = kMul;
+            break;
+        case kOpcodeName_fdivp:
+            arith2 = kDiv;
+            break;
+        case kOpcodeName_fdivrp:
+            arith2 = kDivR;
+            break;
+        default:
+            return std::nullopt;
     }
 
     // After FLD push, ARITHp must target ST(1) (= old_ST(0) before push).
     if (arithp_instr->operands[0].reg.reg.index() != 1) {
         return std::nullopt;
-}
+    }
 
     // ── 4. Emit fused code ──────────────────────────────────────────────────
     AssemblerBuffer& buf = a1->insn_buf;
@@ -885,7 +911,7 @@ static auto try_fuse_fld_arith_arithp(TranslationResult* a1, IRInstr* fld_instr,
     // OPT-D: net-zero-stack fusion — skip flush to preserve full cancellation.
     if (!(a1->x87_cache.tag_push_pending && a1->x87_cache.top_dirty)) {
         x87_flush_top(buf, *a1, Xbase, Wd_top, Wd_tmp);
-}
+    }
 
     const int Dd_fld = alloc_free_fpr(*a1);
     const int Dd_st0 = alloc_free_fpr(*a1);
@@ -901,7 +927,8 @@ static auto try_fuse_fld_arith_arithp(TranslationResult* a1, IRInstr* fld_instr,
     // ── 4b: Load old ST(0) → Dd_st0 ─────────────────────────────────────────
     // Capture key for storing back (net-zero push/pop means same physical slot).
     // Wd_tmp is now free to be reused as the depth-0 offset key.
-    const int Wk_st0 = emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Dd_st0, Xst_base);
+    const int Wk_st0 =
+        emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Dd_st0, Xst_base);
 
     // ── 4c+4d: FMA fast path — when arith1=MUL and arith2 ∈ {ADD,SUB,SUBR},
     //           fold the multiply and accumulate into a single FMA instruction.
@@ -915,8 +942,8 @@ static auto try_fuse_fld_arith_arithp(TranslationResult* a1, IRInstr* fld_instr,
     //     kSubR → Dd_st0 = Dd_fld * Dm - Dd_st0    (FNMSUB)
     //   where Dm = Dd_st0 (register) or Dd_mem (memory operand).
 
-    const bool fma_eligible = (arith1 == kMul) &&
-                              (arith2 == kAdd || arith2 == kSub || arith2 == kSubR);
+    const bool fma_eligible =
+        (arith1 == kMul) && (arith2 == kAdd || arith2 == kSub || arith2 == kSubR);
 
     if (fma_eligible && arith1_is_mem) {
         // FMA with memory multiply operand: load mem → Dd_mem, then single FMA.
@@ -928,23 +955,37 @@ static auto try_fuse_fld_arith_arithp(TranslationResult* a1, IRInstr* fld_instr,
         free_gpr(*a1, addr_reg);
         if (is_f32) {
             emit_fcvt_s_to_d(buf, Dd_mem, Dd_mem);
-}
+        }
 
         switch (arith2) {
-            case kAdd:  emit_fmadd_f64(buf, Dd_st0, Dd_fld, Dd_mem, Dd_st0);  break;
-            case kSub:  emit_fmsub_f64(buf, Dd_st0, Dd_fld, Dd_mem, Dd_st0);  break;
-            case kSubR: emit_fnmsub_f64(buf, Dd_st0, Dd_fld, Dd_mem, Dd_st0); break;
-            default: break;
+            case kAdd:
+                emit_fmadd_f64(buf, Dd_st0, Dd_fld, Dd_mem, Dd_st0);
+                break;
+            case kSub:
+                emit_fmsub_f64(buf, Dd_st0, Dd_fld, Dd_mem, Dd_st0);
+                break;
+            case kSubR:
+                emit_fnmsub_f64(buf, Dd_st0, Dd_fld, Dd_mem, Dd_st0);
+                break;
+            default:
+                break;
         }
         free_fpr(*a1, Dd_mem);
 
     } else if (fma_eligible) {
         // FMA with register multiply operand: Dm = Dd_st0.
         switch (arith2) {
-            case kAdd:  emit_fmadd_f64(buf, Dd_st0, Dd_fld, Dd_st0, Dd_st0);  break;
-            case kSub:  emit_fmsub_f64(buf, Dd_st0, Dd_fld, Dd_st0, Dd_st0);  break;
-            case kSubR: emit_fnmsub_f64(buf, Dd_st0, Dd_fld, Dd_st0, Dd_st0); break;
-            default: break;
+            case kAdd:
+                emit_fmadd_f64(buf, Dd_st0, Dd_fld, Dd_st0, Dd_st0);
+                break;
+            case kSub:
+                emit_fmsub_f64(buf, Dd_st0, Dd_fld, Dd_st0, Dd_st0);
+                break;
+            case kSubR:
+                emit_fnmsub_f64(buf, Dd_st0, Dd_fld, Dd_st0, Dd_st0);
+                break;
+            default:
+                break;
         }
 
     } else {
@@ -953,41 +994,77 @@ static auto try_fuse_fld_arith_arithp(TranslationResult* a1, IRInstr* fld_instr,
         if (arith1_is_mem) {
             const int Dd_mem = alloc_free_fpr(*a1);
             const bool is_f32 = (arith_instr->operands[0].mem.size == IROperandSize::S32);
-            const int addr_reg =
-                compute_operand_address(*a1, /*is_64bit=*/true, &arith_instr->operands[0], GPR::XZR);
+            const int addr_reg = compute_operand_address(*a1, /*is_64bit=*/true,
+                                                         &arith_instr->operands[0], GPR::XZR);
             emit_fldr_imm(buf, is_f32 ? 2 : 3, Dd_mem, addr_reg, /*imm12=*/0);
             free_gpr(*a1, addr_reg);
             if (is_f32) {
                 emit_fcvt_s_to_d(buf, Dd_mem, Dd_mem);
-}
+            }
             switch (arith1) {
-                case kAdd:  emit_fadd_f64(buf, Dd_fld, Dd_fld, Dd_mem); break;
-                case kSub:  emit_fsub_f64(buf, Dd_fld, Dd_fld, Dd_mem); break;
-                case kSubR: emit_fsub_f64(buf, Dd_fld, Dd_mem, Dd_fld); break;
-                case kMul:  emit_fmul_f64(buf, Dd_fld, Dd_fld, Dd_mem); break;
-                case kDiv:  emit_fdiv_f64(buf, Dd_fld, Dd_fld, Dd_mem); break;
-                case kDivR: emit_fdiv_f64(buf, Dd_fld, Dd_mem, Dd_fld); break;
+                case kAdd:
+                    emit_fadd_f64(buf, Dd_fld, Dd_fld, Dd_mem);
+                    break;
+                case kSub:
+                    emit_fsub_f64(buf, Dd_fld, Dd_fld, Dd_mem);
+                    break;
+                case kSubR:
+                    emit_fsub_f64(buf, Dd_fld, Dd_mem, Dd_fld);
+                    break;
+                case kMul:
+                    emit_fmul_f64(buf, Dd_fld, Dd_fld, Dd_mem);
+                    break;
+                case kDiv:
+                    emit_fdiv_f64(buf, Dd_fld, Dd_fld, Dd_mem);
+                    break;
+                case kDivR:
+                    emit_fdiv_f64(buf, Dd_fld, Dd_mem, Dd_fld);
+                    break;
             }
             free_fpr(*a1, Dd_mem);
         } else {
             switch (arith1) {
-                case kAdd:  emit_fadd_f64(buf, Dd_fld, Dd_fld, Dd_st0); break;
-                case kSub:  emit_fsub_f64(buf, Dd_fld, Dd_fld, Dd_st0); break;
-                case kSubR: emit_fsub_f64(buf, Dd_fld, Dd_st0, Dd_fld); break;
-                case kMul:  emit_fmul_f64(buf, Dd_fld, Dd_fld, Dd_st0); break;
-                case kDiv:  emit_fdiv_f64(buf, Dd_fld, Dd_fld, Dd_st0); break;
-                case kDivR: emit_fdiv_f64(buf, Dd_fld, Dd_st0, Dd_fld); break;
+                case kAdd:
+                    emit_fadd_f64(buf, Dd_fld, Dd_fld, Dd_st0);
+                    break;
+                case kSub:
+                    emit_fsub_f64(buf, Dd_fld, Dd_fld, Dd_st0);
+                    break;
+                case kSubR:
+                    emit_fsub_f64(buf, Dd_fld, Dd_st0, Dd_fld);
+                    break;
+                case kMul:
+                    emit_fmul_f64(buf, Dd_fld, Dd_fld, Dd_st0);
+                    break;
+                case kDiv:
+                    emit_fdiv_f64(buf, Dd_fld, Dd_fld, Dd_st0);
+                    break;
+                case kDivR:
+                    emit_fdiv_f64(buf, Dd_fld, Dd_st0, Dd_fld);
+                    break;
             }
         }
 
         // Step 4d: Final popping arithmetic — Dd_st0 = op2(Dd_st0, Dd_fld).
         switch (arith2) {
-            case kAdd:  emit_fadd_f64(buf, Dd_st0, Dd_st0, Dd_fld); break;
-            case kSub:  emit_fsub_f64(buf, Dd_st0, Dd_st0, Dd_fld); break;
-            case kSubR: emit_fsub_f64(buf, Dd_st0, Dd_fld, Dd_st0); break;
-            case kMul:  emit_fmul_f64(buf, Dd_st0, Dd_st0, Dd_fld); break;
-            case kDiv:  emit_fdiv_f64(buf, Dd_st0, Dd_st0, Dd_fld); break;
-            case kDivR: emit_fdiv_f64(buf, Dd_st0, Dd_fld, Dd_st0); break;
+            case kAdd:
+                emit_fadd_f64(buf, Dd_st0, Dd_st0, Dd_fld);
+                break;
+            case kSub:
+                emit_fsub_f64(buf, Dd_st0, Dd_st0, Dd_fld);
+                break;
+            case kSubR:
+                emit_fsub_f64(buf, Dd_st0, Dd_fld, Dd_st0);
+                break;
+            case kMul:
+                emit_fmul_f64(buf, Dd_st0, Dd_st0, Dd_fld);
+                break;
+            case kDiv:
+                emit_fdiv_f64(buf, Dd_st0, Dd_st0, Dd_fld);
+                break;
+            case kDivR:
+                emit_fdiv_f64(buf, Dd_st0, Dd_fld, Dd_st0);
+                break;
         }
     }
 
@@ -1019,13 +1096,13 @@ static auto try_fuse_fld_arith_arithp(TranslationResult* a1, IRInstr* fld_instr,
 // =============================================================================
 
 static auto try_fuse_fld_fcomp_fstsw(TranslationResult* a1, IRInstr* fld_instr,
-                                      IRInstr* fcomp_instr, IRInstr* fstsw_instr)
+                                     IRInstr* fcomp_instr, IRInstr* fstsw_instr)
     -> std::optional<int> {
     // ── 1. Validate FCOMP/FUCOMP ────────────────────────────────────────────
     const auto fcomp_op = fcomp_instr->opcode;
     if (fcomp_op != kOpcodeName_fcomp && fcomp_op != kOpcodeName_fucomp) {
         return std::nullopt;
-}
+    }
 
     // After FLD push, FCOMP can be:
     //   Register form: FCOMP ST(0), ST(1)  — compares fld_value vs old_ST(0)
@@ -1035,26 +1112,26 @@ static auto try_fuse_fld_fcomp_fstsw(TranslationResult* a1, IRInstr* fld_instr,
     if (!fcomp_is_mem) {
         if (fcomp_instr->operands[1].reg.reg.index() != 1) {
             return std::nullopt;
-}
+        }
     } else {
         if (fcomp_instr->operands[1].mem.size == IROperandSize::S80) {
             return std::nullopt;
-}
+        }
     }
 
     // ── 2. Validate FNSTSW AX ───────────────────────────────────────────────
     if (fstsw_instr->opcode != kOpcodeName_fstsw) {
         return std::nullopt;
-}
+    }
     if (fstsw_instr->operands[0].kind != IROperandKind::Register) {
         return std::nullopt;
-}
+    }
 
     // ── 3. Classify FLD source ──────────────────────────────────────────────
     auto cls = classify_fld_source(fld_instr);
     if (cls.source == kFldInvalid) {
         return std::nullopt;
-}
+    }
 
     // ── 4. Emit fused code ──────────────────────────────────────────────────
     AssemblerBuffer& buf = a1->insn_buf;
@@ -1080,7 +1157,7 @@ static auto try_fuse_fld_fcomp_fstsw(TranslationResult* a1, IRInstr* fld_instr,
         free_gpr(*a1, addr_reg);
         if (is_f32) {
             emit_fcvt_s_to_d(buf, Dd_cmp, Dd_cmp);
-}
+        }
     } else {
         emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Dd_cmp, Xst_base);
     }
@@ -1103,7 +1180,7 @@ static auto try_fuse_fld_fcomp_fstsw(TranslationResult* a1, IRInstr* fld_instr,
         // OPT-D: net-zero-stack fusion — skip flush to preserve full cancellation.
         if (!(a1->x87_cache.tag_push_pending && a1->x87_cache.top_dirty)) {
             x87_flush_top(buf, *a1, Xbase, Wd_top, Wd_sw);
-}
+        }
 
         // LDRH Wd_sw, [Xbase, #status_word]
         emit_ldr_str_imm(buf, 1, 0, 1, kX87StatusWordImm12, Xbase, Wd_sw);
@@ -1157,21 +1234,21 @@ static auto try_fuse_fld_fcomp(TranslationResult* a1, IRInstr* fld_instr, IRInst
     const auto fcomp_op = fcomp_instr->opcode;
     if (fcomp_op != kOpcodeName_fcomp && fcomp_op != kOpcodeName_fucomp) {
         return std::nullopt;
-}
+    }
 
     // After FLD push, FCOMP must compare ST(0) vs ST(1) (register form).
     if (fcomp_instr->operands[0].kind != IROperandKind::Register) {
         return std::nullopt;
-}
+    }
     if (fcomp_instr->operands[1].reg.reg.index() != 1) {
         return std::nullopt;
-}
+    }
 
     // ── 2. Classify FLD source ──────────────────────────────────────────────
     auto cls = classify_fld_source(fld_instr);
     if (cls.source == kFldInvalid) {
         return std::nullopt;
-}
+    }
 
     // ── 3. Emit fused code ──────────────────────────────────────────────────
     AssemblerBuffer& buf = a1->insn_buf;
@@ -1208,7 +1285,7 @@ static auto try_fuse_fld_fcomp(TranslationResult* a1, IRInstr* fld_instr, IRInst
         // OPT-D: net-zero-stack fusion — skip flush to preserve full cancellation.
         if (!(a1->x87_cache.tag_push_pending && a1->x87_cache.top_dirty)) {
             x87_flush_top(buf, *a1, Xbase, Wd_top, Wd_sw);
-}
+        }
 
         // LDRH Wd_sw, [Xbase, #status_word]
         emit_ldr_str_imm(buf, 1, 0, 1, kX87StatusWordImm12, Xbase, Wd_sw);
@@ -1249,28 +1326,28 @@ static auto try_fuse_fld_fcomp(TranslationResult* a1, IRInstr* fld_instr, IRInst
 // =============================================================================
 
 static auto try_fuse_fld_fcompp_fstsw(TranslationResult* a1, IRInstr* fld_instr,
-                                       IRInstr* fcompp_instr, IRInstr* fstsw_instr)
+                                      IRInstr* fcompp_instr, IRInstr* fstsw_instr)
     -> std::optional<int> {
     // ── 1. Validate FCOMPP/FUCOMPP ──────────────────────────────────────────
     const auto fcompp_op = fcompp_instr->opcode;
     if (fcompp_op != kOpcodeName_fcompp && fcompp_op != kOpcodeName_fucompp) {
         return std::nullopt;
-}
+    }
     // FCOMPP/FUCOMPP always compare ST(0) vs ST(1) — no explicit operands.
 
     // ── 2. Validate FNSTSW AX ───────────────────────────────────────────────
     if (fstsw_instr->opcode != kOpcodeName_fstsw) {
         return std::nullopt;
-}
+    }
     if (fstsw_instr->operands[0].kind != IROperandKind::Register) {
         return std::nullopt;
-}
+    }
 
     // ── 3. Classify FLD source ──────────────────────────────────────────────
     auto cls = classify_fld_source(fld_instr);
     if (cls.source == kFldInvalid) {
         return std::nullopt;
-}
+    }
 
     // ── 4. Emit fused code ──────────────────────────────────────────────────
     AssemblerBuffer& buf = a1->insn_buf;
@@ -1358,32 +1435,30 @@ static auto try_fuse_fld_fcompp_fstsw(TranslationResult* a1, IRInstr* fld_instr,
 // Returns 3 or 4 (instructions consumed) if fused, std::nullopt otherwise.
 // =============================================================================
 
-static auto try_fuse_fld_fld_fucompp(TranslationResult* a1,
-                                      IRInstr* fld1_instr, IRInstr* fld2_instr,
-                                      IRInstr* fucompp_instr, IRInstr* fstsw_instr)
-    -> std::optional<int> {
+static auto try_fuse_fld_fld_fucompp(TranslationResult* a1, IRInstr* fld1_instr,
+                                     IRInstr* fld2_instr, IRInstr* fucompp_instr,
+                                     IRInstr* fstsw_instr) -> std::optional<int> {
     // ── 1. Validate second FLD ───────────────────────────────────────────────
     // (First FLD is already validated by the caller via classify_fld_source.)
     auto cls1 = classify_fld_source(fld1_instr);
     if (cls1.source == kFldInvalid) {
         return std::nullopt;
-}
+    }
 
     auto cls2 = classify_fld_source(fld2_instr);
     if (cls2.source == kFldInvalid) {
         return std::nullopt;
-}
+    }
 
     // ── 2. Validate FCOMPP/FUCOMPP ──────────────────────────────────────────
     const auto fucompp_op = fucompp_instr->opcode;
     if (fucompp_op != kOpcodeName_fcompp && fucompp_op != kOpcodeName_fucompp) {
         return std::nullopt;
-}
+    }
 
     // ── 3. Optionally validate FSTSW AX (4-instruction form) ────────────────
-    const bool has_fstsw = (fstsw_instr != nullptr
-                            && fstsw_instr->opcode == kOpcodeName_fstsw
-                            && fstsw_instr->operands[0].kind == IROperandKind::Register);
+    const bool has_fstsw = (fstsw_instr != nullptr && fstsw_instr->opcode == kOpcodeName_fstsw &&
+                            fstsw_instr->operands[0].kind == IROperandKind::Register);
 
     // ── 4. Emit fused code ──────────────────────────────────────────────────
     AssemblerBuffer& buf = a1->insn_buf;
@@ -1413,7 +1488,8 @@ static auto try_fuse_fld_fld_fucompp(TranslationResult* a1,
         } else {
             FldClassification cls2_adj = cls2;
             cls2_adj.reg_depth -= 1;
-            emit_fld_value(buf, *a1, cls2_adj, fld2_instr, Xbase, Wd_top, Wd_tmp, Dd_val2, Xst_base);
+            emit_fld_value(buf, *a1, cls2_adj, fld2_instr, Xbase, Wd_top, Wd_tmp, Dd_val2,
+                           Xst_base);
         }
     } else {
         emit_fld_value(buf, *a1, cls2, fld2_instr, Xbase, Wd_top, Wd_tmp, Dd_val2, Xst_base);
@@ -1437,7 +1513,7 @@ static auto try_fuse_fld_fld_fucompp(TranslationResult* a1,
         // OPT-D: net-zero-stack fusion — skip flush to preserve full cancellation.
         if (!(a1->x87_cache.tag_push_pending && a1->x87_cache.top_dirty)) {
             x87_flush_top(buf, *a1, Xbase, Wd_top, Wd_sw);
-}
+        }
 
         // LDRH Wd_sw, [Xbase, #status_word]
         emit_ldr_str_imm(buf, 1, 0, 1, kX87StatusWordImm12, Xbase, Wd_sw);
@@ -1499,13 +1575,26 @@ static auto try_fuse_arithp_fstp(TranslationResult* a1, IRInstr* arithp_instr, I
 
     ArithOp arith;
     switch (arithp_instr->opcode) {
-        case kOpcodeName_faddp:  arith = kAdd;  break;
-        case kOpcodeName_fsubp:  arith = kSub;  break;
-        case kOpcodeName_fsubrp: arith = kSubR; break;
-        case kOpcodeName_fmulp:  arith = kMul;  break;
-        case kOpcodeName_fdivp:  arith = kDiv;  break;
-        case kOpcodeName_fdivrp: arith = kDivR; break;
-        default: return std::nullopt;
+        case kOpcodeName_faddp:
+            arith = kAdd;
+            break;
+        case kOpcodeName_fsubp:
+            arith = kSub;
+            break;
+        case kOpcodeName_fsubrp:
+            arith = kSubR;
+            break;
+        case kOpcodeName_fmulp:
+            arith = kMul;
+            break;
+        case kOpcodeName_fdivp:
+            arith = kDiv;
+            break;
+        case kOpcodeName_fdivrp:
+            arith = kDivR;
+            break;
+        default:
+            return std::nullopt;
     }
 
     // Must target ST(1) — after the pop, the result would land in new ST(0)
@@ -1513,20 +1602,20 @@ static auto try_fuse_arithp_fstp(TranslationResult* a1, IRInstr* arithp_instr, I
     // the pops and would need a stack writeback, which we skip here.
     if (arithp_instr->operands[0].reg.reg.index() != 1) {
         return std::nullopt;
-}
+    }
 
     // ── 2. Validate FSTP to memory (m32 or m64, not m80, not register) ──────
 
     if (fstp_instr->opcode != kOpcodeName_fstp) {
         return std::nullopt;
-}
+    }
     if (fstp_instr->operands[0].kind == IROperandKind::Register) {
         return std::nullopt;
-}
+    }
     const auto fstp_size = fstp_instr->operands[0].mem.size;
     if (fstp_size == IROperandSize::S80) {
         return std::nullopt;
-}
+    }
 
     const bool is_f32 = (fstp_size == IROperandSize::S32);
 
@@ -1555,18 +1644,30 @@ static auto try_fuse_arithp_fstp(TranslationResult* a1, IRInstr* arithp_instr, I
     //   fdivp:  ST(1) = ST(1) / ST(0)
     //   fdivrp: ST(1) = ST(0) / ST(1)
     switch (arith) {
-        case kAdd:  emit_fadd_f64(buf, Dd_dst, Dd_dst, Dd_src); break;
-        case kSub:  emit_fsub_f64(buf, Dd_dst, Dd_dst, Dd_src); break;
-        case kSubR: emit_fsub_f64(buf, Dd_dst, Dd_src, Dd_dst); break;
-        case kMul:  emit_fmul_f64(buf, Dd_dst, Dd_dst, Dd_src); break;
-        case kDiv:  emit_fdiv_f64(buf, Dd_dst, Dd_dst, Dd_src); break;
-        case kDivR: emit_fdiv_f64(buf, Dd_dst, Dd_src, Dd_dst); break;
+        case kAdd:
+            emit_fadd_f64(buf, Dd_dst, Dd_dst, Dd_src);
+            break;
+        case kSub:
+            emit_fsub_f64(buf, Dd_dst, Dd_dst, Dd_src);
+            break;
+        case kSubR:
+            emit_fsub_f64(buf, Dd_dst, Dd_src, Dd_dst);
+            break;
+        case kMul:
+            emit_fmul_f64(buf, Dd_dst, Dd_dst, Dd_src);
+            break;
+        case kDiv:
+            emit_fdiv_f64(buf, Dd_dst, Dd_dst, Dd_src);
+            break;
+        case kDivR:
+            emit_fdiv_f64(buf, Dd_dst, Dd_src, Dd_dst);
+            break;
     }
 
     // Convert and store to memory — result goes directly from register.
     if (is_f32) {
         emit_fcvt_d_to_s(buf, Dd_dst, Dd_dst);
-}
+    }
 
     const int addr_reg =
         compute_operand_address(*a1, /*is_64bit=*/true, &fstp_instr->operands[0], GPR::XZR);
@@ -1617,13 +1718,26 @@ static auto try_fuse_arith_fstp(TranslationResult* a1, IRInstr* arith_instr, IRI
 
     ArithOp arith;
     switch (arith_instr->opcode) {
-        case kOpcodeName_fadd:  arith = kAdd;  break;
-        case kOpcodeName_fsub:  arith = kSub;  break;
-        case kOpcodeName_fsubr: arith = kSubR; break;
-        case kOpcodeName_fmul:  arith = kMul;  break;
-        case kOpcodeName_fdiv:  arith = kDiv;  break;
-        case kOpcodeName_fdivr: arith = kDivR; break;
-        default: return std::nullopt;
+        case kOpcodeName_fadd:
+            arith = kAdd;
+            break;
+        case kOpcodeName_fsub:
+            arith = kSub;
+            break;
+        case kOpcodeName_fsubr:
+            arith = kSubR;
+            break;
+        case kOpcodeName_fmul:
+            arith = kMul;
+            break;
+        case kOpcodeName_fdiv:
+            arith = kDiv;
+            break;
+        case kOpcodeName_fdivr:
+            arith = kDivR;
+            break;
+        default:
+            return std::nullopt;
     }
 
     // ── 2. Check arithmetic destination is ST(0) ─────────────────────────────
@@ -1636,14 +1750,14 @@ static auto try_fuse_arith_fstp(TranslationResult* a1, IRInstr* arith_instr, IRI
 
     const bool arith_is_mem = (arith_instr->operands[0].kind != IROperandKind::Register);
 
-    int arith_src_depth = 0;   // depth of the "other" operand
+    int arith_src_depth = 0;  // depth of the "other" operand
 
     if (!arith_is_mem) {
         const int depth_dst = arith_instr->operands[0].reg.reg.index();
         const int depth_src = arith_instr->operands[1].reg.reg.index();
         if (depth_dst != 0) {
             return std::nullopt;
-}
+        }
         arith_src_depth = depth_src;
     }
 
@@ -1651,14 +1765,14 @@ static auto try_fuse_arith_fstp(TranslationResult* a1, IRInstr* arith_instr, IRI
 
     if (fstp_instr->opcode != kOpcodeName_fstp) {
         return std::nullopt;
-}
+    }
     if (fstp_instr->operands[0].kind == IROperandKind::Register) {
         return std::nullopt;
-}
+    }
     const auto fstp_size = fstp_instr->operands[0].mem.size;
     if (fstp_size == IROperandSize::S80) {
         return std::nullopt;
-}
+    }
 
     const bool is_f32 = (fstp_size == IROperandSize::S32);
 
@@ -1684,35 +1798,60 @@ static auto try_fuse_arith_fstp(TranslationResult* a1, IRInstr* arith_instr, IRI
 
         if (arith_f32) {
             emit_fcvt_s_to_d(buf, Dd_src, Dd_src);
-}
+        }
 
         switch (arith) {
-            case kAdd:  emit_fadd_f64(buf, Dd_dst, Dd_dst, Dd_src); break;
-            case kSub:  emit_fsub_f64(buf, Dd_dst, Dd_dst, Dd_src); break;
-            case kSubR: emit_fsub_f64(buf, Dd_dst, Dd_src, Dd_dst); break;
-            case kMul:  emit_fmul_f64(buf, Dd_dst, Dd_dst, Dd_src); break;
-            case kDiv:  emit_fdiv_f64(buf, Dd_dst, Dd_dst, Dd_src); break;
-            case kDivR: emit_fdiv_f64(buf, Dd_dst, Dd_src, Dd_dst); break;
+            case kAdd:
+                emit_fadd_f64(buf, Dd_dst, Dd_dst, Dd_src);
+                break;
+            case kSub:
+                emit_fsub_f64(buf, Dd_dst, Dd_dst, Dd_src);
+                break;
+            case kSubR:
+                emit_fsub_f64(buf, Dd_dst, Dd_src, Dd_dst);
+                break;
+            case kMul:
+                emit_fmul_f64(buf, Dd_dst, Dd_dst, Dd_src);
+                break;
+            case kDiv:
+                emit_fdiv_f64(buf, Dd_dst, Dd_dst, Dd_src);
+                break;
+            case kDivR:
+                emit_fdiv_f64(buf, Dd_dst, Dd_src, Dd_dst);
+                break;
         }
     } else {
         // Register form: ST(0) op ST(src_depth).
-        emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, arith_src_depth), Wd_tmp, Dd_src, Xst_base);
+        emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, arith_src_depth), Wd_tmp, Dd_src,
+                     Xst_base);
         emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Dd_dst, Xst_base);
 
         switch (arith) {
-            case kAdd:  emit_fadd_f64(buf, Dd_dst, Dd_dst, Dd_src); break;
-            case kSub:  emit_fsub_f64(buf, Dd_dst, Dd_dst, Dd_src); break;
-            case kSubR: emit_fsub_f64(buf, Dd_dst, Dd_src, Dd_dst); break;
-            case kMul:  emit_fmul_f64(buf, Dd_dst, Dd_dst, Dd_src); break;
-            case kDiv:  emit_fdiv_f64(buf, Dd_dst, Dd_dst, Dd_src); break;
-            case kDivR: emit_fdiv_f64(buf, Dd_dst, Dd_src, Dd_dst); break;
+            case kAdd:
+                emit_fadd_f64(buf, Dd_dst, Dd_dst, Dd_src);
+                break;
+            case kSub:
+                emit_fsub_f64(buf, Dd_dst, Dd_dst, Dd_src);
+                break;
+            case kSubR:
+                emit_fsub_f64(buf, Dd_dst, Dd_src, Dd_dst);
+                break;
+            case kMul:
+                emit_fmul_f64(buf, Dd_dst, Dd_dst, Dd_src);
+                break;
+            case kDiv:
+                emit_fdiv_f64(buf, Dd_dst, Dd_dst, Dd_src);
+                break;
+            case kDivR:
+                emit_fdiv_f64(buf, Dd_dst, Dd_src, Dd_dst);
+                break;
         }
     }
 
     // Convert and store to FSTP memory destination — result goes directly.
     if (is_f32) {
         emit_fcvt_d_to_s(buf, Dd_dst, Dd_dst);
-}
+    }
 
     const int addr_fstp =
         compute_operand_address(*a1, /*is_64bit=*/true, &fstp_instr->operands[0], GPR::XZR);
@@ -1760,7 +1899,7 @@ static auto try_fuse_arith_faddp(TranslationResult* a1, IRInstr* mul_instr, IRIn
     // ── 1. Gate on FMUL only — FMA requires multiply as the first op ────────
     if (mul_instr->opcode != kOpcodeName_fmul) {
         return std::nullopt;
-}
+    }
 
     // ── 2. Check FMUL destination is ST(0) ──────────────────────────────────
     const bool mul_is_mem = (mul_instr->operands[0].kind != IROperandKind::Register);
@@ -1771,7 +1910,7 @@ static auto try_fuse_arith_faddp(TranslationResult* a1, IRInstr* mul_instr, IRIn
         const int depth_src = mul_instr->operands[1].reg.reg.index();
         if (depth_dst != 0) {
             return std::nullopt;
-}
+        }
         mul_src_depth = depth_src;
     }
 
@@ -1784,15 +1923,22 @@ static auto try_fuse_arith_faddp(TranslationResult* a1, IRInstr* mul_instr, IRIn
     enum FmaKind : std::uint8_t { kFmadd, kFmsub, kFnmsub };
     FmaKind kind;
     switch (addp_instr->opcode) {
-        case kOpcodeName_faddp:  kind = kFmadd;  break;
-        case kOpcodeName_fsubp:  kind = kFmsub;  break;
-        case kOpcodeName_fsubrp: kind = kFnmsub; break;
-        default: return std::nullopt;
+        case kOpcodeName_faddp:
+            kind = kFmadd;
+            break;
+        case kOpcodeName_fsubp:
+            kind = kFmsub;
+            break;
+        case kOpcodeName_fsubrp:
+            kind = kFnmsub;
+            break;
+        default:
+            return std::nullopt;
     }
 
     if (addp_instr->operands[0].reg.reg.index() != 1) {
         return std::nullopt;
-}
+    }
 
     // ── 4. Emit fused code ──────────────────────────────────────────────────
 
@@ -1801,9 +1947,9 @@ static auto try_fuse_arith_faddp(TranslationResult* a1, IRInstr* mul_instr, IRIn
     const int Xst_base = x87_get_st_base(*a1);
     const int Wd_tmp = alloc_gpr(*a1, 2);
 
-    const int Dd_st0    = alloc_free_fpr(*a1);  // ST(0) — first multiply operand
+    const int Dd_st0 = alloc_free_fpr(*a1);     // ST(0) — first multiply operand
     const int Dd_mul_op = alloc_free_fpr(*a1);  // second multiply operand (ST(i) or [mem])
-    const int Dd_st1    = alloc_free_fpr(*a1);  // ST(1) — accumulator
+    const int Dd_st1 = alloc_free_fpr(*a1);     // ST(1) — accumulator
 
     if (mul_is_mem) {
         // Memory form: FMUL [mem] — ST(0) *= [mem]
@@ -1817,31 +1963,44 @@ static auto try_fuse_arith_faddp(TranslationResult* a1, IRInstr* mul_instr, IRIn
 
         if (mul_f32) {
             emit_fcvt_s_to_d(buf, Dd_mul_op, Dd_mul_op);
-}
+        }
 
         const int Wk_st1 =
             emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, 1), Wd_tmp, Dd_st1, Xst_base);
 
         // Emit FMA: Dd_st1 = f(Dd_st1, Dd_st0, Dd_mul_op)
         switch (kind) {
-            case kFmadd:  emit_fmadd_f64(buf, Dd_st1, Dd_st0, Dd_mul_op, Dd_st1);  break;
-            case kFmsub:  emit_fmsub_f64(buf, Dd_st1, Dd_st0, Dd_mul_op, Dd_st1);  break;
-            case kFnmsub: emit_fnmsub_f64(buf, Dd_st1, Dd_st0, Dd_mul_op, Dd_st1); break;
+            case kFmadd:
+                emit_fmadd_f64(buf, Dd_st1, Dd_st0, Dd_mul_op, Dd_st1);
+                break;
+            case kFmsub:
+                emit_fmsub_f64(buf, Dd_st1, Dd_st0, Dd_mul_op, Dd_st1);
+                break;
+            case kFnmsub:
+                emit_fnmsub_f64(buf, Dd_st1, Dd_st0, Dd_mul_op, Dd_st1);
+                break;
         }
 
         // Store result back to ST(1) — reuse key from the ST(1) load.
         emit_store_st_at_offset(buf, Xbase, Wk_st1, Dd_st1, Xst_base);
     } else {
         // Register form: FMUL ST(0), ST(mul_src_depth)
-        emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, mul_src_depth), Wd_tmp, Dd_mul_op, Xst_base);
+        emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, mul_src_depth), Wd_tmp, Dd_mul_op,
+                     Xst_base);
         emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Dd_st0, Xst_base);
         const int Wk_st1 =
             emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, 1), Wd_tmp, Dd_st1, Xst_base);
 
         switch (kind) {
-            case kFmadd:  emit_fmadd_f64(buf, Dd_st1, Dd_st0, Dd_mul_op, Dd_st1);  break;
-            case kFmsub:  emit_fmsub_f64(buf, Dd_st1, Dd_st0, Dd_mul_op, Dd_st1);  break;
-            case kFnmsub: emit_fnmsub_f64(buf, Dd_st1, Dd_st0, Dd_mul_op, Dd_st1); break;
+            case kFmadd:
+                emit_fmadd_f64(buf, Dd_st1, Dd_st0, Dd_mul_op, Dd_st1);
+                break;
+            case kFmsub:
+                emit_fmsub_f64(buf, Dd_st1, Dd_st0, Dd_mul_op, Dd_st1);
+                break;
+            case kFnmsub:
+                emit_fnmsub_f64(buf, Dd_st1, Dd_st0, Dd_mul_op, Dd_st1);
+                break;
         }
 
         emit_store_st_at_offset(buf, Xbase, Wk_st1, Dd_st1, Xst_base);
@@ -1897,7 +2056,7 @@ static auto try_fuse_fstp_fld(TranslationResult* a1, IRInstr* fstp_instr, IRInst
         // Memory: reject m80 (too complex for fusion)
         if (fstp_instr->operands[0].mem.size == IROperandSize::S80) {
             return std::nullopt;
-}
+        }
     }
 
     // ── 2. Classify the FLD source ──────────────────────────────────────────
@@ -1905,7 +2064,7 @@ static auto try_fuse_fstp_fld(TranslationResult* a1, IRInstr* fstp_instr, IRInst
     auto cls = classify_fld_source(fld_instr);
     if (cls.source == kFldInvalid) {
         return std::nullopt;
-}
+    }
 
     // ── 3. Emit fused code ──────────────────────────────────────────────────
 
@@ -1917,7 +2076,7 @@ static auto try_fuse_fstp_fld(TranslationResult* a1, IRInstr* fstp_instr, IRInst
     // OPT-D: net-zero-stack fusion — skip flush to preserve full cancellation.
     if (!(a1->x87_cache.tag_push_pending && a1->x87_cache.top_dirty)) {
         x87_flush_top(buf, *a1, Xbase, Wd_top, Wd_tmp);
-}
+    }
 
     // FSTP ST(0) is "discard top" — the old ST(0) value is not stored anywhere,
     // so we can skip loading it entirely.
@@ -1948,11 +2107,13 @@ static auto try_fuse_fstp_fld(TranslationResult* a1, IRInstr* fstp_instr, IRInst
         // ── Register path: store FSTP first, then load FLD ──────────────
 
         if (!fstp_is_discard) {
-            emit_store_st(buf, Xbase, Wd_top, resolve_depth(*a1, fstp_reg_depth), Wd_tmp, Dd_st0, Xst_base);
+            emit_store_st(buf, Xbase, Wd_top, resolve_depth(*a1, fstp_reg_depth), Wd_tmp, Dd_st0,
+                          Xst_base);
         }
 
         if (cls.source == kFldReg) {
-            emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, cls.reg_depth + 1), Wd_tmp, Dd_fld, Xst_base);
+            emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, cls.reg_depth + 1), Wd_tmp, Dd_fld,
+                         Xst_base);
         } else {
             emit_fld_value(buf, *a1, cls, fld_instr, Xbase, Wd_top, Wd_tmp, Dd_fld, Xst_base);
         }
@@ -1962,7 +2123,7 @@ static auto try_fuse_fstp_fld(TranslationResult* a1, IRInstr* fstp_instr, IRInst
         const bool is_f32 = (fstp_instr->operands[0].mem.size == IROperandSize::S32);
         if (is_f32) {
             emit_fcvt_d_to_s(buf, Dd_st0, Dd_st0);
-}
+        }
 
         const int addr =
             compute_operand_address(*a1, /*is_64bit=*/true, &fstp_instr->operands[0], GPR::XZR);
@@ -1970,7 +2131,8 @@ static auto try_fuse_fstp_fld(TranslationResult* a1, IRInstr* fstp_instr, IRInst
         free_gpr(*a1, addr);
 
         if (cls.source == kFldReg) {
-            emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, cls.reg_depth + 1), Wd_tmp, Dd_fld, Xst_base);
+            emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, cls.reg_depth + 1), Wd_tmp, Dd_fld,
+                         Xst_base);
         } else {
             emit_fld_value(buf, *a1, cls, fld_instr, Xbase, Wd_top, Wd_tmp, Dd_fld, Xst_base);
         }
@@ -1984,7 +2146,7 @@ static auto try_fuse_fstp_fld(TranslationResult* a1, IRInstr* fstp_instr, IRInst
 
     if (Dd_st0 >= 0) {
         free_fpr(*a1, Dd_st0);
-}
+    }
     free_fpr(*a1, Dd_fld);
     x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp, /*consumed=*/2);
     free_gpr(*a1, Wd_tmp);
@@ -2004,10 +2166,11 @@ static auto try_fuse_fld_group(TranslationResult* tr, IRInstr* instrs, int64_t n
     // 4-instruction fusions (longest first)
     if (idx + 3 < num) {
         if (!fusion_disabled(disabled_mask, FusionId::fld_fld_fucompp)) {
-            if (auto r = try_fuse_fld_fld_fucompp(tr, cur, next, &instrs[idx + 2], &instrs[idx + 3])) {
+            if (auto r =
+                    try_fuse_fld_fld_fucompp(tr, cur, next, &instrs[idx + 2], &instrs[idx + 3])) {
                 return r;
-}
-}
+            }
+        }
     }
 
     // 3-instruction fusions
@@ -2015,46 +2178,46 @@ static auto try_fuse_fld_group(TranslationResult* tr, IRInstr* instrs, int64_t n
         if (!fusion_disabled(disabled_mask, FusionId::fld_arith_fstp)) {
             if (auto r = try_fuse_fld_arith_fstp(tr, cur, next, &instrs[idx + 2])) {
                 return r;
-}
-}
+            }
+        }
         if (!fusion_disabled(disabled_mask, FusionId::fld_arith_arithp)) {
             if (auto r = try_fuse_fld_arith_arithp(tr, cur, next, &instrs[idx + 2])) {
                 return r;
-}
-}
+            }
+        }
         if (!fusion_disabled(disabled_mask, FusionId::fld_fcomp_fstsw)) {
             if (auto r = try_fuse_fld_fcomp_fstsw(tr, cur, next, &instrs[idx + 2])) {
                 return r;
-}
-}
+            }
+        }
         if (!fusion_disabled(disabled_mask, FusionId::fld_fcompp_fstsw)) {
             if (auto r = try_fuse_fld_fcompp_fstsw(tr, cur, next, &instrs[idx + 2])) {
                 return r;
-}
-}
+            }
+        }
         if (!fusion_disabled(disabled_mask, FusionId::fld_fld_fucompp)) {
             if (auto r = try_fuse_fld_fld_fucompp(tr, cur, next, &instrs[idx + 2], nullptr)) {
                 return r;
-}
-}
+            }
+        }
     }
 
     // 2-instruction fusions
     if (!fusion_disabled(disabled_mask, FusionId::fld_arithp)) {
         if (auto r = try_fuse_fld_arithp(tr, cur, next)) {
             return r;
-}
-}
+        }
+    }
     if (!fusion_disabled(disabled_mask, FusionId::fld_fstp)) {
         if (auto r = try_fuse_fld_fstp(tr, cur, next)) {
             return r;
-}
-}
+        }
+    }
     if (!fusion_disabled(disabled_mask, FusionId::fld_fcomp)) {
         if (auto r = try_fuse_fld_fcomp(tr, cur, next)) {
             return r;
-}
-}
+        }
+    }
 
     return std::nullopt;
 }
@@ -2067,13 +2230,13 @@ static auto try_fuse_fxch_group(TranslationResult* tr, IRInstr* instrs, int64_t 
     if (!fusion_disabled(disabled_mask, FusionId::fxch_arithp)) {
         if (auto r = try_fuse_fxch_arithp(tr, cur, next)) {
             return r;
-}
-}
+        }
+    }
     if (!fusion_disabled(disabled_mask, FusionId::fxch_fstp)) {
         if (auto r = try_fuse_fxch_fstp(tr, cur, next)) {
             return r;
-}
-}
+        }
+    }
 
     return std::nullopt;
 }
@@ -2086,8 +2249,8 @@ static auto try_fuse_fcom_group(TranslationResult* tr, IRInstr* instrs, int64_t 
     if (!fusion_disabled(disabled_mask, FusionId::fcom_fstsw)) {
         if (auto r = try_fuse_fcom_fstsw(tr, cur, next)) {
             return r;
-}
-}
+        }
+    }
 
     return std::nullopt;
 }
@@ -2100,8 +2263,8 @@ static auto try_fuse_arithp_group(TranslationResult* tr, IRInstr* instrs, int64_
     if (!fusion_disabled(disabled_mask, FusionId::arithp_fstp)) {
         if (auto r = try_fuse_arithp_fstp(tr, cur, next)) {
             return r;
-}
-}
+        }
+    }
 
     return std::nullopt;
 }
@@ -2114,14 +2277,14 @@ static auto try_fuse_arith_group(TranslationResult* tr, IRInstr* instrs, int64_t
     if (!fusion_disabled(disabled_mask, FusionId::arith_faddp)) {
         if (auto r = try_fuse_arith_faddp(tr, cur, next)) {
             return r;
-}
-}
+        }
+    }
 
     if (!fusion_disabled(disabled_mask, FusionId::arith_fstp)) {
         if (auto r = try_fuse_arith_fstp(tr, cur, next)) {
             return r;
-}
-}
+        }
+    }
 
     return std::nullopt;
 }
@@ -2134,8 +2297,8 @@ static auto try_fuse_fstp_group(TranslationResult* tr, IRInstr* instrs, int64_t 
     if (!fusion_disabled(disabled_mask, FusionId::fstp_fld)) {
         if (auto r = try_fuse_fstp_fld(tr, cur, next)) {
             return r;
-}
-}
+        }
+    }
 
     return std::nullopt;
 }
@@ -2148,7 +2311,7 @@ auto try_peephole(TranslationResult* tr, IRInstr* instrs, int64_t num, int64_t i
                   uint64_t disabled_mask) -> std::optional<int> {
     if (idx + 1 >= num) {
         return std::nullopt;
-}
+    }
 
     switch (instrs[idx].opcode) {
         case kOpcodeName_fld:

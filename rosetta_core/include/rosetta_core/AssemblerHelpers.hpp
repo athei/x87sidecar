@@ -142,8 +142,8 @@ auto emit_fdiv_f64(AssemblerBuffer& buf, int Dd, int Dn, int Dm) -> void;
 //   o1=0 o0=1 → FMSUB:  Dd = Da - Dn * Dm
 //   o1=1 o0=0 → FNMADD: Dd = -Da - Dn * Dm
 //   o1=1 o0=1 → FNMSUB: Dd = Dn * Dm - Da
-auto emit_fp_dp3(AssemblerBuffer& buf, int type, int o1, int o0, int Rd, int Rn, int Rm,
-                 int Ra) -> void;
+auto emit_fp_dp3(AssemblerBuffer& buf, int type, int o1, int o0, int Rd, int Rn, int Rm, int Ra)
+    -> void;
 
 auto emit_fmadd_f64(AssemblerBuffer& buf, int Dd, int Dn, int Dm, int Da) -> void;
 auto emit_fmsub_f64(AssemblerBuffer& buf, int Dd, int Dn, int Dm, int Da) -> void;
@@ -257,9 +257,9 @@ auto emit_cbz(AssemblerBuffer& buf, int is_64bit, int is_nz, int Rt, int imm19) 
 auto emit_b(AssemblerBuffer& buf, int imm26) -> void;
 
 // B.cond #imm19 — conditional branch
-// cond:  AArch64 condition code (0=EQ,1=NE,2=CS,3=CC,4=MI,5=PL,6=VS,7=VC,8=HI,9=LS,10=GE,11=LT,12=GT,13=LE,14=AL)
-// imm19: signed instruction-count offset
-// Encoding: 0101010 0 | imm19 | 0 | cond
+// cond:  AArch64 condition code
+// (0=EQ,1=NE,2=CS,3=CC,4=MI,5=PL,6=VS,7=VC,8=HI,9=LS,10=GE,11=LT,12=GT,13=LE,14=AL) imm19: signed
+// instruction-count offset Encoding: 0101010 0 | imm19 | 0 | cond
 auto emit_b_cond(AssemblerBuffer& buf, int cond, int imm19) -> void;
 
 // FMOV Dd, Dn — FPR-to-FPR double-precision register copy
@@ -271,7 +271,8 @@ auto emit_fmov_f64_reg(AssemblerBuffer& buf, int Dd, int Dn) -> void;
 // ftype: 0=single, 1=double, 3=half
 // rmode: 0=FCVTNS(nearest), 1=FCVTPS(+inf), 2=FCVTMS(-inf), 3=FCVTZS(zero)
 // Encoding: sf | 0 0 11110 | ftype | 1 | rmode | 000 | Rn | Rd
-auto emit_fcvt_fp_to_int(AssemblerBuffer& buf, int sf, int ftype, int rmode, int Rd, int Rn) -> void;
+auto emit_fcvt_fp_to_int(AssemblerBuffer& buf, int sf, int ftype, int rmode, int Rd, int Rn)
+    -> void;
 
 // ---------------------------------------------------------------------------
 // emit_add_reg — mirrors binary at 0x7a8

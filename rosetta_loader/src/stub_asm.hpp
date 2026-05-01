@@ -47,8 +47,7 @@ struct StubBlobs {
 //                         Stub uses it as msgh_local_port with
 //                         MAKE_SEND_ONCE; sidecar replies on the resulting
 //                         send-once and the reply lands here.
-StubBlobs build(uint64_t handlerAddr, uint64_t translateInsnAddr,
-                const uint8_t origPrologue16[16], uint32_t sidecarReqName,
-                uint32_t parentReplyName);
+StubBlobs build(uint64_t handlerAddr, uint64_t translateInsnAddr, const uint8_t origPrologue16[16],
+                uint32_t sidecarReqName, uint32_t parentReplyName);
 
 }  // namespace stub_asm

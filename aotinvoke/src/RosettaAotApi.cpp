@@ -55,8 +55,8 @@ bool find_patterns(uintptr_t aot_base, uintptr_t& trans_insn_addr,
             auto* seg = reinterpret_cast<segment_command_64*>(cmd);
 
             if (strcmp(seg->segname, "__TEXT") == 0) {
-                auto* sections = reinterpret_cast<section_64*>(
-                    reinterpret_cast<std::byte*>(seg) + sizeof(segment_command_64));
+                auto* sections = reinterpret_cast<section_64*>(reinterpret_cast<std::byte*>(seg) +
+                                                               sizeof(segment_command_64));
                 for (auto j = 0; std::cmp_less(j, seg->nsects); j++) {
                     auto& sect = sections[j];
                     if (strcmp(sect.sectname, "__text") == 0) {
@@ -66,8 +66,7 @@ bool find_patterns(uintptr_t aot_base, uintptr_t& trans_insn_addr,
                 }
             }
         }
-        cmd = reinterpret_cast<load_command*>(
-            reinterpret_cast<std::byte*>(cmd) + cmd->cmdsize);
+        cmd = reinterpret_cast<load_command*>(reinterpret_cast<std::byte*>(cmd) + cmd->cmdsize);
     }
 
     if (!text_section) {
@@ -78,8 +77,8 @@ bool find_patterns(uintptr_t aot_base, uintptr_t& trans_insn_addr,
     transaction_result_size_addr = 0;
 
     for (size_t offset = 0; offset < text_section->size; offset++) {
-        const auto* candidate = reinterpret_cast<const void*>(
-            aot_base + text_section->offset + offset);
+        const auto* candidate =
+            reinterpret_cast<const void*>(aot_base + text_section->offset + offset);
         if (trans_insn_addr == 0) {
             if (std::memcmp(candidate, translate_insn_pattern.data(),
                             translate_insn_pattern.size()) == 0) {
@@ -532,5 +531,10 @@ std::array<const char*, 0x64> g_runtime_routine_names = {
 // 0x174, 0xA0>
 
 ThreadContextOffsets g_thread_context_offsets = {
-    .field_0=0x118, .field_4=0x220, .field_8=0x180, .field_C=0, .field_10=0x174, .x87_state_offset=0xA0,
+    .field_0 = 0x118,
+    .field_4 = 0x220,
+    .field_8 = 0x180,
+    .field_C = 0,
+    .field_10 = 0x174,
+    .x87_state_offset = 0xA0,
 };

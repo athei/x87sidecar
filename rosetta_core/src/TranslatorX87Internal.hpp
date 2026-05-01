@@ -19,7 +19,8 @@ namespace TranslatorX87 {
 // (no runtime cost).
 
 inline int resolve_depth(const TranslationResult& a1, int logical_depth) {
-    if (!a1.x87_cache.perm_dirty) return logical_depth;
+    if (!a1.x87_cache.perm_dirty)
+        return logical_depth;
     return a1.x87_cache.perm[logical_depth];
 }
 
@@ -56,29 +57,29 @@ inline int x87_get_st_base(TranslationResult& a1) {
 // OPT-G: Flush deferred permutation before push/pop.
 // Push/pop change TOP, which invalidates the perm map (it maps depths relative
 // to TOP). Rather than trying to adjust the map, flush it and reset to identity.
-inline void perm_flush_before_stack_change(AssemblerBuffer& buf, TranslationResult& a1,
-                                            int Xbase, int Wd_top, int Wd_tmp) {
+inline void perm_flush_before_stack_change(AssemblerBuffer& buf, TranslationResult& a1, int Xbase,
+                                           int Wd_top, int Wd_tmp) {
     if (a1.x87_cache.perm_dirty) {
         const int Xst_base = x87_get_st_base(a1);
         const int Dd_save = alloc_free_fpr(a1);
         const int Dd_chain = alloc_free_fpr(a1);
-        emit_x87_perm_flush(buf, Xbase, Wd_top, Wd_tmp, a1.x87_cache.perm,
-                            Xst_base, Dd_save, Dd_chain);
+        emit_x87_perm_flush(buf, Xbase, Wd_top, Wd_tmp, a1.x87_cache.perm, Xst_base, Dd_save,
+                            Dd_chain);
         free_fpr(a1, Dd_chain);
         free_fpr(a1, Dd_save);
         a1.x87_cache.reset_perm();
     }
 }
 
-inline void x87_end(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, int Wd_top,
-                    int Wd_tmp, int consumed = 1) {
+inline void x87_end(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, int Wd_top, int Wd_tmp,
+                    int consumed = 1) {
     // OPT-G: flush deferred permutation at end of run.
     if (a1.x87_cache.perm_dirty && a1.x87_cache.run_remaining <= consumed) {
         const int Xst_base = x87_get_st_base(a1);
         const int Dd_save = alloc_free_fpr(a1);
         const int Dd_chain = alloc_free_fpr(a1);
-        emit_x87_perm_flush(buf, Xbase, Wd_top, Wd_tmp, a1.x87_cache.perm,
-                            Xst_base, Dd_save, Dd_chain);
+        emit_x87_perm_flush(buf, Xbase, Wd_top, Wd_tmp, a1.x87_cache.perm, Xst_base, Dd_save,
+                            Dd_chain);
         free_fpr(a1, Dd_chain);
         free_fpr(a1, Dd_save);
         a1.x87_cache.reset_perm();
@@ -89,7 +90,7 @@ inline void x87_end(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, int 
         const int Wd_t2 = alloc_free_gpr(a1);
         const int Wd_tw = alloc_free_gpr(a1);
         emit_x87_tag_set_empty_batch(buf, Xbase, Wd_top, Wd_tmp, Wd_t2, Wd_tw,
-                                      a1.x87_cache.deferred_pop_count);
+                                     a1.x87_cache.deferred_pop_count);
         free_gpr(a1, Wd_tw);
         free_gpr(a1, Wd_t2);
         a1.x87_cache.deferred_pop_count = 0;
@@ -132,12 +133,12 @@ inline void x87_flush_top(AssemblerBuffer& buf, TranslationResult& a1, int Xbase
 // code that reads the tag word or before a push (the pushed slot might overlap
 // a deferred-popped slot).
 inline void x87_flush_deferred_pops(AssemblerBuffer& buf, TranslationResult& a1, int Xbase,
-                                     int Wd_top, int Wd_tmp) {
+                                    int Wd_top, int Wd_tmp) {
     if (a1.x87_cache.deferred_pop_count > 0) {
         const int Wd_tmp2 = alloc_free_gpr(a1);
         const int Wd_tagw = alloc_free_gpr(a1);
         emit_x87_tag_set_empty_batch(buf, Xbase, Wd_top, Wd_tmp, Wd_tmp2, Wd_tagw,
-                                      a1.x87_cache.deferred_pop_count);
+                                     a1.x87_cache.deferred_pop_count);
         free_gpr(a1, Wd_tagw);
         free_gpr(a1, Wd_tmp2);
         a1.x87_cache.deferred_pop_count = 0;

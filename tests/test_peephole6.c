@@ -30,17 +30,17 @@ static uint64_t as_u64(double d) {
     return u;
 }
 
-static void check_f32(const char *name, float got, float expected) {
+static void check_f32(const char* name, float got, float expected) {
     if (as_u32(got) != as_u32(expected)) {
-        printf("FAIL  %-60s  got=%.10g (0x%08x)  expected=%.10g (0x%08x)\n",
-               name, got, as_u32(got), expected, as_u32(expected));
+        printf("FAIL  %-60s  got=%.10g (0x%08x)  expected=%.10g (0x%08x)\n", name, got, as_u32(got),
+               expected, as_u32(expected));
         failures++;
     } else {
         printf("PASS  %s\n", name);
     }
 }
 
-static void check_f64(const char *name, double got, double expected) {
+static void check_f64(const char* name, double got, double expected) {
     if (as_u64(got) != as_u64(expected)) {
         printf("FAIL  %-60s  got=%.15g  expected=%.15g\n", name, got, expected);
         failures++;
@@ -49,7 +49,7 @@ static void check_f64(const char *name, double got, double expected) {
     }
 }
 
-static void check_u16(const char *name, uint16_t got, uint16_t expected) {
+static void check_u16(const char* name, uint16_t got, uint16_t expected) {
     if (got != expected) {
         printf("FAIL  %-60s  got=0x%04x  expected=0x%04x\n", name, got, expected);
         failures++;
@@ -59,14 +59,14 @@ static void check_u16(const char *name, uint16_t got, uint16_t expected) {
 }
 
 /* Read x87 status-word CC bits after a compare. */
-#define READ_SW(var)                            \
-    uint16_t var;                               \
-    __asm__ volatile(                           \
-        "fnstsw %%ax\n"                         \
-        "andw $0x4500, %%ax\n"                  \
-        "movw %%ax, %0\n"                       \
-        : "=m"(var)                             \
-        :                                       \
+#define READ_SW(var)           \
+    uint16_t var;              \
+    __asm__ volatile(          \
+        "fnstsw %%ax\n"        \
+        "andw $0x4500, %%ax\n" \
+        "movw %%ax, %0\n"      \
+        : "=m"(var)            \
+        :                      \
         : "ax")
 
 /* =========================================================================
@@ -86,13 +86,13 @@ static void check_u16(const char *name, uint16_t got, uint16_t expected) {
 static uint16_t test_a_fld_m64_fcomp_gt(void) {
     double src = 3.0;
     __asm__ volatile(
-        "fld1\n"           /* ST(0)=1.0 */
-        "fldl %0\n"        /* ST(0)=3.0, ST(1)=1.0 */
-        "fcomp %%st(1)\n"  /* compare 3 vs 1, pop */
+        "fld1\n"          /* ST(0)=1.0 */
+        "fldl %0\n"       /* ST(0)=3.0, ST(1)=1.0 */
+        "fcomp %%st(1)\n" /* compare 3 vs 1, pop */
         :
         : "m"(src));
     READ_SW(cc);
-    __asm__ volatile("fstp %%st(0)\n" ::: "st");  /* clean up ST(0)=1.0 */
+    __asm__ volatile("fstp %%st(0)\n" ::: "st"); /* clean up ST(0)=1.0 */
     return cc;
 }
 
@@ -152,7 +152,7 @@ static uint16_t test_a_fld_m32_fcomp_gt(void) {
  */
 static uint16_t test_a_fld_reg_fcomp_lt(void) {
     __asm__ volatile(
-        "fld1\n fld1\n faddp\n"                     /* 2.0 */
+        "fld1\n fld1\n faddp\n" /* 2.0 */
         "fld1\n fld1\n faddp\n fld1\n faddp\n"
         "fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n" /* 7.0 */
         /* ST(0)=7, ST(1)=2 */
@@ -160,7 +160,10 @@ static uint16_t test_a_fld_reg_fcomp_lt(void) {
         "fcomp %%st(1)\n"
         :);
     READ_SW(cc);
-    __asm__ volatile("fstp %%st(0)\n" "fstp %%st(0)\n" ::: "st");
+    __asm__ volatile(
+        "fstp %%st(0)\n"
+        "fstp %%st(0)\n" ::
+            : "st");
     return cc;
 }
 
@@ -183,7 +186,7 @@ static uint16_t test_a_fld1_fcomp_eq(void) {
  */
 static uint16_t test_a_fldz_fcomp_lt(void) {
     __asm__ volatile(
-        "fld1\n fld1\n faddp\n fld1\n faddp\n"  /* 3.0 */
+        "fld1\n fld1\n faddp\n fld1\n faddp\n" /* 3.0 */
         "fldz\n"
         "fcomp %%st(1)\n"
         :);
@@ -225,8 +228,8 @@ static double test_a_stack_preserved(void) {
         "fldl %1\n"
         "fcomp %%st(1)\n"
         /* Stack should be back to depth 2: ST(0)=10.0, ST(1)=5.0 */
-        "fstpl %0\n"   /* read ST(0)=10.0, pop */
-        "fstp %%st(0)\n"  /* discard ST(1)=5.0 */
+        "fstpl %0\n"     /* read ST(0)=10.0, pop */
+        "fstp %%st(0)\n" /* discard ST(1)=5.0 */
         : "=m"(result)
         : "m"(src));
     return result;
@@ -271,7 +274,7 @@ static double test_b_fld_fmul_fmulp(void) {
     double src = 5.0;
     double result;
     __asm__ volatile(
-        "fld1\n fld1\n faddp\n"  /* 2.0 */
+        "fld1\n fld1\n faddp\n" /* 2.0 */
         "fldl %1\n"
         "fmul %%st(1), %%st(0)\n"
         "fmulp %%st(0), %%st(1)\n"
@@ -291,7 +294,7 @@ static double test_b_fld_fadd_faddp(void) {
     double src = 2.0;
     double result;
     __asm__ volatile(
-        "fld1\n fld1\n faddp\n fld1\n faddp\n"  /* 3.0 */
+        "fld1\n fld1\n faddp\n fld1\n faddp\n" /* 3.0 */
         "fldl %1\n"
         "fadd %%st(1), %%st(0)\n"
         "faddp %%st(0), %%st(1)\n"
@@ -318,7 +321,7 @@ static double test_b_fld_fsub_fsubrp(void) {
         "fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n"
         "fldl %1\n"
         "fsub %%st(1), %%st(0)\n"
-        "fsubp %%st(0), %%st(1)\n"  /* GAS encodes as FSUBRP: ST(1)=ST(0)-ST(1) */
+        "fsubp %%st(0), %%st(1)\n" /* GAS encodes as FSUBRP: ST(1)=ST(0)-ST(1) */
         "fstpl %0\n"
         : "=m"(result)
         : "m"(src));
@@ -337,10 +340,11 @@ static double test_b_fld_fmul_fsubrp(void) {
     double src = 2.0;
     double result;
     __asm__ volatile(
-        "fld1\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n" /* 6.0 */
+        "fld1\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n" /* 6.0
+                                                                                             */
         "fldl %1\n"
         "fmul %%st(1), %%st(0)\n"
-        "fsubp %%st(0), %%st(1)\n"  /* GAS encodes as FSUBRP: ST(1)=ST(0)-ST(1) */
+        "fsubp %%st(0), %%st(1)\n" /* GAS encodes as FSUBRP: ST(1)=ST(0)-ST(1) */
         "fstpl %0\n"
         : "=m"(result)
         : "m"(src));
@@ -357,13 +361,13 @@ static double test_b_fld_fmul_fsubrp(void) {
 static double test_b_fld_reg_fmul_faddp(void) {
     double result;
     __asm__ volatile(
-        "fld1\n fld1\n faddp\n"                     /* 2.0 — ST(0) */
-        "fld1\n fld1\n faddp\n fld1\n faddp\n"      /* 3.0 — ST(0), ST(1)=2 */
+        "fld1\n fld1\n faddp\n"                /* 2.0 — ST(0) */
+        "fld1\n fld1\n faddp\n fld1\n faddp\n" /* 3.0 — ST(0), ST(1)=2 */
         "fld %%st(1)\n"
         "fmul %%st(1), %%st(0)\n"
         "faddp %%st(0), %%st(1)\n"
-        "fstpl %0\n"    /* read ST(0)=9 */
-        "fstp %%st(0)\n"  /* pop ST(0)=2 */
+        "fstpl %0\n"     /* read ST(0)=9 */
+        "fstp %%st(0)\n" /* pop ST(0)=2 */
         : "=m"(result));
     return result;
 }
@@ -400,7 +404,7 @@ static double test_b_fld1_fmul_faddp(void) {
     double result;
     __asm__ volatile(
         "fld1\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n"
-        "fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n"  /* 7.0 */
+        "fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n" /* 7.0 */
         "fld1\n"
         "fmul %%st(1), %%st(0)\n"
         "faddp %%st(0), %%st(1)\n"
@@ -418,7 +422,7 @@ static double test_b_fild_fmul_faddp(void) {
     int ival = 4;
     double result;
     __asm__ volatile(
-        "fld1\n fld1\n faddp\n fld1\n faddp\n"  /* 3.0 */
+        "fld1\n fld1\n faddp\n fld1\n faddp\n" /* 3.0 */
         "fildl %1\n"
         "fmul %%st(1), %%st(0)\n"
         "faddp %%st(0), %%st(1)\n"
@@ -435,48 +439,31 @@ static double test_b_fild_fmul_faddp(void) {
 
 int main(void) {
     printf("=== Section A: fld_fcomp (FLD + FCOMP/FUCOMP, no FSTSW) ===\n");
-    check_u16("A  FLD m64 + FCOMP  GT   3>1=0x0000",
-              test_a_fld_m64_fcomp_gt(), 0x0000);
-    check_u16("A  FLD m64 + FCOMP  LT   2<5=0x0100",
-              test_a_fld_m64_fcomp_lt(), 0x0100);
-    check_u16("A  FLD m64 + FCOMP  EQ   4=4=0x4000",
-              test_a_fld_m64_fcomp_eq(), 0x4000);
-    check_u16("A  FLD m32 + FCOMP  GT   6>1=0x0000",
-              test_a_fld_m32_fcomp_gt(), 0x0000);
-    check_u16("A  FLD ST(1) + FCOMP LT  2<7=0x0100",
-              test_a_fld_reg_fcomp_lt(), 0x0100);
-    check_u16("A  FLD1 + FCOMP     EQ   1=1=0x4000",
-              test_a_fld1_fcomp_eq(), 0x4000);
-    check_u16("A  FLDZ + FCOMP     LT   0<3=0x0100",
-              test_a_fldz_fcomp_lt(), 0x0100);
-    check_u16("A  FLD NaN + FUCOMP UN   NaN=0x4500",
-              test_a_fld_nan_fucomp_unordered(), 0x4500);
-    check_f64("A  stack depth preserved: ST(0)=10.0 after fld+fcomp",
-              test_a_stack_preserved(), 10.0);
+    check_u16("A  FLD m64 + FCOMP  GT   3>1=0x0000", test_a_fld_m64_fcomp_gt(), 0x0000);
+    check_u16("A  FLD m64 + FCOMP  LT   2<5=0x0100", test_a_fld_m64_fcomp_lt(), 0x0100);
+    check_u16("A  FLD m64 + FCOMP  EQ   4=4=0x4000", test_a_fld_m64_fcomp_eq(), 0x4000);
+    check_u16("A  FLD m32 + FCOMP  GT   6>1=0x0000", test_a_fld_m32_fcomp_gt(), 0x0000);
+    check_u16("A  FLD ST(1) + FCOMP LT  2<7=0x0100", test_a_fld_reg_fcomp_lt(), 0x0100);
+    check_u16("A  FLD1 + FCOMP     EQ   1=1=0x4000", test_a_fld1_fcomp_eq(), 0x4000);
+    check_u16("A  FLDZ + FCOMP     LT   0<3=0x0100", test_a_fldz_fcomp_lt(), 0x0100);
+    check_u16("A  FLD NaN + FUCOMP UN   NaN=0x4500", test_a_fld_nan_fucomp_unordered(), 0x4500);
+    check_f64("A  stack depth preserved: ST(0)=10.0 after fld+fcomp", test_a_stack_preserved(),
+              10.0);
 
     printf("\n=== Section B: fld_arith_arithp (FLD + ARITH + ARITHp) ===\n");
-    check_f64("B  FLD m64 + FMUL + FADDP  4+(3*4)=16",
-              test_b_fld_fmul_faddp(), 16.0);
-    check_f64("B  FLD m64 + FMUL + FMULP  2*(5*2)=20",
-              test_b_fld_fmul_fmulp(), 20.0);
-    check_f64("B  FLD m64 + FADD + FADDP  3+(2+3)=8",
-              test_b_fld_fadd_faddp(), 8.0);
+    check_f64("B  FLD m64 + FMUL + FADDP  4+(3*4)=16", test_b_fld_fmul_faddp(), 16.0);
+    check_f64("B  FLD m64 + FMUL + FMULP  2*(5*2)=20", test_b_fld_fmul_fmulp(), 20.0);
+    check_f64("B  FLD m64 + FADD + FADDP  3+(2+3)=8", test_b_fld_fadd_faddp(), 8.0);
     /* GAS AT&T: fsubp encodes FSUBRP; fsubrp encodes FSUBP */
-    check_f64("B  FLD m64 + FSUB + FSUBRP(AT&T fsubp)  (-7)-10=-17",
-              test_b_fld_fsub_fsubrp(), -17.0);
-    check_f64("B  FLD m64 + FMUL + FSUBRP(AT&T fsubp)  12-6=6",
-              test_b_fld_fmul_fsubrp(), 6.0);
-    check_f64("B  FLD ST(1) + FMUL + FADDP  3+(2*3)=9",
-              test_b_fld_reg_fmul_faddp(), 9.0);
-    check_f64("B  FLD m64 + FMUL mem + FADDP  5+(2*4)=13",
-              test_b_fld_fmul_mem_faddp(), 13.0);
-    check_f64("B  FLD1 + FMUL + FADDP  7+(1*7)=14",
-              test_b_fld1_fmul_faddp(), 14.0);
-    check_f64("B  FILD m32 + FMUL + FADDP  3+(4*3)=15",
-              test_b_fild_fmul_faddp(), 15.0);
+    check_f64("B  FLD m64 + FSUB + FSUBRP(AT&T fsubp)  (-7)-10=-17", test_b_fld_fsub_fsubrp(),
+              -17.0);
+    check_f64("B  FLD m64 + FMUL + FSUBRP(AT&T fsubp)  12-6=6", test_b_fld_fmul_fsubrp(), 6.0);
+    check_f64("B  FLD ST(1) + FMUL + FADDP  3+(2*3)=9", test_b_fld_reg_fmul_faddp(), 9.0);
+    check_f64("B  FLD m64 + FMUL mem + FADDP  5+(2*4)=13", test_b_fld_fmul_mem_faddp(), 13.0);
+    check_f64("B  FLD1 + FMUL + FADDP  7+(1*7)=14", test_b_fld1_fmul_faddp(), 14.0);
+    check_f64("B  FILD m32 + FMUL + FADDP  3+(4*3)=15", test_b_fild_fmul_faddp(), 15.0);
 
-    printf("\n%s  (%d failure%s)\n",
-           failures == 0 ? "ALL PASS" : "SOME FAILURES",
-           failures, failures == 1 ? "" : "s");
+    printf("\n%s  (%d failure%s)\n", failures == 0 ? "ALL PASS" : "SOME FAILURES", failures,
+           failures == 1 ? "" : "s");
     return failures ? 1 : 0;
 }

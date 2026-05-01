@@ -13,22 +13,21 @@
 
 static int failures = 0;
 
-static int check_bitexact(const char *name, double got, double expected) {
+static int check_bitexact(const char* name, double got, double expected) {
     uint64_t g, e;
     memcpy(&g, &got, sizeof(g));
     memcpy(&e, &expected, sizeof(e));
     if (g == e) {
-        printf("PASS  %-40s  got=0x%016llx (%.17g)\n", name,
-               (unsigned long long)g, got);
+        printf("PASS  %-40s  got=0x%016llx (%.17g)\n", name, (unsigned long long)g, got);
         return 1;
     }
-    printf("FAIL  %-40s  got=0x%016llx (%.17g)  expected=0x%016llx (%.17g)\n",
-           name, (unsigned long long)g, got, (unsigned long long)e, expected);
+    printf("FAIL  %-40s  got=0x%016llx (%.17g)  expected=0x%016llx (%.17g)\n", name,
+           (unsigned long long)g, got, (unsigned long long)e, expected);
     failures++;
     return 0;
 }
 
-static int check_bitexact_u64(const char *name, double got, uint64_t expected_bits) {
+static int check_bitexact_u64(const char* name, double got, uint64_t expected_bits) {
     double expected;
     memcpy(&expected, &expected_bits, sizeof(expected));
     return check_bitexact(name, got, expected);
@@ -54,11 +53,12 @@ int main(void) {
        remainder(5, 3) = 5 - round(5/3)*3 = 5 - 2*3 = -1 (vs fmod = 2)
        remainder(7, 3) = 7 - round(7/3)*3 = 7 - 2*3 = 1
        remainder(8, 3) = 8 - round(8/3)*3 = 8 - 3*3 = -1 (vs fmod = 2) */
-    check_bitexact_u64("fprem1(5, 3)",   do_fprem1(5.0, 3.0),   0xbff0000000000000ULL); /* -1 */
-    check_bitexact_u64("fprem1(7, 3)",   do_fprem1(7.0, 3.0),   0x3ff0000000000000ULL); /* 1 */
-    check_bitexact_u64("fprem1(8, 3)",   do_fprem1(8.0, 3.0),   0xbff0000000000000ULL); /* -1 */
-    check_bitexact_u64("fprem1(1, 1)",   do_fprem1(1.0, 1.0),   0x0000000000000000ULL); /* 0 */
-    check_bitexact_u64("fprem1(6, 4)",   do_fprem1(6.0, 4.0),   0xc000000000000000ULL); /* -2 (round-to-even) */
+    check_bitexact_u64("fprem1(5, 3)", do_fprem1(5.0, 3.0), 0xbff0000000000000ULL); /* -1 */
+    check_bitexact_u64("fprem1(7, 3)", do_fprem1(7.0, 3.0), 0x3ff0000000000000ULL); /* 1 */
+    check_bitexact_u64("fprem1(8, 3)", do_fprem1(8.0, 3.0), 0xbff0000000000000ULL); /* -1 */
+    check_bitexact_u64("fprem1(1, 1)", do_fprem1(1.0, 1.0), 0x0000000000000000ULL); /* 0 */
+    check_bitexact_u64("fprem1(6, 4)", do_fprem1(6.0, 4.0),
+                       0xc000000000000000ULL); /* -2 (round-to-even) */
 
     printf("\n%d failure(s)\n", failures);
     return failures ? 1 : 0;

@@ -5,25 +5,27 @@
  *
  * NOTE: GAS AT&T syntax: fdivp = Intel FDIVRP, fdivrp = Intel FDIVP
  */
-#include <stdio.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <time.h>
+
 #include "bench_timing.h"
 
 #define TIMES 1000000
-#define RUNS  5
+#define RUNS 5
 
 static bench_ns_t bench_fdiv_m64(void) {
     bench_ns_t start = bench_now_ns();
     volatile double dividend = 10.0;
-    volatile double divisor  = 4.0;
+    volatile double divisor = 4.0;
     volatile double r;
     for (int i = 0; i < TIMES; i++)
-        __asm__ volatile (
+        __asm__ volatile(
             "fldl %1\n\t"
             "fdivl %2\n\t"
             "fstpl %0\n"
-            : "=m"(r) : "m"(dividend), "m"(divisor));
+            : "=m"(r)
+            : "m"(dividend), "m"(divisor));
     return bench_now_ns() - start;
 }
 
@@ -33,11 +35,12 @@ static bench_ns_t bench_fdivr_m64(void) {
     volatile double div_mem = 9.0;
     volatile double r;
     for (int i = 0; i < TIMES; i++)
-        __asm__ volatile (
+        __asm__ volatile(
             "fldl %1\n\t"
-            "fdivrl %2\n\t"     /* ST(0) = 9 / 3 = 3 */
+            "fdivrl %2\n\t" /* ST(0) = 9 / 3 = 3 */
             "fstpl %0\n"
-            : "=m"(r) : "m"(src), "m"(div_mem));
+            : "=m"(r)
+            : "m"(src), "m"(div_mem));
     return bench_now_ns() - start;
 }
 
@@ -46,11 +49,11 @@ static bench_ns_t bench_fdivp(void) {
     bench_ns_t start = bench_now_ns();
     volatile double r;
     for (int i = 0; i < TIMES; i++)
-        __asm__ volatile (
+        __asm__ volatile(
             "fld1\n\t fld1\n\t faddp\n\t"                    /* ST(0)=2 denominator */
             "fld1\n\t fld1\n\t faddp\n\t fld1\n\t faddp\n\t" /* ST(0)=3 numerator above */
             /* ST(0)=3, ST(1)=2 */
-            "fdivp\n\t"     /* GAS=FDIVRP: ST(1)=3/2=1.5, pop -> ST(0)=1.5 */
+            "fdivp\n\t" /* GAS=FDIVRP: ST(1)=3/2=1.5, pop -> ST(0)=1.5 */
             "fstpl %0\n"
             : "=m"(r));
     return bench_now_ns() - start;
@@ -61,11 +64,12 @@ static bench_ns_t bench_fdivrp(void) {
     bench_ns_t start = bench_now_ns();
     volatile double r;
     for (int i = 0; i < TIMES; i++)
-        __asm__ volatile (
-            "fld1\n\t fld1\n\t faddp\n\t"                    /* ST(0)=2 divisor */
-            "fld1\n\t fld1\n\t faddp\n\t fld1\n\t faddp\n\t fld1\n\t faddp\n\t" /* ST(0)=4 dividend */
+        __asm__ volatile(
+            "fld1\n\t fld1\n\t faddp\n\t" /* ST(0)=2 divisor */
+            "fld1\n\t fld1\n\t faddp\n\t fld1\n\t faddp\n\t fld1\n\t faddp\n\t" /* ST(0)=4 dividend
+                                                                                 */
             /* ST(0)=4, ST(1)=2 */
-            "fdivrp\n\t"    /* GAS=FDIVP: ST(1)=2/4=0.5, pop -> ST(0)=0.5 */
+            "fdivrp\n\t" /* GAS=FDIVP: ST(1)=2/4=0.5, pop -> ST(0)=0.5 */
             "fstpl %0\n"
             : "=m"(r));
     return bench_now_ns() - start;
@@ -76,11 +80,12 @@ static bench_ns_t bench_fidiv_m32(void) {
     volatile int32_t mem = 4;
     volatile double r;
     for (int i = 0; i < TIMES; i++)
-        __asm__ volatile (
-            "fldl2t\n\t"        /* push log2(10) ~3.32 */
+        __asm__ volatile(
+            "fldl2t\n\t" /* push log2(10) ~3.32 */
             "fidivl %1\n\t"
             "fstpl %0\n"
-            : "=m"(r) : "m"(mem));
+            : "=m"(r)
+            : "m"(mem));
     return bench_now_ns() - start;
 }
 
@@ -89,27 +94,29 @@ static bench_ns_t bench_fidivr_m32(void) {
     volatile int32_t mem = 12;
     volatile double r;
     for (int i = 0; i < TIMES; i++)
-        __asm__ volatile (
-            "fld1\n\t fld1\n\t faddp\n\t fld1\n\t faddp\n\t"  /* ST(0)=3 */
-            "fidivrl %1\n\t"                                     /* ST(0) = 12 / 3 = 4 */
+        __asm__ volatile(
+            "fld1\n\t fld1\n\t faddp\n\t fld1\n\t faddp\n\t" /* ST(0)=3 */
+            "fidivrl %1\n\t"                                 /* ST(0) = 12 / 3 = 4 */
             "fstpl %0\n"
-            : "=m"(r) : "m"(mem));
+            : "=m"(r)
+            : "m"(mem));
     return bench_now_ns() - start;
 }
 
 int main(void) {
-    struct { const char *name; bench_ns_t (*fn)(void); } benches[] = {
-        {"fdiv_m64",   bench_fdiv_m64},
-        {"fdivr_m64",  bench_fdivr_m64},
-        {"fdivp",      bench_fdivp},
-        {"fdivrp",     bench_fdivrp},
-        {"fidiv_m32",  bench_fidiv_m32},
-        {"fidivr_m32", bench_fidivr_m32},
+    struct {
+        const char* name;
+        bench_ns_t (*fn)(void);
+    } benches[] = {
+        {"fdiv_m64", bench_fdiv_m64},   {"fdivr_m64", bench_fdivr_m64},
+        {"fdivp", bench_fdivp},         {"fdivrp", bench_fdivrp},
+        {"fidiv_m32", bench_fidiv_m32}, {"fidivr_m32", bench_fidivr_m32},
     };
     int n = (int)(sizeof(benches) / sizeof(benches[0]));
     for (int i = 0; i < n; i++) {
         bench_ns_t sum = 0;
-        for (int r = 0; r < RUNS; r++) sum += benches[i].fn();
+        for (int r = 0; r < RUNS; r++)
+            sum += benches[i].fn();
         printf("BENCH %s %lu\n", benches[i].name, (unsigned long)(sum / RUNS));
     }
     return 0;

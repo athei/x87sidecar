@@ -18,9 +18,11 @@ struct X87Cache {
     int16_t run_remaining = 0;  // Countdown; 0 = inactive
     int8_t st_base_gpr = 0;     // GPR holding &st[0] = Xbase + kX87RegFileOff
     int8_t top_dirty = 0;       // OPT-C: 1 = push skipped store_top, TOP in memory stale
-    int8_t gprs_valid = 0;           // 1 = base/top/st_base GPR numbers are meaningful
-    int8_t tag_push_pending = 0;     // OPT-D: 1 = push's tag-valid update deferred (cancel on next pop)
-    int8_t deferred_pop_count = 0;   // OPT-D2: number of pop tag-set-empty updates deferred to run end
+    int8_t gprs_valid = 0;      // 1 = base/top/st_base GPR numbers are meaningful
+    int8_t tag_push_pending =
+        0;  // OPT-D: 1 = push's tag-valid update deferred (cancel on next pop)
+    int8_t deferred_pop_count =
+        0;  // OPT-D2: number of pop tag-set-empty updates deferred to run end
 
     // OPT-G: Deferred FXCH — compile-time register renaming.
     // perm[i] maps logical stack depth i to physical depth offset.

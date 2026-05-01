@@ -10,21 +10,20 @@
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
-#include <string.h>
 #include <stdlib.h>
+#include <string.h>
 
 #define MAX_ULP 4
 
 static int failures = 0;
 
-static int check_ulp(const char *name, double got, double expected) {
+static int check_ulp(const char* name, double got, double expected) {
     uint64_t g, e;
     memcpy(&g, &got, sizeof(g));
     memcpy(&e, &expected, sizeof(e));
 
     if (g == e) {
-        printf("PASS  %-40s  got=0x%016llx (%.17g)\n", name,
-               (unsigned long long)g, got);
+        printf("PASS  %-40s  got=0x%016llx (%.17g)\n", name, (unsigned long long)g, got);
         return 1;
     }
 
@@ -43,13 +42,13 @@ static int check_ulp(const char *name, double got, double expected) {
     }
 
     if (ulp_delta <= MAX_ULP) {
-        printf("PASS  %-40s  got=0x%016llx (%.17g) [ulp=%llu]\n", name,
-               (unsigned long long)g, got, (unsigned long long)ulp_delta);
+        printf("PASS  %-40s  got=0x%016llx (%.17g) [ulp=%llu]\n", name, (unsigned long long)g, got,
+               (unsigned long long)ulp_delta);
         return 1;
     }
 
-    printf("FAIL  %-40s  got=0x%016llx (%.17g)  expected=0x%016llx (%.17g)  ulp=%llu\n",
-           name, (unsigned long long)g, got, (unsigned long long)e, expected,
+    printf("FAIL  %-40s  got=0x%016llx (%.17g)  expected=0x%016llx (%.17g)  ulp=%llu\n", name,
+           (unsigned long long)g, got, (unsigned long long)e, expected,
            (unsigned long long)ulp_delta);
     failures++;
     return 0;
@@ -86,11 +85,11 @@ static double do_fadd_then_cos(double a, double b) {
 
 int main(void) {
     /* Minimal shape — fcos after just fld. */
-    check_ulp("fcos(0.0)",         do_fcos(0.0),         cos(0.0));
-    check_ulp("fcos(-0.0)",        do_fcos(-0.0),        cos(-0.0));
-    check_ulp("fcos(1.0)",         do_fcos(1.0),         cos(1.0));
-    check_ulp("fcos(0.5)",         do_fcos(0.5),         cos(0.5));
-    check_ulp("fcos(-1.0)",        do_fcos(-1.0),        cos(-1.0));
+    check_ulp("fcos(0.0)", do_fcos(0.0), cos(0.0));
+    check_ulp("fcos(-0.0)", do_fcos(-0.0), cos(-0.0));
+    check_ulp("fcos(1.0)", do_fcos(1.0), cos(1.0));
+    check_ulp("fcos(0.5)", do_fcos(0.5), cos(0.5));
+    check_ulp("fcos(-1.0)", do_fcos(-1.0), cos(-1.0));
     /* Avoid M_PI/2 here — cos(π/2) is near-zero, catastrophic
        cancellation makes 4-ULP tolerance impossible without
        a much-higher-precision reduction.  Native x87 80-bit
@@ -99,9 +98,9 @@ int main(void) {
 
     /* Boundary shape — handled prefix (faddp) writes our cache, then
        fcos's inline sequence fires with cache state in registers. */
-    check_ulp("fcos(0.5+0.5)",     do_fadd_then_cos(0.5, 0.5),  cos(1.0));
-    check_ulp("fcos(0.0+0.0)",     do_fadd_then_cos(0.0, 0.0),  cos(0.0));
-    check_ulp("fcos(0.3+0.4)",     do_fadd_then_cos(0.3, 0.4),  cos(0.3 + 0.4));
+    check_ulp("fcos(0.5+0.5)", do_fadd_then_cos(0.5, 0.5), cos(1.0));
+    check_ulp("fcos(0.0+0.0)", do_fadd_then_cos(0.0, 0.0), cos(0.0));
+    check_ulp("fcos(0.3+0.4)", do_fadd_then_cos(0.3, 0.4), cos(0.3 + 0.4));
 
     printf("\n%d failure(s)\n", failures);
     return failures ? 1 : 0;

@@ -4,15 +4,19 @@
  *
  * Build: gcc -O0 -mfpmath=387 -o test_fld_fst test_fld_fst.c -lm
  */
-#include <stdio.h>
-#include <stdint.h>
-#include <string.h>
 #include <math.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
 
 static int failures = 0;
-static uint64_t as_u64(double d) { uint64_t u; memcpy(&u, &d, 8); return u; }
+static uint64_t as_u64(double d) {
+    uint64_t u;
+    memcpy(&u, &d, 8);
+    return u;
+}
 
-static void check(const char *name, double got, double expected) {
+static void check(const char* name, double got, double expected) {
     if (as_u64(got) != as_u64(expected)) {
         printf("FAIL  %-52s  got=%.17g  expected=%.17g\n", name, got, expected);
         failures++;
@@ -21,11 +25,13 @@ static void check(const char *name, double got, double expected) {
     }
 }
 
-static void check_approx(const char *name, double got, double expected, double rel_eps) {
+static void check_approx(const char* name, double got, double expected, double rel_eps) {
     double diff = got - expected;
-    if (diff < 0) diff = -diff;
+    if (diff < 0)
+        diff = -diff;
     double scale = expected < 0 ? -expected : expected;
-    if (scale == 0) scale = 1.0;
+    if (scale == 0)
+        scale = 1.0;
     if (diff / scale > rel_eps) {
         printf("FAIL  %-52s  got=%.17g  expected=%.17g\n", name, got, expected);
         failures++;
@@ -43,26 +49,29 @@ static double fld_st0(void) {
 static double fld_st1(void) {
     double r;
     __asm__ volatile(
-        "fld1\n fld1\n faddp\n"  /* ST(0)=2 */
-        "fld1\n"                  /* ST(0)=1, ST(1)=2 */
-        "fld %%st(1)\n"           /* ST(0)=2, ST(1)=1, ST(2)=2 */
-        "fstpl %0\n fstp %%st(0)\n fstp %%st(0)\n" : "=m"(r));
+        "fld1\n fld1\n faddp\n" /* ST(0)=2 */
+        "fld1\n"                /* ST(0)=1, ST(1)=2 */
+        "fld %%st(1)\n"         /* ST(0)=2, ST(1)=1, ST(2)=2 */
+        "fstpl %0\n fstp %%st(0)\n fstp %%st(0)\n"
+        : "=m"(r));
     return r;
 }
 static double fld_st2(void) {
     double r;
     __asm__ volatile(
-        "fld1\n fld1\n faddp\n fld1\n faddp\n"  /* 3 */
-        "fld1\n fld1\n faddp\n"                   /* 2 */
-        "fld1\n"                                   /* 1 */
-        "fld %%st(2)\n"                            /* should be 3 */
-        "fstpl %0\n fstp %%st(0)\n fstp %%st(0)\n fstp %%st(0)\n" : "=m"(r));
+        "fld1\n fld1\n faddp\n fld1\n faddp\n" /* 3 */
+        "fld1\n fld1\n faddp\n"                /* 2 */
+        "fld1\n"                               /* 1 */
+        "fld %%st(2)\n"                        /* should be 3 */
+        "fstpl %0\n fstp %%st(0)\n fstp %%st(0)\n fstp %%st(0)\n"
+        : "=m"(r));
     return r;
 }
 
 /* === FLD m32fp / m64fp === */
 static double fld_m32(void) {
-    double r; float mem = 3.25f;
+    double r;
+    float mem = 3.25f;
     __asm__ volatile("flds %1\n fstpl %0\n" : "=m"(r) : "m"(mem));
     return r;
 }
@@ -73,13 +82,41 @@ static double fld_m64(void) {
 }
 
 /* === All FLD constants === */
-static double do_fldz(void)   { double r; __asm__ volatile("fldz\n fstpl %0\n" : "=m"(r)); return r; }
-static double do_fld1(void)   { double r; __asm__ volatile("fld1\n fstpl %0\n" : "=m"(r)); return r; }
-static double do_fldl2e(void) { double r; __asm__ volatile("fldl2e\n fstpl %0\n" : "=m"(r)); return r; }
-static double do_fldl2t(void) { double r; __asm__ volatile("fldl2t\n fstpl %0\n" : "=m"(r)); return r; }
-static double do_fldlg2(void) { double r; __asm__ volatile("fldlg2\n fstpl %0\n" : "=m"(r)); return r; }
-static double do_fldln2(void) { double r; __asm__ volatile("fldln2\n fstpl %0\n" : "=m"(r)); return r; }
-static double do_fldpi(void)  { double r; __asm__ volatile("fldpi\n fstpl %0\n" : "=m"(r)); return r; }
+static double do_fldz(void) {
+    double r;
+    __asm__ volatile("fldz\n fstpl %0\n" : "=m"(r));
+    return r;
+}
+static double do_fld1(void) {
+    double r;
+    __asm__ volatile("fld1\n fstpl %0\n" : "=m"(r));
+    return r;
+}
+static double do_fldl2e(void) {
+    double r;
+    __asm__ volatile("fldl2e\n fstpl %0\n" : "=m"(r));
+    return r;
+}
+static double do_fldl2t(void) {
+    double r;
+    __asm__ volatile("fldl2t\n fstpl %0\n" : "=m"(r));
+    return r;
+}
+static double do_fldlg2(void) {
+    double r;
+    __asm__ volatile("fldlg2\n fstpl %0\n" : "=m"(r));
+    return r;
+}
+static double do_fldln2(void) {
+    double r;
+    __asm__ volatile("fldln2\n fstpl %0\n" : "=m"(r));
+    return r;
+}
+static double do_fldpi(void) {
+    double r;
+    __asm__ volatile("fldpi\n fstpl %0\n" : "=m"(r));
+    return r;
+}
 
 /* === FILD m16/m32/m64 === */
 static double fild_m16(int16_t v) {
@@ -105,7 +142,8 @@ static float fst_m32(float val) {
         "flds %1\n"
         "fsts %0\n"
         "fstp %%st(0)\n"
-        : "=m"(r) : "m"(val));
+        : "=m"(r)
+        : "m"(val));
     return r;
 }
 static double fst_m64(double val) {
@@ -114,7 +152,8 @@ static double fst_m64(double val) {
         "fldl %1\n"
         "fstl %0\n"
         "fstp %%st(0)\n"
-        : "=m"(r) : "m"(val));
+        : "=m"(r)
+        : "m"(val));
     return r;
 }
 
@@ -135,10 +174,11 @@ static double fst_stack_st1(void) {
     double r;
     __asm__ volatile(
         "fldz\n"
-        "fld1\n fld1\n faddp\n"  /* ST(0)=2, ST(1)=0 */
-        "fst %%st(1)\n"           /* ST(1)=2, no pop */
-        "faddp\n"                 /* 2+2=4 */
-        "fstpl %0\n" : "=m"(r));
+        "fld1\n fld1\n faddp\n" /* ST(0)=2, ST(1)=0 */
+        "fst %%st(1)\n"         /* ST(1)=2, no pop */
+        "faddp\n"               /* 2+2=4 */
+        "fstpl %0\n"
+        : "=m"(r));
     return r;
 }
 static double fstp_stack_st0(void) {
@@ -146,47 +186,50 @@ static double fstp_stack_st0(void) {
     __asm__ volatile(
         "fld1\n"
         "fld1\n fld1\n faddp\n"
-        "fstp %%st(0)\n"          /* discard 2, ST(0)=1 */
-        "fstpl %0\n" : "=m"(r));
+        "fstp %%st(0)\n" /* discard 2, ST(0)=1 */
+        "fstpl %0\n"
+        : "=m"(r));
     return r;
 }
 static double fstp_stack_st1(void) {
     double r;
     __asm__ volatile(
         "fld1\n"
-        "fld1\n fld1\n faddp\n fld1\n faddp\n"  /* ST(0)=3, ST(1)=1 */
-        "fstp %%st(1)\n"                          /* copy 3→ST(1), pop → ST(0)=3 */
-        "fstpl %0\n" : "=m"(r));
+        "fld1\n fld1\n faddp\n fld1\n faddp\n" /* ST(0)=3, ST(1)=1 */
+        "fstp %%st(1)\n"                       /* copy 3→ST(1), pop → ST(0)=3 */
+        "fstpl %0\n"
+        : "=m"(r));
     return r;
 }
 static double fstp_stack_st2(void) {
     double r;
     __asm__ volatile(
-        "fld1\n"                                   /* 1 */
-        "fld1\n fld1\n faddp\n"                    /* 2 */
-        "fld1\n fld1\n faddp\n fld1\n faddp\n"    /* 3 */
+        "fld1\n"                               /* 1 */
+        "fld1\n fld1\n faddp\n"                /* 2 */
+        "fld1\n fld1\n faddp\n fld1\n faddp\n" /* 3 */
         /* ST(0)=3, ST(1)=2, ST(2)=1 */
-        "fstp %%st(2)\n"                           /* copy 3→ST(2), pop → ST(0)=2, ST(1)=3 */
-        "fstpl %0\n fstp %%st(0)\n" : "=m"(r));
+        "fstp %%st(2)\n" /* copy 3→ST(2), pop → ST(0)=2, ST(1)=3 */
+        "fstpl %0\n fstp %%st(0)\n"
+        : "=m"(r));
     return r;
 }
 
 /* === Stack depth test — 8 values === */
-static void stack_depth_8(double *results) {
+static void stack_depth_8(double* results) {
     __asm__ volatile(
-        "fld1\n"                                         /* 1 */
-        "fld1\n fld1\n faddp\n"                          /* 2 */
-        "fld1\n fld1\n faddp\n fld1\n faddp\n"           /* 3 */
-        "fld1\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n"  /* 4 */
-        "fld1\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n"  /* 5 */
-        "fld1\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n"  /* 6 */
-        "fld1\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n"  /* 7 */
-        "fld1\n fadd %%st(1)\n"  /* 8: push 1, ST(0)+=ST(1)=7 → 8; stays at depth 8 */
+        "fld1\n"                                                                            /* 1 */
+        "fld1\n fld1\n faddp\n"                                                             /* 2 */
+        "fld1\n fld1\n faddp\n fld1\n faddp\n"                                              /* 3 */
+        "fld1\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n"                               /* 4 */
+        "fld1\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n"                /* 5 */
+        "fld1\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n" /* 6 */
+        "fld1\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n "
+        "faddp\n"               /* 7 */
+        "fld1\n fadd %%st(1)\n" /* 8: push 1, ST(0)+=ST(1)=7 → 8; stays at depth 8 */
         "fstpl %0\n fstpl %1\n fstpl %2\n fstpl %3\n"
         "fstpl %4\n fstpl %5\n fstpl %6\n fstpl %7\n"
-        : "=m"(results[0]), "=m"(results[1]), "=m"(results[2]), "=m"(results[3]),
-          "=m"(results[4]), "=m"(results[5]), "=m"(results[6]), "=m"(results[7])
-    );
+        : "=m"(results[0]), "=m"(results[1]), "=m"(results[2]), "=m"(results[3]), "=m"(results[4]),
+          "=m"(results[5]), "=m"(results[6]), "=m"(results[7]));
 }
 
 int main(void) {
@@ -218,7 +261,7 @@ int main(void) {
     check("FILD m32  1000000", fild_m32(1000000), 1000000.0);
     check("FILD m32  -1", fild_m32(-1), -1.0);
     check("FILD m32  INT32_MAX", fild_m32(2147483647), 2147483647.0);
-    check("FILD m32  INT32_MIN", fild_m32(-2147483647-1), -2147483648.0);
+    check("FILD m32  INT32_MIN", fild_m32(-2147483647 - 1), -2147483648.0);
     check("FILD m64  0", fild_m64(0), 0.0);
     check("FILD m64  1e12", fild_m64(1000000000000LL), 1e12);
     check("FILD m64  -1", fild_m64(-1), -1.0);
@@ -248,8 +291,7 @@ int main(void) {
         }
     }
 
-    printf("\n%s  (%d failure%s)\n",
-           failures == 0 ? "ALL PASS" : "SOME FAILURES",
-           failures, failures == 1 ? "" : "s");
+    printf("\n%s  (%d failure%s)\n", failures == 0 ? "ALL PASS" : "SOME FAILURES", failures,
+           failures == 1 ? "" : "s");
     return failures ? 1 : 0;
 }

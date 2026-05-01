@@ -20,9 +20,9 @@
 
 static int failures = 0;
 
-static void do_fxtract(double in, double *sig, double *exp_out) {
+static void do_fxtract(double in, double* sig, double* exp_out) {
     /* fld in;  fxtract;  fstpl sig (pops new ST(0)=sig);  fstpl exp. */
-    __asm__ volatile (
+    __asm__ volatile(
         "fldl  %2\n\t"
         "fxtract\n\t"
         "fstpl %0\n\t"
@@ -32,37 +32,37 @@ static void do_fxtract(double in, double *sig, double *exp_out) {
         : "st");
 }
 
-static void check_pair(const char *name, double in, double exp_sig, double exp_exp) {
+static void check_pair(const char* name, double in, double exp_sig, double exp_exp) {
     double sig, exp_v;
     do_fxtract(in, &sig, &exp_v);
     uint64_t s_bits, es_bits, e_bits, ee_bits;
-    memcpy(&s_bits,  &sig,     8);
+    memcpy(&s_bits, &sig, 8);
     memcpy(&es_bits, &exp_sig, 8);
-    memcpy(&e_bits,  &exp_v,   8);
+    memcpy(&e_bits, &exp_v, 8);
     memcpy(&ee_bits, &exp_exp, 8);
     int ok = (s_bits == es_bits) && (e_bits == ee_bits);
     if (ok) {
         printf("PASS  %s  sig=%.17g exp=%.17g\n", name, sig, exp_v);
     } else {
         printf("FAIL  %s  in=%.17g\n", name, in);
-        printf("      sig got=%.17g (bits=%016llx)  expected=%.17g (bits=%016llx)\n",
-               sig, (unsigned long long)s_bits, exp_sig, (unsigned long long)es_bits);
-        printf("      exp got=%.17g (bits=%016llx)  expected=%.17g (bits=%016llx)\n",
-               exp_v, (unsigned long long)e_bits, exp_exp, (unsigned long long)ee_bits);
+        printf("      sig got=%.17g (bits=%016llx)  expected=%.17g (bits=%016llx)\n", sig,
+               (unsigned long long)s_bits, exp_sig, (unsigned long long)es_bits);
+        printf("      exp got=%.17g (bits=%016llx)  expected=%.17g (bits=%016llx)\n", exp_v,
+               (unsigned long long)e_bits, exp_exp, (unsigned long long)ee_bits);
         failures++;
     }
 }
 
 int main(void) {
     /* Normal cases — sig in [1.0, 2.0), exp = unbiased exponent. */
-    check_pair("fxtract(1.0)",     1.0,     1.0,    0.0);
-    check_pair("fxtract(2.0)",     2.0,     1.0,    1.0);
-    check_pair("fxtract(0.5)",     0.5,     1.0,   -1.0);
-    check_pair("fxtract(6.0)",     6.0,     1.5,    2.0);
-    check_pair("fxtract(-6.0)",   -6.0,    -1.5,    2.0);
-    check_pair("fxtract(1.75)",    1.75,    1.75,   0.0);
-    check_pair("fxtract(1024.0)",  1024.0,  1.0,   10.0);
-    check_pair("fxtract(0.0625)",  0.0625,  1.0,   -4.0);
+    check_pair("fxtract(1.0)", 1.0, 1.0, 0.0);
+    check_pair("fxtract(2.0)", 2.0, 1.0, 1.0);
+    check_pair("fxtract(0.5)", 0.5, 1.0, -1.0);
+    check_pair("fxtract(6.0)", 6.0, 1.5, 2.0);
+    check_pair("fxtract(-6.0)", -6.0, -1.5, 2.0);
+    check_pair("fxtract(1.75)", 1.75, 1.75, 0.0);
+    check_pair("fxtract(1024.0)", 1024.0, 1.0, 10.0);
+    check_pair("fxtract(0.0625)", 0.0625, 1.0, -4.0);
 
     /* ±0 → exp=-∞, sig preserves sign. */
     {
@@ -77,7 +77,7 @@ int main(void) {
 
     /* ±Inf → exp=+Inf always; sig preserves sign of Inf. */
     {
-        double pos_inf =  1.0 / 0.0;
+        double pos_inf = 1.0 / 0.0;
         double neg_inf = -1.0 / 0.0;
         check_pair("fxtract(+Inf)", pos_inf, pos_inf, pos_inf);
         check_pair("fxtract(-Inf)", neg_inf, neg_inf, pos_inf);
@@ -87,7 +87,7 @@ int main(void) {
      * preservation (input passed through both outputs). */
     {
         double qnan;
-        uint64_t bits = 0x7FF8000000000001ULL;  /* QNaN with payload */
+        uint64_t bits = 0x7FF8000000000001ULL; /* QNaN with payload */
         memcpy(&qnan, &bits, 8);
         check_pair("fxtract(QNaN)", qnan, qnan, qnan);
     }

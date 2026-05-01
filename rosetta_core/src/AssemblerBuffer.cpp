@@ -1,9 +1,9 @@
 #include "rosetta_core/AssemblerBuffer.h"
 
-#include <cstdlib>
-#include <cstring>
 #include <sys/mman.h>
 
+#include <cstdlib>
+#include <cstring>
 
 void* mmap_anonymous_rw(size_t size, int tag) {
     void* result;  // x0
@@ -25,18 +25,18 @@ void AssemblerBuffer::grow() {
         new_data = static_cast<uint32_t*>(mmap_anonymous_rw(new_cap, 0xE6));
         if (new_data == MAP_FAILED) {
             return;
-}
+        }
     }
 
     // Copy existing contents (memcpy size is end_cap, not end)
     if (this->data) {
         memcpy(new_data, this->data, this->end_cap);
-}
+    }
 
     // Free old buffer only if mmap-backed
     if (!this->use_heap && this->data) {
         munmap(this->data, this->end_cap);
-}
+    }
 
     this->data = new_data;
     this->end_cap = new_cap;

@@ -10,20 +10,19 @@
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
-#include <string.h>
 #include <stdlib.h>
+#include <string.h>
 
 #define MAX_ULP 4
 
 static int failures = 0;
 
-static int check_ulp(const char *name, double got, double expected) {
+static int check_ulp(const char* name, double got, double expected) {
     uint64_t g, e;
     memcpy(&g, &got, sizeof(g));
     memcpy(&e, &expected, sizeof(e));
     if (g == e) {
-        printf("PASS  %-40s  got=0x%016llx (%.17g)\n", name,
-               (unsigned long long)g, got);
+        printf("PASS  %-40s  got=0x%016llx (%.17g)\n", name, (unsigned long long)g, got);
         return 1;
     }
     if (isnan(got) && isnan(expected)) {
@@ -39,12 +38,12 @@ static int check_ulp(const char *name, double got, double expected) {
         ulp_delta = g_abs + e_abs;
     }
     if (ulp_delta <= MAX_ULP) {
-        printf("PASS  %-40s  got=0x%016llx (%.17g) [ulp=%llu]\n", name,
-               (unsigned long long)g, got, (unsigned long long)ulp_delta);
+        printf("PASS  %-40s  got=0x%016llx (%.17g) [ulp=%llu]\n", name, (unsigned long long)g, got,
+               (unsigned long long)ulp_delta);
         return 1;
     }
-    printf("FAIL  %-40s  got=0x%016llx (%.17g)  expected=0x%016llx (%.17g)  ulp=%llu\n",
-           name, (unsigned long long)g, got, (unsigned long long)e, expected,
+    printf("FAIL  %-40s  got=0x%016llx (%.17g)  expected=0x%016llx (%.17g)  ulp=%llu\n", name,
+           (unsigned long long)g, got, (unsigned long long)e, expected,
            (unsigned long long)ulp_delta);
     failures++;
     return 0;
@@ -63,15 +62,15 @@ static double do_f2xm1(double v) {
 }
 
 int main(void) {
-    check_ulp("f2xm1(0.0)",        do_f2xm1(0.0),        exp2(0.0) - 1.0);
-    check_ulp("f2xm1(1.0)",        do_f2xm1(1.0),        exp2(1.0) - 1.0);
-    check_ulp("f2xm1(-1.0)",       do_f2xm1(-1.0),       exp2(-1.0) - 1.0);
-    check_ulp("f2xm1(0.5)",        do_f2xm1(0.5),        exp2(0.5) - 1.0);
-    check_ulp("f2xm1(-0.5)",       do_f2xm1(-0.5),       exp2(-0.5) - 1.0);
-    check_ulp("f2xm1(0.25)",       do_f2xm1(0.25),       exp2(0.25) - 1.0);
-    check_ulp("f2xm1(-0.25)",      do_f2xm1(-0.25),      exp2(-0.25) - 1.0);
-    check_ulp("f2xm1(0.1)",        do_f2xm1(0.1),        exp2(0.1) - 1.0);
-    check_ulp("f2xm1(-0.1)",       do_f2xm1(-0.1),       exp2(-0.1) - 1.0);
+    check_ulp("f2xm1(0.0)", do_f2xm1(0.0), exp2(0.0) - 1.0);
+    check_ulp("f2xm1(1.0)", do_f2xm1(1.0), exp2(1.0) - 1.0);
+    check_ulp("f2xm1(-1.0)", do_f2xm1(-1.0), exp2(-1.0) - 1.0);
+    check_ulp("f2xm1(0.5)", do_f2xm1(0.5), exp2(0.5) - 1.0);
+    check_ulp("f2xm1(-0.5)", do_f2xm1(-0.5), exp2(-0.5) - 1.0);
+    check_ulp("f2xm1(0.25)", do_f2xm1(0.25), exp2(0.25) - 1.0);
+    check_ulp("f2xm1(-0.25)", do_f2xm1(-0.25), exp2(-0.25) - 1.0);
+    check_ulp("f2xm1(0.1)", do_f2xm1(0.1), exp2(0.1) - 1.0);
+    check_ulp("f2xm1(-0.1)", do_f2xm1(-0.1), exp2(-0.1) - 1.0);
 
     printf("\n%d failure(s)\n", failures);
     return failures ? 1 : 0;

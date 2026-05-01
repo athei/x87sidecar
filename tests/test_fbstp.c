@@ -23,46 +23,45 @@ static int failures = 0;
 
 /* x86 CW.RC values (bits 11:10): */
 #define RC_NEAREST 0x0000
-#define RC_DOWN    0x0400
-#define RC_UP      0x0800
-#define RC_ZERO    0x0C00
+#define RC_DOWN 0x0400
+#define RC_UP 0x0800
+#define RC_ZERO 0x0C00
 
-static const uint8_t INDEF_BCD[10] = {
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC0, 0xFF, 0xFF
-};
+static const uint8_t INDEF_BCD[10] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC0, 0xFF, 0xFF};
 
 static void do_fbstp(double in, uint8_t out[10]) {
     /* Wrapper: FLDL  in;  FBSTP  out  (also pops ST(0)). */
-    __asm__ volatile (
+    __asm__ volatile(
         "fldl  %1\n\t"
         "fbstp %0\n"
         : "=m"(*(uint8_t (*)[10])out)
         : "m"(in)
-        : "st"
-    );
+        : "st");
 }
 
 static void set_rc(uint16_t rc_bits) {
     /* CW = 0x037F | rc_bits  (mask all exceptions, default precision 64-bit) */
     uint16_t cw = 0x037F | rc_bits;
-    __asm__ volatile ("fldcw %0" : : "m"(cw));
+    __asm__ volatile("fldcw %0" : : "m"(cw));
 }
 
 static void reset_cw(void) {
     uint16_t cw = 0x037F;
-    __asm__ volatile ("fldcw %0" : : "m"(cw));
+    __asm__ volatile("fldcw %0" : : "m"(cw));
 }
 
-static void check_bcd(const char *name, const uint8_t got[10], const uint8_t expected[10]) {
+static void check_bcd(const char* name, const uint8_t got[10], const uint8_t expected[10]) {
     if (memcmp(got, expected, 10) == 0) {
         printf("PASS  %-50s\n", name);
         return;
     }
     printf("FAIL  %-50s\n", name);
     printf("        got =");
-    for (int i = 9; i >= 0; i--) printf(" %02x", got[i]);
+    for (int i = 9; i >= 0; i--)
+        printf(" %02x", got[i]);
     printf("\n        exp =");
-    for (int i = 9; i >= 0; i--) printf(" %02x", expected[i]);
+    for (int i = 9; i >= 0; i--)
+        printf(" %02x", expected[i]);
     printf("\n");
     failures++;
 }
@@ -71,14 +70,17 @@ static void check_bcd(const char *name, const uint8_t got[10], const uint8_t exp
 static void encode_bcd(uint64_t mag, int negative, uint8_t out[10]) {
     memset(out, 0, 10);
     for (int i = 0; i < 9; i++) {
-        unsigned d0 = mag % 10; mag /= 10;
-        unsigned d1 = mag % 10; mag /= 10;
+        unsigned d0 = mag % 10;
+        mag /= 10;
+        unsigned d1 = mag % 10;
+        mag /= 10;
         out[i] = (uint8_t)((d1 << 4) | d0);
     }
-    if (negative) out[9] = 0x80;
+    if (negative)
+        out[9] = 0x80;
 }
 
-static void check_signed(const char *name, double in, int64_t expected_int) {
+static void check_signed(const char* name, double in, int64_t expected_int) {
     uint8_t got[10];
     do_fbstp(in, got);
     uint8_t expected[10];
@@ -88,7 +90,7 @@ static void check_signed(const char *name, double in, int64_t expected_int) {
     check_bcd(name, got, expected);
 }
 
-static void check_indef(const char *name, double in) {
+static void check_indef(const char* name, double in) {
     uint8_t got[10];
     do_fbstp(in, got);
     check_bcd(name, got, INDEF_BCD);
@@ -99,21 +101,21 @@ static void test_rc_nearest_baseline(void) {
     set_rc(RC_NEAREST);
 
     /* Trivial integers. */
-    check_signed("nearest +1",       1.0,  1);
-    check_signed("nearest -1",      -1.0, -1);
-    check_signed("nearest +42",     42.0, 42);
+    check_signed("nearest +1", 1.0, 1);
+    check_signed("nearest -1", -1.0, -1);
+    check_signed("nearest +42", 42.0, 42);
     check_signed("nearest +123456", 123456.0, 123456);
     check_signed("nearest -987654321", -987654321.0, -987654321);
 
     /* Half-way: round to even. */
-    check_signed("nearest +1.5 → 2",  1.5,  2);
-    check_signed("nearest +2.5 → 2",  2.5,  2);
+    check_signed("nearest +1.5 → 2", 1.5, 2);
+    check_signed("nearest +2.5 → 2", 2.5, 2);
     check_signed("nearest -1.5 → -2", -1.5, -2);
     check_signed("nearest -2.5 → -2", -2.5, -2);
 
     /* Quarter values. */
-    check_signed("nearest +0.4 → 0",  0.4,  0);
-    check_signed("nearest +0.6 → 1",  0.6,  1);
+    check_signed("nearest +0.4 → 0", 0.4, 0);
+    check_signed("nearest +0.6 → 1", 0.6, 1);
     check_signed("nearest -0.6 → -1", -0.6, -1);
 
     reset_cw();
@@ -123,11 +125,11 @@ static void test_rc_nearest_baseline(void) {
 static void test_rc_down(void) {
     set_rc(RC_DOWN);
 
-    check_signed("down +1.5 → 1",  1.5,  1);
-    check_signed("down +2.5 → 2",  2.5,  2);
+    check_signed("down +1.5 → 1", 1.5, 1);
+    check_signed("down +2.5 → 2", 2.5, 2);
     check_signed("down -1.5 → -2", -1.5, -2);
     check_signed("down -2.5 → -3", -2.5, -3);
-    check_signed("down +0.9 → 0",  0.9,  0);
+    check_signed("down +0.9 → 0", 0.9, 0);
     check_signed("down -0.1 → -1", -0.1, -1);
 
     reset_cw();
@@ -137,17 +139,17 @@ static void test_rc_down(void) {
 static void test_rc_up(void) {
     set_rc(RC_UP);
 
-    check_signed("up +1.5 → 2",  1.5,  2);
-    check_signed("up +2.5 → 3",  2.5,  3);
+    check_signed("up +1.5 → 2", 1.5, 2);
+    check_signed("up +2.5 → 3", 2.5, 3);
     check_signed("up -1.5 → -1", -1.5, -1);
     check_signed("up -2.5 → -2", -2.5, -2);
-    check_signed("up +0.1 → 1",  0.1,  1);
+    check_signed("up +0.1 → 1", 0.1, 1);
     /* up -0.9: rounds toward +inf → -0.0.  Hardware preserves the sign,
      * so the BCD result has sign byte 0x80 (negative zero). */
     {
         uint8_t got[10];
         do_fbstp(-0.9, got);
-        uint8_t exp[10] = {0,0,0,0,0,0,0,0,0,0x80};
+        uint8_t exp[10] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0x80};
         check_bcd("up -0.9 → -0 (sign byte 0x80)", got, exp);
     }
 
@@ -158,16 +160,16 @@ static void test_rc_up(void) {
 static void test_rc_zero(void) {
     set_rc(RC_ZERO);
 
-    check_signed("trunc +1.5 → 1",  1.5,  1);
-    check_signed("trunc +2.5 → 2",  2.5,  2);
+    check_signed("trunc +1.5 → 1", 1.5, 1);
+    check_signed("trunc +2.5 → 2", 2.5, 2);
     check_signed("trunc -1.5 → -1", -1.5, -1);
     check_signed("trunc -2.5 → -2", -2.5, -2);
-    check_signed("trunc +0.9 → 0",  0.9,  0);
+    check_signed("trunc +0.9 → 0", 0.9, 0);
     /* trunc -0.9: truncate toward zero → -0.0.  Sign byte 0x80. */
     {
         uint8_t got[10];
         do_fbstp(-0.9, got);
-        uint8_t exp[10] = {0,0,0,0,0,0,0,0,0,0x80};
+        uint8_t exp[10] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0x80};
         check_bcd("trunc -0.9 → -0 (sign byte 0x80)", got, exp);
     }
 
@@ -189,7 +191,7 @@ static void test_zeros(void) {
     {
         uint8_t got[10];
         do_fbstp(-0.0, got);
-        uint8_t exp[10] = {0,0,0,0,0,0,0,0,0,0x80};
+        uint8_t exp[10] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0x80};
         check_bcd("-0.0 → sign byte 0x80", got, exp);
     }
 
@@ -202,12 +204,12 @@ static void test_full_range(void) {
 
     /* 2^53 - 1 = 9007199254740991 — largest int exactly representable as f64.
      * (10^18 - 1 isn't representable; it rounds up to 10^18 = indefinite.) */
-    check_signed("+(2^53-1)", 9007199254740991.0,  9007199254740991LL);
+    check_signed("+(2^53-1)", 9007199254740991.0, 9007199254740991LL);
     check_signed("-(2^53-1)", -9007199254740991.0, -9007199254740991LL);
 
     /* 16-digit value mid-range. */
-    check_signed("+1234567890123456",   1234567890123456.0,   1234567890123456LL);
-    check_signed("-1234567890123456",  -1234567890123456.0,  -1234567890123456LL);
+    check_signed("+1234567890123456", 1234567890123456.0, 1234567890123456LL);
+    check_signed("-1234567890123456", -1234567890123456.0, -1234567890123456LL);
 
     reset_cw();
 }
@@ -218,17 +220,26 @@ static void test_indefinite(void) {
 
     /* NaN */
     {
-        union { uint64_t u; double d; } nan = { .u = 0x7FF8000000000001ULL };
+        union {
+            uint64_t u;
+            double d;
+        } nan = {.u = 0x7FF8000000000001ULL};
         check_indef("NaN → indefinite", nan.d);
     }
     /* +inf */
     {
-        union { uint64_t u; double d; } pinf = { .u = 0x7FF0000000000000ULL };
+        union {
+            uint64_t u;
+            double d;
+        } pinf = {.u = 0x7FF0000000000000ULL};
         check_indef("+inf → indefinite", pinf.d);
     }
     /* -inf */
     {
-        union { uint64_t u; double d; } ninf = { .u = 0xFFF0000000000000ULL };
+        union {
+            uint64_t u;
+            double d;
+        } ninf = {.u = 0xFFF0000000000000ULL};
         check_indef("-inf → indefinite", ninf.d);
     }
     /* |val| == 1e18 (exactly representable as a double) */

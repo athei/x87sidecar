@@ -15,41 +15,45 @@
 // Isolate a single case:
 //   gcc -O0 -mfpmath=387 -mno-sse -DTEST_FLD_M80FP_TRUNC=0 ... sample_fld_m80fp.c
 
-#include <stdio.h>
-#include <stdint.h>
 #include <math.h>
+#include <stdint.h>
+#include <stdio.h>
 
-static uint64_t as_u64(double d) { uint64_t u; __builtin_memcpy(&u, &d, 8); return u; }
+static uint64_t as_u64(double d) {
+    uint64_t u;
+    __builtin_memcpy(&u, &d, 8);
+    return u;
+}
 
 // ---------------------------------------------------------------------------
 // Per-test enable flags
 // ---------------------------------------------------------------------------
 #ifndef TEST_FLD_M80FP_ONE
-#  define TEST_FLD_M80FP_ONE     1
+#define TEST_FLD_M80FP_ONE 1
 #endif
 #ifndef TEST_FLD_M80FP_NEG
-#  define TEST_FLD_M80FP_NEG     1
+#define TEST_FLD_M80FP_NEG 1
 #endif
 #ifndef TEST_FLD_M80FP_FRAC
-#  define TEST_FLD_M80FP_FRAC    1
+#define TEST_FLD_M80FP_FRAC 1
 #endif
 #ifndef TEST_FLD_M80FP_PI
-#  define TEST_FLD_M80FP_PI      1
+#define TEST_FLD_M80FP_PI 1
 #endif
 #ifndef TEST_FLD_M80FP_SQRT2
-#  define TEST_FLD_M80FP_SQRT2   1
+#define TEST_FLD_M80FP_SQRT2 1
 #endif
 #ifndef TEST_FLD_M80FP_INF_POS
-#  define TEST_FLD_M80FP_INF_POS 1
+#define TEST_FLD_M80FP_INF_POS 1
 #endif
 #ifndef TEST_FLD_M80FP_INF_NEG
-#  define TEST_FLD_M80FP_INF_NEG 1
+#define TEST_FLD_M80FP_INF_NEG 1
 #endif
 #ifndef TEST_FLD_M80FP_TRUNC
-#  define TEST_FLD_M80FP_TRUNC   1
+#define TEST_FLD_M80FP_TRUNC 1
 #endif
 #ifndef TEST_FLD_M80FP_ROUND_OVERFLOW
-#  define TEST_FLD_M80FP_ROUND_OVERFLOW 1
+#define TEST_FLD_M80FP_ROUND_OVERFLOW 1
 #endif
 
 // ---------------------------------------------------------------------------
@@ -58,15 +62,13 @@ static uint64_t as_u64(double d) { uint64_t u; __builtin_memcpy(&u, &d, 8); retu
 // The volatile prevents the compiler from folding the conversion itself —
 // we want the x87 FLD m80fp + FSTP m64fp sequence, not a compile-time cast.
 // ---------------------------------------------------------------------------
-static uint64_t load_f80_to_f64(volatile long double *src)
-{
+static uint64_t load_f80_to_f64(volatile long double* src) {
     double result;
-    __asm__ volatile (
+    __asm__ volatile(
         "fldt %1\n"
         "fstpl %0\n"
-        : "=m" (result)
-        : "m"  (*src)
-    );
+        : "=m"(result)
+        : "m"(*src));
     return as_u64(result);
 }
 
@@ -92,21 +94,19 @@ static uint64_t load_f80_to_f64(volatile long double *src)
 // +1.0 — simplest normal value, only the explicit integer bit is set.
 // f80: 3FFF 8000000000000000  ->  f64: 0x3FF0000000000000
 #if TEST_FLD_M80FP_ONE
-static uint64_t test_fld_m80fp_one(void)
-{
+static uint64_t test_fld_m80fp_one(void) {
     static const volatile unsigned char src[10] = {
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80,  // mantissa LE
-        0xFF, 0x3F                                         // exponent LE
+        0xFF, 0x3F                                       // exponent LE
     };
-    return load_f80_to_f64((volatile long double *)src);
+    return load_f80_to_f64((volatile long double*)src);
 }
 #endif
 
 // -1.0 — tests the sign bit path.
 // f80: BFFF 8000000000000000  ->  f64: 0xBFF0000000000000
 #if TEST_FLD_M80FP_NEG
-static uint64_t test_fld_m80fp_neg(void)
-{
+static uint64_t test_fld_m80fp_neg(void) {
     volatile long double src = -1.0L;
     return load_f80_to_f64(&src);
 }
@@ -115,8 +115,7 @@ static uint64_t test_fld_m80fp_neg(void)
 // 1.5 — tests a non-zero fractional mantissa.
 // f80: 3FFF C000000000000000  ->  f64: 0x3FF8000000000000
 #if TEST_FLD_M80FP_FRAC
-static uint64_t test_fld_m80fp_frac(void)
-{
+static uint64_t test_fld_m80fp_frac(void) {
     volatile long double src = 1.5L;
     return load_f80_to_f64(&src);
 }
@@ -126,8 +125,7 @@ static uint64_t test_fld_m80fp_frac(void)
 // mantissa being narrowed to 52 bits.
 // f80: 4000 C90FDAA22168C235  ->  f64: 0x400921FB54442D18
 #if TEST_FLD_M80FP_PI
-static uint64_t test_fld_m80fp_pi(void)
-{
+static uint64_t test_fld_m80fp_pi(void) {
     volatile long double src = 3.14159265358979323846264338327950288L;
     return load_f80_to_f64(&src);
 }
@@ -136,8 +134,7 @@ static uint64_t test_fld_m80fp_pi(void)
 // sqrt(2) — tests mantissa truncation with many significant bits.
 // f80: 3FFF B504F333F9DE6484  ->  f64: 0x3FF6A09E667F3BCD
 #if TEST_FLD_M80FP_SQRT2
-static uint64_t test_fld_m80fp_sqrt2(void)
-{
+static uint64_t test_fld_m80fp_sqrt2(void) {
     volatile long double src = 1.41421356237309504880168872420969808L;
     return load_f80_to_f64(&src);
 }
@@ -146,8 +143,7 @@ static uint64_t test_fld_m80fp_sqrt2(void)
 // +infinity — tests the special-case exponent (0x7FFF).
 // f80: 7FFF 8000000000000000  ->  f64: 0x7FF0000000000000
 #if TEST_FLD_M80FP_INF_POS
-static uint64_t test_fld_m80fp_inf_pos(void)
-{
+static uint64_t test_fld_m80fp_inf_pos(void) {
     volatile long double src = __builtin_infl();
     return load_f80_to_f64(&src);
 }
@@ -156,8 +152,7 @@ static uint64_t test_fld_m80fp_inf_pos(void)
 // -infinity — same exponent path, sign bit set.
 // f80: FFFF 8000000000000000  ->  f64: 0xFFF0000000000000
 #if TEST_FLD_M80FP_INF_NEG
-static uint64_t test_fld_m80fp_inf_neg(void)
-{
+static uint64_t test_fld_m80fp_inf_neg(void) {
     volatile long double src = -__builtin_infl();
     return load_f80_to_f64(&src);
 }
@@ -173,8 +168,7 @@ static uint64_t test_fld_m80fp_inf_neg(void)
 // This specifically tests that your conversion drops the sub-52-bit
 // mantissa bits rather than rounding them into the result incorrectly.
 #if TEST_FLD_M80FP_TRUNC
-static uint64_t test_fld_m80fp_trunc(void)
-{
+static uint64_t test_fld_m80fp_trunc(void) {
     volatile long double src = 1.0L + 0x1p-52L + 0x1p-64L;
     return load_f80_to_f64(&src);
 }
@@ -193,49 +187,51 @@ static uint64_t test_fld_m80fp_trunc(void)
 // that the result drops back to 1.0 (mantissa zeroed by the carry, exp_adj
 // unchanged at 0x3FF).
 #if TEST_FLD_M80FP_ROUND_OVERFLOW
-static uint64_t test_fld_m80fp_round_overflow(void)
-{
+static uint64_t test_fld_m80fp_round_overflow(void) {
     static const volatile unsigned char src[10] = {
         0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,  // mantissa = all 1s
-        0xFF, 0x3F                                         // exp = 0x3FFF, sign = +
+        0xFF, 0x3F                                       // exp = 0x3FFF, sign = +
     };
-    return load_f80_to_f64((volatile long double *)src);
+    return load_f80_to_f64((volatile long double*)src);
 }
 #endif
 
 // ---------------------------------------------------------------------------
 
-typedef struct { const char* name; uint64_t (*fn)(void); uint64_t expected; } TestCase;
+typedef struct {
+    const char* name;
+    uint64_t (*fn)(void);
+    uint64_t expected;
+} TestCase;
 
-int main(void)
-{
+int main(void) {
     TestCase tests[] = {
 #if TEST_FLD_M80FP_ONE
-        { "fld m80fp  +1.0             ", test_fld_m80fp_one,     0x3FF0000000000000ULL },
+        {"fld m80fp  +1.0             ", test_fld_m80fp_one, 0x3FF0000000000000ULL},
 #endif
 #if TEST_FLD_M80FP_NEG
-        { "fld m80fp  -1.0  sign bit   ", test_fld_m80fp_neg,     0xBFF0000000000000ULL },
+        {"fld m80fp  -1.0  sign bit   ", test_fld_m80fp_neg, 0xBFF0000000000000ULL},
 #endif
 #if TEST_FLD_M80FP_FRAC
-        { "fld m80fp  1.5   fraction   ", test_fld_m80fp_frac,    0x3FF8000000000000ULL },
+        {"fld m80fp  1.5   fraction   ", test_fld_m80fp_frac, 0x3FF8000000000000ULL},
 #endif
 #if TEST_FLD_M80FP_PI
-        { "fld m80fp  pi    exp+trunc  ", test_fld_m80fp_pi,      0x400921FB54442D18ULL },
+        {"fld m80fp  pi    exp+trunc  ", test_fld_m80fp_pi, 0x400921FB54442D18ULL},
 #endif
 #if TEST_FLD_M80FP_SQRT2
-        { "fld m80fp  sqrt2 many bits  ", test_fld_m80fp_sqrt2,   0x3FF6A09E667F3BCDUL },
+        {"fld m80fp  sqrt2 many bits  ", test_fld_m80fp_sqrt2, 0x3FF6A09E667F3BCDUL},
 #endif
 #if TEST_FLD_M80FP_INF_POS
-        { "fld m80fp  +inf  exp=7FFF   ", test_fld_m80fp_inf_pos, 0x7FF0000000000000ULL },
+        {"fld m80fp  +inf  exp=7FFF   ", test_fld_m80fp_inf_pos, 0x7FF0000000000000ULL},
 #endif
 #if TEST_FLD_M80FP_INF_NEG
-        { "fld m80fp  -inf  exp=FFFF   ", test_fld_m80fp_inf_neg, 0xFFF0000000000000ULL },
+        {"fld m80fp  -inf  exp=FFFF   ", test_fld_m80fp_inf_neg, 0xFFF0000000000000ULL},
 #endif
 #if TEST_FLD_M80FP_TRUNC
-        { "fld m80fp  trunc 2^-64 lost ", test_fld_m80fp_trunc,   0x3FF0000000000001ULL },
+        {"fld m80fp  trunc 2^-64 lost ", test_fld_m80fp_trunc, 0x3FF0000000000001ULL},
 #endif
 #if TEST_FLD_M80FP_ROUND_OVERFLOW
-        { "fld m80fp  round->2.0       ", test_fld_m80fp_round_overflow, 0x4000000000000000ULL },
+        {"fld m80fp  round->2.0       ", test_fld_m80fp_round_overflow, 0x4000000000000000ULL},
 #endif
     };
 
@@ -244,8 +240,7 @@ int main(void)
     for (int i = 0; i < n; i++) {
         uint64_t got = tests[i].fn();
         int ok = (got == tests[i].expected);
-        printf("%s  got=%016llx  expected=%016llx  %s\n",
-               tests[i].name, (unsigned long long)got,
+        printf("%s  got=%016llx  expected=%016llx  %s\n", tests[i].name, (unsigned long long)got,
                (unsigned long long)tests[i].expected, ok ? "PASS" : "FAIL");
         ok ? pass++ : fail++;
     }

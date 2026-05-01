@@ -9,20 +9,19 @@
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
-#include <string.h>
 #include <stdlib.h>
+#include <string.h>
 
 #define MAX_ULP 4
 
 static int failures = 0;
 
-static int check_ulp(const char *name, double got, double expected) {
+static int check_ulp(const char* name, double got, double expected) {
     uint64_t g, e;
     memcpy(&g, &got, sizeof(g));
     memcpy(&e, &expected, sizeof(e));
     if (g == e) {
-        printf("PASS  %-40s  got=0x%016llx (%.17g)\n", name,
-               (unsigned long long)g, got);
+        printf("PASS  %-40s  got=0x%016llx (%.17g)\n", name, (unsigned long long)g, got);
         return 1;
     }
     if (isnan(got) && isnan(expected)) {
@@ -38,12 +37,12 @@ static int check_ulp(const char *name, double got, double expected) {
         ulp_delta = g_abs + e_abs;
     }
     if (ulp_delta <= MAX_ULP) {
-        printf("PASS  %-40s  got=0x%016llx (%.17g) [ulp=%llu]\n", name,
-               (unsigned long long)g, got, (unsigned long long)ulp_delta);
+        printf("PASS  %-40s  got=0x%016llx (%.17g) [ulp=%llu]\n", name, (unsigned long long)g, got,
+               (unsigned long long)ulp_delta);
         return 1;
     }
-    printf("FAIL  %-40s  got=0x%016llx (%.17g)  expected=0x%016llx (%.17g)  ulp=%llu\n",
-           name, (unsigned long long)g, got, (unsigned long long)e, expected,
+    printf("FAIL  %-40s  got=0x%016llx (%.17g)  expected=0x%016llx (%.17g)  ulp=%llu\n", name,
+           (unsigned long long)g, got, (unsigned long long)e, expected,
            (unsigned long long)ulp_delta);
     failures++;
     return 0;
@@ -52,9 +51,9 @@ static int check_ulp(const char *name, double got, double expected) {
 static double do_fyl2xp1(double y, double x) {
     double r;
     __asm__ volatile(
-        "fldl  %1\n\t"   /* push y → ST(0) */
-        "fldl  %2\n\t"   /* push x → ST(0); y now ST(1) */
-        "fyl2xp1\n\t"    /* ST(1) = y*log2(x+1); pop */
+        "fldl  %1\n\t" /* push y → ST(0) */
+        "fldl  %2\n\t" /* push x → ST(0); y now ST(1) */
+        "fyl2xp1\n\t"  /* ST(1) = y*log2(x+1); pop */
         "fstpl %0\n\t"
         : "=m"(r)
         : "m"(y), "m"(x)
@@ -63,14 +62,14 @@ static double do_fyl2xp1(double y, double x) {
 }
 
 int main(void) {
-    check_ulp("fyl2xp1(1, 0)",   do_fyl2xp1(1.0, 0.0),   1.0 * log2(1.0));
-    check_ulp("fyl2xp1(2, 0)",   do_fyl2xp1(2.0, 0.0),   2.0 * log2(1.0));
-    check_ulp("fyl2xp1(1, 1)",   do_fyl2xp1(1.0, 1.0),   1.0 * log2(2.0));
-    check_ulp("fyl2xp1(3, 1)",   do_fyl2xp1(3.0, 1.0),   3.0 * log2(2.0));
-    check_ulp("fyl2xp1(1, 3)",   do_fyl2xp1(1.0, 3.0),   1.0 * log2(4.0));
-    check_ulp("fyl2xp1(1, 0.1)", do_fyl2xp1(1.0, 0.1),   1.0 * log2(1.1));
-    check_ulp("fyl2xp1(1,-0.1)", do_fyl2xp1(1.0, -0.1),  1.0 * log2(0.9));
-    check_ulp("fyl2xp1(2, 0.25)",do_fyl2xp1(2.0, 0.25),  2.0 * log2(1.25));
+    check_ulp("fyl2xp1(1, 0)", do_fyl2xp1(1.0, 0.0), 1.0 * log2(1.0));
+    check_ulp("fyl2xp1(2, 0)", do_fyl2xp1(2.0, 0.0), 2.0 * log2(1.0));
+    check_ulp("fyl2xp1(1, 1)", do_fyl2xp1(1.0, 1.0), 1.0 * log2(2.0));
+    check_ulp("fyl2xp1(3, 1)", do_fyl2xp1(3.0, 1.0), 3.0 * log2(2.0));
+    check_ulp("fyl2xp1(1, 3)", do_fyl2xp1(1.0, 3.0), 1.0 * log2(4.0));
+    check_ulp("fyl2xp1(1, 0.1)", do_fyl2xp1(1.0, 0.1), 1.0 * log2(1.1));
+    check_ulp("fyl2xp1(1,-0.1)", do_fyl2xp1(1.0, -0.1), 1.0 * log2(0.9));
+    check_ulp("fyl2xp1(2, 0.25)", do_fyl2xp1(2.0, 0.25), 2.0 * log2(1.25));
 
     printf("\n%d failure(s)\n", failures);
     return failures ? 1 : 0;

@@ -22,9 +22,13 @@
 #include <string.h>
 
 static int failures = 0;
-static uint64_t as_u64(double d) { uint64_t u; memcpy(&u, &d, 8); return u; }
+static uint64_t as_u64(double d) {
+    uint64_t u;
+    memcpy(&u, &d, 8);
+    return u;
+}
 
-static void check(const char *name, double got, double expected) {
+static void check(const char* name, double got, double expected) {
     if (as_u64(got) != as_u64(expected)) {
         printf("FAIL  %-55s  got=%.17g  expected=%.17g\n", name, got, expected);
         failures++;
@@ -53,28 +57,28 @@ static void check(const char *name, double got, double expected) {
  * Run 3: FSTP ST(0), FSTP [r1], FSTP [r2]
  *   Reads the remaining values and verifies they survived correctly.
  */
-static void test_elision_3deep(double *result, double *r1, double *r2) {
+static void test_elision_3deep(double* result, double* r1, double* r2) {
     volatile double a = 2.0, b = 3.0, c = 5.0;
     int dummy;
     __asm__ volatile(
         /* Run 1: push 3 values */
-        "fldl %4\n\t"           /* ST(0)=a=2 */
-        "fldl %5\n\t"           /* ST(0)=b=3, ST(1)=2 */
-        "fldl %6\n\t"           /* ST(0)=c=5, ST(1)=3, ST(2)=2 */
+        "fldl %4\n\t" /* ST(0)=a=2 */
+        "fldl %5\n\t" /* ST(0)=b=3, ST(1)=2 */
+        "fldl %6\n\t" /* ST(0)=c=5, ST(1)=3, ST(2)=2 */
         /* Break: non-x87 instruction */
         "movl $0, %3\n\t"
         /* Run 2: non-popping arithmetic (ReadSt elision target) */
-        "fadd %%st(2), %%st\n\t"  /* ST(0) = 5+2 = 7 */
-        "fmul %%st(1), %%st\n\t"  /* ST(0) = 7*3 = 21 */
-        "fstl %0\n\t"             /* FST (non-popping): store 21 to *result */
+        "fadd %%st(2), %%st\n\t" /* ST(0) = 5+2 = 7 */
+        "fmul %%st(1), %%st\n\t" /* ST(0) = 7*3 = 21 */
+        "fstl %0\n\t"            /* FST (non-popping): store 21 to *result */
         /* Break */
         "movl $1, %3\n\t"
         /* Run 3: verify remaining values survived */
-        "fstp %%st(0)\n\t"       /* pop 21 → ST(0)=3, ST(1)=2 */
-        "fstpl %1\n\t"           /* r1 = 3, pop → ST(0)=2 */
-        "fstpl %2\n\t"           /* r2 = 2, pop */
+        "fstp %%st(0)\n\t" /* pop 21 → ST(0)=3, ST(1)=2 */
+        "fstpl %1\n\t"     /* r1 = 3, pop → ST(0)=2 */
+        "fstpl %2\n\t"     /* r2 = 2, pop */
         : "=m"(*result), "=m"(*r1), "=m"(*r2), "+m"(dummy)
-        : "m"(a), "m"(b), "m"(c)  /* %4=a, %5=b, %6=c */
+        : "m"(a), "m"(b), "m"(c) /* %4=a, %5=b, %6=c */
     );
 }
 
@@ -91,28 +95,27 @@ static void test_elision_3deep(double *result, double *r1, double *r2) {
  *     d=0: FAdd → store (needed)
  *     d=1: ReadSt(2), initial_depth=2. 2 == 1+1 → YES. Elide.
  */
-static void test_pop_then_arith(double *result, double *r1) {
+static void test_pop_then_arith(double* result, double* r1) {
     volatile double a = 2.0, b = 3.0, c = 5.0;
     int dummy;
     __asm__ volatile(
         /* Run 1: push 3 values */
-        "fldl %3\n\t"           /* ST(0)=a=2 */
-        "fldl %4\n\t"           /* ST(0)=b=3, ST(1)=2 */
-        "fldl %5\n\t"           /* ST(0)=c=5, ST(1)=3, ST(2)=2 */
+        "fldl %3\n\t" /* ST(0)=a=2 */
+        "fldl %4\n\t" /* ST(0)=b=3, ST(1)=2 */
+        "fldl %5\n\t" /* ST(0)=c=5, ST(1)=3, ST(2)=2 */
         /* Break */
         "movl $0, %2\n\t"
         /* Run 2: pop one, then arithmetic on remaining */
         "fstp %%st(0)\n\t"       /* pop c=5 → ST(0)=3, ST(1)=2 */
-        "fadd %%st(1), %%st\n\t"  /* ST(0) = 3+2 = 5 */
-        "fstl %0\n\t"             /* FST (non-popping): store 5 */
+        "fadd %%st(1), %%st\n\t" /* ST(0) = 3+2 = 5 */
+        "fstl %0\n\t"            /* FST (non-popping): store 5 */
         /* Break */
         "movl $1, %2\n\t"
         /* Run 3: verify */
-        "fstp %%st(0)\n\t"       /* pop 5 → ST(0)=2 */
-        "fstpl %1\n\t"           /* r1 = 2, pop */
+        "fstp %%st(0)\n\t" /* pop 5 → ST(0)=2 */
+        "fstpl %1\n\t"     /* r1 = 2, pop */
         : "=m"(*result), "=m"(*r1), "+m"(dummy)
-        : "m"(a), "m"(b), "m"(c)
-    );
+        : "m"(a), "m"(b), "m"(c));
 }
 
 int main(void) {

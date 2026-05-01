@@ -16,19 +16,20 @@
  *   10 = round toward +inf (ceil)
  *   11 = round toward zero (truncate)
  */
-#include <stdio.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <time.h>
+
 #include "bench_timing.h"
 
 #define TIMES 2000000
-#define RUNS  5
+#define RUNS 5
 
 /* Control word values for each rounding mode */
-#define CW_NEAREST   0x037F   /* RC=00 default, double precision, all exceptions masked */
-#define CW_FLOOR     0x077F   /* RC=01 toward -inf */
-#define CW_CEIL      0x0B7F   /* RC=10 toward +inf */
-#define CW_TRUNC     0x0F7F   /* RC=11 toward zero */
+#define CW_NEAREST 0x037F /* RC=00 default, double precision, all exceptions masked */
+#define CW_FLOOR 0x077F   /* RC=01 toward -inf */
+#define CW_CEIL 0x0B7F    /* RC=10 toward +inf */
+#define CW_TRUNC 0x0F7F   /* RC=11 toward zero */
 
 /* ── FISTP m32 (most common real-world pattern: FLDCW + FISTP for coord floor) ── */
 
@@ -38,11 +39,12 @@ static bench_ns_t bench_fistp_m32_nearest(void) {
     volatile int32_t r;
     volatile double src = 1.7;
     for (int i = 0; i < TIMES; i++)
-        __asm__ volatile (
+        __asm__ volatile(
             "fldcw %1\n\t"
             "fldl  %2\n\t"
             "fistpl %0\n"
-            : "=m"(r) : "m"(cw), "m"(src));
+            : "=m"(r)
+            : "m"(cw), "m"(src));
     return bench_now_ns() - start;
 }
 
@@ -52,11 +54,12 @@ static bench_ns_t bench_fistp_m32_floor(void) {
     volatile int32_t r;
     volatile double src = 1.7;
     for (int i = 0; i < TIMES; i++)
-        __asm__ volatile (
+        __asm__ volatile(
             "fldcw %1\n\t"
             "fldl  %2\n\t"
             "fistpl %0\n"
-            : "=m"(r) : "m"(cw), "m"(src));
+            : "=m"(r)
+            : "m"(cw), "m"(src));
     return bench_now_ns() - start;
 }
 
@@ -66,11 +69,12 @@ static bench_ns_t bench_fistp_m32_ceil(void) {
     volatile int32_t r;
     volatile double src = 1.7;
     for (int i = 0; i < TIMES; i++)
-        __asm__ volatile (
+        __asm__ volatile(
             "fldcw %1\n\t"
             "fldl  %2\n\t"
             "fistpl %0\n"
-            : "=m"(r) : "m"(cw), "m"(src));
+            : "=m"(r)
+            : "m"(cw), "m"(src));
     return bench_now_ns() - start;
 }
 
@@ -80,11 +84,12 @@ static bench_ns_t bench_fistp_m32_trunc(void) {
     volatile int32_t r;
     volatile double src = 1.7;
     for (int i = 0; i < TIMES; i++)
-        __asm__ volatile (
+        __asm__ volatile(
             "fldcw %1\n\t"
             "fldl  %2\n\t"
             "fistpl %0\n"
-            : "=m"(r) : "m"(cw), "m"(src));
+            : "=m"(r)
+            : "m"(cw), "m"(src));
     return bench_now_ns() - start;
 }
 
@@ -96,11 +101,12 @@ static bench_ns_t bench_fistp_m64_nearest(void) {
     volatile int64_t r;
     volatile double src = 1.7;
     for (int i = 0; i < TIMES; i++)
-        __asm__ volatile (
+        __asm__ volatile(
             "fldcw %1\n\t"
             "fldl  %2\n\t"
             "fistpll %0\n"
-            : "=m"(r) : "m"(cw), "m"(src));
+            : "=m"(r)
+            : "m"(cw), "m"(src));
     return bench_now_ns() - start;
 }
 
@@ -110,11 +116,12 @@ static bench_ns_t bench_fistp_m64_floor(void) {
     volatile int64_t r;
     volatile double src = 1.7;
     for (int i = 0; i < TIMES; i++)
-        __asm__ volatile (
+        __asm__ volatile(
             "fldcw %1\n\t"
             "fldl  %2\n\t"
             "fistpll %0\n"
-            : "=m"(r) : "m"(cw), "m"(src));
+            : "=m"(r)
+            : "m"(cw), "m"(src));
     return bench_now_ns() - start;
 }
 
@@ -126,12 +133,13 @@ static bench_ns_t bench_frndint_nearest(void) {
     volatile double r;
     volatile double src = 1.7;
     for (int i = 0; i < TIMES; i++)
-        __asm__ volatile (
+        __asm__ volatile(
             "fldcw  %1\n\t"
             "fldl   %2\n\t"
             "frndint\n\t"
             "fstpl  %0\n"
-            : "=m"(r) : "m"(cw), "m"(src));
+            : "=m"(r)
+            : "m"(cw), "m"(src));
     return bench_now_ns() - start;
 }
 
@@ -141,12 +149,13 @@ static bench_ns_t bench_frndint_floor(void) {
     volatile double r;
     volatile double src = 1.7;
     for (int i = 0; i < TIMES; i++)
-        __asm__ volatile (
+        __asm__ volatile(
             "fldcw  %1\n\t"
             "fldl   %2\n\t"
             "frndint\n\t"
             "fstpl  %0\n"
-            : "=m"(r) : "m"(cw), "m"(src));
+            : "=m"(r)
+            : "m"(cw), "m"(src));
     return bench_now_ns() - start;
 }
 
@@ -158,12 +167,13 @@ static bench_ns_t bench_fist_m32_nearest(void) {
     volatile int32_t r;
     volatile double src = 1.7;
     for (int i = 0; i < TIMES; i++)
-        __asm__ volatile (
+        __asm__ volatile(
             "fldcw  %1\n\t"
             "fldl   %2\n\t"
             "fistl  %0\n\t"
             "fstp   %%st(0)\n\t"
-            : "=m"(r) : "m"(cw), "m"(src));
+            : "=m"(r)
+            : "m"(cw), "m"(src));
     return bench_now_ns() - start;
 }
 
@@ -173,32 +183,32 @@ static bench_ns_t bench_fist_m32_floor(void) {
     volatile int32_t r;
     volatile double src = 1.7;
     for (int i = 0; i < TIMES; i++)
-        __asm__ volatile (
+        __asm__ volatile(
             "fldcw  %1\n\t"
             "fldl   %2\n\t"
             "fistl  %0\n\t"
             "fstp   %%st(0)\n\t"
-            : "=m"(r) : "m"(cw), "m"(src));
+            : "=m"(r)
+            : "m"(cw), "m"(src));
     return bench_now_ns() - start;
 }
 
 int main(void) {
-    struct { const char *name; bench_ns_t (*fn)(void); } benches[] = {
-        {"fistp_m32_nearest", bench_fistp_m32_nearest},
-        {"fistp_m32_floor",   bench_fistp_m32_floor},
-        {"fistp_m32_ceil",    bench_fistp_m32_ceil},
-        {"fistp_m32_trunc",   bench_fistp_m32_trunc},
-        {"fistp_m64_nearest", bench_fistp_m64_nearest},
-        {"fistp_m64_floor",   bench_fistp_m64_floor},
-        {"frndint_nearest",   bench_frndint_nearest},
-        {"frndint_floor",     bench_frndint_floor},
-        {"fist_m32_nearest",  bench_fist_m32_nearest},
-        {"fist_m32_floor",    bench_fist_m32_floor},
+    struct {
+        const char* name;
+        bench_ns_t (*fn)(void);
+    } benches[] = {
+        {"fistp_m32_nearest", bench_fistp_m32_nearest}, {"fistp_m32_floor", bench_fistp_m32_floor},
+        {"fistp_m32_ceil", bench_fistp_m32_ceil},       {"fistp_m32_trunc", bench_fistp_m32_trunc},
+        {"fistp_m64_nearest", bench_fistp_m64_nearest}, {"fistp_m64_floor", bench_fistp_m64_floor},
+        {"frndint_nearest", bench_frndint_nearest},     {"frndint_floor", bench_frndint_floor},
+        {"fist_m32_nearest", bench_fist_m32_nearest},   {"fist_m32_floor", bench_fist_m32_floor},
     };
     int n = (int)(sizeof(benches) / sizeof(benches[0]));
     for (int i = 0; i < n; i++) {
         bench_ns_t sum = 0;
-        for (int r = 0; r < RUNS; r++) sum += benches[i].fn();
+        for (int r = 0; r < RUNS; r++)
+            sum += benches[i].fn();
         printf("BENCH %-22s %lu\n", benches[i].name, (unsigned long)(sum / RUNS));
     }
     return 0;

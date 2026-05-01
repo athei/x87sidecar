@@ -8,13 +8,14 @@
  *
  * Compare with ROSETTA_X87_DISABLE_FUSIONS=fstp_fld to measure benefit.
  */
-#include <stdio.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <time.h>
+
 #include "bench_timing.h"
 
 #define TIMES 2000000
-#define RUNS  5
+#define RUNS 5
 
 /* --------------------------------------------------------------------------
  * Long chain: 8x (FSTP m64 + FLD m64) in a single asm block.
@@ -27,7 +28,7 @@ static bench_ns_t bench_chain_8x(void) {
     volatile double r;
     double a = 1.0, b = 2.0;
     for (int i = 0; i < TIMES; i++)
-        __asm__ volatile (
+        __asm__ volatile(
             "fldl %1\n\t"
             "fstpl %0\n\t fldl %2\n\t"
             "fstpl %0\n\t fldl %1\n\t"
@@ -38,7 +39,8 @@ static bench_ns_t bench_chain_8x(void) {
             "fstpl %0\n\t fldl %2\n\t"
             "fstpl %0\n\t fldl %1\n\t"
             "fstp %%st(0)\n"
-            : "=m"(r) : "m"(a), "m"(b));
+            : "=m"(r)
+            : "m"(a), "m"(b));
     return bench_now_ns() - start;
 }
 
@@ -52,33 +54,34 @@ static bench_ns_t bench_arith_boundary(void) {
     volatile double r;
     double a = 2.0, b = 3.0, c = 4.0;
     for (int i = 0; i < TIMES; i++)
-        __asm__ volatile (
+        __asm__ volatile(
             /* compute a*b, store result, load c */
-            "fldl %1\n\t"          /* ST(0) = a */
-            "fmull %2\n\t"         /* ST(0) = a*b */
-            "fstpl %0\n\t"         /* store result, pop */
-            "fldl %3\n\t"          /* load c -- THIS is the fstp+fld fusion */
+            "fldl %1\n\t"  /* ST(0) = a */
+            "fmull %2\n\t" /* ST(0) = a*b */
+            "fstpl %0\n\t" /* store result, pop */
+            "fldl %3\n\t"  /* load c -- THIS is the fstp+fld fusion */
             /* compute c*a, store result, load b */
-            "fmull %1\n\t"         /* ST(0) = c*a */
-            "fstpl %0\n\t"         /* store, pop */
-            "fldl %2\n\t"          /* load b -- fusion target */
+            "fmull %1\n\t" /* ST(0) = c*a */
+            "fstpl %0\n\t" /* store, pop */
+            "fldl %2\n\t"  /* load b -- fusion target */
             /* compute b*c, store result, load a */
-            "fmull %3\n\t"         /* ST(0) = b*c */
-            "fstpl %0\n\t"         /* store, pop */
-            "fldl %1\n\t"          /* load a -- fusion target */
+            "fmull %3\n\t" /* ST(0) = b*c */
+            "fstpl %0\n\t" /* store, pop */
+            "fldl %1\n\t"  /* load a -- fusion target */
             /* one more round */
             "fmull %2\n\t"
             "fstpl %0\n\t"
-            "fldl %3\n\t"          /* fusion target */
+            "fldl %3\n\t" /* fusion target */
             "fmull %1\n\t"
             "fstpl %0\n\t"
-            "fldl %2\n\t"          /* fusion target */
+            "fldl %2\n\t" /* fusion target */
             "fmull %3\n\t"
             "fstpl %0\n\t"
-            "fldl %1\n\t"          /* fusion target */
+            "fldl %1\n\t" /* fusion target */
             "fmull %2\n\t"
             "fstp %%st(0)\n"
-            : "=m"(r) : "m"(a), "m"(b), "m"(c));
+            : "=m"(r)
+            : "m"(a), "m"(b), "m"(c));
     return bench_now_ns() - start;
 }
 
@@ -92,7 +95,7 @@ static bench_ns_t bench_fldz_chain(void) {
     volatile double r;
     double a = 42.0;
     for (int i = 0; i < TIMES; i++)
-        __asm__ volatile (
+        __asm__ volatile(
             "fldl %1\n\t"
             "fstpl %0\n\t fldz\n\t"
             "fstpl %0\n\t fldz\n\t"
@@ -103,7 +106,8 @@ static bench_ns_t bench_fldz_chain(void) {
             "fstpl %0\n\t fldz\n\t"
             "fstpl %0\n\t fldz\n\t"
             "fstp %%st(0)\n"
-            : "=m"(r) : "m"(a));
+            : "=m"(r)
+            : "m"(a));
     return bench_now_ns() - start;
 }
 
@@ -117,11 +121,11 @@ static bench_ns_t bench_two_deep(void) {
     volatile double r;
     double a = 1.0, b = 2.0, c = 3.0;
     for (int i = 0; i < TIMES; i++)
-        __asm__ volatile (
-            "fldl %1\n\t"          /* ST(0)=a, stack depth 1 */
-            "fldl %2\n\t"          /* ST(0)=b, ST(1)=a, depth 2 */
-            "fstpl %0\n\t fldl %3\n\t"   /* store b, load c: ST(0)=c, ST(1)=a */
-            "fstpl %0\n\t fldl %2\n\t"   /* store c, load b: ST(0)=b, ST(1)=a */
+        __asm__ volatile(
+            "fldl %1\n\t"              /* ST(0)=a, stack depth 1 */
+            "fldl %2\n\t"              /* ST(0)=b, ST(1)=a, depth 2 */
+            "fstpl %0\n\t fldl %3\n\t" /* store b, load c: ST(0)=c, ST(1)=a */
+            "fstpl %0\n\t fldl %2\n\t" /* store c, load b: ST(0)=b, ST(1)=a */
             "fstpl %0\n\t fldl %3\n\t"
             "fstpl %0\n\t fldl %2\n\t"
             "fstpl %0\n\t fldl %3\n\t"
@@ -130,7 +134,8 @@ static bench_ns_t bench_two_deep(void) {
             "fstpl %0\n\t fldl %2\n\t"
             "fstp %%st(0)\n\t"
             "fstp %%st(0)\n"
-            : "=m"(r) : "m"(a), "m"(b), "m"(c));
+            : "=m"(r)
+            : "m"(a), "m"(b), "m"(c));
     return bench_now_ns() - start;
 }
 
@@ -143,10 +148,10 @@ static bench_ns_t bench_reg_chain(void) {
     volatile double r;
     double a = 1.0, b = 2.0;
     for (int i = 0; i < TIMES; i++)
-        __asm__ volatile (
-            "fldl %1\n\t"              /* ST(0)=a */
-            "fldl %2\n\t"              /* ST(0)=b, ST(1)=a */
-            "fstp %%st(1)\n\t fldl %1\n\t"   /* ST(1)=b, pop→ST(0)=b, push a */
+        __asm__ volatile(
+            "fldl %1\n\t"                  /* ST(0)=a */
+            "fldl %2\n\t"                  /* ST(0)=b, ST(1)=a */
+            "fstp %%st(1)\n\t fldl %1\n\t" /* ST(1)=b, pop→ST(0)=b, push a */
             "fstp %%st(1)\n\t fldl %2\n\t"
             "fstp %%st(1)\n\t fldl %1\n\t"
             "fstp %%st(1)\n\t fldl %2\n\t"
@@ -156,7 +161,8 @@ static bench_ns_t bench_reg_chain(void) {
             "fstp %%st(1)\n\t fldl %2\n\t"
             "fstp %%st(0)\n\t"
             "fstp %%st(0)\n"
-            : "=m"(r) : "m"(a), "m"(b));
+            : "=m"(r)
+            : "m"(a), "m"(b));
     return bench_now_ns() - start;
 }
 
@@ -180,7 +186,7 @@ static bench_ns_t bench_isolated_pairs(void) {
     double a = 1.0, b = 2.0;
     volatile int dummy = 0;
     for (int i = 0; i < TIMES; i++)
-        __asm__ volatile (
+        __asm__ volatile(
             /* Setup: push initial value onto x87 stack */
             "fldl %3\n\t"
             /* integer break — next fstp+fld starts a fresh run of 2 */
@@ -244,7 +250,7 @@ static bench_ns_t bench_short_run_boundary(void) {
     double a = 2.0, b = 3.0, c = 4.0;
     volatile int dummy = 0;
     for (int i = 0; i < TIMES; i++)
-        __asm__ volatile (
+        __asm__ volatile(
             /* compute block 1: fld+fmul+fstp (run=3, fused as fld_arith_fstp) */
             "fldl %1\n\t"
             "fmull %2\n\t"
@@ -277,19 +283,23 @@ static bench_ns_t bench_short_run_boundary(void) {
 }
 
 int main(void) {
-    struct { const char *name; bench_ns_t (*fn)(void); } benches[] = {
-        {"chain_8x",           bench_chain_8x},
-        {"arith_boundary",     bench_arith_boundary},
-        {"fldz_chain",         bench_fldz_chain},
-        {"two_deep",           bench_two_deep},
-        {"reg_chain",          bench_reg_chain},
-        {"isolated_pairs",     bench_isolated_pairs},
+    struct {
+        const char* name;
+        bench_ns_t (*fn)(void);
+    } benches[] = {
+        {"chain_8x", bench_chain_8x},
+        {"arith_boundary", bench_arith_boundary},
+        {"fldz_chain", bench_fldz_chain},
+        {"two_deep", bench_two_deep},
+        {"reg_chain", bench_reg_chain},
+        {"isolated_pairs", bench_isolated_pairs},
         {"short_run_boundary", bench_short_run_boundary},
     };
     int n = (int)(sizeof(benches) / sizeof(benches[0]));
     for (int i = 0; i < n; i++) {
         bench_ns_t sum = 0;
-        for (int r = 0; r < RUNS; r++) sum += benches[i].fn();
+        for (int r = 0; r < RUNS; r++)
+            sum += benches[i].fn();
         printf("BENCH %-20s %lu\n", benches[i].name, (unsigned long)(sum / RUNS));
     }
     return 0;

@@ -14,12 +14,12 @@
  *
  * Build: clang -arch x86_64 -O0 -o test_fldcw test_fldcw.c
  */
-#include <stdio.h>
 #include <stdint.h>
+#include <stdio.h>
 
 static int failures = 0;
 
-static void check_u16(const char *name, uint16_t got, uint16_t expected) {
+static void check_u16(const char* name, uint16_t got, uint16_t expected) {
     if (got != expected) {
         printf("FAIL  %-55s  got=0x%04X  expected=0x%04X\n", name, got, expected);
         failures++;
@@ -28,7 +28,7 @@ static void check_u16(const char *name, uint16_t got, uint16_t expected) {
     }
 }
 
-static void check_i32(const char *name, int32_t got, int32_t expected) {
+static void check_i32(const char* name, int32_t got, int32_t expected) {
     if (got != expected) {
         printf("FAIL  %-55s  got=%d  expected=%d\n", name, got, expected);
         failures++;
@@ -37,7 +37,7 @@ static void check_i32(const char *name, int32_t got, int32_t expected) {
     }
 }
 
-static void check_f64(const char *name, double got, double expected) {
+static void check_f64(const char* name, double got, double expected) {
     if (got != expected) {
         printf("FAIL  %-55s  got=%g  expected=%g\n", name, got, expected);
         failures++;
@@ -47,20 +47,20 @@ static void check_f64(const char *name, double got, double expected) {
 }
 
 /* Standard x87 control word values. */
-#define CW_NEAREST  0x037F   /* RC=00  round to nearest (even) */
-#define CW_FLOOR    0x077F   /* RC=01  round down               */
-#define CW_CEIL     0x0B7F   /* RC=10  round up                 */
-#define CW_TRUNC    0x0F7F   /* RC=11  truncate toward zero     */
+#define CW_NEAREST 0x037F /* RC=00  round to nearest (even) */
+#define CW_FLOOR 0x077F   /* RC=01  round down               */
+#define CW_CEIL 0x0B7F    /* RC=10  round up                 */
+#define CW_TRUNC 0x0F7F   /* RC=11  truncate toward zero     */
 
 /* ── Helpers used outside of IR runs (call site keeps them isolated) ─────── */
 
 static void set_cw(uint16_t cw) {
-    __asm__ volatile ("fldcw %0" : : "m"(cw));
+    __asm__ volatile("fldcw %0" : : "m"(cw));
 }
 
 static uint16_t get_cw(void) {
     uint16_t cw;
-    __asm__ volatile ("fnstcw %0" : "=m"(cw));
+    __asm__ volatile("fnstcw %0" : "=m"(cw));
     return cw;
 }
 
@@ -70,14 +70,13 @@ static uint16_t get_cw(void) {
  */
 static uint16_t fnstcw_roundtrip(uint16_t cw_in) {
     uint16_t cw_out = 0;
-    __asm__ volatile (
-        "fldcw  %1\n\t"     /* set CW before run (outside run) */
-        "fldz\n\t"          /* FLD  → starts run, ST(0)=0      */
-        "fnstcw %0\n\t"     /* FNSTCW — inside run             */
-        "fstp   %%st(0)\n"  /* clean up stack                  */
+    __asm__ volatile(
+        "fldcw  %1\n\t"    /* set CW before run (outside run) */
+        "fldz\n\t"         /* FLD  → starts run, ST(0)=0      */
+        "fnstcw %0\n\t"    /* FNSTCW — inside run             */
+        "fstp   %%st(0)\n" /* clean up stack                  */
         : "=m"(cw_out)
-        : "m"(cw_in)
-    );
+        : "m"(cw_in));
     return cw_out;
 }
 
@@ -88,13 +87,12 @@ static uint16_t fnstcw_roundtrip(uint16_t cw_in) {
  */
 static int32_t fldcw_then_fistp(double val, uint16_t new_cw) {
     int32_t result = 0;
-    __asm__ volatile (
-        "fldl   %1\n\t"    /* FLD val  → ST(0)=val; run starts here */
-        "fldcw  %2\n\t"    /* FLDCW new_cw — inside run             */
-        "fistpl %0\n"      /* FISTP → *result using new RC          */
+    __asm__ volatile(
+        "fldl   %1\n\t" /* FLD val  → ST(0)=val; run starts here */
+        "fldcw  %2\n\t" /* FLDCW new_cw — inside run             */
+        "fistpl %0\n"   /* FISTP → *result using new RC          */
         : "=m"(result)
-        : "m"(val), "m"(new_cw)
-    );
+        : "m"(val), "m"(new_cw));
     return result;
 }
 
@@ -103,15 +101,14 @@ static int32_t fldcw_then_fistp(double val, uint16_t new_cw) {
  */
 static double fnop_in_arith_run(double a, double b) {
     double result = 0.0;
-    __asm__ volatile (
-        "fldl   %1\n\t"    /* FLD a                     */
-        "fnop\n\t"         /* FNOP — no-op inside run   */
-        "fldl   %2\n\t"    /* FLD b                     */
-        "faddp\n\t"        /* ST(1) += ST(0), pop       */
-        "fstpl  %0\n"      /* FSTP result               */
+    __asm__ volatile(
+        "fldl   %1\n\t" /* FLD a                     */
+        "fnop\n\t"      /* FNOP — no-op inside run   */
+        "fldl   %2\n\t" /* FLD b                     */
+        "faddp\n\t"     /* ST(1) += ST(0), pop       */
+        "fstpl  %0\n"   /* FSTP result               */
         : "=m"(result)
-        : "m"(a), "m"(b)
-    );
+        : "m"(a), "m"(b));
     return result;
 }
 
@@ -119,19 +116,17 @@ static double fnop_in_arith_run(double a, double b) {
  * FLDCW new_cw + FNSTCW cw_out + FLD a + FLD b + FADDP + FSTP result.
  * Verifies that the CW written by FLDCW is what FNSTCW reads back.
  */
-static double fldcw_fnstcw_arith(double a, double b,
-                                  uint16_t new_cw, uint16_t *cw_out) {
+static double fldcw_fnstcw_arith(double a, double b, uint16_t new_cw, uint16_t* cw_out) {
     double result = 0.0;
-    __asm__ volatile (
-        "fldcw  %2\n\t"    /* FLDCW  — run starts here          */
-        "fnstcw %1\n\t"    /* FNSTCW — read back CW             */
-        "fldl   %3\n\t"    /* FLD a                             */
-        "fldl   %4\n\t"    /* FLD b                             */
-        "faddp\n\t"        /* a + b                             */
-        "fstpl  %0\n"      /* FSTP result                       */
+    __asm__ volatile(
+        "fldcw  %2\n\t" /* FLDCW  — run starts here          */
+        "fnstcw %1\n\t" /* FNSTCW — read back CW             */
+        "fldl   %3\n\t" /* FLD a                             */
+        "fldl   %4\n\t" /* FLD b                             */
+        "faddp\n\t"     /* a + b                             */
+        "fstpl  %0\n"   /* FSTP result                       */
         : "=m"(result), "=m"(*cw_out)
-        : "m"(new_cw), "m"(a), "m"(b)
-    );
+        : "m"(new_cw), "m"(a), "m"(b));
     return result;
 }
 
@@ -140,7 +135,7 @@ static double fldcw_fnstcw_arith(double a, double b,
  */
 static double fnop_x3(double a, double b) {
     double result = 0.0;
-    __asm__ volatile (
+    __asm__ volatile(
         "fldl   %1\n\t"
         "fnop\n\t"
         "fnop\n\t"
@@ -149,8 +144,7 @@ static double fnop_x3(double a, double b) {
         "fmulp\n\t"
         "fstpl  %0\n"
         : "=m"(result)
-        : "m"(a), "m"(b)
-    );
+        : "m"(a), "m"(b));
     return result;
 }
 
@@ -158,15 +152,13 @@ static double fnop_x3(double a, double b) {
  * Classic compiler-generated code: save CW, change it, restore it.
  * All in one IR run: FNSTCW save + FLDCW new + ... + FLDCW restore.
  */
-static void fnstcw_save_fldcw_restore(uint16_t new_cw,
-                                       uint16_t *saved, uint16_t *restored) {
-    __asm__ volatile (
-        "fnstcw %0\n\t"     /* save current CW           */
-        "fldcw  %2\n\t"     /* load new CW               */
-        "fnstcw %1\n"       /* read back to verify       */
+static void fnstcw_save_fldcw_restore(uint16_t new_cw, uint16_t* saved, uint16_t* restored) {
+    __asm__ volatile(
+        "fnstcw %0\n\t" /* save current CW           */
+        "fldcw  %2\n\t" /* load new CW               */
+        "fnstcw %1\n"   /* read back to verify       */
         : "=m"(*saved), "=m"(*restored)
-        : "m"(new_cw)
-    );
+        : "m"(new_cw));
 }
 
 int main(void) {
@@ -175,46 +167,33 @@ int main(void) {
     /* ── 1. FNSTCW round-trips ─────────────────────────────────────────── */
     printf("=== FNSTCW round-trip ===\n");
     {
-        check_u16("FNSTCW round-trip  CW_NEAREST",
-                  fnstcw_roundtrip(CW_NEAREST), CW_NEAREST);
-        check_u16("FNSTCW round-trip  CW_FLOOR",
-                  fnstcw_roundtrip(CW_FLOOR),   CW_FLOOR);
-        check_u16("FNSTCW round-trip  CW_CEIL",
-                  fnstcw_roundtrip(CW_CEIL),    CW_CEIL);
-        check_u16("FNSTCW round-trip  CW_TRUNC",
-                  fnstcw_roundtrip(CW_TRUNC),   CW_TRUNC);
+        check_u16("FNSTCW round-trip  CW_NEAREST", fnstcw_roundtrip(CW_NEAREST), CW_NEAREST);
+        check_u16("FNSTCW round-trip  CW_FLOOR", fnstcw_roundtrip(CW_FLOOR), CW_FLOOR);
+        check_u16("FNSTCW round-trip  CW_CEIL", fnstcw_roundtrip(CW_CEIL), CW_CEIL);
+        check_u16("FNSTCW round-trip  CW_TRUNC", fnstcw_roundtrip(CW_TRUNC), CW_TRUNC);
     }
 
     /* ── 2. FLDCW changes RC for FISTP in same run ─────────────────────── */
     printf("\n=== FLDCW in-run: RC visible to FISTP ===\n");
     {
-        set_cw(CW_NEAREST);  /* baseline: nearest */
-        check_i32("FLDCW→FLOOR  then FISTP  2.9 → 2",
-                  fldcw_then_fistp(2.9,  CW_FLOOR), 2);
-        check_i32("FLDCW→FLOOR  then FISTP -2.9 → -3",
-                  fldcw_then_fistp(-2.9, CW_FLOOR), -3);
-        check_i32("FLDCW→CEIL   then FISTP  2.1 → 3",
-                  fldcw_then_fistp(2.1,  CW_CEIL),  3);
-        check_i32("FLDCW→CEIL   then FISTP -2.1 → -2",
-                  fldcw_then_fistp(-2.1, CW_CEIL),  -2);
-        check_i32("FLDCW→TRUNC  then FISTP  2.9 → 2",
-                  fldcw_then_fistp(2.9,  CW_TRUNC), 2);
-        check_i32("FLDCW→TRUNC  then FISTP -2.9 → -2",
-                  fldcw_then_fistp(-2.9, CW_TRUNC), -2);
-        check_i32("FLDCW→NEAREST then FISTP 2.5 → 2",
-                  fldcw_then_fistp(2.5,  CW_NEAREST), 2); /* ties to even */
+        set_cw(CW_NEAREST); /* baseline: nearest */
+        check_i32("FLDCW→FLOOR  then FISTP  2.9 → 2", fldcw_then_fistp(2.9, CW_FLOOR), 2);
+        check_i32("FLDCW→FLOOR  then FISTP -2.9 → -3", fldcw_then_fistp(-2.9, CW_FLOOR), -3);
+        check_i32("FLDCW→CEIL   then FISTP  2.1 → 3", fldcw_then_fistp(2.1, CW_CEIL), 3);
+        check_i32("FLDCW→CEIL   then FISTP -2.1 → -2", fldcw_then_fistp(-2.1, CW_CEIL), -2);
+        check_i32("FLDCW→TRUNC  then FISTP  2.9 → 2", fldcw_then_fistp(2.9, CW_TRUNC), 2);
+        check_i32("FLDCW→TRUNC  then FISTP -2.9 → -2", fldcw_then_fistp(-2.9, CW_TRUNC), -2);
+        check_i32("FLDCW→NEAREST then FISTP 2.5 → 2", fldcw_then_fistp(2.5, CW_NEAREST),
+                  2); /* ties to even */
     }
 
     /* ── 3. FNOP inside arithmetic run ─────────────────────────────────── */
     printf("\n=== FNOP inside arithmetic run ===\n");
     {
         set_cw(CW_NEAREST);
-        check_f64("FNOP in run: 3.0 + 4.0 = 7.0",
-                  fnop_in_arith_run(3.0, 4.0), 7.0);
-        check_f64("FNOP in run: -1.5 + 2.5 = 1.0",
-                  fnop_in_arith_run(-1.5, 2.5), 1.0);
-        check_f64("FNOP in run: 0.0 + 0.0 = 0.0",
-                  fnop_in_arith_run(0.0, 0.0), 0.0);
+        check_f64("FNOP in run: 3.0 + 4.0 = 7.0", fnop_in_arith_run(3.0, 4.0), 7.0);
+        check_f64("FNOP in run: -1.5 + 2.5 = 1.0", fnop_in_arith_run(-1.5, 2.5), 1.0);
+        check_f64("FNOP in run: 0.0 + 0.0 = 0.0", fnop_in_arith_run(0.0, 0.0), 0.0);
     }
 
     /* ── 4. FLDCW + FNSTCW + arithmetic in one run ─────────────────────── */
@@ -228,7 +207,7 @@ int main(void) {
         check_f64("FLDCW→FLOOR, 3.0+4.0=7.0", r, 7.0);
 
         r = fldcw_fnstcw_arith(1.0, 2.0, CW_CEIL, &cw_out);
-        check_u16("FLDCW→CEIL,  FNSTCW reads back CW_CEIL",  cw_out, CW_CEIL);
+        check_u16("FLDCW→CEIL,  FNSTCW reads back CW_CEIL", cw_out, CW_CEIL);
         check_f64("FLDCW→CEIL,  1.0+2.0=3.0", r, 3.0);
     }
 
@@ -237,7 +216,7 @@ int main(void) {
     {
         set_cw(CW_NEAREST);
         check_f64("3x FNOP: 3.0 * 4.0 = 12.0", fnop_x3(3.0, 4.0), 12.0);
-        check_f64("3x FNOP: 2.5 * 2.0 = 5.0",  fnop_x3(2.5, 2.0), 5.0);
+        check_f64("3x FNOP: 2.5 * 2.0 = 5.0", fnop_x3(2.5, 2.0), 5.0);
     }
 
     /* ── 6. FNSTCW save / FLDCW restore pattern ─────────────────────────── */
@@ -260,8 +239,7 @@ int main(void) {
     /* Restore original control word */
     set_cw(saved_cw);
 
-    printf("\n%s  (%d failure%s)\n",
-           failures == 0 ? "ALL PASS" : "SOME FAILURES",
-           failures, failures == 1 ? "" : "s");
+    printf("\n%s  (%d failure%s)\n", failures == 0 ? "ALL PASS" : "SOME FAILURES", failures,
+           failures == 1 ? "" : "s");
     return failures ? 1 : 0;
 }

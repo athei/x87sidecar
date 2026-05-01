@@ -1,12 +1,11 @@
 #include "rosetta_core/TranslatorHelpers.hpp"
 
+#include "rosetta_config/Config.h"
 #include "rosetta_core/AssemblerHelpers.hpp"
 #include "rosetta_core/CoreConfig.h"
 #include "rosetta_core/IROperand.h"
 #include "rosetta_core/Register.h"
 #include "rosetta_core/RuntimeRoutine.h"
-#include "rosetta_config/Config.h"
-
 
 int alloc_gpr(TranslationResult& translation, int pool_index) {
     const int reg = kGprScratchPool[pool_index];
@@ -27,7 +26,7 @@ int alloc_free_gpr(TranslationResult& translation) {
 auto resolve_hint_gpr(TranslationResult& result, int hint_reg) -> int {
     if (hint_reg == GPR::XZR) {
         return alloc_free_gpr(result);
-}
+    }
     return hint_reg;
 }
 
@@ -35,7 +34,7 @@ void free_gpr(TranslationResult& translation, int reg) {
     assert(reg != 0x3F && "free_gpr: cannot free SP");
     if ((1U << reg) & kGprScratchMask) {
         translation.free_gpr_mask |= 1U << reg;
-}
+    }
 }
 
 int alloc_fpr(TranslationResult& translation, int pool_index) {
@@ -61,19 +60,19 @@ void free_fpr(TranslationResult& translation, int reg) {
     const uint32_t active_mask = extended ? kFprScratchMaskExt : kFprScratchMask;
     if ((1U << reg) & active_mask) {
         translation.free_fpr_mask |= 1U << reg;
-}
+    }
 }
 
 auto emit_load_immediate(TranslationResult& result, int is_64bit, uint64_t value, int dst_reg)
     -> int {
     if (value == 0) {
         return GPR::XZR;
-}
+    }
 
     int reg = dst_reg;
     if (dst_reg == GPR::XZR) {
         reg = alloc_free_gpr(result);
-}
+    }
 
     uint64_t v = is_64bit ? value : static_cast<uint32_t>(value);
     if (!v) {
@@ -99,10 +98,10 @@ auto emit_load_immediate(TranslationResult& result, int is_64bit, uint64_t value
         auto chunk = static_cast<uint16_t>(v >> (16 * i));
         if (chunk == 0) {
             zeros++;
-}
+        }
         if (chunk == 0xFFFF) {
             ones++;
-}
+        }
     }
 
     bool use_movz = (zeros >= ones);
@@ -136,7 +135,7 @@ auto emit_load_immediate(TranslationResult& result, int is_64bit, uint64_t value
         auto chunk = static_cast<uint16_t>(v >> (16 * i));
         if (chunk != trivial) {
             emit_movn(result.insn_buf, is_64bit, /*opc=*/3 /*MOVK*/, i, chunk, reg);
-}
+        }
     }
 
     return reg;
@@ -302,15 +301,14 @@ auto compute_mem_operand_address(TranslationResult& result, bool is_64bit, IROpe
                 return scratch_reg;
             }
             return result_reg;
-        }             // No displacement: result = base + index*scale
-            if (dst_reg == GPR::XZR) {
-                result_reg = alloc_scratch_gpr(result);
-}
+        }  // No displacement: result = base + index*scale
+        if (dst_reg == GPR::XZR) {
+            result_reg = alloc_scratch_gpr(result);
+        }
 
-            emit_add_sub_shifted_reg(result.insn_buf, is_64bit, 0, 0, 0, index_idx,
-                                     operand->mem.shift_amount, base_idx, result_reg);
-            return result_reg;
-       
+        emit_add_sub_shifted_reg(result.insn_buf, is_64bit, 0, 0, 0, index_idx,
+                                 operand->mem.shift_amount, base_idx, result_reg);
+        return result_reg;
     }
 
     // =========================================================================
@@ -351,25 +349,24 @@ auto compute_mem_operand_address(TranslationResult& result, bool is_64bit, IROpe
             // disp fits in imm12 (possibly shifted)
             if (dst_reg == GPR::XZR) {
                 result_reg = alloc_scratch_gpr(result);
-}
+            }
 
             emit_add_imm(result.insn_buf, is_64bit, /*is_sub=*/!is_add, 0, imm_shift,
                          static_cast<int64_t>(imm_value), base_idx, result_reg);
             return result_reg;
-        }             // No displacement
-            if (!is_64bit) {
-                // 32-bit: must emit a W-register MOV to zero-extend properly.
-                // Returning the source register directly is incorrect here.
-                if (dst_reg == GPR::XZR) {
-                    result_reg = alloc_scratch_gpr(result);
-}
-
-                emit_mov_reg(result.insn_buf, /*is_64bit=*/0, result_reg, base_idx);
-                return result_reg;
+        }  // No displacement
+        if (!is_64bit) {
+            // 32-bit: must emit a W-register MOV to zero-extend properly.
+            // Returning the source register directly is incorrect here.
+            if (dst_reg == GPR::XZR) {
+                result_reg = alloc_scratch_gpr(result);
             }
-            // 64-bit: can return the register number directly — no instruction needed.
-            return base_idx;
-       
+
+            emit_mov_reg(result.insn_buf, /*is_64bit=*/0, result_reg, base_idx);
+            return result_reg;
+        }
+        // 64-bit: can return the register number directly — no instruction needed.
+        return base_idx;
     }
 
     // =========================================================================
@@ -406,7 +403,7 @@ auto compute_mem_operand_address(TranslationResult& result, bool is_64bit, IROpe
                                      operand->mem.shift_amount, disp_reg, result_reg);
             if (disp_reg != result_reg) {
                 free_gpr(result, disp_reg);
-}
+            }
             return result_reg;
         }
 
@@ -416,14 +413,15 @@ auto compute_mem_operand_address(TranslationResult& result, bool is_64bit, IROpe
             // Emit a LSL via UBFM: immr = (width - shift), imms = (width - shift - 1)
             if (dst_reg == GPR::XZR) {
                 result_reg = alloc_scratch_gpr(result);
-}
+            }
 
             const int reg_width = is_64bit ? 64 : 32;
             // N bit must equal is_64bit for UBFM
             emit_bitfield(result.insn_buf, is_64bit, /*opc=*/2 /*UBFM*/,
                           /*N=*/is_64bit ? 1 : 0,
                           /*immr=*/static_cast<int8_t>(reg_width - shift),
-                          /*imms=*/static_cast<int8_t>(reg_width - shift - 1), index_idx, result_reg);
+                          /*imms=*/static_cast<int8_t>(reg_width - shift - 1), index_idx,
+                          result_reg);
             return result_reg;
         }
 
@@ -435,7 +433,7 @@ auto compute_mem_operand_address(TranslationResult& result, bool is_64bit, IROpe
         // 32-bit: must emit a W-register MOV (zero-extension)
         if (dst_reg == GPR::XZR) {
             result_reg = alloc_scratch_gpr(result);
-}
+        }
 
         emit_mov_reg(result.insn_buf, /*is_64bit=*/0, result_reg, index_idx);
         return result_reg;
@@ -460,7 +458,7 @@ auto compute_mem_operand_address(TranslationResult& result, bool is_64bit, IROpe
         // Binary emits MOVZ W<result_reg>, #0 — does NOT return XZR.
         if (dst_reg == GPR::XZR) {
             result_reg = alloc_scratch_gpr(result);
-}
+        }
 
         emit_movn(result.insn_buf, /*is_64bit=*/0, /*opc=*/2 /*MOVZ*/,
                   /*hw=*/0, /*imm16=*/0, result_reg);
@@ -525,8 +523,10 @@ auto compute_operand_address(TranslationResult& result, int is_64bit, IROperand*
             const int tls_tmp = alloc_gpr(result, 7);  // kGprScratchPool[7] = X29
 
             // Emit BL #0 patched by a Branch26 fixup to kRuntimeRoutine_get_tls_base
-            result._fixups.push_back(Fixup{.kind=FixupKind::Branch26, .insn_offset=static_cast<uint32_t>(result.insn_buf.end),
-                                           .target=static_cast<uint32_t>(kRuntimeRoutine_get_tls_base)});
+            result._fixups.push_back(
+                Fixup{.kind = FixupKind::Branch26,
+                      .insn_offset = static_cast<uint32_t>(result.insn_buf.end),
+                      .target = static_cast<uint32_t>(kRuntimeRoutine_get_tls_base)});
             result.insn_buf.emit(0x94000000U);  // BL placeholder
 
             // In JIT mode (translator_variant==1): dereference the TLS block pointer
@@ -549,7 +549,7 @@ auto compute_operand_address(TranslationResult& result, int is_64bit, IROperand*
         // Free the intermediate inner_reg if it isn't the original dst_reg
         if (inner_reg != dst_reg) {
             free_gpr(result, inner_reg);
-}
+        }
 
         return seg_reg;
     }
@@ -570,7 +570,7 @@ auto compute_operand_address(TranslationResult& result, int is_64bit, IROperand*
         int out_reg = dst_reg;
         if (dst_reg == GPR::XZR) {
             out_reg = alloc_scratch_gpr(result);
-}
+        }
 
         emit_load_immediate_no_xzr(result, addr_size_is_64, op->abs_mem.value, out_reg);
         return out_reg;
@@ -581,7 +581,7 @@ auto compute_operand_address(TranslationResult& result, int is_64bit, IROperand*
         int out_reg = dst_reg;
         if (dst_reg == GPR::XZR) {
             out_reg = alloc_scratch_gpr(result);
-}
+        }
 
         // fixup_target: use imm.value as the target id when mem_flags != 0,
         // otherwise 0 (no fixup target — anonymous address).
@@ -589,12 +589,16 @@ auto compute_operand_address(TranslationResult& result, int is_64bit, IROperand*
 
         // Emit ADRP out_reg, <page>   [patched by Arm64Page21 fixup]
         result.external_fixups.push_back(
-            Fixup{.kind=FixupKind::Arm64Page21, .insn_offset=static_cast<uint32_t>(result.insn_buf.end), .target=static_cast<uint32_t>(fixup_target)});
+            Fixup{.kind = FixupKind::Arm64Page21,
+                  .insn_offset = static_cast<uint32_t>(result.insn_buf.end),
+                  .target = static_cast<uint32_t>(fixup_target)});
         emit_adr(result.insn_buf, /*is_adrp=*/1, out_reg, 0);
 
         // Emit ADD out_reg, out_reg, #<page_offset>   [patched by Arm64PageOffset12]
-        result.external_fixups.push_back(Fixup{
-            .kind=FixupKind::Arm64PageOffset12, .insn_offset=static_cast<uint32_t>(result.insn_buf.end), .target=static_cast<uint32_t>(fixup_target)});
+        result.external_fixups.push_back(
+            Fixup{.kind = FixupKind::Arm64PageOffset12,
+                  .insn_offset = static_cast<uint32_t>(result.insn_buf.end),
+                  .target = static_cast<uint32_t>(fixup_target)});
         emit_add_imm(result.insn_buf, addr_size_is_64, 0, 0, 0, 0, out_reg, out_reg);
 
         // If bit0 of mem_flags is CLEAR, the immediate also carries a runtime
@@ -660,7 +664,7 @@ auto translate_gpr(TranslationResult* result, int is_64bit, uint8_t reg, unsigne
         // Condition: !needs_extend AND size_class is not byte-high (1).
         if (!needs_extend && size_class != 1) {
             return index;
-}
+        }
 
         // BFX path for size_class 0 or 1.
         // immr = size_class * 8:
@@ -758,15 +762,18 @@ auto translate_gpr(TranslationResult* result, int is_64bit, uint8_t reg, unsigne
 auto read_operand_to_gpr(TranslationResult& result, bool is_64bit, IROperand* operand,
                          int extend_mode, int hint_reg) -> int {
     if (operand->kind == IROperandKind::Register) {
-        return translate_gpr(&result, static_cast<int>(is_64bit), operand->reg.reg.value, extend_mode, hint_reg);
+        return translate_gpr(&result, static_cast<int>(is_64bit), operand->reg.reg.value,
+                             extend_mode, hint_reg);
     }
 
     if (operand->kind == IROperandKind::BranchOffset) {
-        return emit_load_immediate(result, is_64bit, static_cast<uint64_t>(operand->branch.value), hint_reg);
+        return emit_load_immediate(result, is_64bit, static_cast<uint64_t>(operand->branch.value),
+                                   hint_reg);
     }
 
     if (operand->kind == IROperandKind::Immediate) {
-        return emit_load_immediate(result, is_64bit, static_cast<uint64_t>(operand->imm.value), hint_reg);
+        return emit_load_immediate(result, is_64bit, static_cast<uint64_t>(operand->imm.value),
+                                   hint_reg);
     }
 
     if (operand->kind == IROperandKind::MemRef) {
@@ -775,21 +782,22 @@ auto read_operand_to_gpr(TranslationResult& result, bool is_64bit, IROperand* op
         const IROperandSize addr_size = operand->mem.addr_size;
         assert(addr_size < IROperandSize::S128 && "OperandSize does not correspond to a DataSize");
 
-        const int addr_reg = compute_operand_address(result, static_cast<int>(addr_size == IROperandSize::S64),
-                                                     operand, static_cast<int64_t>(dst_reg));
+        const int addr_reg =
+            compute_operand_address(result, static_cast<int>(addr_size == IROperandSize::S64),
+                                    operand, static_cast<int64_t>(dst_reg));
 
         const auto mem_size = static_cast<uint32_t>(operand->mem.size);
         assert(mem_size < (uint32_t)IROperandSize::S256 && "invalid OperandSize for memory load");
 
-        const uint32_t natural_size =
-            is_64bit ? static_cast<uint32_t>(IROperandSize::S32) : static_cast<uint32_t>(IROperandSize::S16);
+        const uint32_t natural_size = is_64bit ? static_cast<uint32_t>(IROperandSize::S32)
+                                               : static_cast<uint32_t>(IROperandSize::S16);
         if (extend_mode == 2 && natural_size >= mem_size) {
             emit_ldrs(result.insn_buf, static_cast<int>(is_64bit), mem_size, dst_reg, addr_reg);
         } else {
             emit_ldr_str_imm(result.insn_buf, static_cast<int>(mem_size),
                              /*is_fp=*/0, /*opc=*/1,
                              /*imm12=*/0, addr_reg, dst_reg);
-}
+        }
 
         return dst_reg;
     }
@@ -797,21 +805,22 @@ auto read_operand_to_gpr(TranslationResult& result, bool is_64bit, IROperand* op
     if (operand->kind == IROperandKind::AbsMem) {
         const int out_reg = resolve_hint_gpr(result, hint_reg);
 
-        const int addr_reg = compute_operand_address(result,
-                                                     /*is_64bit=*/1, operand, static_cast<int64_t>(out_reg));
+        const int addr_reg =
+            compute_operand_address(result,
+                                    /*is_64bit=*/1, operand, static_cast<int64_t>(out_reg));
 
         const auto mem_size = static_cast<uint32_t>(operand->abs_mem.size);
         assert(mem_size < (uint32_t)IROperandSize::S256 && "invalid OperandSize for AbsMem load");
 
-        const uint32_t natural_size =
-            is_64bit ? static_cast<uint32_t>(IROperandSize::S32) : static_cast<uint32_t>(IROperandSize::S16);
+        const uint32_t natural_size = is_64bit ? static_cast<uint32_t>(IROperandSize::S32)
+                                               : static_cast<uint32_t>(IROperandSize::S16);
         if (extend_mode == 2 && natural_size >= mem_size) {
             emit_ldrs(result.insn_buf, static_cast<int>(is_64bit), mem_size, out_reg, addr_reg);
         } else {
             emit_ldr_str_imm(result.insn_buf, static_cast<int>(mem_size),
                              /*is_fp=*/0, /*opc=*/1,
                              /*imm12=*/0, addr_reg, out_reg);
-}
+        }
 
         return out_reg;
     }

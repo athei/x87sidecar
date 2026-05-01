@@ -10,7 +10,7 @@
 
 static int failures = 0;
 
-static void check_u16(const char *name, uint16_t got, uint16_t expected) {
+static void check_u16(const char* name, uint16_t got, uint16_t expected) {
     if (got != expected) {
         printf("FAIL  %-52s  got=0x%04x  expected=0x%04x\n", name, got, expected);
         failures++;
@@ -48,20 +48,20 @@ static uint16_t do_fxam(double v) {
 
 int main(void) {
     /* Zero */
-    check_u16("fxam(+0.0)",  do_fxam(0.0),   0x4000);
-    check_u16("fxam(-0.0)",  do_fxam(-0.0),  0x4200);
+    check_u16("fxam(+0.0)", do_fxam(0.0), 0x4000);
+    check_u16("fxam(-0.0)", do_fxam(-0.0), 0x4200);
 
     /* Normal */
-    check_u16("fxam(+1.0)",  do_fxam(1.0),   0x0400);
-    check_u16("fxam(-1.0)",  do_fxam(-1.0),  0x0600);
-    check_u16("fxam(+42.5)", do_fxam(42.5),  0x0400);
+    check_u16("fxam(+1.0)", do_fxam(1.0), 0x0400);
+    check_u16("fxam(-1.0)", do_fxam(-1.0), 0x0600);
+    check_u16("fxam(+42.5)", do_fxam(42.5), 0x0400);
 
     /* Infinity */
-    check_u16("fxam(+inf)",  do_fxam(INFINITY),  0x0500);
-    check_u16("fxam(-inf)",  do_fxam(-INFINITY), 0x0700);
+    check_u16("fxam(+inf)", do_fxam(INFINITY), 0x0500);
+    check_u16("fxam(-inf)", do_fxam(-INFINITY), 0x0700);
 
     /* NaN */
-    check_u16("fxam(NaN)",   do_fxam(NAN),   0x0100);
+    check_u16("fxam(NaN)", do_fxam(NAN), 0x0100);
 
     printf("\n%d failure(s)\n", failures);
     return failures ? 1 : 0;

@@ -1,26 +1,30 @@
-#include <stdio.h>
-#include <stdint.h>
 #include <math.h>
+#include <stdint.h>
+#include <stdio.h>
 
-static uint64_t as_u64(double d) { uint64_t u; __builtin_memcpy(&u, &d, 8); return u; }
+static uint64_t as_u64(double d) {
+    uint64_t u;
+    __builtin_memcpy(&u, &d, 8);
+    return u;
+}
 
 // ---------------------------------------------------------------------------
 // Per-test enable flags.
 // ---------------------------------------------------------------------------
 #ifndef TEST_FLD_M32FP
-#  define TEST_FLD_M32FP  1
+#define TEST_FLD_M32FP 1
 #endif
 #ifndef TEST_FLD_M64FP
-#  define TEST_FLD_M64FP  1
+#define TEST_FLD_M64FP 1
 #endif
 #ifndef TEST_FLD_STI_SIMPLE
-#  define TEST_FLD_STI_SIMPLE  1
+#define TEST_FLD_STI_SIMPLE 1
 #endif
 #ifndef TEST_FLD_ST0_DUP
-#  define TEST_FLD_ST0_DUP  1
+#define TEST_FLD_ST0_DUP 1
 #endif
 #ifndef TEST_FLD_STI_DEEP
-#  define TEST_FLD_STI_DEEP  1
+#define TEST_FLD_STI_DEEP 1
 #endif
 
 // ---------------------------------------------------------------------------
@@ -29,16 +33,14 @@ static uint64_t as_u64(double d) { uint64_t u; __builtin_memcpy(&u, &d, 8); retu
 // 1.5f = 0x3FC00000 (f32) = 0x3FF8000000000000 (f64)
 // ---------------------------------------------------------------------------
 #if TEST_FLD_M32FP
-static uint64_t test_fld_m32fp(void)
-{
+static uint64_t test_fld_m32fp(void) {
     double result;
     float src = 1.5f;
-    __asm__ volatile (
+    __asm__ volatile(
         "flds %1\n"
         "fstpl %0\n"
-        : "=m" (result)
-        : "m"  (src)
-    );
+        : "=m"(result)
+        : "m"(src));
     return as_u64(result);
 }
 #endif
@@ -49,16 +51,14 @@ static uint64_t test_fld_m32fp(void)
 // pi = 0x400921FB54442D18
 // ---------------------------------------------------------------------------
 #if TEST_FLD_M64FP
-static uint64_t test_fld_m64fp(void)
-{
+static uint64_t test_fld_m64fp(void) {
     double result;
-    double src = 3.14159265358979311600;   /* bit pattern: 0x400921FB54442D18 */
-    __asm__ volatile (
+    double src = 3.14159265358979311600; /* bit pattern: 0x400921FB54442D18 */
+    __asm__ volatile(
         "fldl %1\n"
         "fstpl %0\n"
-        : "=m" (result)
-        : "m"  (src)
-    );
+        : "=m"(result)
+        : "m"(src));
     return as_u64(result);
 }
 #endif
@@ -71,17 +71,17 @@ static uint64_t test_fld_m64fp(void)
 // expected: 0x3FF0000000000000
 // ---------------------------------------------------------------------------
 #if TEST_FLD_STI_SIMPLE
-static uint64_t test_fld_sti_simple(void)
-{
+static uint64_t test_fld_sti_simple(void) {
     double result;
-    __asm__ volatile (
-        "fld1\n"                    // ST(0) = 1.0
-        "fld1\n" "fld1\n" "faddp\n" // ST(0) = 2.0, ST(1) = 1.0
-        "fld %%st(1)\n"             // D9 C1: push copy of ST(1)=1.0
-                                    // Stack: ST(0)=1.0, ST(1)=2.0, ST(2)=1.0
-        "fstpl %0\n"                // pop ST(0)=1.0
-        : "=m" (result)
-    );
+    __asm__ volatile(
+        "fld1\n"  // ST(0) = 1.0
+        "fld1\n"
+        "fld1\n"
+        "faddp\n"        // ST(0) = 2.0, ST(1) = 1.0
+        "fld %%st(1)\n"  // D9 C1: push copy of ST(1)=1.0
+                         // Stack: ST(0)=1.0, ST(1)=2.0, ST(2)=1.0
+        "fstpl %0\n"     // pop ST(0)=1.0
+        : "=m"(result));
     return as_u64(result);
 }
 #endif
@@ -94,17 +94,18 @@ static uint64_t test_fld_sti_simple(void)
 // expected: 0x4018000000000000
 // ---------------------------------------------------------------------------
 #if TEST_FLD_ST0_DUP
-static uint64_t test_fld_st0_dup(void)
-{
+static uint64_t test_fld_st0_dup(void) {
     double result;
-    __asm__ volatile (
-        "fld1\n" "fld1\n" "faddp\n" // ST(0) = 2.0
-        "fld1\n" "faddp\n"          // ST(0) = 3.0
-        "fld %%st(0)\n"             // D9 C0: duplicate top → ST(0)=3.0, ST(1)=3.0
-        "faddp\n"                   // 3.0 + 3.0 = 6.0
+    __asm__ volatile(
+        "fld1\n"
+        "fld1\n"
+        "faddp\n"  // ST(0) = 2.0
+        "fld1\n"
+        "faddp\n"        // ST(0) = 3.0
+        "fld %%st(0)\n"  // D9 C0: duplicate top → ST(0)=3.0, ST(1)=3.0
+        "faddp\n"        // 3.0 + 3.0 = 6.0
         "fstpl %0\n"
-        : "=m" (result)
-    );
+        : "=m"(result));
     return as_u64(result);
 }
 #endif
@@ -117,47 +118,53 @@ static uint64_t test_fld_st0_dup(void)
 // expected: 0x3FF0000000000000
 // ---------------------------------------------------------------------------
 #if TEST_FLD_STI_DEEP
-static uint64_t test_fld_sti_deep(void)
-{
+static uint64_t test_fld_sti_deep(void) {
     double result;
-    __asm__ volatile (
-        "fld1\n"                    // ST(0) = 1.0
-        "fld1\n" "fld1\n" "faddp\n" // ST(0) = 2.0, ST(1) = 1.0
-        "fld1\n" "fld1\n" "faddp\n" // ST(0) = 2.0, ...
-        "fld1\n" "faddp\n"          // ST(0) = 3.0, ST(1) = 2.0, ST(2) = 1.0
-        "fld %%st(2)\n"             // D9 C2: push copy of ST(2)=1.0
-        "fstpl %0\n"                // pop ST(0)=1.0; stack depth = 3 again
+    __asm__ volatile(
+        "fld1\n"  // ST(0) = 1.0
+        "fld1\n"
+        "fld1\n"
+        "faddp\n"  // ST(0) = 2.0, ST(1) = 1.0
+        "fld1\n"
+        "fld1\n"
+        "faddp\n"  // ST(0) = 2.0, ...
+        "fld1\n"
+        "faddp\n"        // ST(0) = 3.0, ST(1) = 2.0, ST(2) = 1.0
+        "fld %%st(2)\n"  // D9 C2: push copy of ST(2)=1.0
+        "fstpl %0\n"     // pop ST(0)=1.0; stack depth = 3 again
         // clean up remaining 3 values
         "fstp %%st(0)\n"
         "fstp %%st(0)\n"
         "fstp %%st(0)\n"
-        : "=m" (result)
-    );
+        : "=m"(result));
     return as_u64(result);
 }
 #endif
 
 // ---------------------------------------------------------------------------
 
-typedef struct { const char* name; uint64_t (*fn)(void); uint64_t expected; } TestCase;
+typedef struct {
+    const char* name;
+    uint64_t (*fn)(void);
+    uint64_t expected;
+} TestCase;
 
-int main(void)
-{
+int main(void) {
     TestCase tests[] = {
 #if TEST_FLD_M32FP
-        { "fld m32fp     1.5f widen to f64  ", test_fld_m32fp,    0x3FF8000000000000ULL },
+        {"fld m32fp     1.5f widen to f64  ", test_fld_m32fp, 0x3FF8000000000000ULL},
 #endif
 #if TEST_FLD_M64FP
-        { "fld m64fp     pi bit-exact       ", test_fld_m64fp,    0x400921FB54442D18ULL },
+        {"fld m64fp     pi bit-exact       ", test_fld_m64fp, 0x400921FB54442D18ULL},
 #endif
 #if TEST_FLD_STI_SIMPLE
-        { "fld st(1)     copy ST(1)=1.0     ", test_fld_sti_simple, 0x3FF0000000000000ULL },
+        {"fld st(1)     copy ST(1)=1.0     ", test_fld_sti_simple, 0x3FF0000000000000ULL},
 #endif
 #if TEST_FLD_ST0_DUP
-        { "fld st(0)     duplicate top      ", test_fld_st0_dup,  0x4018000000000000ULL },
+        {"fld st(0)     duplicate top      ", test_fld_st0_dup, 0x4018000000000000ULL},
 #endif
 #if TEST_FLD_STI_DEEP
-        { "fld st(2)     copy ST(2)=1.0     ", test_fld_sti_deep, 0x3FF0000000000000ULL },
+        {"fld st(2)     copy ST(2)=1.0     ", test_fld_sti_deep, 0x3FF0000000000000ULL},
 #endif
     };
 
@@ -166,8 +173,7 @@ int main(void)
     for (int i = 0; i < n; i++) {
         uint64_t got = tests[i].fn();
         int ok = (got == tests[i].expected);
-        printf("%s  got=%016llx  expected=%016llx  %s\n",
-               tests[i].name, (unsigned long long)got,
+        printf("%s  got=%016llx  expected=%016llx  %s\n", tests[i].name, (unsigned long long)got,
                (unsigned long long)tests[i].expected, ok ? "PASS" : "FAIL");
         ok ? pass++ : fail++;
     }

@@ -23,7 +23,7 @@
 
 static int failures = 0;
 
-static void check_u16(const char *name, uint16_t got, uint16_t expected) {
+static void check_u16(const char* name, uint16_t got, uint16_t expected) {
     if (got != expected) {
         printf("FAIL  %-70s  got=0x%04x  expected=0x%04x\n", name, got, expected);
         failures++;
@@ -32,7 +32,7 @@ static void check_u16(const char *name, uint16_t got, uint16_t expected) {
     }
 }
 
-static void check_u8(const char *name, uint8_t got, uint8_t expected) {
+static void check_u8(const char* name, uint8_t got, uint8_t expected) {
     if (got != expected) {
         printf("FAIL  %-70s  got=%u  expected=%u\n", name, got, expected);
         failures++;
@@ -42,14 +42,15 @@ static void check_u8(const char *name, uint8_t got, uint8_t expected) {
 }
 
 /* Read x87 status-word CC bits after a compare (mask to C0/C2/C3). */
-#define READ_SW(var)                                        \
-    uint16_t var;                                           \
-    __asm__ volatile (                                      \
-        "fnstsw %%ax\n"                                     \
-        "andw $0x4500, %%ax\n"                              \
-        "movw %%ax, %0\n"                                   \
-        : "=m" (var) : : "ax"                               \
-    )
+#define READ_SW(var)           \
+    uint16_t var;              \
+    __asm__ volatile(          \
+        "fnstsw %%ax\n"        \
+        "andw $0x4500, %%ax\n" \
+        "movw %%ax, %0\n"      \
+        : "=m"(var)            \
+        :                      \
+        : "ax")
 
 /* =========================================================================
  * Section A: FCOM CC bits survive NZCV save/restore
@@ -63,41 +64,61 @@ static void check_u8(const char *name, uint8_t got, uint8_t expected) {
 static uint16_t section_a_gt(void) {
     double st0 = 3.0, src = 1.0;
     /* prime CF=1 before FCOM */
-    __asm__ volatile ("xorl %%eax, %%eax\n\t" "cmpl $1, %%eax\n" : : : "eax", "cc");
-    __asm__ volatile ("fldl %0\n" : : "m" (st0));
-    __asm__ volatile ("fcoml %0\n" : : "m" (src));
+    __asm__ volatile(
+        "xorl %%eax, %%eax\n\t"
+        "cmpl $1, %%eax\n"
+        :
+        :
+        : "eax", "cc");
+    __asm__ volatile("fldl %0\n" : : "m"(st0));
+    __asm__ volatile("fcoml %0\n" : : "m"(src));
     READ_SW(cc);
-    __asm__ volatile ("fstp %%st(0)\n" : : : "st");
+    __asm__ volatile("fstp %%st(0)\n" : : : "st");
     return cc;
 }
 
 static uint16_t section_a_lt(void) {
     double st0 = 1.0, src = 3.0;
-    __asm__ volatile ("xorl %%eax, %%eax\n\t" "cmpl $1, %%eax\n" : : : "eax", "cc");
-    __asm__ volatile ("fldl %0\n" : : "m" (st0));
-    __asm__ volatile ("fcoml %0\n" : : "m" (src));
+    __asm__ volatile(
+        "xorl %%eax, %%eax\n\t"
+        "cmpl $1, %%eax\n"
+        :
+        :
+        : "eax", "cc");
+    __asm__ volatile("fldl %0\n" : : "m"(st0));
+    __asm__ volatile("fcoml %0\n" : : "m"(src));
     READ_SW(cc);
-    __asm__ volatile ("fstp %%st(0)\n" : : : "st");
+    __asm__ volatile("fstp %%st(0)\n" : : : "st");
     return cc;
 }
 
 static uint16_t section_a_eq(void) {
     double st0 = 2.0, src = 2.0;
-    __asm__ volatile ("xorl %%eax, %%eax\n\t" "cmpl $1, %%eax\n" : : : "eax", "cc");
-    __asm__ volatile ("fldl %0\n" : : "m" (st0));
-    __asm__ volatile ("fcoml %0\n" : : "m" (src));
+    __asm__ volatile(
+        "xorl %%eax, %%eax\n\t"
+        "cmpl $1, %%eax\n"
+        :
+        :
+        : "eax", "cc");
+    __asm__ volatile("fldl %0\n" : : "m"(st0));
+    __asm__ volatile("fcoml %0\n" : : "m"(src));
     READ_SW(cc);
-    __asm__ volatile ("fstp %%st(0)\n" : : : "st");
+    __asm__ volatile("fstp %%st(0)\n" : : : "st");
     return cc;
 }
 
 static uint16_t section_a_un(void) {
     double nan_val = __builtin_nan(""), src = 1.0;
-    __asm__ volatile ("xorl %%eax, %%eax\n\t" "cmpl $1, %%eax\n" : : : "eax", "cc");
-    __asm__ volatile ("fldl %0\n" : : "m" (nan_val));
-    __asm__ volatile ("fcoml %0\n" : : "m" (src));
+    __asm__ volatile(
+        "xorl %%eax, %%eax\n\t"
+        "cmpl $1, %%eax\n"
+        :
+        :
+        : "eax", "cc");
+    __asm__ volatile("fldl %0\n" : : "m"(nan_val));
+    __asm__ volatile("fcoml %0\n" : : "m"(src));
     READ_SW(cc);
-    __asm__ volatile ("fstp %%st(0)\n" : : : "st");
+    __asm__ volatile("fstp %%st(0)\n" : : : "st");
     return cc;
 }
 
@@ -116,19 +137,18 @@ static uint16_t section_a_un(void) {
 static uint8_t section_b_cf_survives_fcom(void) {
     double a = 1.0, b = 2.0;
     uint8_t result = 0;
-    __asm__ volatile (
-        "xorl  %%eax, %%eax\n\t"  /* eax = 0                   */
-        "cmpl  $1, %%eax\n\t"     /* 0 < 1 unsigned → CF=1     */
-        "fldl  %2\n\t"            /* push b=2.0                 */
-        "fldl  %1\n\t"            /* push a=1.0; ST(1)=2.0      */
-        "fcom  %%st(1)\n\t"       /* FCOM ST(1): MRS/MSR path   */
-        "fstp  %%st(0)\n\t"       /* pop a                      */
-        "fstp  %%st(0)\n\t"       /* pop b                      */
-        "setb  %0\n"              /* CF should still be 1       */
-        : "=r" (result)
-        : "m" (a), "m" (b)
-        : "eax", "cc", "st"
-    );
+    __asm__ volatile(
+        "xorl  %%eax, %%eax\n\t" /* eax = 0                   */
+        "cmpl  $1, %%eax\n\t"    /* 0 < 1 unsigned → CF=1     */
+        "fldl  %2\n\t"           /* push b=2.0                 */
+        "fldl  %1\n\t"           /* push a=1.0; ST(1)=2.0      */
+        "fcom  %%st(1)\n\t"      /* FCOM ST(1): MRS/MSR path   */
+        "fstp  %%st(0)\n\t"      /* pop a                      */
+        "fstp  %%st(0)\n\t"      /* pop b                      */
+        "setb  %0\n"             /* CF should still be 1       */
+        : "=r"(result)
+        : "m"(a), "m"(b)
+        : "eax", "cc", "st");
     return result;
 }
 
@@ -136,17 +156,16 @@ static uint8_t section_b_cf_survives_fcom(void) {
 static uint8_t section_b_cf_survives_fcoml(void) {
     double a = 1.0, b = 2.0;
     uint8_t result = 0;
-    __asm__ volatile (
+    __asm__ volatile(
         "xorl  %%eax, %%eax\n\t"
         "cmpl  $1, %%eax\n\t"
         "fldl  %1\n\t"
         "fcoml %2\n\t"
         "fstp  %%st(0)\n\t"
         "setb  %0\n"
-        : "=r" (result)
-        : "m" (a), "m" (b)
-        : "eax", "cc", "st"
-    );
+        : "=r"(result)
+        : "m"(a), "m"(b)
+        : "eax", "cc", "st");
     return result;
 }
 
@@ -162,10 +181,9 @@ int main(void) {
     check_u16("A/fcom UN (NaN vs 1.0) => C3=1 C2=1 C0=1", section_a_un(), 0x4500);
 
     /* Section B: CF survives MRS/MSR roundtrip */
-    check_u8("B/fcom  ST(1): CF=1 before FCOM is preserved after",
-             section_b_cf_survives_fcom(), 1);
-    check_u8("B/fcoml m64:  CF=1 before FCOML is preserved after",
-             section_b_cf_survives_fcoml(), 1);
+    check_u8("B/fcom  ST(1): CF=1 before FCOM is preserved after", section_b_cf_survives_fcom(), 1);
+    check_u8("B/fcoml m64:  CF=1 before FCOML is preserved after", section_b_cf_survives_fcoml(),
+             1);
 
     if (failures == 0)
         printf("\nAll tests passed.\n");

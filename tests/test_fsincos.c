@@ -12,21 +12,20 @@
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
-#include <string.h>
 #include <stdlib.h>
+#include <string.h>
 
 #define MAX_ULP 4
 
 static int failures = 0;
 
-static int check_ulp(const char *name, double got, double expected) {
+static int check_ulp(const char* name, double got, double expected) {
     uint64_t g, e;
     memcpy(&g, &got, sizeof(g));
     memcpy(&e, &expected, sizeof(e));
 
     if (g == e) {
-        printf("PASS  %-40s  got=0x%016llx (%.17g)\n", name,
-               (unsigned long long)g, got);
+        printf("PASS  %-40s  got=0x%016llx (%.17g)\n", name, (unsigned long long)g, got);
         return 1;
     }
     if (isnan(got) && isnan(expected)) {
@@ -44,24 +43,24 @@ static int check_ulp(const char *name, double got, double expected) {
     }
 
     if (ulp_delta <= MAX_ULP) {
-        printf("PASS  %-40s  got=0x%016llx (%.17g) [ulp=%llu]\n", name,
-               (unsigned long long)g, got, (unsigned long long)ulp_delta);
+        printf("PASS  %-40s  got=0x%016llx (%.17g) [ulp=%llu]\n", name, (unsigned long long)g, got,
+               (unsigned long long)ulp_delta);
         return 1;
     }
 
-    printf("FAIL  %-40s  got=0x%016llx (%.17g)  expected=0x%016llx (%.17g)  ulp=%llu\n",
-           name, (unsigned long long)g, got, (unsigned long long)e, expected,
+    printf("FAIL  %-40s  got=0x%016llx (%.17g)  expected=0x%016llx (%.17g)  ulp=%llu\n", name,
+           (unsigned long long)g, got, (unsigned long long)e, expected,
            (unsigned long long)ulp_delta);
     failures++;
     return 0;
 }
 
-static void do_fsincos(double v, double *out_sin, double *out_cos) {
+static void do_fsincos(double v, double* out_sin, double* out_cos) {
     __asm__ volatile(
         "fldl  %2\n\t"
         "fsincos\n\t"
-        "fstpl %1\n\t"   /* cos at ST(0) → out_cos */
-        "fstpl %0\n\t"   /* sin at new ST(0) → out_sin */
+        "fstpl %1\n\t" /* cos at ST(0) → out_cos */
+        "fstpl %0\n\t" /* sin at new ST(0) → out_sin */
         : "=m"(*out_sin), "=m"(*out_cos)
         : "m"(v)
         : "st");

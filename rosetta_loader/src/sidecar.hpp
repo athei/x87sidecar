@@ -26,10 +26,8 @@ namespace sidecar {
 //
 // `parentTaskPort` must be a send-right to the parent's task port (held
 // by MuhDebugger.taskPort_). Returns true on success.
-bool installPortInParent(mach_port_t parentTaskPort,
-                         mach_port_t* outServicePort,
-                         uint32_t* outParentReqName,
-                         uint32_t* outParentReplyName);
+bool installPortInParent(mach_port_t parentTaskPort, mach_port_t* outServicePort,
+                         uint32_t* outParentReqName, uint32_t* outParentReplyName);
 
 // Spawn a detached worker thread that runs the Mach receive loop on
 // `servicePort`. The thread also needs `parentTaskPort` to

@@ -11,14 +11,14 @@
  *
  * Build: gcc -O0 -mfpmath=387 -o test_fcomp_mem test_fcomp_mem.c
  */
-#include <stdio.h>
-#include <stdint.h>
-#include <string.h>
 #include <math.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
 
 static int failures = 0;
 
-static void check(const char *name, uint16_t got, uint16_t expected) {
+static void check(const char* name, uint16_t got, uint16_t expected) {
     if (got != expected) {
         printf("FAIL  %-55s  got=0x%04x  expected=0x%04x\n", name, got, expected);
         failures++;
@@ -27,9 +27,10 @@ static void check(const char *name, uint16_t got, uint16_t expected) {
     }
 }
 
-static void check_d(const char *name, double got, double expected) {
+static void check_d(const char* name, double got, double expected) {
     uint64_t a, b;
-    memcpy(&a, &got, 8); memcpy(&b, &expected, 8);
+    memcpy(&a, &got, 8);
+    memcpy(&b, &expected, 8);
     if (a != b) {
         printf("FAIL  %-55s  got=%.10g  expected=%.10g\n", name, got, expected);
         failures++;
@@ -50,7 +51,9 @@ static uint16_t fcom_m32(double a, float b) {
         "fnstsw %%ax\n"
         "movw %%ax, %0\n"
         "fstp %%st(0)\n"
-        : "=m"(sw) : "m"(a), "m"(b) : "ax");
+        : "=m"(sw)
+        : "m"(a), "m"(b)
+        : "ax");
     return sw & 0x4500;
 }
 
@@ -63,7 +66,9 @@ static uint16_t fcom_m64(double a, double b) {
         "fnstsw %%ax\n"
         "movw %%ax, %0\n"
         "fstp %%st(0)\n"
-        : "=m"(sw) : "m"(a), "m"(b) : "ax");
+        : "=m"(sw)
+        : "m"(a), "m"(b)
+        : "ax");
     return sw & 0x4500;
 }
 
@@ -75,7 +80,9 @@ static uint16_t fcomp_m32(double a, float b) {
         "fcomps %2\n"
         "fnstsw %%ax\n"
         "movw %%ax, %0\n"
-        : "=m"(sw) : "m"(a), "m"(b) : "ax");
+        : "=m"(sw)
+        : "m"(a), "m"(b)
+        : "ax");
     return sw & 0x4500;
 }
 
@@ -87,7 +94,9 @@ static uint16_t fcomp_m64(double a, double b) {
         "fcompl %2\n"
         "fnstsw %%ax\n"
         "movw %%ax, %0\n"
-        : "=m"(sw) : "m"(a), "m"(b) : "ax");
+        : "=m"(sw)
+        : "m"(a), "m"(b)
+        : "ax");
     return sw & 0x4500;
 }
 
@@ -95,12 +104,13 @@ static uint16_t fcomp_m64(double a, double b) {
 static double fcomp_m32_stack_check(double under, double top, float cmp) {
     double result;
     __asm__ volatile(
-        "fldl %1\n"     /* push 'under' */
-        "fldl %2\n"     /* push 'top' — ST(0)=top, ST(1)=under */
-        "fcomps %3\n"   /* compare ST(0) with cmp, pop */
+        "fldl %1\n"   /* push 'under' */
+        "fldl %2\n"   /* push 'top' — ST(0)=top, ST(1)=under */
+        "fcomps %3\n" /* compare ST(0) with cmp, pop */
         /* After pop: ST(0) should be 'under' */
         "fstpl %0\n"
-        : "=m"(result) : "m"(under), "m"(top), "m"(cmp));
+        : "=m"(result)
+        : "m"(under), "m"(top), "m"(cmp));
     return result;
 }
 
@@ -108,11 +118,12 @@ static double fcomp_m32_stack_check(double under, double top, float cmp) {
 static double fcomp_m64_stack_check(double under, double top, double cmp) {
     double result;
     __asm__ volatile(
-        "fldl %1\n"     /* push 'under' */
-        "fldl %2\n"     /* push 'top' */
-        "fcompl %3\n"   /* compare and pop */
+        "fldl %1\n"   /* push 'under' */
+        "fldl %2\n"   /* push 'top' */
+        "fcompl %3\n" /* compare and pop */
         "fstpl %0\n"
-        : "=m"(result) : "m"(under), "m"(top), "m"(cmp));
+        : "=m"(result)
+        : "m"(under), "m"(top), "m"(cmp));
     return result;
 }
 
@@ -122,24 +133,28 @@ static uint16_t render_pattern_fcomp_m32(float value, float threshold) {
     uint16_t sw;
     float zero = 0.0f;
     __asm__ volatile(
-        "flds %1\n"       /* load value */
-        "fsubs %2\n"      /* subtract threshold: ST(0) = value - threshold */
-        "fcomps %3\n"     /* compare (value-threshold) against 0.0f, pop */
+        "flds %1\n"   /* load value */
+        "fsubs %2\n"  /* subtract threshold: ST(0) = value - threshold */
+        "fcomps %3\n" /* compare (value-threshold) against 0.0f, pop */
         "fnstsw %%ax\n"
         "movw %%ax, %0\n"
-        : "=m"(sw) : "m"(value), "m"(threshold), "m"(zero) : "ax");
+        : "=m"(sw)
+        : "m"(value), "m"(threshold), "m"(zero)
+        : "ax");
     return sw & 0x4500;
 }
 
 /* ========== Long sequence: multiple FCOMP m32 in a row ========== */
-static void multi_fcomp_m32(uint16_t *results, double *vals, float *cmps, int n) {
+static void multi_fcomp_m32(uint16_t* results, double* vals, float* cmps, int n) {
     for (int i = 0; i < n; i++) {
         __asm__ volatile(
             "fldl %1\n"
             "fcomps %2\n"
             "fnstsw %%ax\n"
             "movw %%ax, %0\n"
-            : "=m"(results[i]) : "m"(vals[i]), "m"(cmps[i]) : "ax");
+            : "=m"(results[i])
+            : "m"(vals[i]), "m"(cmps[i])
+            : "ax");
         results[i] &= 0x4500;
     }
 }
@@ -150,16 +165,18 @@ static uint16_t fcomp_m32_in_sequence(void) {
     float one_f = 1.0f;
     float three_f = 3.0f;
     __asm__ volatile(
-        "fld1\n"                                /* push 1.0 */
-        "fld1\n fld1\n faddp\n"                 /* push 2.0 */
-        "fld1\n fld1\n faddp\n fld1\n faddp\n"  /* push 3.0 */
+        "fld1\n"                               /* push 1.0 */
+        "fld1\n fld1\n faddp\n"                /* push 2.0 */
+        "fld1\n fld1\n faddp\n fld1\n faddp\n" /* push 3.0 */
         /* ST(0)=3, ST(1)=2, ST(2)=1 */
-        "fcomps %1\n"                            /* compare 3.0 > 1.0f → GT, pop */
+        "fcomps %1\n" /* compare 3.0 > 1.0f → GT, pop */
         "fnstsw %%ax\n"
         "movw %%ax, %0\n"
         /* ST(0)=2, ST(1)=1 — clean up */
         "fstp %%st(0)\n fstp %%st(0)\n"
-        : "=m"(sw) : "m"(one_f) : "ax");
+        : "=m"(sw)
+        : "m"(one_f)
+        : "ax");
     return sw & 0x4500;
 }
 
@@ -168,11 +185,13 @@ static uint16_t fcomp_m32_in_sequence_lt(void) {
     uint16_t sw;
     float five_f = 5.0f;
     __asm__ volatile(
-        "fld1\n fld1\n faddp\n fld1\n faddp\n"  /* 3.0 */
-        "fcomps %1\n"                             /* 3.0 < 5.0f → LT, pop */
+        "fld1\n fld1\n faddp\n fld1\n faddp\n" /* 3.0 */
+        "fcomps %1\n"                          /* 3.0 < 5.0f → LT, pop */
         "fnstsw %%ax\n"
         "movw %%ax, %0\n"
-        : "=m"(sw) : "m"(five_f) : "ax");
+        : "=m"(sw)
+        : "m"(five_f)
+        : "ax");
     return sw & 0x4500;
 }
 
@@ -181,11 +200,13 @@ static uint16_t fcomp_m32_in_sequence_eq(void) {
     uint16_t sw;
     float three_f = 3.0f;
     __asm__ volatile(
-        "fld1\n fld1\n faddp\n fld1\n faddp\n"  /* 3.0 */
-        "fcomps %1\n"                             /* 3.0 == 3.0f → EQ, pop */
+        "fld1\n fld1\n faddp\n fld1\n faddp\n" /* 3.0 */
+        "fcomps %1\n"                          /* 3.0 == 3.0f → EQ, pop */
         "fnstsw %%ax\n"
         "movw %%ax, %0\n"
-        : "=m"(sw) : "m"(three_f) : "ax");
+        : "=m"(sw)
+        : "m"(three_f)
+        : "ax");
     return sw & 0x4500;
 }
 
@@ -194,25 +215,25 @@ int main(void) {
     check("FCOM m32  5.0 > 3.0f  GT", fcom_m32(5.0, 3.0f), 0x0000);
     check("FCOM m32  1.0 < 3.0f  LT", fcom_m32(1.0, 3.0f), 0x0100);
     check("FCOM m32  3.0 = 3.0f  EQ", fcom_m32(3.0, 3.0f), 0x4000);
-    check("FCOM m32  NaN         UN", fcom_m32(NAN, 1.0f),  0x4500);
+    check("FCOM m32  NaN         UN", fcom_m32(NAN, 1.0f), 0x4500);
 
     printf("\n=== FCOM m64fp (no pop) — baseline ===\n");
     check("FCOM m64  5.0 > 3.0   GT", fcom_m64(5.0, 3.0), 0x0000);
     check("FCOM m64  1.0 < 3.0   LT", fcom_m64(1.0, 3.0), 0x0100);
     check("FCOM m64  3.0 = 3.0   EQ", fcom_m64(3.0, 3.0), 0x4000);
-    check("FCOM m64  NaN         UN", fcom_m64(NAN, 1.0),  0x4500);
+    check("FCOM m64  NaN         UN", fcom_m64(NAN, 1.0), 0x4500);
 
     printf("\n=== FCOMP m32fp (pop) — the suspect ===\n");
     check("FCOMP m32  5.0 > 3.0f  GT", fcomp_m32(5.0, 3.0f), 0x0000);
     check("FCOMP m32  1.0 < 3.0f  LT", fcomp_m32(1.0, 3.0f), 0x0100);
     check("FCOMP m32  3.0 = 3.0f  EQ", fcomp_m32(3.0, 3.0f), 0x4000);
-    check("FCOMP m32  NaN         UN", fcomp_m32(NAN, 1.0f),  0x4500);
+    check("FCOMP m32  NaN         UN", fcomp_m32(NAN, 1.0f), 0x4500);
 
     printf("\n=== FCOMP m64fp (pop) ===\n");
     check("FCOMP m64  5.0 > 3.0   GT", fcomp_m64(5.0, 3.0), 0x0000);
     check("FCOMP m64  1.0 < 3.0   LT", fcomp_m64(1.0, 3.0), 0x0100);
     check("FCOMP m64  3.0 = 3.0   EQ", fcomp_m64(3.0, 3.0), 0x4000);
-    check("FCOMP m64  NaN         UN", fcomp_m64(NAN, 1.0),  0x4500);
+    check("FCOMP m64  NaN         UN", fcomp_m64(NAN, 1.0), 0x4500);
 
     printf("\n=== FCOMP m32 — stack correctness after pop ===\n");
     check_d("FCOMP m32 pop: ST(0)=under=7.0", fcomp_m32_stack_check(7.0, 3.0, 1.0f), 7.0);
@@ -231,7 +252,7 @@ int main(void) {
     printf("\n=== Multiple FCOMP m32 in sequence ===\n");
     {
         double vals[] = {5.0, 1.0, 3.0, -1.0};
-        float  cmps[] = {3.0f, 3.0f, 3.0f, 0.0f};
+        float cmps[] = {3.0f, 3.0f, 3.0f, 0.0f};
         uint16_t results[4];
         multi_fcomp_m32(results, vals, cmps, 4);
         check("Multi[0] 5>3  GT", results[0], 0x0000);
@@ -240,8 +261,7 @@ int main(void) {
         check("Multi[3] -1<0 LT", results[3], 0x0100);
     }
 
-    printf("\n%s  (%d failure%s)\n",
-           failures == 0 ? "ALL PASS" : "SOME FAILURES",
-           failures, failures == 1 ? "" : "s");
+    printf("\n%s  (%d failure%s)\n", failures == 0 ? "ALL PASS" : "SOME FAILURES", failures,
+           failures == 1 ? "" : "s");
     return failures ? 1 : 0;
 }

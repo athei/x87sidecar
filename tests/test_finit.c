@@ -19,15 +19,21 @@
 
 static int failures = 0;
 
-static void fnstenv28(uint8_t *env28) {
-    __asm__ volatile ("fnstenv %0" : "=m" (*env28) :: "memory");
+static void fnstenv28(uint8_t* env28) {
+    __asm__ volatile("fnstenv %0" : "=m"(*env28)::"memory");
 }
 
-static uint16_t env_cw(const uint8_t *e) { return (uint16_t)e[0] | ((uint16_t)e[1] << 8); }
-static uint16_t env_sw(const uint8_t *e) { return (uint16_t)e[4] | ((uint16_t)e[5] << 8); }
-static uint16_t env_tw(const uint8_t *e) { return (uint16_t)e[8] | ((uint16_t)e[9] << 8); }
+static uint16_t env_cw(const uint8_t* e) {
+    return (uint16_t)e[0] | ((uint16_t)e[1] << 8);
+}
+static uint16_t env_sw(const uint8_t* e) {
+    return (uint16_t)e[4] | ((uint16_t)e[5] << 8);
+}
+static uint16_t env_tw(const uint8_t* e) {
+    return (uint16_t)e[8] | ((uint16_t)e[9] << 8);
+}
 
-static void check_eq(const char *name, uint16_t got, uint16_t expected) {
+static void check_eq(const char* name, uint16_t got, uint16_t expected) {
     if (got == expected) {
         printf("PASS  %s  (0x%04x)\n", name, got);
     } else {
@@ -40,28 +46,28 @@ static void check_eq(const char *name, uint16_t got, uint16_t expected) {
 static void test_resets_from_dirty(void) {
     /* Build a dirty state: change CW, push some values to fill ST, set
      * exception bits via fldenv. */
-    __asm__ volatile ("fninit");
+    __asm__ volatile("fninit");
 
     /* Change CW to something non-default (round-toward-zero, mask all). */
     uint16_t cw_alt = 0x0F7F;
-    __asm__ volatile ("fldcw %0" : : "m"(cw_alt));
+    __asm__ volatile("fldcw %0" : : "m"(cw_alt));
 
     /* Push 5 values so TOP = 8-5 = 3 and 5 tag-word slots are kValid. */
-    __asm__ volatile ("fld1");
-    __asm__ volatile ("fld1");
-    __asm__ volatile ("fld1");
-    __asm__ volatile ("fld1");
-    __asm__ volatile ("fld1");
+    __asm__ volatile("fld1");
+    __asm__ volatile("fld1");
+    __asm__ volatile("fld1");
+    __asm__ volatile("fld1");
+    __asm__ volatile("fld1");
 
     /* Inject exception bits into status_word. */
     {
         uint8_t env[28] __attribute__((aligned(16)));
-        __asm__ volatile ("fnstenv %0" : "=m" (env) :: "memory");
+        __asm__ volatile("fnstenv %0" : "=m"(env)::"memory");
         uint16_t sw = env_sw(env);
         sw |= 0x003F; /* bits 0..5 (PE,UE,OE,ZE,DE,IE) */
         env[4] = sw & 0xFF;
         env[5] = sw >> 8;
-        __asm__ volatile ("fldenv %0" : : "m"(env) : "memory");
+        __asm__ volatile("fldenv %0" : : "m"(env) : "memory");
     }
 
     /* Sanity: dirty state visible. */
@@ -69,8 +75,7 @@ static void test_resets_from_dirty(void) {
         uint8_t env[28] __attribute__((aligned(16)));
         fnstenv28(env);
         if (env_cw(env) != cw_alt) {
-            printf("FAIL  dirty_setup_cw  got=0x%04x expected=0x%04x\n",
-                   env_cw(env), cw_alt);
+            printf("FAIL  dirty_setup_cw  got=0x%04x expected=0x%04x\n", env_cw(env), cw_alt);
             failures++;
         }
         /* Don't assert SW here — fldenv may clamp ES; just verify TOP shifted. */
@@ -86,7 +91,7 @@ static void test_resets_from_dirty(void) {
     }
 
     /* The reset under test. */
-    __asm__ volatile (".byte 0xDB, 0xE3");  /* FNINIT */
+    __asm__ volatile(".byte 0xDB, 0xE3"); /* FNINIT */
 
     /* Verify post-reset env. */
     uint8_t env[28] __attribute__((aligned(16)));
@@ -98,10 +103,10 @@ static void test_resets_from_dirty(void) {
 
 /* ── Test 2: post-finit, fld1 pushes correctly (TOP=0 → 7) ───────────────── */
 static void test_fld_after_finit(void) {
-    __asm__ volatile (".byte 0xDB, 0xE3");
+    __asm__ volatile(".byte 0xDB, 0xE3");
 
     /* TOP should be 0; fld1 decrements TOP to 7 and tags slot 7 valid. */
-    __asm__ volatile ("fld1");
+    __asm__ volatile("fld1");
 
     uint8_t env[28] __attribute__((aligned(16)));
     fnstenv28(env);
@@ -112,18 +117,18 @@ static void test_fld_after_finit(void) {
     if (top == 7 && tw == 0x3FFF) {
         printf("PASS  test_fld_after_finit  top=%u tw=0x%04x\n", top, tw);
     } else {
-        printf("FAIL  test_fld_after_finit  top=%u tw=0x%04x (expected top=7 tw=0x3FFF)\n",
-               top, tw);
+        printf("FAIL  test_fld_after_finit  top=%u tw=0x%04x (expected top=7 tw=0x3FFF)\n", top,
+               tw);
         failures++;
     }
 
-    __asm__ volatile ("fstp %%st(0)" : : : "st");
+    __asm__ volatile("fstp %%st(0)" : : : "st");
 }
 
 /* ── Test 3: fninit on a clean (already-init) state stays clean ──────────── */
 static void test_idempotent(void) {
-    __asm__ volatile (".byte 0xDB, 0xE3");
-    __asm__ volatile (".byte 0xDB, 0xE3");
+    __asm__ volatile(".byte 0xDB, 0xE3");
+    __asm__ volatile(".byte 0xDB, 0xE3");
 
     uint8_t env[28] __attribute__((aligned(16)));
     fnstenv28(env);

@@ -3,15 +3,19 @@
  *
  * Build: gcc -O0 -mfpmath=387 -o test_compare_unary test_compare_unary.c -lm
  */
-#include <stdio.h>
-#include <stdint.h>
-#include <string.h>
 #include <math.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
 
 static int failures = 0;
-static uint64_t as_u64(double d) { uint64_t u; memcpy(&u, &d, 8); return u; }
+static uint64_t as_u64(double d) {
+    uint64_t u;
+    memcpy(&u, &d, 8);
+    return u;
+}
 
-static void check_d(const char *name, double got, double expected) {
+static void check_d(const char* name, double got, double expected) {
     if (as_u64(got) != as_u64(expected)) {
         printf("FAIL  %-52s  got=%.17g  expected=%.17g\n", name, got, expected);
         failures++;
@@ -19,7 +23,7 @@ static void check_d(const char *name, double got, double expected) {
         printf("PASS  %s\n", name);
     }
 }
-static void check_i(const char *name, int64_t got, int64_t expected) {
+static void check_i(const char* name, int64_t got, int64_t expected) {
     if (got != expected) {
         printf("FAIL  %-52s  got=%lld  expected=%lld\n", name, (long long)got, (long long)expected);
         failures++;
@@ -27,7 +31,7 @@ static void check_i(const char *name, int64_t got, int64_t expected) {
         printf("PASS  %s\n", name);
     }
 }
-static void check_u16(const char *name, uint16_t got, uint16_t expected) {
+static void check_u16(const char* name, uint16_t got, uint16_t expected) {
     if (got != expected) {
         printf("FAIL  %-52s  got=0x%04x  expected=0x%04x\n", name, got, expected);
         failures++;
@@ -65,7 +69,7 @@ static double do_frndint(double v) {
 }
 
 /* ==== FXCH ==== */
-static void do_fxch_st1(double *r0, double *r1) {
+static void do_fxch_st1(double* r0, double* r1) {
     __asm__ volatile(
         "fld1\n"
         "fld1\n fld1\n faddp\n" /* ST(0)=2, ST(1)=1 */
@@ -73,13 +77,13 @@ static void do_fxch_st1(double *r0, double *r1) {
         "fstpl %0\n fstpl %1\n"
         : "=m"(*r0), "=m"(*r1));
 }
-static void do_fxch_st2(double *r0, double *r1, double *r2) {
+static void do_fxch_st2(double* r0, double* r1, double* r2) {
     __asm__ volatile(
-        "fld1\n fld1\n faddp\n fld1\n faddp\n"  /* 3 */
-        "fld1\n fld1\n faddp\n"                   /* 2 */
-        "fld1\n"                                   /* 1 */
+        "fld1\n fld1\n faddp\n fld1\n faddp\n" /* 3 */
+        "fld1\n fld1\n faddp\n"                /* 2 */
+        "fld1\n"                               /* 1 */
         /* ST(0)=1, ST(1)=2, ST(2)=3 */
-        "fxch %%st(2)\n"                           /* ST(0)=3, ST(1)=2, ST(2)=1 */
+        "fxch %%st(2)\n" /* ST(0)=3, ST(1)=2, ST(2)=1 */
         "fstpl %0\n fstpl %1\n fstpl %2\n"
         : "=m"(*r0), "=m"(*r1), "=m"(*r2));
 }
@@ -90,13 +94,15 @@ static void do_fxch_st2(double *r0, double *r1, double *r2) {
 static uint16_t fcom_flags(double a, double b) {
     uint16_t sw;
     __asm__ volatile(
-        "fldl %2\n"   /* ST(1) = b */
-        "fldl %1\n"   /* ST(0) = a */
+        "fldl %2\n" /* ST(1) = b */
+        "fldl %1\n" /* ST(0) = a */
         "fcompp\n"
         "fnstsw %%ax\n"
         "movw %%ax, %0\n"
-        : "=m"(sw) : "m"(a), "m"(b) : "ax");
-    return sw & 0x4500;  /* mask C3(14), C2(10), C0(8) */
+        : "=m"(sw)
+        : "m"(a), "m"(b)
+        : "ax");
+    return sw & 0x4500; /* mask C3(14), C2(10), C0(8) */
 }
 
 /* FUCOMPP + FSTSW AX */
@@ -108,7 +114,9 @@ static uint16_t fucom_flags(double a, double b) {
         "fucompp\n"
         "fnstsw %%ax\n"
         "movw %%ax, %0\n"
-        : "=m"(sw) : "m"(a), "m"(b) : "ax");
+        : "=m"(sw)
+        : "m"(a), "m"(b)
+        : "ax");
     return sw & 0x4500;
 }
 
@@ -121,8 +129,10 @@ static uint16_t fcomp_flags(double a, double b) {
         "fcomp %%st(1)\n"
         "fnstsw %%ax\n"
         "movw %%ax, %0\n"
-        "fstp %%st(0)\n"  /* clean remaining */
-        : "=m"(sw) : "m"(a), "m"(b) : "ax");
+        "fstp %%st(0)\n" /* clean remaining */
+        : "=m"(sw)
+        : "m"(a), "m"(b)
+        : "ax");
     return sw & 0x4500;
 }
 
@@ -136,7 +146,9 @@ static uint16_t fcom_nopop_flags(double a, double b) {
         "fnstsw %%ax\n"
         "movw %%ax, %0\n"
         "fstp %%st(0)\n fstp %%st(0)\n"
-        : "=m"(sw) : "m"(a), "m"(b) : "ax");
+        : "=m"(sw)
+        : "m"(a), "m"(b)
+        : "ax");
     return sw & 0x4500;
 }
 
@@ -149,7 +161,9 @@ static uint16_t fcom_m64_flags(double a, double b) {
         "fnstsw %%ax\n"
         "movw %%ax, %0\n"
         "fstp %%st(0)\n"
-        : "=m"(sw) : "m"(a), "m"(b) : "ax");
+        : "=m"(sw)
+        : "m"(a), "m"(b)
+        : "ax");
     return sw & 0x4500;
 }
 
@@ -162,7 +176,9 @@ static uint16_t fcom_m32_flags(float a_f, float b_f) {
         "fnstsw %%ax\n"
         "movw %%ax, %0\n"
         "fstp %%st(0)\n"
-        : "=m"(sw) : "m"(a_f), "m"(b_f) : "ax");
+        : "=m"(sw)
+        : "m"(a_f), "m"(b_f)
+        : "ax");
     return sw & 0x4500;
 }
 
@@ -174,7 +190,8 @@ static uint16_t fstsw_m16(double a, double b) {
         "fldl %1\n"
         "fcompp\n"
         "fnstsw %0\n"
-        : "=m"(sw) : "m"(a), "m"(b));
+        : "=m"(sw)
+        : "m"(a), "m"(b));
     return sw & 0x4500;
 }
 
@@ -200,8 +217,10 @@ static double fchs_chain(double v) {
     double r;
     __asm__ volatile(
         "fldl %1\n"
-        "fchs\n fchs\n fchs\n fchs\n fchs\n"  /* 5 negations = net negative */
-        "fstpl %0\n" : "=m"(r) : "m"(v));
+        "fchs\n fchs\n fchs\n fchs\n fchs\n" /* 5 negations = net negative */
+        "fstpl %0\n"
+        : "=m"(r)
+        : "m"(v));
     return r;
 }
 
@@ -292,8 +311,7 @@ int main(void) {
     check_i("FISTP m64  1000000.0", do_fistp_m64(1000000.0), 1000000);
     check_i("FISTP m64  -1.0", do_fistp_m64(-1.0), -1);
 
-    printf("\n%s  (%d failure%s)\n",
-           failures == 0 ? "ALL PASS" : "SOME FAILURES",
-           failures, failures == 1 ? "" : "s");
+    printf("\n%s  (%d failure%s)\n", failures == 0 ? "ALL PASS" : "SOME FAILURES", failures,
+           failures == 1 ? "" : "s");
     return failures ? 1 : 0;
 }

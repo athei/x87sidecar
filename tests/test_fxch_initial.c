@@ -22,9 +22,13 @@
 #include <string.h>
 
 static int failures = 0;
-static uint64_t as_u64(double d) { uint64_t u; memcpy(&u, &d, 8); return u; }
+static uint64_t as_u64(double d) {
+    uint64_t u;
+    memcpy(&u, &d, 8);
+    return u;
+}
 
-static void check(const char *name, double got, double expected) {
+static void check(const char* name, double got, double expected) {
     if (as_u64(got) != as_u64(expected)) {
         printf("FAIL  %-55s  got=%.17g  expected=%.17g\n", name, got, expected);
         failures++;
@@ -54,30 +58,29 @@ static void check(const char *name, double got, double expected) {
  * unchanged → Run 3 sees [c=5, b=3, a=2] (original order).
  * Expects: [c=5, a=2, b=3].
  */
-static void test_fxch_3_initial(double *r0, double *r1, double *r2) {
+static void test_fxch_3_initial(double* r0, double* r1, double* r2) {
     volatile double a = 2.0, b = 3.0, c = 5.0;
     int dummy;
     /* Operands: %0=*r0  %1=*r1  %2=*r2  %3=dummy  |  %4=a  %5=b  %6=c */
     __asm__ volatile(
         /* Run 1: push three values */
-        "fldl %4\n\t"           /* ST(0)=a=2 */
-        "fldl %5\n\t"           /* ST(0)=b=3, ST(1)=2 */
-        "fldl %6\n\t"           /* ST(0)=c=5, ST(1)=3, ST(2)=2 */
+        "fldl %4\n\t" /* ST(0)=a=2 */
+        "fldl %5\n\t" /* ST(0)=b=3, ST(1)=2 */
+        "fldl %6\n\t" /* ST(0)=c=5, ST(1)=3, ST(2)=2 */
         /* Break */
         "movl $0, %3\n\t"
         /* Run 2: three FXCHs (all slots initial, consumed=3) */
-        "fxch %%st(2)\n\t"     /* [a, b, c] */
-        "fxch %%st(1)\n\t"     /* [b, a, c] */
-        "fxch %%st(2)\n\t"     /* [c, a, b]  — net: slots 1,2 swapped */
+        "fxch %%st(2)\n\t" /* [a, b, c] */
+        "fxch %%st(1)\n\t" /* [b, a, c] */
+        "fxch %%st(2)\n\t" /* [c, a, b]  — net: slots 1,2 swapped */
         /* Break */
         "movl $1, %3\n\t"
         /* Run 3: verify */
-        "fstpl %0\n\t"         /* r0 = c = 5 */
-        "fstpl %1\n\t"         /* r1 = a = 2 */
-        "fstpl %2\n\t"         /* r2 = b = 3 */
+        "fstpl %0\n\t" /* r0 = c = 5 */
+        "fstpl %1\n\t" /* r1 = a = 2 */
+        "fstpl %2\n\t" /* r2 = b = 3 */
         : "=m"(*r0), "=m"(*r1), "=m"(*r2), "+m"(dummy)
-        : "m"(a), "m"(b), "m"(c)
-    );
+        : "m"(a), "m"(b), "m"(c));
 }
 
 /*
@@ -96,28 +99,27 @@ static void test_fxch_3_initial(double *r0, double *r1, double *r2) {
  *     d=1: FAdd → STORE  (7 to slot 1)
  *     d=2: val=-2 < 0 → SKIP!  Physical slot 2 still has a=2, should be b=3.
  */
-static void test_fxch_mixed(double *r0, double *r1, double *r2) {
+static void test_fxch_mixed(double* r0, double* r1, double* r2) {
     volatile double a = 2.0, b = 3.0, c = 5.0;
     int dummy;
     /* Operands: %0=*r0  %1=*r1  %2=*r2  %3=dummy  |  %4=a  %5=b  %6=c */
     __asm__ volatile(
         /* Run 1 */
-        "fldl %4\n\t"           /* ST(0)=a=2 */
-        "fldl %5\n\t"           /* ST(0)=b=3, ST(1)=2 */
-        "fldl %6\n\t"           /* ST(0)=c=5, ST(1)=3, ST(2)=2 */
+        "fldl %4\n\t" /* ST(0)=a=2 */
+        "fldl %5\n\t" /* ST(0)=b=3, ST(1)=2 */
+        "fldl %6\n\t" /* ST(0)=c=5, ST(1)=3, ST(2)=2 */
         "movl $0, %3\n\t"
         /* Run 2: FADD + 2 FXCHs (consumed=3, one slot stays initial) */
-        "fadd %%st(2), %%st\n\t"  /* ST(0) = 5+2 = 7 */
-        "fxch %%st(1)\n\t"        /* ST(0)=b(init), ST(1)=7 */
-        "fxch %%st(2)\n\t"        /* ST(0)=a(ReadSt), ST(1)=7, ST(2)=b(init) */
+        "fadd %%st(2), %%st\n\t" /* ST(0) = 5+2 = 7 */
+        "fxch %%st(1)\n\t"       /* ST(0)=b(init), ST(1)=7 */
+        "fxch %%st(2)\n\t"       /* ST(0)=a(ReadSt), ST(1)=7, ST(2)=b(init) */
         "movl $1, %3\n\t"
         /* Run 3: verify */
-        "fstpl %0\n\t"           /* r0 = a = 2 */
-        "fstpl %1\n\t"           /* r1 = c+a = 7 */
-        "fstpl %2\n\t"           /* r2 = b = 3 */
+        "fstpl %0\n\t" /* r0 = a = 2 */
+        "fstpl %1\n\t" /* r1 = c+a = 7 */
+        "fstpl %2\n\t" /* r2 = b = 3 */
         : "=m"(*r0), "=m"(*r1), "=m"(*r2), "+m"(dummy)
-        : "m"(a), "m"(b), "m"(c)
-    );
+        : "m"(a), "m"(b), "m"(c));
 }
 
 /*
@@ -133,30 +135,29 @@ static void test_fxch_mixed(double *r0, double *r1, double *r2) {
  *
  * Without fix: no stores → Run 3 sees [d,c,b,a]. Expects [c,b,a,d].
  */
-static void test_fxch_deep(double *r0, double *r1, double *r2, double *r3) {
+static void test_fxch_deep(double* r0, double* r1, double* r2, double* r3) {
     volatile double a = 2.0, b = 3.0, c = 5.0, d = 7.0;
     int dummy;
     /* Operands: %0=*r0 %1=*r1 %2=*r2 %3=*r3 %4=dummy | %5=a %6=b %7=c %8=d */
     __asm__ volatile(
         /* Run 1: push four values */
-        "fldl %5\n\t"           /* ST(0)=a=2 */
-        "fldl %6\n\t"           /* ST(0)=b=3 */
-        "fldl %7\n\t"           /* ST(0)=c=5 */
-        "fldl %8\n\t"           /* ST(0)=d=7, ST(1)=c, ST(2)=b, ST(3)=a */
+        "fldl %5\n\t" /* ST(0)=a=2 */
+        "fldl %6\n\t" /* ST(0)=b=3 */
+        "fldl %7\n\t" /* ST(0)=c=5 */
+        "fldl %8\n\t" /* ST(0)=d=7, ST(1)=c, ST(2)=b, ST(3)=a */
         "movl $0, %4\n\t"
         /* Run 2: three FXCHs (consumed=3, all initial, deep targets) */
-        "fxch %%st(3)\n\t"     /* [a, c, b, d] */
-        "fxch %%st(2)\n\t"     /* [b, c, a, d] */
-        "fxch %%st(1)\n\t"     /* [c, b, a, d] */
+        "fxch %%st(3)\n\t" /* [a, c, b, d] */
+        "fxch %%st(2)\n\t" /* [b, c, a, d] */
+        "fxch %%st(1)\n\t" /* [c, b, a, d] */
         "movl $1, %4\n\t"
         /* Run 3: verify */
-        "fstpl %0\n\t"         /* r0 = c = 5 */
-        "fstpl %1\n\t"         /* r1 = b = 3 */
-        "fstpl %2\n\t"         /* r2 = a = 2 */
-        "fstpl %3\n\t"         /* r3 = d = 7 */
+        "fstpl %0\n\t" /* r0 = c = 5 */
+        "fstpl %1\n\t" /* r1 = b = 3 */
+        "fstpl %2\n\t" /* r2 = a = 2 */
+        "fstpl %3\n\t" /* r3 = d = 7 */
         : "=m"(*r0), "=m"(*r1), "=m"(*r2), "=m"(*r3), "+m"(dummy)
-        : "m"(a), "m"(b), "m"(c), "m"(d)
-    );
+        : "m"(a), "m"(b), "m"(c), "m"(d));
 }
 
 int main(void) {

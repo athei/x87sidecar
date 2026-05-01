@@ -52,8 +52,7 @@ constexpr uint32_t svc(uint16_t imm16) {
 constexpr uint32_t stp_preindex(uint32_t rt1, uint32_t rt2, uint32_t rn, int32_t imm) {
     int32_t scaled = imm / 8;
     uint32_t imm7 = static_cast<uint32_t>(scaled) & 0x7F;
-    return 0xA9800000U | (imm7 << 15) | ((rt2 & 0x1F) << 10) | ((rn & 0x1F) << 5) |
-           (rt1 & 0x1F);
+    return 0xA9800000U | (imm7 << 15) | ((rt2 & 0x1F) << 10) | ((rn & 0x1F) << 5) | (rt1 & 0x1F);
 }
 
 // STP Xt1, Xt2, [Xn|SP, #imm]  (signed-offset, 64-bit pair store)
@@ -61,8 +60,7 @@ constexpr uint32_t stp_preindex(uint32_t rt1, uint32_t rt2, uint32_t rn, int32_t
 constexpr uint32_t stp_offset(uint32_t rt1, uint32_t rt2, uint32_t rn, int32_t imm) {
     int32_t scaled = imm / 8;
     uint32_t imm7 = static_cast<uint32_t>(scaled) & 0x7F;
-    return 0xA9000000U | (imm7 << 15) | ((rt2 & 0x1F) << 10) | ((rn & 0x1F) << 5) |
-           (rt1 & 0x1F);
+    return 0xA9000000U | (imm7 << 15) | ((rt2 & 0x1F) << 10) | ((rn & 0x1F) << 5) | (rt1 & 0x1F);
 }
 
 // LDP Xt1, Xt2, [Xn|SP, #imm]  (signed-offset, 64-bit pair load)
@@ -70,8 +68,7 @@ constexpr uint32_t stp_offset(uint32_t rt1, uint32_t rt2, uint32_t rn, int32_t i
 constexpr uint32_t ldp_offset(uint32_t rt1, uint32_t rt2, uint32_t rn, int32_t imm) {
     int32_t scaled = imm / 8;
     uint32_t imm7 = static_cast<uint32_t>(scaled) & 0x7F;
-    return 0xA9400000U | (imm7 << 15) | ((rt2 & 0x1F) << 10) | ((rn & 0x1F) << 5) |
-           (rt1 & 0x1F);
+    return 0xA9400000U | (imm7 << 15) | ((rt2 & 0x1F) << 10) | ((rn & 0x1F) << 5) | (rt1 & 0x1F);
 }
 
 // LDP Xt1, Xt2, [Xn|SP], #imm  (post-index, 64-bit pair load)
@@ -79,8 +76,7 @@ constexpr uint32_t ldp_offset(uint32_t rt1, uint32_t rt2, uint32_t rn, int32_t i
 constexpr uint32_t ldp_postindex(uint32_t rt1, uint32_t rt2, uint32_t rn, int32_t imm) {
     int32_t scaled = imm / 8;
     uint32_t imm7 = static_cast<uint32_t>(scaled) & 0x7F;
-    return 0xA8C00000U | (imm7 << 15) | ((rt2 & 0x1F) << 10) | ((rn & 0x1F) << 5) |
-           (rt1 & 0x1F);
+    return 0xA8C00000U | (imm7 << 15) | ((rt2 & 0x1F) << 10) | ((rn & 0x1F) << 5) | (rt1 & 0x1F);
 }
 
 // STR Wt, [Xn|SP, #imm]  (32-bit store, unsigned offset)
@@ -185,8 +181,8 @@ constexpr uint32_t RET_INSN = 0xD65F03C0U;
 // MADD Xd, Xn, Xm, Xa     (Xd = Xn * Xm + Xa, 64-bit)
 //   sf=1, op54=00, 11011, op31=000, Rm, o0=0, Ra, Rn, Rd
 constexpr uint32_t madd(uint32_t rd, uint32_t rn, uint32_t rm, uint32_t ra) {
-    return 0x9B000000U | ((rm & 0x1F) << 16) | ((ra & 0x1F) << 10) |
-           ((rn & 0x1F) << 5) | (rd & 0x1F);
+    return 0x9B000000U | ((rm & 0x1F) << 16) | ((ra & 0x1F) << 10) | ((rn & 0x1F) << 5) |
+           (rd & 0x1F);
 }
 
 // 32-bit register encoder helpers — only differ from 64-bit by sf=0 in
@@ -226,9 +222,8 @@ void emit_abs_jump_3movs(std::vector<uint8_t>& out, uint64_t target) {
 
 // ──── public ────────────────────────────────────────────────────────────────
 
-StubBlobs build(uint64_t handlerAddr, uint64_t translateInsnAddr,
-                const uint8_t origPrologue16[16], uint32_t sidecarReqName,
-                uint32_t parentReplyName) {
+StubBlobs build(uint64_t handlerAddr, uint64_t translateInsnAddr, const uint8_t origPrologue16[16],
+                uint32_t sidecarReqName, uint32_t parentReplyName) {
     StubBlobs blobs;
 
     // ENTRY: 16-byte abs-jump to handlerAddr, written into translate_insn[0..16].
@@ -256,7 +251,7 @@ StubBlobs build(uint64_t handlerAddr, uint64_t translateInsnAddr,
     // path can compute the same stashAddr the filter prologue uses
     // below at line ~471.
     constexpr size_t kFilterInstrs = 13;
-    constexpr size_t kFilterBytes  = kFilterInstrs * 4;
+    constexpr size_t kFilterBytes = kFilterInstrs * 4;
 
     std::vector<uint8_t> ipc;
 
@@ -322,45 +317,45 @@ StubBlobs build(uint64_t handlerAddr, uint64_t translateInsnAddr,
     //   local  = MACH_MSG_TYPE_MAKE_SEND_ONCE = 21 = 0x15  (kernel hands
     //            the sidecar a fresh send-once for the reply)
     constexpr uint32_t MSG_BITS = 0x13U | (0x15U << 8);  // = 0x1513
-    constexpr uint32_t MSG_SIZE = 24 + 40;                // header + 5×8 args
-    constexpr uint32_t RCV_SIZE = 128;                    // reply cap
-    constexpr uint32_t MSG_ID   = 0x10000001;             // sidecar dispatches on it
+    constexpr uint32_t MSG_SIZE = 24 + 40;               // header + 5×8 args
+    constexpr uint32_t RCV_SIZE = 128;                   // reply cap
+    constexpr uint32_t MSG_ID = 0x10000001;              // sidecar dispatches on it
 
     // Use x9 as scratch for header field values.
 
     // msgh_bits — 0x1513 fits in 16 bits (single movz)
     emit(ipc, movz(9, MSG_BITS, 0));
-    emit(ipc, str_w_offset(9, SP, 64));         // [sp+64]
+    emit(ipc, str_w_offset(9, SP, 64));  // [sp+64]
 
     // msgh_size
     emit(ipc, movz(9, MSG_SIZE, 0));
-    emit(ipc, str_w_offset(9, SP, 68));         // [sp+68]
+    emit(ipc, str_w_offset(9, SP, 68));  // [sp+68]
 
     // msgh_remote_port = sidecarReqName (32-bit)
-    emit_load_imm64(ipc, 9, sidecarReqName);    // 4 instructions
-    emit(ipc, str_w_offset(9, SP, 72));         // [sp+72]
+    emit_load_imm64(ipc, 9, sidecarReqName);  // 4 instructions
+    emit(ipc, str_w_offset(9, SP, 72));       // [sp+72]
 
     // msgh_local_port = parentReplyName (32-bit) — kernel auto-derives
     // a SEND_ONCE right via MAKE_SEND_ONCE in MSG_BITS.local.
-    emit_load_imm64(ipc, 9, parentReplyName);   // 4 instructions
-    emit(ipc, str_w_offset(9, SP, 76));         // [sp+76]
+    emit_load_imm64(ipc, 9, parentReplyName);  // 4 instructions
+    emit(ipc, str_w_offset(9, SP, 76));        // [sp+76]
 
     // msgh_voucher_port = 0
     emit(ipc, movz(9, 0, 0));
-    emit(ipc, str_w_offset(9, SP, 80));         // [sp+80]
+    emit(ipc, str_w_offset(9, SP, 80));  // [sp+80]
 
     // msgh_id
     emit(ipc, movz(9, static_cast<uint16_t>(MSG_ID & 0xFFFF), 0));
     emit(ipc, movk(9, static_cast<uint16_t>((MSG_ID >> 16) & 0xFFFF), 16));
-    emit(ipc, str_w_offset(9, SP, 84));         // [sp+84]
+    emit(ipc, str_w_offset(9, SP, 84));  // [sp+84]
 
     // ── Body: five translate_insn args (still in x0..x4 at this point) ──────
     // Header lives at sp+64 .. sp+88. Body lives at sp+88 .. sp+128.
-    emit(ipc, str_x_offset(0, SP, 88));         // body[+0]  = x0 = TR*
-    emit(ipc, str_x_offset(1, SP, 96));         // body[+8]  = x1 = block*
-    emit(ipc, str_x_offset(2, SP, 104));        // body[+16] = x2 = instr_array*
-    emit(ipc, str_x_offset(3, SP, 112));        // body[+24] = x3 = num_instrs
-    emit(ipc, str_x_offset(4, SP, 120));        // body[+32] = x4 = insn_idx
+    emit(ipc, str_x_offset(0, SP, 88));   // body[+0]  = x0 = TR*
+    emit(ipc, str_x_offset(1, SP, 96));   // body[+8]  = x1 = block*
+    emit(ipc, str_x_offset(2, SP, 104));  // body[+16] = x2 = instr_array*
+    emit(ipc, str_x_offset(3, SP, 112));  // body[+24] = x3 = num_instrs
+    emit(ipc, str_x_offset(4, SP, 120));  // body[+32] = x4 = insn_idx
 
     // ── mach_msg_trap arguments ──────────────────────────────────────────────
     //   x0  = msg pointer (sp + 64)
@@ -371,14 +366,14 @@ StubBlobs build(uint64_t handlerAddr, uint64_t translateInsnAddr,
     //   x5  = timeout   = 0  (block forever)
     //   x6  = notify    = 0
     //   x16 = -31  (mach_msg_trap)
-    emit(ipc, add_imm(0, SP, 64));              // x0 = sp + 64
-    emit(ipc, movz(1, 0x0003, 0));              // x1 = SEND | RCV
-    emit(ipc, movz(2, MSG_SIZE, 0));            // x2 = send_size
-    emit(ipc, movz(3, RCV_SIZE, 0));            // x3 = rcv_size
-    emit_load_imm64(ipc, 4, parentReplyName);   // x4 = rcv_name
-    emit(ipc, movz(5, 0, 0));                   // x5 = timeout
-    emit(ipc, movz(6, 0, 0));                   // x6 = notify
-    emit(ipc, movn(16, 30, 0));                 // x16 = -31 (mach_msg_trap)
+    emit(ipc, add_imm(0, SP, 64));             // x0 = sp + 64
+    emit(ipc, movz(1, 0x0003, 0));             // x1 = SEND | RCV
+    emit(ipc, movz(2, MSG_SIZE, 0));           // x2 = send_size
+    emit(ipc, movz(3, RCV_SIZE, 0));           // x3 = rcv_size
+    emit_load_imm64(ipc, 4, parentReplyName);  // x4 = rcv_name
+    emit(ipc, movz(5, 0, 0));                  // x5 = timeout
+    emit(ipc, movz(6, 0, 0));                  // x6 = notify
+    emit(ipc, movn(16, 30, 0));                // x16 = -31 (mach_msg_trap)
     emit(ipc, svc(0x80));
 
     // ── Reply parsing ───────────────────────────────────────────────────────
@@ -407,20 +402,20 @@ StubBlobs build(uint64_t handlerAddr, uint64_t translateInsnAddr,
     // path the FILTER prologue uses for non-x87 opcodes.
     //
     // Read msgh_id into w9.
-    emit(ipc, ldr_w_offset(9, SP, 84));         // w9 = msgh_id
+    emit(ipc, ldr_w_offset(9, SP, 84));  // w9 = msgh_id
     // CBZ branch is `target = CBZ_addr + imm19*4`. We want to land at the
     // FIRST instruction of NONE path, which is one past the SOME path's
     // last (7th) instruction, i.e., 8 instructions ahead of CBZ.
-    emit(ipc, cbz_w(9, 8));                     // skip 7 some-path → none_label
+    emit(ipc, cbz_w(9, 8));  // skip 7 some-path → none_label
 
     // ── SOME PATH ───────────────────────────────────────────────────────────
-    emit(ipc, ldr_x_offset(0, SP, 88));         // x0 = result (replaces saved x0)
-    emit(ipc, ldr_x_offset(1, SP, 8));          // restore x1
-    emit(ipc, ldp_offset(2, 3, SP, 16));        // restore x2, x3
-    emit(ipc, ldp_offset(4, 5, SP, 32));        // restore x4, x5
-    emit(ipc, ldp_offset(16, LR, SP, 48));      // restore x16, lr
-    emit(ipc, add_imm(SP, SP, FRAME_SIZE));     // sp += FRAME_SIZE
-    emit(ipc, 0xD65F03C0U);                     // ret  (= BR x30)
+    emit(ipc, ldr_x_offset(0, SP, 88));      // x0 = result (replaces saved x0)
+    emit(ipc, ldr_x_offset(1, SP, 8));       // restore x1
+    emit(ipc, ldp_offset(2, 3, SP, 16));     // restore x2, x3
+    emit(ipc, ldp_offset(4, 5, SP, 32));     // restore x4, x5
+    emit(ipc, ldp_offset(16, LR, SP, 48));   // restore x16, lr
+    emit(ipc, add_imm(SP, SP, FRAME_SIZE));  // sp += FRAME_SIZE
+    emit(ipc, 0xD65F03C0U);                  // ret  (= BR x30)
 
     // ── NONE PATH ───────────────────────────────────────────────────────────
     // Sidecar declined the opcode. Restore caller registers and abs-jump
@@ -428,12 +423,12 @@ StubBlobs build(uint64_t handlerAddr, uint64_t translateInsnAddr,
     // tail-jumps to translate_insn+16). x0 comes from sp+0 — the SOME
     // path read from sp+88 (reply body), but for NONE we hand stock the
     // caller's untouched arguments.
-    emit(ipc, ldr_x_offset(0, SP, 0));          // x0 = caller's TR*
-    emit(ipc, ldr_x_offset(1, SP, 8));          // restore x1
-    emit(ipc, ldp_offset(2, 3, SP, 16));        // restore x2, x3
-    emit(ipc, ldp_offset(4, 5, SP, 32));        // restore x4, x5
-    emit(ipc, ldp_offset(16, LR, SP, 48));      // restore x16, lr
-    emit(ipc, add_imm(SP, SP, FRAME_SIZE));     // sp += FRAME_SIZE
+    emit(ipc, ldr_x_offset(0, SP, 0));       // x0 = caller's TR*
+    emit(ipc, ldr_x_offset(1, SP, 8));       // restore x1
+    emit(ipc, ldp_offset(2, 3, SP, 16));     // restore x2, x3
+    emit(ipc, ldp_offset(4, 5, SP, 32));     // restore x4, x5
+    emit(ipc, ldp_offset(16, LR, SP, 48));   // restore x16, lr
+    emit(ipc, add_imm(SP, SP, FRAME_SIZE));  // sp += FRAME_SIZE
     // Abs-jump to STASH. STASH lives at the end of the concatenated
     // handler blob (filter + ipc + STASH + STASH_JUMP), so its address
     // is handlerAddr + kFilterBytes + ipc.size() once `ipc` is final.
@@ -442,8 +437,7 @@ StubBlobs build(uint64_t handlerAddr, uint64_t translateInsnAddr,
     // will be (current size) + 16. The same value is recomputed at
     // line ~453 below for the filter's bypass jump — they target the
     // same address.
-    const uint64_t noneStashAddr =
-        handlerAddr + kFilterBytes + ipc.size() + 16;
+    const uint64_t noneStashAddr = handlerAddr + kFilterBytes + ipc.size() + 16;
     emit_abs_jump_3movs(ipc, noneStashAddr);
 
     // ──── FILTER prologue ───────────────────────────────────────────────────
@@ -465,15 +459,13 @@ StubBlobs build(uint64_t handlerAddr, uint64_t translateInsnAddr,
     // preserve them across the filter.
     // (kFilterInstrs / kFilterBytes are declared at the top of build() so
     // the IPC body's NONE path can compute the same stashAddr.)
-    constexpr uint32_t kX87LoLo    = 0x25;
-    constexpr uint32_t kX87LoHi    = 0x30;
-    constexpr uint32_t kX87HiLo    = 0xBD;
-    constexpr uint32_t kX87HiHi    = 0x10C;
+    constexpr uint32_t kX87LoLo = 0x25;
+    constexpr uint32_t kX87LoHi = 0x30;
+    constexpr uint32_t kX87HiLo = 0xBD;
+    constexpr uint32_t kX87HiHi = 0x10C;
 
-    static_assert(sizeof(IRInstr) == 0x50,
-                  "stub filter assumes IRInstr stride 0x50");
-    static_assert(offsetof(IRInstr, opcode) == 0x4,
-                  "stub filter assumes IRInstr.opcode at +4");
+    static_assert(sizeof(IRInstr) == 0x50, "stub filter assumes IRInstr stride 0x50");
+    static_assert(offsetof(IRInstr, opcode) == 0x4, "stub filter assumes IRInstr.opcode at +4");
 
     // STASH lives right after the IPC body in the final blob.
     const uint64_t stashAddr = handlerAddr + kFilterBytes + ipc.size();
@@ -515,7 +507,7 @@ StubBlobs build(uint64_t handlerAddr, uint64_t translateInsnAddr,
     auto& h = blobs.handler;
     h.reserve(filter.size() + ipc.size() + 16 + 16);
     h.insert(h.end(), filter.begin(), filter.end());
-    h.insert(h.end(), ipc.begin(),    ipc.end());
+    h.insert(h.end(), ipc.begin(), ipc.end());
     // STASH (4 instructions = original 16 bytes of translate_insn).
     h.insert(h.end(), origPrologue16, origPrologue16 + 16);
     // STASH_JUMP (abs-jump to translate_insn + 16).
@@ -523,6 +515,5 @@ StubBlobs build(uint64_t handlerAddr, uint64_t translateInsnAddr,
 
     return blobs;
 }
-
 
 }  // namespace stub_asm

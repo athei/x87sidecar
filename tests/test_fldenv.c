@@ -24,22 +24,37 @@
 
 static int failures = 0;
 
-static void fnstenv28(uint8_t *env28) {
-    __asm__ volatile ("fnstenv %0" : "=m" (*env28) :: "memory");
+static void fnstenv28(uint8_t* env28) {
+    __asm__ volatile("fnstenv %0" : "=m"(*env28)::"memory");
 }
 
-static void fldenv28(const uint8_t *env28) {
-    __asm__ volatile ("fldenv %0" : : "m" (*env28) : "memory");
+static void fldenv28(const uint8_t* env28) {
+    __asm__ volatile("fldenv %0" : : "m"(*env28) : "memory");
 }
 
-static uint16_t env_cw(const uint8_t *e) { return (uint16_t)e[0] | ((uint16_t)e[1] << 8); }
-static uint16_t env_sw(const uint8_t *e) { return (uint16_t)e[4] | ((uint16_t)e[5] << 8); }
-static uint16_t env_tw(const uint8_t *e) { return (uint16_t)e[8] | ((uint16_t)e[9] << 8); }
-static void set_env_cw(uint8_t *e, uint16_t v) { e[0] = v & 0xFF; e[1] = v >> 8; }
-static void set_env_sw(uint8_t *e, uint16_t v) { e[4] = v & 0xFF; e[5] = v >> 8; }
-static void set_env_tw(uint8_t *e, uint16_t v) { e[8] = v & 0xFF; e[9] = v >> 8; }
+static uint16_t env_cw(const uint8_t* e) {
+    return (uint16_t)e[0] | ((uint16_t)e[1] << 8);
+}
+static uint16_t env_sw(const uint8_t* e) {
+    return (uint16_t)e[4] | ((uint16_t)e[5] << 8);
+}
+static uint16_t env_tw(const uint8_t* e) {
+    return (uint16_t)e[8] | ((uint16_t)e[9] << 8);
+}
+static void set_env_cw(uint8_t* e, uint16_t v) {
+    e[0] = v & 0xFF;
+    e[1] = v >> 8;
+}
+static void set_env_sw(uint8_t* e, uint16_t v) {
+    e[4] = v & 0xFF;
+    e[5] = v >> 8;
+}
+static void set_env_tw(uint8_t* e, uint16_t v) {
+    e[8] = v & 0xFF;
+    e[9] = v >> 8;
+}
 
-static void check_eq(const char *name, uint16_t got, uint16_t expected) {
+static void check_eq(const char* name, uint16_t got, uint16_t expected) {
     if (got == expected) {
         printf("PASS  %s  (0x%04x)\n", name, got);
     } else {
@@ -50,7 +65,7 @@ static void check_eq(const char *name, uint16_t got, uint16_t expected) {
 
 /* ── Test 1: load CW from a buffer; CW changes. ───────────────────────────── */
 static void test_load_cw(void) {
-    __asm__ volatile (".byte 0xDB, 0xE3");  /* FNINIT — known baseline */
+    __asm__ volatile(".byte 0xDB, 0xE3"); /* FNINIT — known baseline */
 
     uint8_t env[28] __attribute__((aligned(16))) = {0};
     fnstenv28(env);
@@ -66,7 +81,7 @@ static void test_load_cw(void) {
 
 /* ── Test 2: load SW.TOP; subsequent fld pushes to (TOP-1) & 7. ──────────── */
 static void test_load_sw_top(void) {
-    __asm__ volatile (".byte 0xDB, 0xE3");
+    __asm__ volatile(".byte 0xDB, 0xE3");
 
     /* Snapshot env, set TOP=5, SW=other bits clear. */
     uint8_t env[28] __attribute__((aligned(16))) = {0};
@@ -83,7 +98,7 @@ static void test_load_sw_top(void) {
     fnstenv28(verify);
     uint16_t top = (env_sw(verify) >> 11) & 7;
     check_eq("test_load_sw_top: TOP=5", top, 5);
-    check_eq("test_load_sw_top: TW",    env_tw(verify), 0xFC00);
+    check_eq("test_load_sw_top: TW", env_tw(verify), 0xFC00);
 
     /* Subsequent fld1: TOP becomes (5-1)&7 = 4; tag for slot 4 becomes valid.
      * TW after: bits[8:9] (slot 4) become 00.  Pre-fld TW = 0xFC00 (bit pattern
@@ -99,37 +114,37 @@ static void test_load_sw_top(void) {
 /* ── Test 3: round-trip — fnstenv then fldenv into different buffer ────── */
 static void test_round_trip(void) {
     /* Set up state A: TOP=2, slot 6 valid. */
-    __asm__ volatile (".byte 0xDB, 0xE3");
+    __asm__ volatile(".byte 0xDB, 0xE3");
     uint8_t env_a[28] __attribute__((aligned(16))) = {0};
     fnstenv28(env_a);
-    set_env_sw(env_a, 0x1000);    /* TOP=2 */
-    set_env_tw(env_a, 0xCFFF);    /* slot 6 valid (bits 13:12 = 00), rest empty */
+    set_env_sw(env_a, 0x1000); /* TOP=2 */
+    set_env_tw(env_a, 0xCFFF); /* slot 6 valid (bits 13:12 = 00), rest empty */
     fldenv28(env_a);
 
     /* Snapshot. */
     uint8_t snap_a[28] __attribute__((aligned(16))) = {0};
     fnstenv28(snap_a);
     check_eq("round_trip: state A TOP", (env_sw(snap_a) >> 11) & 7, 2);
-    check_eq("round_trip: state A TW",  env_tw(snap_a), 0xCFFF);
+    check_eq("round_trip: state A TW", env_tw(snap_a), 0xCFFF);
 
     /* Switch to state B. */
     uint8_t env_b[28] __attribute__((aligned(16))) = {0};
     fnstenv28(env_b);
-    set_env_sw(env_b, 0x3800);    /* TOP=7 */
-    set_env_tw(env_b, 0x3FFF);    /* slot 7 valid, rest empty */
+    set_env_sw(env_b, 0x3800); /* TOP=7 */
+    set_env_tw(env_b, 0x3FFF); /* slot 7 valid, rest empty */
     fldenv28(env_b);
 
     uint8_t snap_b[28] __attribute__((aligned(16))) = {0};
     fnstenv28(snap_b);
     check_eq("round_trip: state B TOP", (env_sw(snap_b) >> 11) & 7, 7);
-    check_eq("round_trip: state B TW",  env_tw(snap_b), 0x3FFF);
+    check_eq("round_trip: state B TW", env_tw(snap_b), 0x3FFF);
 
     /* Switch back to A. */
     fldenv28(env_a);
     uint8_t snap_a2[28] __attribute__((aligned(16))) = {0};
     fnstenv28(snap_a2);
     check_eq("round_trip: back to A TOP", (env_sw(snap_a2) >> 11) & 7, 2);
-    check_eq("round_trip: back to A TW",  env_tw(snap_a2), 0xCFFF);
+    check_eq("round_trip: back to A TW", env_tw(snap_a2), 0xCFFF);
 }
 
 int main(void) {

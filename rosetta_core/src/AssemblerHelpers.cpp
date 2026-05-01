@@ -5,7 +5,6 @@
 #include "rosetta_core/IROperand.h"
 #include "rosetta_core/Register.h"
 
-
 // AArch64 logical immediates encode a value as a replicated bitmask:
 //   - Pick an element size S ∈ {2,4,8,16,32,64} bits
 //   - Within each element, place a contiguous run of 1s (len bits), right-rotated by R
@@ -27,13 +26,13 @@ bool is_bitmask_immediate(bool is_64bit, uint64_t value, LogicalImmEncoding& out
         // value + 1 < 2  means value == 0 or value == 0xFFFFFFFFFFFFFFFF
         if (value + 1 < 2) {
             return false;
-}
+        }
         element_size = 64;
     } else {
         // 32-bit: truncate, then same check
         if (static_cast<uint32_t>(value + 1) < 2) {
             return false;
-}
+        }
         value = static_cast<uint32_t>(value);
         element_size = 32;
     }
@@ -70,8 +69,9 @@ bool is_bitmask_immediate(bool is_64bit, uint64_t value, LogicalImmEncoding& out
         uint64_t filled = (element - 1) | element;
         if (((filled + 1) & filled) == 0) {
             // Yes, contiguous 1s — count trailing zeros for rotation, then run length
-            rotation = static_cast<uint8_t>(__builtin_ctzll(element));                // RBIT+CLZ
-            run_len = static_cast<uint8_t>(__builtin_ctzll(~(element >> rotation)));  // length of 1-run
+            rotation = static_cast<uint8_t>(__builtin_ctzll(element));  // RBIT+CLZ
+            run_len =
+                static_cast<uint8_t>(__builtin_ctzll(~(element >> rotation)));  // length of 1-run
             goto encode;
         }
     }
@@ -81,18 +81,18 @@ bool is_bitmask_immediate(bool is_64bit, uint64_t value, LogicalImmEncoding& out
         uint64_t zeros = element_mask & ~value;
         if (zeros == 0) {
             return false;
-}
+        }
 
         // Check if zeros is a contiguous run of 1s
         uint64_t filled_z = (zeros - 1) | zeros;
         if (((filled_z + 1) & filled_z) != 0) {
             return false;
-}
+        }
 
         // zeros is contiguous — decode rotation and run length
         // Uses CLZ (not CTZ) — different from the 1s path
         int lz = __builtin_clzll(zeros);                          // leading zeros
-        rotation = static_cast<uint8_t>(64 - lz);                            // position of highest set bit + 1
+        rotation = static_cast<uint8_t>(64 - lz);                 // position of highest set bit + 1
         int tz = __builtin_clzll(__builtin_bitreverse64(zeros));  // trailing zeros via RBIT+CLZ
         run_len = static_cast<uint8_t>(lz + tz - (64 - element_size));
     }
@@ -180,13 +180,13 @@ auto emit_movz_movk_abs64(AssemblerBuffer& buf, int Rd, uint64_t addr) -> void {
     // the code size is uniform regardless of address (the top MOVK is
     // a no-op-ish movk #0 on macOS userland, but emitting it keeps every
     // call site the same number of bytes).
-    emit_movn(buf, /*is_64bit=*/1, /*opc=MOVZ*/2, /*hw=*/0,
-              static_cast<uint16_t>(addr & 0xFFFF), Rd);
-    emit_movn(buf, /*is_64bit=*/1, /*opc=MOVK*/3, /*hw=*/1,
+    emit_movn(buf, /*is_64bit=*/1, /*opc=MOVZ*/ 2, /*hw=*/0, static_cast<uint16_t>(addr & 0xFFFF),
+              Rd);
+    emit_movn(buf, /*is_64bit=*/1, /*opc=MOVK*/ 3, /*hw=*/1,
               static_cast<uint16_t>((addr >> 16) & 0xFFFF), Rd);
-    emit_movn(buf, /*is_64bit=*/1, /*opc=MOVK*/3, /*hw=*/2,
+    emit_movn(buf, /*is_64bit=*/1, /*opc=MOVK*/ 3, /*hw=*/2,
               static_cast<uint16_t>((addr >> 32) & 0xFFFF), Rd);
-    emit_movn(buf, /*is_64bit=*/1, /*opc=MOVK*/3, /*hw=*/3,
+    emit_movn(buf, /*is_64bit=*/1, /*opc=MOVK*/ 3, /*hw=*/3,
               static_cast<uint16_t>((addr >> 48) & 0xFFFF), Rd);
 }
 
@@ -197,7 +197,7 @@ auto emit_mov_reg(AssemblerBuffer& buf, int is_64bit, int Rd, int Rn) -> void {
     } else {
         // ORR Xd, XZR, Xn  (opc=1, n=0, shift=0, shift_amount=0, Rn=XZR=0x1F)
         emit_logical_shifted_reg(buf, is_64bit, 1, 0, 0, Rn, 0, GPR::XZR, Rd);
-}
+    }
 }
 
 auto emit_lslv(AssemblerBuffer& buf, int is_64bit, int Rm, int Rn, int Rd) -> void {
@@ -361,8 +361,8 @@ auto emit_fdiv_f64(AssemblerBuffer& buf, int Dd, int Dn, int Dm) -> void {
     emit_fp_dp2(buf, /*type=*/1, /*opcode=*/1 /*FDIV*/, Dd, Dn, Dm);
 }
 
-auto emit_fp_dp3(AssemblerBuffer& buf, int type, int o1, int o0, int Rd, int Rn, int Rm,
-                 int Ra) -> void {
+auto emit_fp_dp3(AssemblerBuffer& buf, int type, int o1, int o0, int Rd, int Rn, int Rm, int Ra)
+    -> void {
     // Scalar FP data-proc 3-source:
     // [31]=M=0 [30]=0 [29]=S=0 [28:24]=11111 [23:22]=type [21]=o1
     // [20:16]=Rm [15]=o0 [14:10]=Ra [9:5]=Rn [4:0]=Rd
@@ -645,10 +645,12 @@ auto emit_b_cond(AssemblerBuffer& buf, int cond, int imm19) -> void {
 auto emit_fmov_f64_reg(AssemblerBuffer& buf, int Dd, int Dn) -> void {
     // FMOV Dd, Dn — double-precision FPR-to-FPR copy
     // Encoding: 0x1E604000 | (Rn<<5) | Rd
-    buf.emit(0x1E604000U | (static_cast<uint32_t>(Dn & 0x1F) << 5) | static_cast<uint32_t>(Dd & 0x1F));
+    buf.emit(0x1E604000U | (static_cast<uint32_t>(Dn & 0x1F) << 5) |
+             static_cast<uint32_t>(Dd & 0x1F));
 }
 
-auto emit_fcvt_fp_to_int(AssemblerBuffer& buf, int sf, int ftype, int rmode, int Rd, int Rn) -> void {
+auto emit_fcvt_fp_to_int(AssemblerBuffer& buf, int sf, int ftype, int rmode, int Rd, int Rn)
+    -> void {
     // FCVT{N,P,M,Z}S — FP to signed integer with explicit rounding mode
     // Encoding: sf | 0 0 11110 | ftype | 1 | rmode | 000 | Rn | Rd
     uint32_t insn = 0x1E200000U;
@@ -713,7 +715,8 @@ auto emit_and_imm(AssemblerBuffer& buf, int is_64bit, int Rd, int N, int64_t imm
                   int Rn) -> void {
     assert((is_64bit == 1 || N == 0) &&
            "emit_and_imm: data_size == DataSize::S64 || N == 0 — invalid value of N");
-    emit_logical_imm(buf, is_64bit, /*opc=*/0, N, static_cast<int8_t>(immr), static_cast<int8_t>(imms), Rn, Rd);
+    emit_logical_imm(buf, is_64bit, /*opc=*/0, N, static_cast<int8_t>(immr),
+                     static_cast<int8_t>(imms), Rn, Rd);
 }
 
 // ---------------------------------------------------------------------------
@@ -728,7 +731,8 @@ auto emit_orr_imm(AssemblerBuffer& buf, int is_64bit, int Rd, int Rn, int N, int
                   int64_t imms) -> void {
     assert((is_64bit == 1 || N == 0) &&
            "emit_orr_imm: data_size == DataSize::S64 || N == 0 — invalid value of N");
-    emit_logical_imm(buf, is_64bit, /*opc=*/1, N, static_cast<int8_t>(immr), static_cast<int8_t>(imms), Rn, Rd);
+    emit_logical_imm(buf, is_64bit, /*opc=*/1, N, static_cast<int8_t>(immr),
+                     static_cast<int8_t>(imms), Rn, Rd);
 }
 
 auto emit_adr(AssemblerBuffer& buf, int is_adrp, int Rd, uint32_t imm) -> void {

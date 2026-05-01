@@ -13,26 +13,34 @@
  *   fcom_fstsw:    FUCOM+FSTSW, FCOM m32fp+FSTSW, FCOM m64fp+FSTSW
  */
 
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-#include <math.h>
 
 static int failures = 0;
 
-static uint32_t as_u32(float f)  { uint32_t u; memcpy(&u, &f, 4); return u; }
-static uint64_t as_u64(double d) { uint64_t u; memcpy(&u, &d, 8); return u; }
+static uint32_t as_u32(float f) {
+    uint32_t u;
+    memcpy(&u, &f, 4);
+    return u;
+}
+static uint64_t as_u64(double d) {
+    uint64_t u;
+    memcpy(&u, &d, 8);
+    return u;
+}
 
-static void check_f32(const char *name, float got, float expected) {
+static void check_f32(const char* name, float got, float expected) {
     if (as_u32(got) != as_u32(expected)) {
-        printf("FAIL  %-65s  got=%.10g (0x%08x)  expected=%.10g (0x%08x)\n",
-               name, (double)got, as_u32(got), (double)expected, as_u32(expected));
+        printf("FAIL  %-65s  got=%.10g (0x%08x)  expected=%.10g (0x%08x)\n", name, (double)got,
+               as_u32(got), (double)expected, as_u32(expected));
         failures++;
     } else {
         printf("PASS  %s\n", name);
     }
 }
-static void check_f64(const char *name, double got, double expected) {
+static void check_f64(const char* name, double got, double expected) {
     if (as_u64(got) != as_u64(expected)) {
         printf("FAIL  %-65s  got=%.15g  expected=%.15g\n", name, got, expected);
         failures++;
@@ -40,7 +48,7 @@ static void check_f64(const char *name, double got, double expected) {
         printf("PASS  %s\n", name);
     }
 }
-static void check_f64_approx(const char *name, double got, double expected) {
+static void check_f64_approx(const char* name, double got, double expected) {
     double denom = expected != 0.0 ? fabs(expected) : 1.0;
     if (fabs(got - expected) / denom > 1e-6) {
         printf("FAIL  %-65s  got=%.15g  expected=%.15g\n", name, got, expected);
@@ -49,7 +57,7 @@ static void check_f64_approx(const char *name, double got, double expected) {
         printf("PASS  %s\n", name);
     }
 }
-static void check_u16(const char *name, uint16_t got, uint16_t expected) {
+static void check_u16(const char* name, uint16_t got, uint16_t expected) {
     if (got != expected) {
         printf("FAIL  %-65s  got=0x%04x  expected=0x%04x\n", name, got, expected);
         failures++;
@@ -59,21 +67,21 @@ static void check_u16(const char *name, uint16_t got, uint16_t expected) {
 }
 
 /* Read x87 status-word CC bits (C0/C2/C3 only). */
-#define READ_SW(var)                                \
-    uint16_t var;                                   \
-    __asm__ volatile(                               \
-        "fnstsw %%ax\n"                             \
-        "andw $0x4500, %%ax\n"                      \
-        "movw %%ax, %0\n"                           \
-        : "=m"(var)                                 \
-        :                                           \
+#define READ_SW(var)           \
+    uint16_t var;              \
+    __asm__ volatile(          \
+        "fnstsw %%ax\n"        \
+        "andw $0x4500, %%ax\n" \
+        "movw %%ax, %0\n"      \
+        : "=m"(var)            \
+        :                      \
         : "ax")
 
 /* Comparison result codes */
-#define SW_GT  0x0000u
-#define SW_LT  0x0100u
-#define SW_EQ  0x4000u
-#define SW_UN  0x4500u
+#define SW_GT 0x0000u
+#define SW_LT 0x0100u
+#define SW_EQ 0x4000u
+#define SW_UN 0x4500u
 
 /* =========================================================================
  * fld_arithp: FLD + popping arithmetic — constant and FILD sources
@@ -87,11 +95,12 @@ static double test_p1_fild_m64_faddp(void) {
     double result;
     int64_t ival = 12;
     __asm__ volatile(
-        "fld1\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n"  /* 5.0 */
+        "fld1\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n" /* 5.0 */
         "fildll %1\n"
         "faddp %%st, %%st(1)\n"
         "fstpl %0\n"
-        : "=m"(result) : "m"(ival));
+        : "=m"(result)
+        : "m"(ival));
     return result;
 }
 
@@ -102,7 +111,7 @@ static double test_p1_fild_m64_faddp(void) {
 static double test_p1_fldpi_fmulp(void) {
     double result;
     __asm__ volatile(
-        "fld1\n fld1\n faddp\n"   /* 2.0 */
+        "fld1\n fld1\n faddp\n" /* 2.0 */
         "fldpi\n"
         "fmulp %%st, %%st(1)\n"
         "fstpl %0\n"
@@ -185,9 +194,9 @@ static double test_p2_fld1_fstp_reg(void) {
         /* build 7.0 */
         "fld1\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n"
         "fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n"
-        "fld1\n"               /* push 1.0 */
-        "fstp %%st(1)\n"       /* store 1 → ST(1), pop */
-        "fstpl %0\n"           /* result = ST(0) = 1.0 */
+        "fld1\n"         /* push 1.0 */
+        "fstp %%st(1)\n" /* store 1 → ST(1), pop */
+        "fstpl %0\n"     /* result = ST(0) = 1.0 */
         : "=m"(result));
     return result;
 }
@@ -200,10 +209,10 @@ static double test_p2_fld1_fstp_reg(void) {
 static double test_p2_fldpi_fstp_m64(void) {
     double dst = 0.0;
     __asm__ volatile(
-        "fld1\n fld1\n faddp\n"   /* ST(0) = 2.0 (stays on stack) */
+        "fld1\n fld1\n faddp\n" /* ST(0) = 2.0 (stays on stack) */
         "fldpi\n"
-        "fstpl %0\n"              /* store π, pop */
-        "fstp %%st(0)\n"          /* clean 2.0 */
+        "fstpl %0\n"     /* store π, pop */
+        "fstp %%st(0)\n" /* clean 2.0 */
         : "=m"(dst));
     return dst;
 }
@@ -217,11 +226,12 @@ static double test_p2_fild_m16_fstp_reg(void) {
     double result;
     int16_t ival = 42;
     __asm__ volatile(
-        "fld1\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n"  /* 5.0 */
+        "fld1\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n" /* 5.0 */
         "filds %1\n"
         "fstp %%st(1)\n"
         "fstpl %0\n"
-        : "=m"(result) : "m"(ival));
+        : "=m"(result)
+        : "m"(ival));
     return result;
 }
 
@@ -234,11 +244,12 @@ static double test_p2_fild_m32_fstp_m64(void) {
     double base = 1.5;
     int32_t ival = 100;
     __asm__ volatile(
-        "fldl %2\n"   /* ST(0) = 1.5 */
-        "fildl %1\n"  /* ST(0) = 100.0, ST(1) = 1.5 */
-        "fstpl %0\n"  /* store 100.0, pop */
-        "fstp %%st(0)\n"  /* clean 1.5 */
-        : "=m"(dst) : "m"(ival), "m"(base));
+        "fldl %2\n"      /* ST(0) = 1.5 */
+        "fildl %1\n"     /* ST(0) = 100.0, ST(1) = 1.5 */
+        "fstpl %0\n"     /* store 100.0, pop */
+        "fstp %%st(0)\n" /* clean 1.5 */
+        : "=m"(dst)
+        : "m"(ival), "m"(base));
     return dst;
 }
 
@@ -250,11 +261,12 @@ static double test_p2_fild_m64_fstp_m64(void) {
     double dst = 0.0;
     int64_t ival = 1000000;
     __asm__ volatile(
-        "fld1\n"      /* dummy base, stays on stack */
-        "fildll %1\n"  /* ST(0) = 1000000.0, ST(1) = 1.0 */
-        "fstpl %0\n"  /* store 1000000.0, pop */
-        "fstp %%st(0)\n"  /* clean dummy */
-        : "=m"(dst) : "m"(ival));
+        "fld1\n"         /* dummy base, stays on stack */
+        "fildll %1\n"    /* ST(0) = 1000000.0, ST(1) = 1.0 */
+        "fstpl %0\n"     /* store 1000000.0, pop */
+        "fstp %%st(0)\n" /* clean dummy */
+        : "=m"(dst)
+        : "m"(ival));
     return dst;
 }
 
@@ -275,10 +287,11 @@ static float test_f7_fld_m64_fsubr_fstp_reg(void) {
         "fld1\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n"
         "fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n"
         "fldl %1\n"
-        "fsubr %%st(1), %%st(0)\n"   /* ST(0) = 10-3=7 */
+        "fsubr %%st(1), %%st(0)\n" /* ST(0) = 10-3=7 */
         "fstp %%st(1)\n"
         "fstps %0\n"
-        : "=m"(result) : "m"(src));
+        : "=m"(result)
+        : "m"(src));
     return result;
 }
 
@@ -291,12 +304,13 @@ static float test_f7_fld_m64_fdivr_fstp_reg(void) {
     float result;
     double src = 6.0;
     __asm__ volatile(
-        "fld1\n fld1\n faddp\n fld1\n faddp\n"   /* 3.0 */
+        "fld1\n fld1\n faddp\n fld1\n faddp\n" /* 3.0 */
         "fldl %1\n"
-        "fdivr %%st(1), %%st(0)\n"   /* ST(0) = 3/6 = 0.5 */
+        "fdivr %%st(1), %%st(0)\n" /* ST(0) = 3/6 = 0.5 */
         "fstp %%st(1)\n"
         "fstps %0\n"
-        : "=m"(result) : "m"(src));
+        : "=m"(result)
+        : "m"(src));
     return result;
 }
 
@@ -314,10 +328,11 @@ static float test_f7_fld_m64_fsub_m32_fstp_reg(void) {
         "fld1\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n"
         "fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n"
         "fldl %1\n"
-        "fsubs %2\n"          /* ST(0) = 5 - 2.5 = 2.5 */
+        "fsubs %2\n" /* ST(0) = 5 - 2.5 = 2.5 */
         "fstp %%st(1)\n"
         "fstps %0\n"
-        : "=m"(result) : "m"(fld_src), "m"(sub_src));
+        : "=m"(result)
+        : "m"(fld_src), "m"(sub_src));
     return result;
 }
 
@@ -331,12 +346,13 @@ static float test_f7_fld_m64_fdiv_m64_fstp_reg(void) {
     double fld_src = 12.0;
     double div_src = 4.0;
     __asm__ volatile(
-        "fld1\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n"   /* 4.0 */
+        "fld1\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n" /* 4.0 */
         "fldl %1\n"
-        "fdivl %2\n"          /* ST(0) = 12 / 4 = 3 */
+        "fdivl %2\n" /* ST(0) = 12 / 4 = 3 */
         "fstp %%st(1)\n"
         "fstps %0\n"
-        : "=m"(result) : "m"(fld_src), "m"(div_src));
+        : "=m"(result)
+        : "m"(fld_src), "m"(div_src));
     return result;
 }
 
@@ -348,8 +364,8 @@ static float test_f7_fld_m64_fdiv_m64_fstp_reg(void) {
 static uint16_t test_f8_fucomp_m64_gt(void) {
     double src = 3.0;
     __asm__ volatile(
-        "fld1\n"        /* ST(0) = 1.0 */
-        "fldl %0\n"     /* ST(0) = 3.0, ST(1) = 1.0 */
+        "fld1\n"    /* ST(0) = 1.0 */
+        "fldl %0\n" /* ST(0) = 3.0, ST(1) = 1.0 */
         "fucomp %%st(1)\n"
         :
         : "m"(src));
@@ -362,8 +378,8 @@ static uint16_t test_f8_fucomp_m64_gt(void) {
 static uint16_t test_f8_fucomp_m64_lt(void) {
     double src = 1.0;
     __asm__ volatile(
-        "fld1\n fld1\n faddp\n fld1\n faddp\n"   /* ST(0) = 3.0 */
-        "fldl %0\n"     /* ST(0) = 1.0, ST(1) = 3.0 */
+        "fld1\n fld1\n faddp\n fld1\n faddp\n" /* ST(0) = 3.0 */
+        "fldl %0\n"                            /* ST(0) = 1.0, ST(1) = 3.0 */
         "fucomp %%st(1)\n"
         :
         : "m"(src));
@@ -376,7 +392,7 @@ static uint16_t test_f8_fucomp_m64_lt(void) {
 static uint16_t test_f8_fucomp_m64_eq(void) {
     double src = 5.0;
     __asm__ volatile(
-        "fld1\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n"   /* 5.0 */
+        "fld1\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n" /* 5.0 */
         "fldl %0\n"
         "fucomp %%st(1)\n"
         :
@@ -426,7 +442,7 @@ static uint16_t test_f8_fucomp_m32_gt(void) {
  *
  * Use A=1.0, B=2.0, C=3.0.
  * ========================================================================= */
-static void test_p4_fxch_fstp_deep(double *r0, double *r1) {
+static void test_p4_fxch_fstp_deep(double* r0, double* r1) {
     __asm__ volatile(
         /* push C=3.0 (deepest) */
         "fld1\n fld1\n faddp\n fld1\n faddp\n"
@@ -435,10 +451,10 @@ static void test_p4_fxch_fstp_deep(double *r0, double *r1) {
         /* push A=1.0 */
         "fld1\n"
         /* ST(0)=1, ST(1)=2, ST(2)=3 */
-        "fxch %%st(1)\n"      /* ST(0)=2, ST(1)=1, ST(2)=3 */
-        "fstp %%st(1)\n"      /* store 2→ST(1), pop: ST(0)=2, ST(1)=3 */
-        "fstpl %0\n"          /* r0 = 2 */
-        "fstpl %1\n"          /* r1 = 3 */
+        "fxch %%st(1)\n" /* ST(0)=2, ST(1)=1, ST(2)=3 */
+        "fstp %%st(1)\n" /* store 2→ST(1), pop: ST(0)=2, ST(1)=3 */
+        "fstpl %0\n"     /* r0 = 2 */
+        "fstpl %1\n"     /* r1 = 3 */
         : "=m"(*r0), "=m"(*r1));
 }
 
@@ -450,14 +466,16 @@ static void test_p4_fxch_fstp_deep(double *r0, double *r1) {
 static uint16_t test_fcom_fucom_gt(void) {
     uint16_t sw;
     __asm__ volatile(
-        "fld1\n fld1\n faddp\n fld1\n faddp\n"   /* 3 = ST(1) */
-        "fld1\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n"  /* 5 = ST(0) */
+        "fld1\n fld1\n faddp\n fld1\n faddp\n"                               /* 3 = ST(1) */
+        "fld1\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n" /* 5 = ST(0) */
         "fucom %%st(1)\n"
         "fnstsw %%ax\n"
         "andw $0x4500, %%ax\n"
         "movw %%ax, %0\n"
         "fstp %%st(0)\n fstp %%st(0)\n"
-        : "=m"(sw) : : "ax");
+        : "=m"(sw)
+        :
+        : "ax");
     return sw;
 }
 
@@ -466,14 +484,16 @@ static uint16_t test_fcom_fucom_lt(void) {
     uint16_t sw;
     __asm__ volatile(
         "fld1\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n"
-        "fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n"   /* 8 = ST(1) */
-        "fld1\n fld1\n faddp\n"                            /* 2 = ST(0) */
+        "fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n" /* 8 = ST(1) */
+        "fld1\n fld1\n faddp\n"                        /* 2 = ST(0) */
         "fucom %%st(1)\n"
         "fnstsw %%ax\n"
         "andw $0x4500, %%ax\n"
         "movw %%ax, %0\n"
         "fstp %%st(0)\n fstp %%st(0)\n"
-        : "=m"(sw) : : "ax");
+        : "=m"(sw)
+        :
+        : "ax");
     return sw;
 }
 
@@ -481,14 +501,16 @@ static uint16_t test_fcom_fucom_lt(void) {
 static uint16_t test_fcom_fucom_eq(void) {
     uint16_t sw;
     __asm__ volatile(
-        "fld1\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n"   /* 4 = ST(1) */
-        "fld1\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n"   /* 4 = ST(0) */
+        "fld1\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n" /* 4 = ST(1) */
+        "fld1\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n" /* 4 = ST(0) */
         "fucom %%st(1)\n"
         "fnstsw %%ax\n"
         "andw $0x4500, %%ax\n"
         "movw %%ax, %0\n"
         "fstp %%st(0)\n fstp %%st(0)\n"
-        : "=m"(sw) : : "ax");
+        : "=m"(sw)
+        :
+        : "ax");
     return sw;
 }
 
@@ -497,14 +519,16 @@ static uint16_t test_fcom_fucom_unordered(void) {
     double nan_val = __builtin_nan("");
     uint16_t sw;
     __asm__ volatile(
-        "fld1\n"          /* ST(1) = 1.0 */
-        "fldl %1\n"       /* ST(0) = NaN */
+        "fld1\n"    /* ST(1) = 1.0 */
+        "fldl %1\n" /* ST(0) = NaN */
         "fucom %%st(1)\n"
         "fnstsw %%ax\n"
         "andw $0x4500, %%ax\n"
         "movw %%ax, %0\n"
         "fstp %%st(0)\n fstp %%st(0)\n"
-        : "=m"(sw) : "m"(nan_val) : "ax");
+        : "=m"(sw)
+        : "m"(nan_val)
+        : "ax");
     return sw;
 }
 
@@ -513,13 +537,15 @@ static uint16_t test_fcom_m32_gt(void) {
     float cmp = 3.0f;
     uint16_t sw;
     __asm__ volatile(
-        "fld1\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n"  /* 5.0 */
+        "fld1\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n" /* 5.0 */
         "fcoms %1\n"
         "fnstsw %%ax\n"
         "andw $0x4500, %%ax\n"
         "movw %%ax, %0\n"
         "fstp %%st(0)\n"
-        : "=m"(sw) : "m"(cmp) : "ax");
+        : "=m"(sw)
+        : "m"(cmp)
+        : "ax");
     return sw;
 }
 
@@ -534,7 +560,9 @@ static uint16_t test_fcom_m32_lt(void) {
         "andw $0x4500, %%ax\n"
         "movw %%ax, %0\n"
         "fstp %%st(0)\n"
-        : "=m"(sw) : "m"(cmp) : "ax");
+        : "=m"(sw)
+        : "m"(cmp)
+        : "ax");
     return sw;
 }
 
@@ -543,13 +571,16 @@ static uint16_t test_fcom_m64_gt(void) {
     double cmp = 2.5;
     uint16_t sw;
     __asm__ volatile(
-        "fld1\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n"  /* 6.0 */
+        "fld1\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n fld1\n faddp\n" /* 6.0
+                                                                                             */
         "fcoml %1\n"
         "fnstsw %%ax\n"
         "andw $0x4500, %%ax\n"
         "movw %%ax, %0\n"
         "fstp %%st(0)\n"
-        : "=m"(sw) : "m"(cmp) : "ax");
+        : "=m"(sw)
+        : "m"(cmp)
+        : "ax");
     return sw;
 }
 
@@ -564,7 +595,9 @@ static uint16_t test_fcom_m64_lt(void) {
         "andw $0x4500, %%ax\n"
         "movw %%ax, %0\n"
         "fstp %%st(0)\n"
-        : "=m"(sw) : "m"(cmp) : "ax");
+        : "=m"(sw)
+        : "m"(cmp)
+        : "ax");
     return sw;
 }
 
@@ -579,64 +612,62 @@ int main(void) {
     /* Use x87 canonical bit patterns so that the comparison is exact
      * regardless of C library rounding vs x87 extended-precision rounding. */
     double x87_ln2, x87_lg2, x87_l2e, x87_l2t, x87_pi;
-    { uint64_t b = 0x3FE62E42FEFA39EFULL; memcpy(&x87_ln2, &b, 8); }
-    { uint64_t b = 0x3FD34413509F79FFULL; memcpy(&x87_lg2, &b, 8); }
-    { uint64_t b = 0x3FF71547652B82FEULL; memcpy(&x87_l2e, &b, 8); }
-    { uint64_t b = 0x400A934F0979A371ULL; memcpy(&x87_l2t, &b, 8); }
-    { uint64_t b = 0x400921FB54442D18ULL; memcpy(&x87_pi,  &b, 8); }
+    {
+        uint64_t b = 0x3FE62E42FEFA39EFULL;
+        memcpy(&x87_ln2, &b, 8);
+    }
+    {
+        uint64_t b = 0x3FD34413509F79FFULL;
+        memcpy(&x87_lg2, &b, 8);
+    }
+    {
+        uint64_t b = 0x3FF71547652B82FEULL;
+        memcpy(&x87_l2e, &b, 8);
+    }
+    {
+        uint64_t b = 0x400A934F0979A371ULL;
+        memcpy(&x87_l2t, &b, 8);
+    }
+    {
+        uint64_t b = 0x400921FB54442D18ULL;
+        memcpy(&x87_pi, &b, 8);
+    }
 
-    check_f64("P1  FILD m64 + FADDP            5+12=17",
-              test_p1_fild_m64_faddp(), 17.0);
-    check_f64_approx("P1  FLDPI  + FMULP              2*pi",
-              test_p1_fldpi_fmulp(), 2.0 * x87_pi);
-    check_f64_approx("P1  FLDLN2 + FADDP              0+ln2",
-              test_p1_fldln2_faddp(), x87_ln2);
-    check_f64_approx("P1  FLDLG2 + FADDP              0+log10(2)",
-              test_p1_fldlg2_faddp(), x87_lg2);
-    check_f64_approx("P1  FLDL2E + FMULP              1*log2(e)",
-              test_p1_fldl2e_fmulp(), x87_l2e);
-    check_f64_approx("P1  FLDL2T + FMULP              1*log2(10)",
-              test_p1_fldl2t_fmulp(), x87_l2t);
+    check_f64("P1  FILD m64 + FADDP            5+12=17", test_p1_fild_m64_faddp(), 17.0);
+    check_f64_approx("P1  FLDPI  + FMULP              2*pi", test_p1_fldpi_fmulp(), 2.0 * x87_pi);
+    check_f64_approx("P1  FLDLN2 + FADDP              0+ln2", test_p1_fldln2_faddp(), x87_ln2);
+    check_f64_approx("P1  FLDLG2 + FADDP              0+log10(2)", test_p1_fldlg2_faddp(), x87_lg2);
+    check_f64_approx("P1  FLDL2E + FMULP              1*log2(e)", test_p1_fldl2e_fmulp(), x87_l2e);
+    check_f64_approx("P1  FLDL2T + FMULP              1*log2(10)", test_p1_fldl2t_fmulp(), x87_l2t);
 
     /* --- fld_fstp: FLD1/FLDPI + FSTP, FILD m16/m32/m64 + FSTP --- */
     printf("\n=== fld_fstp: constant and FILD sources ===\n");
 
-    check_f64("P2  FLD1 + FSTP ST(1)           → 1.0",
-              test_p2_fld1_fstp_reg(), 1.0);
-    check_f64_approx("P2  FLDPI + FSTP m64            → pi",
-              test_p2_fldpi_fstp_m64(), x87_pi);
-    check_f64("P2  FILD m16 + FSTP ST(1)       → 42",
-              test_p2_fild_m16_fstp_reg(), 42.0);
-    check_f64("P2  FILD m32 + FSTP m64         → 100",
-              test_p2_fild_m32_fstp_m64(), 100.0);
-    check_f64("P2  FILD m64 + FSTP m64         → 1000000",
-              test_p2_fild_m64_fstp_m64(), 1000000.0);
+    check_f64("P2  FLD1 + FSTP ST(1)           → 1.0", test_p2_fld1_fstp_reg(), 1.0);
+    check_f64_approx("P2  FLDPI + FSTP m64            → pi", test_p2_fldpi_fstp_m64(), x87_pi);
+    check_f64("P2  FILD m16 + FSTP ST(1)       → 42", test_p2_fild_m16_fstp_reg(), 42.0);
+    check_f64("P2  FILD m32 + FSTP m64         → 100", test_p2_fild_m32_fstp_m64(), 100.0);
+    check_f64("P2  FILD m64 + FSTP m64         → 1000000", test_p2_fild_m64_fstp_m64(), 1000000.0);
 
     /* --- fld_arith_fstp: FSUBR/FDIVR, memory-form arithmetic --- */
     printf("\n=== fld_arith_fstp: FSUBR/FDIVR and memory arithmetic ===\n");
 
-    check_f32("F7  FLD m64 + FSUBR + FSTP ST(1)  10-3=7",
-              test_f7_fld_m64_fsubr_fstp_reg(), 7.0f);
-    check_f32("F7  FLD m64 + FDIVR + FSTP ST(1)  3/6=0.5",
-              test_f7_fld_m64_fdivr_fstp_reg(), 0.5f);
-    check_f32("F7  FLD m64 + FSUB m32 + FSTP ST(1) 5-2.5=2.5",
-              test_f7_fld_m64_fsub_m32_fstp_reg(), 2.5f);
-    check_f32("F7  FLD m64 + FDIV m64 + FSTP ST(1) 12/4=3",
-              test_f7_fld_m64_fdiv_m64_fstp_reg(), 3.0f);
+    check_f32("F7  FLD m64 + FSUBR + FSTP ST(1)  10-3=7", test_f7_fld_m64_fsubr_fstp_reg(), 7.0f);
+    check_f32("F7  FLD m64 + FDIVR + FSTP ST(1)  3/6=0.5", test_f7_fld_m64_fdivr_fstp_reg(), 0.5f);
+    check_f32("F7  FLD m64 + FSUB m32 + FSTP ST(1) 5-2.5=2.5", test_f7_fld_m64_fsub_m32_fstp_reg(),
+              2.5f);
+    check_f32("F7  FLD m64 + FDIV m64 + FSTP ST(1) 12/4=3", test_f7_fld_m64_fdiv_m64_fstp_reg(),
+              3.0f);
 
     /* --- fld_fcomp_fstsw: FUCOMP variant --- */
     printf("\n=== fld_fcomp_fstsw: FUCOMP variant ===\n");
 
-    check_u16("F8  FLD m64 + FUCOMP + FNSTSW  GT  3>1=0x0000",
-              test_f8_fucomp_m64_gt(), SW_GT);
-    check_u16("F8  FLD m64 + FUCOMP + FNSTSW  LT  1<3=0x0100",
-              test_f8_fucomp_m64_lt(), SW_LT);
-    check_u16("F8  FLD m64 + FUCOMP + FNSTSW  EQ  5=5=0x4000",
-              test_f8_fucomp_m64_eq(), SW_EQ);
-    check_u16("F8  FLD m64 + FUCOMP + FNSTSW  UN  NaN=0x4500",
-              test_f8_fucomp_m64_unordered(), SW_UN);
-    check_u16("F8  FLD m32 + FUCOMP + FNSTSW  GT  7>1=0x0000",
-              test_f8_fucomp_m32_gt(), SW_GT);
+    check_u16("F8  FLD m64 + FUCOMP + FNSTSW  GT  3>1=0x0000", test_f8_fucomp_m64_gt(), SW_GT);
+    check_u16("F8  FLD m64 + FUCOMP + FNSTSW  LT  1<3=0x0100", test_f8_fucomp_m64_lt(), SW_LT);
+    check_u16("F8  FLD m64 + FUCOMP + FNSTSW  EQ  5=5=0x4000", test_f8_fucomp_m64_eq(), SW_EQ);
+    check_u16("F8  FLD m64 + FUCOMP + FNSTSW  UN  NaN=0x4500", test_f8_fucomp_m64_unordered(),
+              SW_UN);
+    check_u16("F8  FLD m32 + FUCOMP + FNSTSW  GT  7>1=0x0000", test_f8_fucomp_m32_gt(), SW_GT);
 
     /* --- fxch_fstp: 3-level stack --- */
     printf("\n=== fxch_fstp: 3-level stack (ST(2) present) ===\n");
@@ -651,22 +682,14 @@ int main(void) {
     /* --- fcom_fstsw: FUCOM+FSTSW, FCOM m32/m64 +FSTSW --- */
     printf("\n=== fcom_fstsw: FUCOM, FCOM m32fp, FCOM m64fp ===\n");
 
-    check_u16("fcom_fstsw  FUCOM ST(1) GT  5>3=0x0000",
-              test_fcom_fucom_gt(), SW_GT);
-    check_u16("fcom_fstsw  FUCOM ST(1) LT  2<8=0x0100",
-              test_fcom_fucom_lt(), SW_LT);
-    check_u16("fcom_fstsw  FUCOM ST(1) EQ  4=4=0x4000",
-              test_fcom_fucom_eq(), SW_EQ);
-    check_u16("fcom_fstsw  FUCOM ST(1) UN  NaN=0x4500",
-              test_fcom_fucom_unordered(), SW_UN);
-    check_u16("fcom_fstsw  FCOM m32fp  GT  5>3.0f=0x0000",
-              test_fcom_m32_gt(), SW_GT);
-    check_u16("fcom_fstsw  FCOM m32fp  LT  1<4.0f=0x0100",
-              test_fcom_m32_lt(), SW_LT);
-    check_u16("fcom_fstsw  FCOM m64fp  GT  6>2.5=0x0000",
-              test_fcom_m64_gt(), SW_GT);
-    check_u16("fcom_fstsw  FCOM m64fp  LT  1<9.0=0x0100",
-              test_fcom_m64_lt(), SW_LT);
+    check_u16("fcom_fstsw  FUCOM ST(1) GT  5>3=0x0000", test_fcom_fucom_gt(), SW_GT);
+    check_u16("fcom_fstsw  FUCOM ST(1) LT  2<8=0x0100", test_fcom_fucom_lt(), SW_LT);
+    check_u16("fcom_fstsw  FUCOM ST(1) EQ  4=4=0x4000", test_fcom_fucom_eq(), SW_EQ);
+    check_u16("fcom_fstsw  FUCOM ST(1) UN  NaN=0x4500", test_fcom_fucom_unordered(), SW_UN);
+    check_u16("fcom_fstsw  FCOM m32fp  GT  5>3.0f=0x0000", test_fcom_m32_gt(), SW_GT);
+    check_u16("fcom_fstsw  FCOM m32fp  LT  1<4.0f=0x0100", test_fcom_m32_lt(), SW_LT);
+    check_u16("fcom_fstsw  FCOM m64fp  GT  6>2.5=0x0000", test_fcom_m64_gt(), SW_GT);
+    check_u16("fcom_fstsw  FCOM m64fp  LT  1<9.0=0x0100", test_fcom_m64_lt(), SW_LT);
 
     if (failures == 0)
         printf("\nAll tests passed.\n");

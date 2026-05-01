@@ -23,17 +23,17 @@ static int failures = 0;
 
 static uint16_t fnstsw(void) {
     uint16_t sw;
-    __asm__ volatile ("fnstsw %0" : "=m" (sw));
+    __asm__ volatile("fnstsw %0" : "=m"(sw));
     return sw;
 }
 
 static uint16_t snapshot_tag_word(void) {
     uint8_t env[28] __attribute__((aligned(16)));
-    __asm__ volatile ("fnstenv %0" : "=m" (env) :: "memory");
+    __asm__ volatile("fnstenv %0" : "=m"(env)::"memory");
     return (uint16_t)env[8] | ((uint16_t)env[9] << 8);
 }
 
-static void check_eq_u16(const char *name, uint16_t got, uint16_t expected) {
+static void check_eq_u16(const char* name, uint16_t got, uint16_t expected) {
     if (got == expected) {
         printf("PASS  %s  (got=0x%04x)\n", name, got);
     } else {
@@ -42,32 +42,32 @@ static void check_eq_u16(const char *name, uint16_t got, uint16_t expected) {
     }
 }
 
-static void check_bitexact_f64(const char *name, double got, double expected) {
+static void check_bitexact_f64(const char* name, double got, double expected) {
     uint64_t g, e;
     memcpy(&g, &got, 8);
     memcpy(&e, &expected, 8);
     if (g == e) {
         printf("PASS  %s  (val=%.17g)\n", name, got);
     } else {
-        printf("FAIL  %s  got=%.17g (bits=%016llx) expected=%.17g (bits=%016llx)\n",
-               name, got, (unsigned long long)g, expected, (unsigned long long)e);
+        printf("FAIL  %s  got=%.17g (bits=%016llx) expected=%.17g (bits=%016llx)\n", name, got,
+               (unsigned long long)g, expected, (unsigned long long)e);
         failures++;
     }
 }
 
 /* ── Test 1: ffree ST(1) clears the right tag, leaves others untouched. ──── */
 static void test_ffree_st1(void) {
-    __asm__ volatile ("fninit");
+    __asm__ volatile("fninit");
     volatile double a = 1.0, b = 2.0, c = 3.0;
-    __asm__ volatile ("fldl %0" : : "m"(a));   /* TOP=7, reg7=1.0 */
-    __asm__ volatile ("fldl %0" : : "m"(b));   /* TOP=6, reg6=2.0 */
-    __asm__ volatile ("fldl %0" : : "m"(c));   /* TOP=5, reg5=3.0 */
+    __asm__ volatile("fldl %0" : : "m"(a)); /* TOP=7, reg7=1.0 */
+    __asm__ volatile("fldl %0" : : "m"(b)); /* TOP=6, reg6=2.0 */
+    __asm__ volatile("fldl %0" : : "m"(c)); /* TOP=5, reg5=3.0 */
 
     uint16_t tag_before = snapshot_tag_word();
     /* slot 5,6,7 valid (00); slots 0..4 empty (11).  Pattern: 0b00_00_00_11_11_11_11_11 = 0x03FF */
     check_eq_u16("ffree st1: tag_word before", tag_before, 0x03FF);
 
-    __asm__ volatile ("ffree %st(1)");
+    __asm__ volatile("ffree %st(1)");
 
     uint16_t tag_after = snapshot_tag_word();
     /* After ffree ST(1): physical slot (5+1)&7 = 6 marked empty.
@@ -76,53 +76,53 @@ static void test_ffree_st1(void) {
 
     /* ST(0) (reg 5) and ST(2) (reg 7) values should still be intact. */
     double r0;
-    __asm__ volatile ("fstl %0" : "=m"(r0) : : "st");  /* peek ST(0), don't pop */
+    __asm__ volatile("fstl %0" : "=m"(r0) : : "st"); /* peek ST(0), don't pop */
     check_bitexact_f64("ffree st1: ST(0) value intact", r0, 3.0);
 
-    __asm__ volatile ("fninit");
+    __asm__ volatile("fninit");
 }
 
 /* ── Test 2: ffree ST(0) marks top of stack as empty. ─────────────────────── */
 static void test_ffree_st0(void) {
-    __asm__ volatile ("fninit");
+    __asm__ volatile("fninit");
     volatile double a = 7.5;
-    __asm__ volatile ("fldl %0" : : "m"(a));   /* TOP=7, reg7=7.5 */
+    __asm__ volatile("fldl %0" : : "m"(a)); /* TOP=7, reg7=7.5 */
 
     uint16_t tag_before = snapshot_tag_word();
     /* Only slot 7 valid: 0x3FFF. */
     check_eq_u16("ffree st0: tag_word before", tag_before, 0x3FFF);
 
-    __asm__ volatile ("ffree %st(0)");
+    __asm__ volatile("ffree %st(0)");
 
     uint16_t tag_after = snapshot_tag_word();
     /* All slots empty now: 0xFFFF. */
     check_eq_u16("ffree st0: tag_word after", tag_after, 0xFFFF);
 
-    __asm__ volatile ("fninit");
+    __asm__ volatile("fninit");
 }
 
 /* ── Test 3: ffree of an already-empty slot is idempotent. ────────────────── */
 static void test_ffree_already_empty(void) {
-    __asm__ volatile ("fninit");
+    __asm__ volatile("fninit");
     /* Stack is fully empty after fninit; tag = 0xFFFF.  ffree any slot is no-op. */
-    __asm__ volatile ("ffree %st(3)");
+    __asm__ volatile("ffree %st(3)");
     uint16_t tag = snapshot_tag_word();
     check_eq_u16("ffree already-empty: tag still all empty", tag, 0xFFFF);
 }
 
 /* ── Test 4: after ffree ST(i), an fld retags valid. ──────────────────────── */
 static void test_ffree_then_fld(void) {
-    __asm__ volatile ("fninit");
+    __asm__ volatile("fninit");
     volatile double a = 1.0, b = 2.0, c = 3.0, d = 4.0;
-    __asm__ volatile ("fldl %0" : : "m"(a));
-    __asm__ volatile ("fldl %0" : : "m"(b));
-    __asm__ volatile ("fldl %0" : : "m"(c));
+    __asm__ volatile("fldl %0" : : "m"(a));
+    __asm__ volatile("fldl %0" : : "m"(b));
+    __asm__ volatile("fldl %0" : : "m"(c));
 
-    __asm__ volatile ("ffree %st(2)");          /* mark old ST(2)=1.0 slot empty */
+    __asm__ volatile("ffree %st(2)"); /* mark old ST(2)=1.0 slot empty */
     /* New fld pushes — slot at new TOP must become valid even if it was
      * previously freed.  This sanity-checks ffree's tag write didn't break
      * subsequent push tagging. */
-    __asm__ volatile ("fldl %0" : : "m"(d));    /* TOP-=1, push 4.0 */
+    __asm__ volatile("fldl %0" : : "m"(d)); /* TOP-=1, push 4.0 */
 
     uint16_t tag = snapshot_tag_word();
     /* The fld retags its slot valid; the freed slot 7 is still empty. */
@@ -136,7 +136,7 @@ static void test_ffree_then_fld(void) {
      * = 0b11_00_00_00_11_11_11_11 = 0xC0FF. */
     check_eq_u16("ffree then fld: tag pattern", tag, 0xC0FF);
 
-    __asm__ volatile ("fninit");
+    __asm__ volatile("fninit");
 }
 
 int main(void) {

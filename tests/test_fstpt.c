@@ -9,15 +9,17 @@
 // Compile:
 //   clang -arch x86_64 -O0 -g -o test_fstpt test_fstpt.c
 
-#include <stdio.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 // 10-byte f80 result packed into two integers for comparison
-typedef struct { uint64_t mantissa; uint16_t exponent; } F80;
+typedef struct {
+    uint64_t mantissa;
+    uint16_t exponent;
+} F80;
 
-static F80 as_f80(const unsigned char buf[10])
-{
+static F80 as_f80(const unsigned char buf[10]) {
     F80 r;
     memcpy(&r.mantissa, buf, 8);
     memcpy(&r.exponent, buf + 8, 2);
@@ -26,52 +28,50 @@ static F80 as_f80(const unsigned char buf[10])
 
 // Per-test enable flags
 #ifndef TEST_FSTPT_ONE
-#  define TEST_FSTPT_ONE     1
+#define TEST_FSTPT_ONE 1
 #endif
 #ifndef TEST_FSTPT_NEG
-#  define TEST_FSTPT_NEG     1
+#define TEST_FSTPT_NEG 1
 #endif
 #ifndef TEST_FSTPT_FRAC
-#  define TEST_FSTPT_FRAC    1
+#define TEST_FSTPT_FRAC 1
 #endif
 #ifndef TEST_FSTPT_PI
-#  define TEST_FSTPT_PI      1
+#define TEST_FSTPT_PI 1
 #endif
 #ifndef TEST_FSTPT_SQRT2
-#  define TEST_FSTPT_SQRT2   1
+#define TEST_FSTPT_SQRT2 1
 #endif
 #ifndef TEST_FSTPT_INF_POS
-#  define TEST_FSTPT_INF_POS 1
+#define TEST_FSTPT_INF_POS 1
 #endif
 #ifndef TEST_FSTPT_INF_NEG
-#  define TEST_FSTPT_INF_NEG 1
+#define TEST_FSTPT_INF_NEG 1
 #endif
 #ifndef TEST_FSTPT_ZERO_POS
-#  define TEST_FSTPT_ZERO_POS 1
+#define TEST_FSTPT_ZERO_POS 1
 #endif
 #ifndef TEST_FSTPT_ZERO_NEG
-#  define TEST_FSTPT_ZERO_NEG 1
+#define TEST_FSTPT_ZERO_NEG 1
 #endif
 #ifndef TEST_FSTPT_LARGE
-#  define TEST_FSTPT_LARGE   1
+#define TEST_FSTPT_LARGE 1
 #endif
 #ifndef TEST_FSTPT_SMALL
-#  define TEST_FSTPT_SMALL   1
+#define TEST_FSTPT_SMALL 1
 #endif
 
 // ---------------------------------------------------------------------------
 // Helper: push a double via FLD m64fp, then store via FSTPT m80fp.
 // Returns the 10-byte result in an F80 struct.
 // ---------------------------------------------------------------------------
-static F80 store_f64_as_f80(volatile double *src)
-{
+static F80 store_f64_as_f80(volatile double* src) {
     unsigned char buf[10];
-    __asm__ volatile (
+    __asm__ volatile(
         "fldl %1\n"
         "fstpt %0\n"
-        : "=m" (buf)
-        : "m"  (*src)
-    );
+        : "=m"(buf)
+        : "m"(*src));
     return as_f80(buf);
 }
 
@@ -88,8 +88,7 @@ static F80 store_f64_as_f80(volatile double *src)
 
 // +1.0: f64 exp=1023 → f80 exp=16383=0x3FFF, mantissa=0x8000000000000000
 #if TEST_FSTPT_ONE
-static int test_fstpt_one(void)
-{
+static int test_fstpt_one(void) {
     volatile double src = 1.0;
     F80 r = store_f64_as_f80(&src);
     return (r.mantissa == 0x8000000000000000ULL && r.exponent == 0x3FFF);
@@ -98,8 +97,7 @@ static int test_fstpt_one(void)
 
 // -1.0: sign bit set → exponent word = 0xBFFF
 #if TEST_FSTPT_NEG
-static int test_fstpt_neg(void)
-{
+static int test_fstpt_neg(void) {
     volatile double src = -1.0;
     F80 r = store_f64_as_f80(&src);
     return (r.mantissa == 0x8000000000000000ULL && r.exponent == 0xBFFF);
@@ -108,8 +106,7 @@ static int test_fstpt_neg(void)
 
 // 1.5: mantissa has fraction bit → 0xC000000000000000
 #if TEST_FSTPT_FRAC
-static int test_fstpt_frac(void)
-{
+static int test_fstpt_frac(void) {
     volatile double src = 1.5;
     F80 r = store_f64_as_f80(&src);
     return (r.mantissa == 0xC000000000000000ULL && r.exponent == 0x3FFF);
@@ -119,8 +116,7 @@ static int test_fstpt_frac(void)
 // pi: exp=1024 → f80 exp=16384=0x4000, mantissa=0xC90FDAA22168C000
 // (double has 52 mantissa bits → shifted left 11 into 63-bit field + integer bit)
 #if TEST_FSTPT_PI
-static int test_fstpt_pi(void)
-{
+static int test_fstpt_pi(void) {
     volatile double src = 3.14159265358979323846;
     F80 r = store_f64_as_f80(&src);
     // f64 bits: 0x400921FB54442D18
@@ -132,8 +128,7 @@ static int test_fstpt_pi(void)
 
 // sqrt(2): exp=1023 → f80 exp=16383=0x3FFF
 #if TEST_FSTPT_SQRT2
-static int test_fstpt_sqrt2(void)
-{
+static int test_fstpt_sqrt2(void) {
     volatile double src = 1.4142135623730950488;
     F80 r = store_f64_as_f80(&src);
     // f64 bits: 0x3FF6A09E667F3BCD
@@ -145,8 +140,7 @@ static int test_fstpt_sqrt2(void)
 
 // +inf: exponent = 0x7FFF, mantissa = 0x8000000000000000
 #if TEST_FSTPT_INF_POS
-static int test_fstpt_inf_pos(void)
-{
+static int test_fstpt_inf_pos(void) {
     volatile double src = __builtin_inf();
     F80 r = store_f64_as_f80(&src);
     return (r.mantissa == 0x8000000000000000ULL && r.exponent == 0x7FFF);
@@ -155,8 +149,7 @@ static int test_fstpt_inf_pos(void)
 
 // -inf: exponent = 0xFFFF, mantissa = 0x8000000000000000
 #if TEST_FSTPT_INF_NEG
-static int test_fstpt_inf_neg(void)
-{
+static int test_fstpt_inf_neg(void) {
     volatile double src = -__builtin_inf();
     F80 r = store_f64_as_f80(&src);
     return (r.mantissa == 0x8000000000000000ULL && r.exponent == 0xFFFF);
@@ -165,8 +158,7 @@ static int test_fstpt_inf_neg(void)
 
 // +0.0: all zero (zero/denorm path)
 #if TEST_FSTPT_ZERO_POS
-static int test_fstpt_zero_pos(void)
-{
+static int test_fstpt_zero_pos(void) {
     volatile double src = 0.0;
     F80 r = store_f64_as_f80(&src);
     return (r.mantissa == 0x0000000000000000ULL && r.exponent == 0x0000);
@@ -175,8 +167,7 @@ static int test_fstpt_zero_pos(void)
 
 // -0.0: mantissa=0, exponent=0x8000 (sign only)
 #if TEST_FSTPT_ZERO_NEG
-static int test_fstpt_zero_neg(void)
-{
+static int test_fstpt_zero_neg(void) {
     volatile double src = -0.0;
     F80 r = store_f64_as_f80(&src);
     return (r.mantissa == 0x0000000000000000ULL && r.exponent == 0x8000);
@@ -186,8 +177,7 @@ static int test_fstpt_zero_neg(void)
 // Large value: 2^1023 (max normal exponent)
 // f64 exp=2046 → f80 exp=2046+15360=17406=0x43FE
 #if TEST_FSTPT_LARGE
-static int test_fstpt_large(void)
-{
+static int test_fstpt_large(void) {
     volatile double src = 0x1p+1023;
     F80 r = store_f64_as_f80(&src);
     return (r.mantissa == 0x8000000000000000ULL && r.exponent == 0x43FE);
@@ -197,8 +187,7 @@ static int test_fstpt_large(void)
 // Small value: 2^-1022 (min normal exponent)
 // f64 exp=1 → f80 exp=1+15360=15361=0x3C01
 #if TEST_FSTPT_SMALL
-static int test_fstpt_small(void)
-{
+static int test_fstpt_small(void) {
     volatile double src = 0x1p-1022;
     F80 r = store_f64_as_f80(&src);
     return (r.mantissa == 0x8000000000000000ULL && r.exponent == 0x3C01);
@@ -207,43 +196,45 @@ static int test_fstpt_small(void)
 
 // ---------------------------------------------------------------------------
 
-typedef struct { const char* name; int (*fn)(void); } TestCase;
+typedef struct {
+    const char* name;
+    int (*fn)(void);
+} TestCase;
 
-int main(void)
-{
+int main(void) {
     TestCase tests[] = {
 #if TEST_FSTPT_ONE
-        { "fstpt  +1.0             ", test_fstpt_one },
+        {"fstpt  +1.0             ", test_fstpt_one},
 #endif
 #if TEST_FSTPT_NEG
-        { "fstpt  -1.0  sign bit   ", test_fstpt_neg },
+        {"fstpt  -1.0  sign bit   ", test_fstpt_neg},
 #endif
 #if TEST_FSTPT_FRAC
-        { "fstpt  1.5   fraction   ", test_fstpt_frac },
+        {"fstpt  1.5   fraction   ", test_fstpt_frac},
 #endif
 #if TEST_FSTPT_PI
-        { "fstpt  pi    exp+mant   ", test_fstpt_pi },
+        {"fstpt  pi    exp+mant   ", test_fstpt_pi},
 #endif
 #if TEST_FSTPT_SQRT2
-        { "fstpt  sqrt2 many bits  ", test_fstpt_sqrt2 },
+        {"fstpt  sqrt2 many bits  ", test_fstpt_sqrt2},
 #endif
 #if TEST_FSTPT_INF_POS
-        { "fstpt  +inf  exp=7FFF   ", test_fstpt_inf_pos },
+        {"fstpt  +inf  exp=7FFF   ", test_fstpt_inf_pos},
 #endif
 #if TEST_FSTPT_INF_NEG
-        { "fstpt  -inf  exp=FFFF   ", test_fstpt_inf_neg },
+        {"fstpt  -inf  exp=FFFF   ", test_fstpt_inf_neg},
 #endif
 #if TEST_FSTPT_ZERO_POS
-        { "fstpt  +0.0  zero path  ", test_fstpt_zero_pos },
+        {"fstpt  +0.0  zero path  ", test_fstpt_zero_pos},
 #endif
 #if TEST_FSTPT_ZERO_NEG
-        { "fstpt  -0.0  neg zero   ", test_fstpt_zero_neg },
+        {"fstpt  -0.0  neg zero   ", test_fstpt_zero_neg},
 #endif
 #if TEST_FSTPT_LARGE
-        { "fstpt  2^1023 max exp   ", test_fstpt_large },
+        {"fstpt  2^1023 max exp   ", test_fstpt_large},
 #endif
 #if TEST_FSTPT_SMALL
-        { "fstpt  2^-1022 min exp  ", test_fstpt_small },
+        {"fstpt  2^-1022 min exp  ", test_fstpt_small},
 #endif
     };
 
