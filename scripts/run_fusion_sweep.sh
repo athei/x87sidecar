@@ -207,7 +207,7 @@ echo ""
 
 # ── Baseline: all fusions disabled (JIT on, no peephole) ─────────────────────
 run_config sweep baseline \
-    "ROSETTA_X87_DISABLE_ALL_FUSIONS=1" \
+    "X87_DISABLE_ALL_FUSIONS=1" \
     "${ALL_TESTS[@]}"
 
 # ── Phase 1 — Single fusion ───────────────────────────────────────────────────
@@ -219,7 +219,7 @@ if [[ $RUN_PHASE1 -eq 1 ]]; then
         others=$(fusions_except_set single || true)
         prev_failed=$FAILED
         run_config sweep "single:$f" \
-            "ROSETTA_X87_DISABLE_FUSIONS=$others" \
+            "X87_DISABLE_FUSIONS=$others" \
             "${SWEEP_TESTS[@]}"
         if [[ $STOP_ON_FAIL -eq 1 && $FAILED -gt $prev_failed ]]; then
             echo -e "${RED}STOPPED: fusion '$f' has failure(s)${NC}"
@@ -251,7 +251,7 @@ if [[ $RUN_PHASE2 -eq 1 && $STOPPED -eq 0 ]]; then
                 "${SWEEP_TESTS[@]}"
         else
             run_config sweep "cumul:$label" \
-                "ROSETTA_X87_DISABLE_FUSIONS=$others" \
+                "X87_DISABLE_FUSIONS=$others" \
                 "${SWEEP_TESTS[@]}"
         fi
 

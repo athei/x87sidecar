@@ -1,6 +1,5 @@
 add_executable(rosettax87
     src/main.cpp
-    src/cli_args.cpp
     src/macho_loader.cpp
     src/offset_finder.cpp
     src/sidecar.cpp

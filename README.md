@@ -52,8 +52,8 @@ All flags are set via environment variables and read at runtime.
 
 | Variable | Description |
 |----------|-------------|
-| `ROSETTA_X87_FAST_ROUND=1` | Skip rounding mode dispatch (faster but unsafe for FLDCW-heavy code) |
-| `ROSETTA_X87_EXTENDED_FPR_SCRATCH=1` | Expand FPR scratch register pool |
+| `X87_FAST_ROUND=1` | Skip rounding mode dispatch (faster but unsafe for FLDCW-heavy code) |
+| `X87_EXTENDED_FPR_SCRATCH=1` | Expand FPR scratch register pool |
 
 ### Debugging & Troubleshooting
 
@@ -61,15 +61,14 @@ These flags are primarily useful for narrowing down bugs by selectively disablin
 
 | Variable | Description |
 |----------|-------------|
-| `ROSETTA_X87_DISABLE_CACHE=1` | Disable x87 translation cache |
-| `ROSETTA_X87_DISABLE_DEFERRED_FXCH=1` | Disable deferred FXCH optimization |
-| `ROSETTA_X87_DISABLE_IR=1` | Disable IR optimization pipeline |
-| `ROSETTA_X87_DISABLE_ALL_OPS=1` | Disable all translated opcodes (fall back to Rosetta default) |
-| `ROSETTA_X87_DISABLE_ALL_FUSIONS=1` | Disable all instruction fusions |
-| `ROSETTA_X87_DISABLE_OPS=op1,op2,...` | Disable specific opcodes (comma-separated) |
-| `ROSETTA_X87_DISABLE_FUSIONS=f1,f2,...` | Disable specific fusions (comma-separated) |
-| `ROSETTA_X87_LOGS=1` | Enable verbose logging output from the loader |
-| `ROSETTA_X87_FORCE_ATTACH=1` | Force debugger attach even when argv looks like a 64-bit Windows PE |
+| `X87_DISABLE_CACHE=1` | Disable x87 translation cache |
+| `X87_DISABLE_DEFERRED_FXCH=1` | Disable deferred FXCH optimization |
+| `X87_DISABLE_X87_IR=1` | Disable IR optimization pipeline |
+| `X87_DISABLE_ALL_FUSIONS=1` | Disable all instruction fusions |
+| `X87_DISABLE_FUSIONS=f1,f2,...` | Disable specific fusions (comma-separated) |
+| `X87_DISABLE_HOOK=1` | Skip the translate_insn entry patch (passthrough — apples-to-apples bench baseline) |
+| `X87_LOGS=1` | Enable verbose logging output from the loader |
+| `X87_FORCE_ATTACH=1` | Force debugger attach even when argv looks like a 64-bit Windows PE |
 
 ### Automatic x64 Bypass
 

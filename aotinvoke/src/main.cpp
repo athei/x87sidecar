@@ -13,7 +13,7 @@
 
 #include "RosettaAotApi.h"
 #include "rosetta_core/Config.h"
-#include "rosetta_core/ConfigCli.h"
+#include "rosetta_core/ConfigEnv.h"
 #include "rosetta_core/CoreConfig.h"
 #include "rosetta_core/CustomTranslationHook.h"
 
@@ -26,15 +26,16 @@ void aotinvoke_usage(const char* prog) {
         "Flags:\n"
         "  --help       print this message and exit\n"
         "  --verbose    dump the parsed IR module before translation\n"
+        "\n"
+        "All other configuration is via environment variables:\n"
         "\n",
         prog);
-    print_translator_flag_help(stdout);
+    print_env_help(stdout);
 }
 
 }  // namespace
 
 int main(int argc, char** argv) try {
-    static RosettaConfig cfg{};
     bool verbose = false;
     int positional[2];
     int positional_count = 0;
@@ -50,15 +51,7 @@ int main(int argc, char** argv) try {
             continue;
         }
         if (a.starts_with("--")) {
-            const char* bad = nullptr;
-            if (apply_translator_flag(a, cfg, bad)) {
-                continue;
-            }
-            if (bad != nullptr) {
-                std::fprintf(stderr, "%s: unknown fusion name in %s: %s\n", argv[0], argv[i], bad);
-            } else {
-                std::fprintf(stderr, "%s: unknown flag: %s (try --help)\n", argv[0], argv[i]);
-            }
+            std::fprintf(stderr, "%s: unknown flag: %s (try --help)\n", argv[0], argv[i]);
             return 2;
         }
         if (positional_count >= 2) {
@@ -73,6 +66,7 @@ int main(int argc, char** argv) try {
         return 2;
     }
 
+    static RosettaConfig cfg = load_config_from_env();
     rosetta_set_config(&cfg);
     char* input_arg = argv[positional[0]];
     char* output_arg = argv[positional[1]];

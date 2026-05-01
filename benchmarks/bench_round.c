@@ -6,7 +6,7 @@
  * This forces the RC dispatch chain to execute the correct non-default branch,
  * making the 7-instruction CBZ/SUB chain cost visible.
  *
- * With ROSETTA_X87_FAST_ROUND=1, the dispatch chain is replaced by a single
+ * With X87_FAST_ROUND=1, the dispatch chain is replaced by a single
  * FCVTNS/FRINTN instruction (round-to-nearest only). The benchmark measures
  * the overhead of the dispatch chain vs. the fast path.
  *

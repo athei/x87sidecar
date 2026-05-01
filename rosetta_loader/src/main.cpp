@@ -19,12 +19,13 @@
 #include <map>
 #include <numbers>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
-#include "cli_args.hpp"
 #include "offset_finder.hpp"
 #include "rosetta_core/Config.h"
+#include "rosetta_core/ConfigEnv.h"
 #include "rosetta_core/CoreConfig.h"
 #include "rosetta_core/TranscendentalHelper.h"
 #include "rosetta_core/TranslationResult.h"
@@ -666,17 +667,30 @@ static AttachDecision classifyAttachTarget(int argc, char* argv[]) {
     return {.skip = false, .displayPath = std::move(fallbackExe), .reason = nullptr};
 }
 
-int main(int argc, char* argv[]) try {
-    CliArgs cli = parse_cli_args(argc, argv);
-    if (cli.exit_early) {
-        return cli.exit_code;
-    }
-    // Shift argv so argv[1] is the target program (downstream code already
-    // assumes that layout; saves us from threading the index through).
-    argc -= cli.program_argv_idx - 1;
-    argv += cli.program_argv_idx - 1;
+static void print_loader_usage(const char* prog) {
+    std::printf(
+        "usage: %s <program> [program-args...]\n"
+        "\n"
+        "Flags:\n"
+        "  --help    print this message and exit\n"
+        "\n"
+        "All other configuration is via environment variables:\n"
+        "\n",
+        prog);
+    print_env_help(stdout);
+}
 
-    static RosettaConfig g_cfg = cli.cfg;
+int main(int argc, char* argv[]) try {
+    if (argc >= 2 && std::string_view(argv[1]) == "--help") {
+        print_loader_usage(argv[0]);
+        return 0;
+    }
+    if (argc < 2) {
+        std::fprintf(stderr, "%s: missing <program> argument (try --help)\n", argv[0]);
+        return 2;
+    }
+
+    static RosettaConfig g_cfg = load_config_from_env();
     rosetta_set_config(&g_cfg);
     logsEnabled = g_cfg.loader_logs ? "1" : nullptr;
 

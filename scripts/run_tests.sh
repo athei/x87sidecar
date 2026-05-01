@@ -6,8 +6,9 @@
 # Phases:
 #   1. Native Rosetta (baseline)
 #   2. rosettax87 (IR + fusions enabled, default config)
-#   3. rosettax87 with ROSETTA_X87_DISABLE_IR=1 (direct translator only)
-#   4. rosettax87 with ROSETTA_X87_DISABLE_IR=1 + ROSETTA_X87_DISABLE_ALL_FUSIONS=1
+#   3. rosettax87 with X87_DISABLE_X87_IR=1 (direct translator only)
+#   4. rosettax87 with X87_DISABLE_X87_IR=1 + X87_DISABLE_ALL_FUSIONS=1
+#   5. rosettax87 with X87_DISABLE_HOOK=1 (stock translate_insn only)
 #
 # Usage:
 #   bash scripts/run_tests.sh                # build + test (all phases)
@@ -211,7 +212,7 @@ if [[ $NATIVE_ONLY -eq 0 ]]; then
             continue
         fi
         EXIT=0
-        OUT=$(ROSETTA_X87_DISABLE_IR=1 "$LOADER" "$BINARY" 2>/dev/null | filter_runtime_lines) || EXIT=$?
+        OUT=$(X87_DISABLE_X87_IR=1 "$LOADER" "$BINARY" 2>/dev/null | filter_runtime_lines) || EXIT=$?
         check_output "$t" "$OUT" "$EXIT"
     done
 fi
@@ -229,12 +230,12 @@ if [[ $NATIVE_ONLY -eq 0 ]]; then
             continue
         fi
         EXIT=0
-        OUT=$(ROSETTA_X87_DISABLE_IR=1 ROSETTA_X87_DISABLE_ALL_FUSIONS=1 "$LOADER" "$BINARY" 2>/dev/null | filter_runtime_lines) || EXIT=$?
+        OUT=$(X87_DISABLE_X87_IR=1 X87_DISABLE_ALL_FUSIONS=1 "$LOADER" "$BINARY" 2>/dev/null | filter_runtime_lines) || EXIT=$?
         check_output "$t" "$OUT" "$EXIT"
     done
 fi
 
-# ── Phase 5: rosettax87 --disable-hook (stock translate_insn only) ───────
+# ── Phase 5: rosettax87 X87_DISABLE_HOOK=1 (stock translate_insn only) ───
 # Validates that the deliberate-fall-through ops (fxsave, fxrstor, and
 # the metadata-only set in kKnownFallThrough) compose correctly with
 # stock's emit.  A FAIL here indicates an m108-style internal-offset
@@ -242,7 +243,7 @@ fi
 # (test_*_compose.c) are the primary target of this phase.
 if [[ $NATIVE_ONLY -eq 0 ]]; then
     echo ""
-    echo -e "${BOLD}=== Phase 5: rosettax87 --disable-hook (stock emit) ===${NC}"
+    echo -e "${BOLD}=== Phase 5: rosettax87 X87_DISABLE_HOOK=1 (stock emit) ===${NC}"
 
     for t in "${TESTS[@]}"; do
         BINARY="$TESTS_BIN/$t"
@@ -252,7 +253,7 @@ if [[ $NATIVE_ONLY -eq 0 ]]; then
             continue
         fi
         EXIT=0
-        OUT=$("$LOADER" --disable-hook "$BINARY" 2>/dev/null | filter_runtime_lines) || EXIT=$?
+        OUT=$(X87_DISABLE_HOOK=1 "$LOADER" "$BINARY" 2>/dev/null | filter_runtime_lines) || EXIT=$?
         check_output "$t" "$OUT" "$EXIT"
     done
 fi

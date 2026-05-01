@@ -8,8 +8,8 @@
 # Options:
 #   --opcode <op>          Enable only this opcode (disable all others + all fusions)
 #   --fusion <f>           Enable only this fusion (disable all others + all ops)
-#   --disable-all-ops      ROSETTA_X87_DISABLE_ALL_OPS=1
-#   --disable-all-fusions  ROSETTA_X87_DISABLE_ALL_FUSIONS=1
+#   --disable-all-ops      ROSETTA_X87_DISABLE_ALL_OPS=1  (zombie — no such knob)
+#   --disable-all-fusions  X87_DISABLE_ALL_FUSIONS=1
 #   --env VAR=VAL          Pass arbitrary env var to aotinvoke (repeatable)
 #
 # Examples:
@@ -72,17 +72,17 @@ while [[ $# -gt 0 ]]; do
         --opcode)
             op="$2"; shift 2
             others=$(printf '%s\n' "${ALL_OPCODES[@]}" | grep -vFx "$op" | paste -s -d ',' -)
-            EXTRA_ENV+=("ROSETTA_X87_DISABLE_ALL_FUSIONS=1")
+            EXTRA_ENV+=("X87_DISABLE_ALL_FUSIONS=1")
             [[ -n "$others" ]] && EXTRA_ENV+=("ROSETTA_X87_DISABLE_OPS=$others")
             ;;
         --fusion)
             f="$2"; shift 2
             others=$(printf '%s\n' "${ALL_FUSIONS[@]}" | grep -vFx "$f" | paste -s -d ',' -)
             EXTRA_ENV+=("ROSETTA_X87_DISABLE_ALL_OPS=1")
-            [[ -n "$others" ]] && EXTRA_ENV+=("ROSETTA_X87_DISABLE_FUSIONS=$others")
+            [[ -n "$others" ]] && EXTRA_ENV+=("X87_DISABLE_FUSIONS=$others")
             ;;
-        --disable-all-ops)     EXTRA_ENV+=("ROSETTA_X87_DISABLE_ALL_OPS=1");     shift ;;
-        --disable-all-fusions) EXTRA_ENV+=("ROSETTA_X87_DISABLE_ALL_FUSIONS=1"); shift ;;
+        --disable-all-ops)     EXTRA_ENV+=("ROSETTA_X87_DISABLE_ALL_OPS=1"); shift ;;
+        --disable-all-fusions) EXTRA_ENV+=("X87_DISABLE_ALL_FUSIONS=1");     shift ;;
         --env)                 EXTRA_ENV+=("$2"); shift 2 ;;
         *) echo "Unknown option: $1" >&2; exit 1 ;;
     esac

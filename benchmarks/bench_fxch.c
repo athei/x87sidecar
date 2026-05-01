@@ -9,7 +9,7 @@
  *   - FXCH + FSTP (discard pattern, also covered by fusion)
  *   - Double FXCH (swap-back, should be free with deferred FXCH)
  *
- * Compare with ROSETTA_X87_DISABLE_DEFERRED_FXCH=1 to measure the benefit.
+ * Compare with X87_DISABLE_DEFERRED_FXCH=1 to measure the benefit.
  */
 #include <stdint.h>
 #include <stdio.h>

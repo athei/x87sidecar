@@ -105,27 +105,27 @@ filter_runtime_lines() {
 # Run a benchmark binary through the loader.
 #
 # Both the "baseline" and "optimized" columns now go through the loader,
-# differing only in --disable-hook.  This is a deliberate apples-to-apples
+# differing only in X87_DISABLE_HOOK=1.  This is a deliberate apples-to-apples
 # choice: with the loader attached, Apple's runtime drops out of AOT-cache
 # + interpreter mode (because the loader writes g_disable_aot=1 in
 # libRosettaRuntime).  Running the bare binary uses Apple's interpreter
 # fast path for tiny x87 loops, which is faster than any JIT translation
 # (the bench is ~0.55× of the interpreter "native" time even when our hook
-# is bypassed).  --disable-hook strips just the translate_insn entry patch
-# but keeps everything else, so both columns translate via the same JIT
-# pipeline; the "optimized" column adds our inline x87 emit, the
+# is bypassed).  X87_DISABLE_HOOK=1 strips just the translate_insn entry
+# patch but keeps everything else, so both columns translate via the same
+# JIT pipeline; the "optimized" column adds our inline x87 emit, the
 # "baseline" column relies on stock libRosettaRuntime's JIT codegen.
 #
-# Usage: run_bench <binary> <mode: baseline|optimized> [extra-loader-flags...]
+# Usage: run_bench <binary> <mode: baseline|optimized> [extra-env=val...]
 run_bench() {
     local binary="$1"
     local mode="$2"
     shift 2
-    local -a flags=("$@")
+    local -a extra_env=("$@")
     if [[ "$mode" == "baseline" ]]; then
-        flags+=("--disable-hook")
+        extra_env+=("X87_DISABLE_HOOK=1")
     fi
-    "$LOADER" "${flags[@]}" "$binary" 2>/dev/null | filter_runtime_lines
+    env "${extra_env[@]}" "$LOADER" "$binary" 2>/dev/null | filter_runtime_lines
 }
 
 # Collect results: associative arrays keyed by "bench.func_name"
@@ -161,7 +161,7 @@ echo ""
 
 # ── Legend ────────────────────────────────────────────────────────────────────
 echo -e "${BOLD}Columns:${NC}"
-echo "  baseline  — rosettax87 --disable-hook (no x87 hook, AOT cache + interpreter"
+echo "  baseline  — X87_DISABLE_HOOK=1 rosettax87 (no x87 hook, AOT cache + interpreter"
 echo "              both disabled — same translation environment as the optimized"
 echo "              column, only without our inline x87 emit)"
 echo "  JIT       — rosettax87 with full JIT optimizations enabled"
@@ -236,19 +236,20 @@ if [[ $total_count -gt 0 ]]; then
     echo -e "  Avg spd_gain (JIT vs baseline):  ${GREEN}${avg_vs_nat_int}.$(printf '%02d' $avg_vs_nat_frac)x${NC}"
 fi
 
-# ── --fast-round comparison ───────────────────────────────────────────────────
+# ── X87_FAST_ROUND comparison ────────────────────────────────────────────────
 # bench_round exercises FISTP/FIST/FRNDINT with all four rounding modes.
 # Compare JIT with the full RC dispatch chain (default) vs. single-instruction
-# fast path (--fast-round, nearest-only, ~27% faster).
+# fast path (X87_FAST_ROUND=1, nearest-only, ~27% faster).
 #
-# WARNING: --fast-round is incorrect for code that uses FLDCW to set non-default
-# rounding modes (e.g. Lua, floor-based coordinate math). Only use it when you
-# have verified the target binary never changes the x87 rounding mode.
+# WARNING: X87_FAST_ROUND is incorrect for code that uses FLDCW to set
+# non-default rounding modes (e.g. Lua, floor-based coordinate math). Only
+# use it when you have verified the target binary never changes the x87
+# rounding mode.
 ROUND_BIN="$BENCH_BIN/bench_round"
 if [[ -x "$ROUND_BIN" ]]; then
     echo ""
-    echo -e "${BOLD}--fast-round comparison${NC}  (bench_round)"
-    echo -e "  ${YELLOW}NOTE: --fast-round is unsafe for code using FLDCW (e.g. Lua).${NC}"
+    echo -e "${BOLD}X87_FAST_ROUND comparison${NC}  (bench_round)"
+    echo -e "  ${YELLOW}NOTE: X87_FAST_ROUND is unsafe for code using FLDCW (e.g. Lua).${NC}"
     echo ""
 
     declare -A ROUND_DEFAULT
@@ -262,7 +263,7 @@ if [[ -x "$ROUND_BIN" ]]; then
     while IFS=' ' read -r keyword name ticks; do
         [[ "$keyword" == "BENCH" ]] || continue
         ROUND_FAST["$name"]="$ticks"
-    done < <(run_bench "$ROUND_BIN" optimized --fast-round)
+    done < <(run_bench "$ROUND_BIN" optimized X87_FAST_ROUND=1)
 
     DIVIDER2=$(printf '─%.0s' $(seq 1 $((COL_NAME + COL_NUM*2 + COL_SPD + 8))))
     printf "${BOLD}%-${COL_NAME}s %${COL_NUM}s %${COL_NUM}s %${COL_SPD}s${NC}\n" \

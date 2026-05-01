@@ -6,7 +6,7 @@
  * measurable we need long x87 runs with many consecutive FSTP+FLD
  * pairs so the savings accumulate within a single translated block.
  *
- * Compare with ROSETTA_X87_DISABLE_FUSIONS=fstp_fld to measure benefit.
+ * Compare with X87_DISABLE_FUSIONS=fstp_fld to measure benefit.
  */
 #include <stdint.h>
 #include <stdio.h>
