@@ -13,7 +13,7 @@ namespace TranslatorX87 {
 // lambda; reproduce it here so we don't pollute the public header just for
 // these helpers.
 static inline void emit_csel(AssemblerBuffer& buf, int is_64, int Rd, int Rn, int Rm, int cond) {
-    uint32_t insn = 0x1A800000u;
+    uint32_t insn = 0x1A800000U;
     insn |= (uint32_t)(is_64 != 0) << 31;
     insn |= (uint32_t)(Rm   & 0x1F) << 16;
     insn |= (uint32_t)(cond & 0xF)  << 12;
@@ -55,7 +55,7 @@ void emit_f80_to_f64_convert(AssemblerBuffer& buf,
     emit_bitfield(buf, /*is_64=*/1, /*UBFM=*/2, /*N=*/1,
                   /*immr=*/15, /*imms=*/15, Wexp, Xsign);
     LogicalImmEncoding enc_15bits;
-    is_bitmask_immediate(/*is_64=*/false, 0x7FFFu, enc_15bits);
+    is_bitmask_immediate(/*is_64=*/false, 0x7FFFU, enc_15bits);
     emit_and_imm(buf, /*is_64=*/0, Wexp,
                  enc_15bits.N, enc_15bits.immr, enc_15bits.imms, Wexp);
 

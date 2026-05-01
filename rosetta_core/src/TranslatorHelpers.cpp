@@ -10,7 +10,7 @@
 
 int alloc_gpr(TranslationResult& translation, int pool_index) {
     const int reg = kGprScratchPool[pool_index];
-    const uint32_t mask = 1u << reg;
+    const uint32_t mask = 1U << reg;
     assert((translation.free_gpr_mask & mask) != 0 && "alloc_gpr: pool slot already occupied");
     translation.free_gpr_mask &= ~mask;
     return reg;
@@ -20,7 +20,7 @@ int alloc_free_gpr(TranslationResult& translation) {
     uint32_t mask = translation.free_gpr_mask;
     assert(mask != 0 && "no temporary GPR available to allocate");
     int reg = __builtin_ctz(mask);  // lowest set bit = binary reverse of __clz(__rbit32)
-    translation.free_gpr_mask = mask & ~(1u << reg);
+    translation.free_gpr_mask = mask & ~(1U << reg);
     return reg;
 }
 
@@ -32,15 +32,15 @@ auto resolve_hint_gpr(TranslationResult& result, int hint_reg) -> int {
 
 void free_gpr(TranslationResult& translation, int reg) {
     assert(reg != 0x3F && "free_gpr: cannot free SP");
-    if ((1u << reg) & kGprScratchMask)
-        translation.free_gpr_mask |= 1u << reg;
+    if ((1U << reg) & kGprScratchMask)
+        translation.free_gpr_mask |= 1U << reg;
 }
 
 int alloc_fpr(TranslationResult& translation, int pool_index) {
     const bool extended = g_rosetta_config && g_rosetta_config->extended_fpr_scratch;
     const uint8_t* pool = extended ? kFprScratchPoolExtended : kFprScratchPool;
     const int reg = pool[pool_index];
-    const uint32_t mask = 1u << reg;
+    const uint32_t mask = 1U << reg;
     assert((translation.free_fpr_mask & mask) != 0 && "alloc_fpr: pool slot already occupied");
     translation.free_fpr_mask &= ~mask;
     return reg;
@@ -50,15 +50,15 @@ auto alloc_free_fpr(TranslationResult& translation) -> int {
     uint32_t mask = translation.free_fpr_mask;
     assert(mask != 0 && "no temporary FPR available to allocate");
     int reg = __builtin_ctz(mask);  // lowest set bit = binary reverse of __clz(__rbit32)
-    translation.free_fpr_mask = mask & ~(1u << reg);
+    translation.free_fpr_mask = mask & ~(1U << reg);
     return reg;
 }
 
 void free_fpr(TranslationResult& translation, int reg) {
     const bool extended = g_rosetta_config && g_rosetta_config->extended_fpr_scratch;
     const uint32_t active_mask = extended ? kFprScratchMaskExt : kFprScratchMask;
-    if ((1u << reg) & active_mask)
-        translation.free_fpr_mask |= 1u << reg;
+    if ((1U << reg) & active_mask)
+        translation.free_fpr_mask |= 1U << reg;
 }
 
 auto emit_load_immediate(TranslationResult& result, int is_64bit, uint64_t value, int dst_reg)
@@ -156,14 +156,14 @@ static int alloc_scratch_gpr(TranslationResult& result) {
         __builtin_unreachable();
     }
     int r = __builtin_ctz(mask);
-    result.free_gpr_mask = mask & ~(1u << r);
+    result.free_gpr_mask = mask & ~(1U << r);
     return r;
 }
 
 // Returns true if `reg` is any entry in kGprScratchPool (bits 22–29).
 // The binary checks this via a linear pool search + special-case for X22.
 static bool is_scratch_pool_reg(int reg) {
-    return (reg >= 0) && (reg < 32) && (((kGprScratchMask >> reg) & 1u) != 0);
+    return (reg >= 0) && (reg < 32) && (((kGprScratchMask >> reg) & 1U) != 0);
 }
 
 // =============================================================================
@@ -198,12 +198,12 @@ auto compute_mem_operand_address(TranslationResult& result, bool is_64bit, IROpe
     bool is_add = true;
     bool disp_encodable = false;
 
-    if (disp < 0x1000u) {
+    if (disp < 0x1000U) {
         imm_value = disp;
         imm_shift = 0;
         is_add = true;
         disp_encodable = true;
-    } else if ((disp & 0xFFFFFFFFFF000FFFull) == 0) {
+    } else if ((disp & 0xFFFFFFFFFF000FFFULL) == 0) {
         // Fits in shifted form: value is page-aligned, top bits zero
         imm_value = disp >> 12;
         imm_shift = 1;
@@ -212,12 +212,12 @@ auto compute_mem_operand_address(TranslationResult& result, bool is_64bit, IROpe
     } else {
         // Try negated (SUB) forms
         const uint64_t neg = static_cast<uint64_t>(-static_cast<int64_t>(disp));
-        if (neg < 0x1000u) {
+        if (neg < 0x1000U) {
             imm_value = neg;
             imm_shift = 0;
             is_add = false;
             disp_encodable = true;
-        } else if ((neg & 0xFFFFFFFFFF000FFFull) == 0) {
+        } else if ((neg & 0xFFFFFFFFFF000FFFULL) == 0) {
             imm_value = neg >> 12;
             imm_shift = 1;
             is_add = false;
@@ -512,7 +512,7 @@ auto compute_operand_address(TranslationResult& result, int is_64bit, IROperand*
             // Emit BL #0 patched by a Branch26 fixup to kRuntimeRoutine_get_tls_base
             result._fixups.push_back(Fixup{FixupKind::Branch26, (uint32_t)result.insn_buf.end,
                                            (uint32_t)kRuntimeRoutine_get_tls_base});
-            result.insn_buf.emit(0x94000000u);  // BL placeholder
+            result.insn_buf.emit(0x94000000U);  // BL placeholder
 
             // In JIT mode (translator_variant==1): dereference the TLS block pointer
             // at offset 6*8=48 into tls_tmp before adding inner_reg.

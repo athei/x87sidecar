@@ -17,33 +17,33 @@ namespace {
 //   Pattern: 1_10_100101_hw_imm16_Rd
 constexpr uint32_t movz(uint32_t rd, uint16_t imm, uint32_t lsl_shift) {
     uint32_t hw = lsl_shift / 16;  // 0, 1, 2, 3
-    return 0xD2800000u | (hw << 21) | (uint32_t(imm) << 5) | (rd & 0x1F);
+    return 0xD2800000U | (hw << 21) | (uint32_t(imm) << 5) | (rd & 0x1F);
 }
 
 // MOVK Xd, #imm16, lsl #(hw*16)
 //   sf=1, opc=11, 100101, hw, imm16, Rd
 constexpr uint32_t movk(uint32_t rd, uint16_t imm, uint32_t lsl_shift) {
     uint32_t hw = lsl_shift / 16;
-    return 0xF2800000u | (hw << 21) | (uint32_t(imm) << 5) | (rd & 0x1F);
+    return 0xF2800000U | (hw << 21) | (uint32_t(imm) << 5) | (rd & 0x1F);
 }
 
 // MOVN Xd, #imm16, lsl #(hw*16)   (move-with-NOT — used for negative immediates)
 //   sf=1, opc=00, 100101, hw, imm16, Rd
 constexpr uint32_t movn(uint32_t rd, uint16_t imm, uint32_t lsl_shift) {
     uint32_t hw = lsl_shift / 16;
-    return 0x92800000u | (hw << 21) | (uint32_t(imm) << 5) | (rd & 0x1F);
+    return 0x92800000U | (hw << 21) | (uint32_t(imm) << 5) | (rd & 0x1F);
 }
 
 // BR Xn  (unconditional branch via register)
 //   1101_0110_0001_1111_0000_00_Rn_00000
 constexpr uint32_t br(uint32_t rn) {
-    return 0xD61F0000u | ((rn & 0x1F) << 5);
+    return 0xD61F0000U | ((rn & 0x1F) << 5);
 }
 
 // SVC #imm16  (supervisor call — used with imm16=0x80 for syscalls on Darwin)
 //   1101_0100_000_imm16_00001
 constexpr uint32_t svc(uint16_t imm16) {
-    return 0xD4000001u | (uint32_t(imm16) << 5);
+    return 0xD4000001U | (uint32_t(imm16) << 5);
 }
 
 // STP Xt1, Xt2, [Xn|SP, #imm7]!  (pre-index, 64-bit pair store)
@@ -52,7 +52,7 @@ constexpr uint32_t svc(uint16_t imm16) {
 constexpr uint32_t stp_preindex(uint32_t rt1, uint32_t rt2, uint32_t rn, int32_t imm) {
     int32_t scaled = imm / 8;
     uint32_t imm7 = uint32_t(scaled) & 0x7F;
-    return 0xA9800000u | (imm7 << 15) | ((rt2 & 0x1F) << 10) | ((rn & 0x1F) << 5) |
+    return 0xA9800000U | (imm7 << 15) | ((rt2 & 0x1F) << 10) | ((rn & 0x1F) << 5) |
            (rt1 & 0x1F);
 }
 
@@ -61,7 +61,7 @@ constexpr uint32_t stp_preindex(uint32_t rt1, uint32_t rt2, uint32_t rn, int32_t
 constexpr uint32_t stp_offset(uint32_t rt1, uint32_t rt2, uint32_t rn, int32_t imm) {
     int32_t scaled = imm / 8;
     uint32_t imm7 = uint32_t(scaled) & 0x7F;
-    return 0xA9000000u | (imm7 << 15) | ((rt2 & 0x1F) << 10) | ((rn & 0x1F) << 5) |
+    return 0xA9000000U | (imm7 << 15) | ((rt2 & 0x1F) << 10) | ((rn & 0x1F) << 5) |
            (rt1 & 0x1F);
 }
 
@@ -70,7 +70,7 @@ constexpr uint32_t stp_offset(uint32_t rt1, uint32_t rt2, uint32_t rn, int32_t i
 constexpr uint32_t ldp_offset(uint32_t rt1, uint32_t rt2, uint32_t rn, int32_t imm) {
     int32_t scaled = imm / 8;
     uint32_t imm7 = uint32_t(scaled) & 0x7F;
-    return 0xA9400000u | (imm7 << 15) | ((rt2 & 0x1F) << 10) | ((rn & 0x1F) << 5) |
+    return 0xA9400000U | (imm7 << 15) | ((rt2 & 0x1F) << 10) | ((rn & 0x1F) << 5) |
            (rt1 & 0x1F);
 }
 
@@ -79,7 +79,7 @@ constexpr uint32_t ldp_offset(uint32_t rt1, uint32_t rt2, uint32_t rn, int32_t i
 constexpr uint32_t ldp_postindex(uint32_t rt1, uint32_t rt2, uint32_t rn, int32_t imm) {
     int32_t scaled = imm / 8;
     uint32_t imm7 = uint32_t(scaled) & 0x7F;
-    return 0xA8C00000u | (imm7 << 15) | ((rt2 & 0x1F) << 10) | ((rn & 0x1F) << 5) |
+    return 0xA8C00000U | (imm7 << 15) | ((rt2 & 0x1F) << 10) | ((rn & 0x1F) << 5) |
            (rt1 & 0x1F);
 }
 
@@ -87,74 +87,74 @@ constexpr uint32_t ldp_postindex(uint32_t rt1, uint32_t rt2, uint32_t rn, int32_
 //   10_111_0_01_00_imm12_Rn_Rt
 constexpr uint32_t str_w_offset(uint32_t wt, uint32_t rn, uint32_t imm) {
     uint32_t imm12 = (imm / 4) & 0xFFF;
-    return 0xB9000000u | (imm12 << 10) | ((rn & 0x1F) << 5) | (wt & 0x1F);
+    return 0xB9000000U | (imm12 << 10) | ((rn & 0x1F) << 5) | (wt & 0x1F);
 }
 
 // STR Xt, [Xn|SP, #imm]  (64-bit store, unsigned offset, scaled by 8)
 //   11_111_0_01_00_imm12_Rn_Rt
 constexpr uint32_t str_x_offset(uint32_t xt, uint32_t rn, uint32_t imm) {
     uint32_t imm12 = (imm / 8) & 0xFFF;
-    return 0xF9000000u | (imm12 << 10) | ((rn & 0x1F) << 5) | (xt & 0x1F);
+    return 0xF9000000U | (imm12 << 10) | ((rn & 0x1F) << 5) | (xt & 0x1F);
 }
 
 // CBZ Xt, +imm19*4   (branch if zero — 64-bit). imm19 is signed PC-relative
 //   in 4-byte units.
 constexpr uint32_t cbz(uint32_t rt, int32_t imm19_words) {
     uint32_t imm19 = uint32_t(imm19_words) & 0x7FFFF;
-    return 0xB4000000u | (imm19 << 5) | (rt & 0x1F);
+    return 0xB4000000U | (imm19 << 5) | (rt & 0x1F);
 }
 
 // CBZ Wt, +imm19*4   (32-bit variant)
 constexpr uint32_t cbz_w(uint32_t rt, int32_t imm19_words) {
     uint32_t imm19 = uint32_t(imm19_words) & 0x7FFFF;
-    return 0x34000000u | (imm19 << 5) | (rt & 0x1F);
+    return 0x34000000U | (imm19 << 5) | (rt & 0x1F);
 }
 
 // LDR Xt, [Xn|SP, #imm]  (64-bit load, unsigned offset, scaled by 8)
 //   11_111_0_01_01_imm12_Rn_Rt
 constexpr uint32_t ldr_x_offset(uint32_t xt, uint32_t rn, uint32_t imm) {
     uint32_t imm12 = (imm / 8) & 0xFFF;
-    return 0xF9400000u | (imm12 << 10) | ((rn & 0x1F) << 5) | (xt & 0x1F);
+    return 0xF9400000U | (imm12 << 10) | ((rn & 0x1F) << 5) | (xt & 0x1F);
 }
 
 // LDR Wt, [Xn|SP, #imm]  (32-bit load, unsigned offset, scaled by 4)
 //   10_111_0_01_01_imm12_Rn_Rt
 constexpr uint32_t ldr_w_offset(uint32_t wt, uint32_t rn, uint32_t imm) {
     uint32_t imm12 = (imm / 4) & 0xFFF;
-    return 0xB9400000u | (imm12 << 10) | ((rn & 0x1F) << 5) | (wt & 0x1F);
+    return 0xB9400000U | (imm12 << 10) | ((rn & 0x1F) << 5) | (wt & 0x1F);
 }
 
 // BRK #imm16
 constexpr uint32_t brk_imm(uint16_t imm) {
-    return 0xD4200000u | (uint32_t(imm) << 5);
+    return 0xD4200000U | (uint32_t(imm) << 5);
 }
 
 // ADD Xd, Xn, #imm12  (signed-offset, no shift, 64-bit add immediate)
 //   sf=1, op=0, S=0, 10001, sh=0, imm12, Rn, Rd
 constexpr uint32_t add_imm(uint32_t rd, uint32_t rn, uint32_t imm) {
     uint32_t imm12 = imm & 0xFFF;
-    return 0x91000000u | (imm12 << 10) | ((rn & 0x1F) << 5) | (rd & 0x1F);
+    return 0x91000000U | (imm12 << 10) | ((rn & 0x1F) << 5) | (rd & 0x1F);
 }
 
 // SUB Wd, Wn, #imm12  (32-bit subtract immediate, no flags)
 //   sf=0, op=1, S=0, 10001, sh=0, imm12, Rn, Rd
 constexpr uint32_t sub_imm_w(uint32_t rd, uint32_t rn, uint32_t imm) {
     uint32_t imm12 = imm & 0xFFF;
-    return 0x51000000u | (imm12 << 10) | ((rn & 0x1F) << 5) | (rd & 0x1F);
+    return 0x51000000U | (imm12 << 10) | ((rn & 0x1F) << 5) | (rd & 0x1F);
 }
 
 // CMP Wn, #imm12   (= SUBS WZR, Wn, #imm12 — 32-bit compare immediate)
 //   sf=0, op=1, S=1, 10001, sh=0, imm12, Rn, 11111
 constexpr uint32_t cmp_imm_w(uint32_t rn, uint32_t imm) {
     uint32_t imm12 = imm & 0xFFF;
-    return 0x7100001Fu | (imm12 << 10) | ((rn & 0x1F) << 5);
+    return 0x7100001FU | (imm12 << 10) | ((rn & 0x1F) << 5);
 }
 
 // B.cond +imm19*4   (signed PC-relative conditional branch, 4-byte units).
 //   0101_0100_imm19_0_cond
 constexpr uint32_t b_cond(uint32_t cond, int32_t imm19_words) {
     uint32_t imm19 = uint32_t(imm19_words) & 0x7FFFF;
-    return 0x54000000u | (imm19 << 5) | (cond & 0xF);
+    return 0x54000000U | (imm19 << 5) | (cond & 0xF);
 }
 constexpr uint32_t COND_LS = 0x9;  // unsigned ≤
 
@@ -162,30 +162,30 @@ constexpr uint32_t COND_LS = 0x9;  // unsigned ≤
 //   01_111_0_01_01_imm12_Rn_Rt
 constexpr uint32_t ldrh_w_offset(uint32_t wt, uint32_t rn, uint32_t imm) {
     uint32_t imm12 = (imm / 2) & 0xFFF;
-    return 0x79400000u | (imm12 << 10) | ((rn & 0x1F) << 5) | (wt & 0x1F);
+    return 0x79400000U | (imm12 << 10) | ((rn & 0x1F) << 5) | (wt & 0x1F);
 }
 
 // STR Dt, [Xn|SP, #imm]  (64-bit FP/SIMD store, unsigned offset, scaled by 8)
 //   1111 1101 00 imm12 Rn Rt   — size=11, V=1, opc=00
 constexpr uint32_t str_d_offset(uint32_t dt, uint32_t rn, uint32_t imm) {
     uint32_t imm12 = (imm / 8) & 0xFFF;
-    return 0xFD000000u | (imm12 << 10) | ((rn & 0x1F) << 5) | (dt & 0x1F);
+    return 0xFD000000U | (imm12 << 10) | ((rn & 0x1F) << 5) | (dt & 0x1F);
 }
 
 // LDR Dt, [Xn|SP, #imm]  (64-bit FP/SIMD load, unsigned offset, scaled by 8)
 //   1111 1101 01 imm12 Rn Rt
 constexpr uint32_t ldr_d_offset(uint32_t dt, uint32_t rn, uint32_t imm) {
     uint32_t imm12 = (imm / 8) & 0xFFF;
-    return 0xFD400000u | (imm12 << 10) | ((rn & 0x1F) << 5) | (dt & 0x1F);
+    return 0xFD400000U | (imm12 << 10) | ((rn & 0x1F) << 5) | (dt & 0x1F);
 }
 
 // RET (= BR x30)
-constexpr uint32_t RET_INSN = 0xD65F03C0u;
+constexpr uint32_t RET_INSN = 0xD65F03C0U;
 
 // MADD Xd, Xn, Xm, Xa     (Xd = Xn * Xm + Xa, 64-bit)
 //   sf=1, op54=00, 11011, op31=000, Rm, o0=0, Ra, Rn, Rd
 constexpr uint32_t madd(uint32_t rd, uint32_t rn, uint32_t rm, uint32_t ra) {
-    return 0x9B000000u | ((rm & 0x1F) << 16) | ((ra & 0x1F) << 10) |
+    return 0x9B000000U | ((rm & 0x1F) << 16) | ((ra & 0x1F) << 10) |
            ((rn & 0x1F) << 5) | (rd & 0x1F);
 }
 
@@ -321,7 +321,7 @@ StubBlobs build(uint64_t handlerAddr, uint64_t translateInsnAddr,
     //            send right at parent's namespaced sidecarReqName)
     //   local  = MACH_MSG_TYPE_MAKE_SEND_ONCE = 21 = 0x15  (kernel hands
     //            the sidecar a fresh send-once for the reply)
-    constexpr uint32_t MSG_BITS = 0x13u | (0x15u << 8);  // = 0x1513
+    constexpr uint32_t MSG_BITS = 0x13U | (0x15U << 8);  // = 0x1513
     constexpr uint32_t MSG_SIZE = 24 + 40;                // header + 5×8 args
     constexpr uint32_t RCV_SIZE = 128;                    // reply cap
     constexpr uint32_t MSG_ID   = 0x10000001;             // sidecar dispatches on it
@@ -420,7 +420,7 @@ StubBlobs build(uint64_t handlerAddr, uint64_t translateInsnAddr,
     emit(ipc, ldp_offset(4, 5, SP, 32));        // restore x4, x5
     emit(ipc, ldp_offset(16, LR, SP, 48));      // restore x16, lr
     emit(ipc, add_imm(SP, SP, FRAME_SIZE));     // sp += FRAME_SIZE
-    emit(ipc, 0xD65F03C0u);                     // ret  (= BR x30)
+    emit(ipc, 0xD65F03C0U);                     // ret  (= BR x30)
 
     // ── NONE PATH ───────────────────────────────────────────────────────────
     // Sidecar declined the opcode. Restore caller registers and abs-jump

@@ -13,8 +13,8 @@
 #define AARCH64_PAGE_SIZE 16384u
 
 static void write_abs_jump(void* dst, const void* target) {
-    uint32_t ldr_x9 = 0x58000049u;  // LDR X9, #8
-    uint32_t br_x9 = 0xD61F0120u;   // BR  X9
+    uint32_t ldr_x9 = 0x58000049U;  // LDR X9, #8
+    uint32_t br_x9 = 0xD61F0120U;   // BR  X9
     uint8_t* p = (uint8_t*)dst;
     memcpy(p + 0, &ldr_x9, 4);
     memcpy(p + 4, &br_x9, 4);
@@ -127,14 +127,14 @@ int patch_movz_imm(void* addr, uint16_t new_imm) {
     memcpy(&insn, addr, 4);
 
     // Verify: MOVZ Wd, #imm  (32-bit register, no shift)
-    if ((insn & 0xFFE00000u) != 0x52800000u) {
+    if ((insn & 0xFFE00000U) != 0x52800000U) {
         errno = EINVAL;
         printf("patch_movz_imm: instruction at %p is not MOVZ Wd,#imm (got 0x%08X)\n", addr, insn);
         return -1;
     }
 
     // Build the patched instruction: keep Rd, replace imm16.
-    insn = (insn & ~0x001FFFE0u) | ((uint32_t)new_imm << 5);
+    insn = (insn & ~0x001FFFE0U) | ((uint32_t)new_imm << 5);
 
     // Make the page writable (COW).
     vm_address_t page = (vm_address_t)addr & ~((vm_address_t)AARCH64_PAGE_SIZE - 1);

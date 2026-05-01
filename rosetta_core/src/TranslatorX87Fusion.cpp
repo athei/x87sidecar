@@ -12,7 +12,7 @@
 namespace TranslatorX87 {
 
 static inline bool fusion_disabled(uint64_t mask, FusionId id) {
-    return (mask >> static_cast<int>(id)) & 1u;
+    return (mask >> static_cast<int>(id)) & 1U;
 }
 
 // =============================================================================

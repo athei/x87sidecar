@@ -68,10 +68,10 @@ void emit_load_top(AssemblerBuffer& buf, const TranslationResult& translation, i
     // LDRH imm12 encodes halfword units (imm12 * 2 = byte offset).
     // Maximum byte offset representable: 4095 * 2 = 8190.
     // Condition: byte offset even AND fits in scaled imm12.
-    const bool use_x18_direct = ((sw_byte_off & 1u) == 0u) && (sw_byte_off <= 0x1FFEu);
+    const bool use_x18_direct = ((sw_byte_off & 1U) == 0U) && (sw_byte_off <= 0x1FFEU);
     const int base_reg = use_x18_direct ? kX87ThreadReg : Xbase;
     const int16_t imm12 =
-        use_x18_direct ? static_cast<int16_t>(sw_byte_off / 2u) : kX87StatusWordImm12;  // = 1
+        use_x18_direct ? static_cast<int16_t>(sw_byte_off / 2U) : kX87StatusWordImm12;  // = 1
 
     // LDRH  Wd_top, [base_reg, #imm12]   ; load status_word (16-bit)
     emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/1, imm12, base_reg, Wd_top);
@@ -612,7 +612,7 @@ void emit_x87_tag_set_valid_batch(AssemblerBuffer& buf, int Xbase, int Wd_top,
                   /*immr*/ 31, /*imms*/ 30, Wd_top, Wd_tmp);
 
     // mask = (1 << (2 * count)) - 1  — covers count adjacent 2-bit pairs
-    const uint16_t mask = static_cast<uint16_t>((1u << (2 * count)) - 1);
+    const uint16_t mask = static_cast<uint16_t>((1U << (2 * count)) - 1);
     emit_movn(buf, /*is_64=*/0, /*MOVZ opc*/ 2, /*hw*/ 0, mask, Wd_tmp2);
 
     // LSLV Wd_tmp2, Wd_tmp2, Wd_tmp  — shift mask into position

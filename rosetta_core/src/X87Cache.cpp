@@ -168,9 +168,9 @@ bool X87Cache::perm_is_identity() const {
 uint32_t X87Cache::pinned_mask() const {
     uint32_t mask = 0;
     if (gprs_valid) {
-        mask |= (1u << base_gpr);
-        mask |= (1u << top_gpr);
-        mask |= (1u << st_base_gpr);
+        mask |= (1U << base_gpr);
+        mask |= (1U << top_gpr);
+        mask |= (1U << st_base_gpr);
     }
     return mask;
 }

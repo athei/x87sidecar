@@ -39,7 +39,7 @@ bool is_bitmask_immediate(bool is_64bit, uint64_t value, LogicalImmEncoding& out
     // Step 1: find smallest repeating element size (halve while pattern repeats)
     do {
         unsigned int half = element_size >> 1;
-        element_size &= ~1u;  // clear low bit (no-op for powers of 2 >= 4)
+        element_size &= ~1U;  // clear low bit (no-op for powers of 2 >= 4)
 
         uint64_t mask = ~(0xFFFFFFFFFFFFFFFFULL << half);
         if (((value >> half) ^ value) & mask) {
@@ -445,9 +445,9 @@ auto emit_fcmp_f64(AssemblerBuffer& buf, int Dn, int Dm) -> void {
 // =============================================================================
 auto emit_cset(AssemblerBuffer& buf, int is_64bit, int cond, int Rd) -> void {
     const uint32_t inv_cond = cond ^ 1;
-    uint32_t insn = 0x1A9F07E0u;  // CSINC Rd, XZR, XZR, AL (base with XZR in Rm and Rn)
+    uint32_t insn = 0x1A9F07E0U;  // CSINC Rd, XZR, XZR, AL (base with XZR in Rm and Rn)
     insn |= (uint32_t)(is_64bit & 1) << 31;
-    insn |= (inv_cond & 0xFu) << 12;
+    insn |= (inv_cond & 0xFU) << 12;
     insn |= (uint32_t)(Rd & 0x1F);
     buf.emit(insn);
 }
@@ -459,7 +459,7 @@ auto emit_cset(AssemblerBuffer& buf, int is_64bit, int cond, int Rd) -> void {
 // Base: 0x1E600C00
 // =============================================================================
 auto emit_fcsel_f64(AssemblerBuffer& buf, int Dd, int Dn, int Dm, int cond) -> void {
-    uint32_t insn = 0x1E600C00u;
+    uint32_t insn = 0x1E600C00U;
     insn |= (uint32_t)(Dm & 0x1F) << 16;
     insn |= (uint32_t)(cond & 0xF) << 12;
     insn |= (uint32_t)(Dn & 0x1F) << 5;
@@ -474,7 +474,7 @@ auto emit_fcsel_f64(AssemblerBuffer& buf, int Dd, int Dn, int Dm, int cond) -> v
 // 0x1E602008 | (Rn << 5)  for f64
 // =============================================================================
 auto emit_fcmp_zero_f64(AssemblerBuffer& buf, int Dn) -> void {
-    uint32_t insn = 0x1E602008u;
+    uint32_t insn = 0x1E602008U;
     insn |= (uint32_t)(Dn & 0x1F) << 5;
     buf.emit(insn);
 }
@@ -534,7 +534,7 @@ auto emit_movi_d_zero(AssemblerBuffer& buf, int Dd) -> void {
     // Zeroes the entire 128-bit V register (bits[127:64] cleared implicitly).
     // No GPR dependency — can issue independently from the ADD Xbase in the
     // same cycle on Apple M-series (4-wide dispatch).
-    buf.emit(0x2F00E400u | (uint32_t)(Dd & 0x1F));
+    buf.emit(0x2F00E400U | (uint32_t)(Dd & 0x1F));
 }
 
 auto emit_fmov_d_one(AssemblerBuffer& buf, int Dd) -> void {
@@ -546,7 +546,7 @@ auto emit_fmov_d_one(AssemblerBuffer& buf, int Dd) -> void {
     //   full = 0x1E601000 | (0x70 << 13) | Rd = 0x1E6E1000 | Rd
     // Single instruction, no GPR needed — replaces MOVZ+FMOV (2 insns +
     // cross-domain latency).
-    buf.emit(0x1E6E1000u | (uint32_t)(Dd & 0x1F));
+    buf.emit(0x1E6E1000U | (uint32_t)(Dd & 0x1F));
 }
 
 auto emit_ldr_literal_f64(AssemblerBuffer& buf, int Dd, uint64_t constant) -> void {
@@ -554,13 +554,13 @@ auto emit_ldr_literal_f64(AssemblerBuffer& buf, int Dd, uint64_t constant) -> vo
     // Encoding (LDR literal, SIMD&FP):
     //   opc=01 (64-bit) | 011 | V=1 | 00 | imm19=2 | Rt
     //   0b01_011_1_00_0000000000000000010_00000 = 0x5C000040
-    buf.emit(0x5C000040u | (uint32_t)(Dd & 0x1F));
+    buf.emit(0x5C000040U | (uint32_t)(Dd & 0x1F));
 
     // B #3 — skip over the 8 bytes of constant data, land on next real insn
     emit_b(buf, 3);
 
     // .quad constant — 8 bytes of raw data in 2 instruction slots
-    buf.emit((uint32_t)(constant & 0xFFFFFFFFu));
+    buf.emit((uint32_t)(constant & 0xFFFFFFFFU));
     buf.emit((uint32_t)(constant >> 32));
 }
 
@@ -600,13 +600,13 @@ auto emit_mrs_nzcv(AssemblerBuffer& buf, int Xd) -> void {
     // MRS Xd, NZCV
     // NZCV sysreg: op0=3, op1=3, CRn=4, CRm=2, op2=0 → encoding 0xD53B4200 | Rt
     // Bit layout: 1101 0101 0011 1011 0100 0010 0000 | Rt
-    buf.emit(0xD53B4200u | (uint32_t)(Xd & 0x1F));
+    buf.emit(0xD53B4200U | (uint32_t)(Xd & 0x1F));
 }
 
 auto emit_msr_nzcv(AssemblerBuffer& buf, int Xd) -> void {
     // MSR NZCV, Xd
     // Same sysreg as MRS but with L=0 (write): 0xD51B4200 | Rt
-    buf.emit(0xD51B4200u | (uint32_t)(Xd & 0x1F));
+    buf.emit(0xD51B4200U | (uint32_t)(Xd & 0x1F));
 }
 
 auto emit_cbz(AssemblerBuffer& buf, int is_64bit, int is_nz, int Rt, int imm19) -> void {
@@ -614,10 +614,10 @@ auto emit_cbz(AssemblerBuffer& buf, int is_64bit, int is_nz, int Rt, int imm19) 
     // Encoding: sf | 011010 | b5=0 | op | imm19 | Rt
     // 32-bit: 0 011 0100 / 0 011 0101   (0x34 / 0x35)
     // 64-bit: 1 011 0100 / 1 011 0101   (0xB4 / 0xB5)
-    uint32_t insn = 0x34000000u;
+    uint32_t insn = 0x34000000U;
     insn |= (uint32_t)(is_64bit != 0) << 31;
     insn |= (uint32_t)(is_nz != 0) << 24;
-    insn |= ((uint32_t)(imm19) & 0x7FFFFu) << 5;
+    insn |= ((uint32_t)(imm19) & 0x7FFFFU) << 5;
     insn |= (uint32_t)(Rt & 0x1F);
     buf.emit(insn);
 }
@@ -625,14 +625,14 @@ auto emit_cbz(AssemblerBuffer& buf, int is_64bit, int is_nz, int Rt, int imm19) 
 auto emit_b(AssemblerBuffer& buf, int imm26) -> void {
     // B #imm26
     // Encoding: 0 00101 | imm26
-    buf.emit(0x14000000u | ((uint32_t)(imm26) & 0x3FFFFFFu));
+    buf.emit(0x14000000U | ((uint32_t)(imm26) & 0x3FFFFFFU));
 }
 
 auto emit_b_cond(AssemblerBuffer& buf, int cond, int imm19) -> void {
     // B.cond #imm19
     // Encoding: 0101 0100 | imm19 | 0 | cond[3:0]
-    uint32_t insn = 0x54000000u;
-    insn |= ((uint32_t)(imm19) & 0x7FFFFu) << 5;
+    uint32_t insn = 0x54000000U;
+    insn |= ((uint32_t)(imm19) & 0x7FFFFU) << 5;
     insn |= (uint32_t)(cond & 0xF);
     buf.emit(insn);
 }
@@ -640,16 +640,16 @@ auto emit_b_cond(AssemblerBuffer& buf, int cond, int imm19) -> void {
 auto emit_fmov_f64_reg(AssemblerBuffer& buf, int Dd, int Dn) -> void {
     // FMOV Dd, Dn — double-precision FPR-to-FPR copy
     // Encoding: 0x1E604000 | (Rn<<5) | Rd
-    buf.emit(0x1E604000u | ((uint32_t)(Dn & 0x1F) << 5) | (uint32_t)(Dd & 0x1F));
+    buf.emit(0x1E604000U | ((uint32_t)(Dn & 0x1F) << 5) | (uint32_t)(Dd & 0x1F));
 }
 
 auto emit_fcvt_fp_to_int(AssemblerBuffer& buf, int sf, int ftype, int rmode, int Rd, int Rn) -> void {
     // FCVT{N,P,M,Z}S — FP to signed integer with explicit rounding mode
     // Encoding: sf | 0 0 11110 | ftype | 1 | rmode | 000 | Rn | Rd
-    uint32_t insn = 0x1E200000u;
+    uint32_t insn = 0x1E200000U;
     insn |= (uint32_t)(sf != 0) << 31;
     insn |= (uint32_t)(ftype & 0x3) << 22;
-    insn |= 1u << 21;  // fixed
+    insn |= 1U << 21;  // fixed
     insn |= (uint32_t)(rmode & 0x3) << 19;
     // opcode bits [18:16] = 000 (FCVT*S signed)
     insn |= (uint32_t)(Rn & 0x1F) << 5;
