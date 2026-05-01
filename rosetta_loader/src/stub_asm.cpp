@@ -408,11 +408,17 @@ StubBlobs build(uint64_t handlerAddr, uint64_t translateInsnAddr,
 
     // ── NONE PATH ───────────────────────────────────────────────────────────
     // Sidecar declined an x87 opcode. Composition with stock would produce
-    // invalid code; abort the parent here. The CrashReporter log will pin
-    // PC inside libRosettaRuntime's __TEXT (our installed handler) with a
-    // BRK imm16 of 0xCD64 — a recognisable rosetta-jit fallback marker.
+    // invalid code; abort the parent here. We _exit(133) via the BSD
+    // syscall trap — BRK raises EXC_BREAKPOINT, which Rosetta's task-level
+    // Mach exception port catches before the kernel can deliver SIGTRAP
+    // (the stub lives inside libRosettaRuntime's __TEXT pad, registered
+    // code Rosetta manages), so the parent would hang instead of dying.
+    // SVC bypasses exception delivery: the kernel handles syscalls
+    // directly (same trap is used for mach_msg above).
     // Caller regs are intentionally not restored: the parent is dying.
-    emit(ipc, brk_imm(0xCD64));
+    emit(ipc, movz(0, 133, 0));                 // x0 = exit code 133
+    emit(ipc, movz(16, 1, 0));                  // x16 = SYS_exit (BSD #1)
+    emit(ipc, svc(0x80));                       // svc #0x80 → kernel _exit
 
     // ──── FILTER prologue ───────────────────────────────────────────────────
     // Bypass the IPC entirely for non-x87 opcodes — translate_insn fires for
