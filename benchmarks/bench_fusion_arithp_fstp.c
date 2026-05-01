@@ -215,6 +215,7 @@ int main(void) {
     };
     int n = (int)(sizeof(benches) / sizeof(benches[0]));
     for (int i = 0; i < n; i++) {
+        benches[i].fn(); /* warmup: discard, JIT translates on first call */
         bench_ns_t sum = 0;
         for (int r = 0; r < RUNS; r++)
             sum += benches[i].fn();

@@ -28,6 +28,7 @@ static bench_ns_t bench_fsincos(void) {
 }
 
 int main(void) {
+    bench_fsincos(); /* warmup: discard, JIT translates on first call */
     bench_ns_t sum = 0;
     for (int r = 0; r < RUNS; r++)
         sum += bench_fsincos();

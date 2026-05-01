@@ -28,6 +28,7 @@ static bench_ns_t bench_fyl2xp1(void) {
 }
 
 int main(void) {
+    bench_fyl2xp1(); /* warmup: discard, JIT translates on first call */
     bench_ns_t sum = 0;
     for (int r = 0; r < RUNS; r++)
         sum += bench_fyl2xp1();
