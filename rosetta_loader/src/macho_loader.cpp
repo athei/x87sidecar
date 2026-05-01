@@ -3,6 +3,7 @@
 #include <mach-o/loader.h>
 #include <mach/vm_page_size.h>
 
+#include <algorithm>
 #include <fstream>
 
 auto MachoLoader::open(std::filesystem::path const& path) -> bool {
@@ -19,7 +20,7 @@ auto MachoLoader::open(std::filesystem::path const& path) -> bool {
     buffer_ = std::vector<uint8_t>(std::istreambuf_iterator<char>(file),
                                    std::istreambuf_iterator<char>());
 
-    return buffer_.empty() == false;
+    return !buffer_.empty();
 }
 
 auto MachoLoader::machHeader() const -> mach_header_64* {
@@ -38,9 +39,7 @@ auto MachoLoader::imageSize() const -> size_t {
             auto *seg = (segment_command_64*)cmd;
 
             uint64_t segEnd = seg->vmaddr + seg->vmsize;
-            if (segEnd > imageSize) {
-                imageSize = segEnd;
-            }
+            imageSize = std::max<uint64_t>(segEnd, imageSize);
         }
 
         cmd = (load_command*)((uint8_t*)cmd + cmd->cmdsize);

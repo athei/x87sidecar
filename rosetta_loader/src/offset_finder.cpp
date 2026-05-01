@@ -109,8 +109,8 @@ __text:00000000000147B4 08 F1 4F 39                 LDRB            W8, [X8,#dis
     */
     uint32_t adrp_offset = results[2] + 8;
 
-    uint32_t adrp_instruction = reinterpret_cast<uint32_t*>(&buffer.data()[adrp_offset])[0];
-    uint32_t ldrb_instruction = reinterpret_cast<uint32_t*>(&buffer.data()[adrp_offset + 4])[0];
+    uint32_t adrp_instruction = reinterpret_cast<uint32_t*>(&buffer[adrp_offset])[0];
+    uint32_t ldrb_instruction = reinterpret_cast<uint32_t*>(&buffer[adrp_offset + 4])[0];
 
     // Decode ADRP: PC-relative page address
     // immlo = bits [30:29], immhi = bits [23:5]

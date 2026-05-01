@@ -1,5 +1,6 @@
 #include "rosetta_core/X87IR.h"
 
+#include <algorithm>
 #include <cstring>
 #include <utility>
 
@@ -939,15 +940,13 @@ int peak_live_gprs(const Context& ctx) {
         }
 
         int node_total = pinned + held + transient;
-        if (node_total > peak) { peak = node_total;
-}
+        peak = std::max(node_total, peak);
     }
 
     // Epilogue: if top_delta != 0, needs 2 more transient GPRs (Wd_tmp2 + Wd_tagw)
     if (ctx.top_delta != 0) {
         int epilogue_total = pinned + held + 2;
-        if (epilogue_total > peak) { peak = epilogue_total;
-}
+        peak = std::max(epilogue_total, peak);
     }
 
     return peak;
@@ -1024,8 +1023,7 @@ int peak_live_fprs(const Context& ctx) {
         if (produces_fpr) {
             live++;
             holding[i] = true;
-            if (live > peak) { peak = live;
-}
+            peak = std::max(live, peak);
         }
 
         // StoreF32 allocates a transient Ds_tmp (fcvt d→s narrowing) that is

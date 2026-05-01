@@ -373,7 +373,7 @@ auto translate_fbld(TranslationResult* a1, IRInstr* a2) -> void {
 
     // digits 15..0 from Xlow (bytes 7..0, MSB first).
     for (int byte_idx = 7; byte_idx >= 0; byte_idx--) {
-        const int hi_lsb = byte_idx * 8 + 4;
+        const int hi_lsb = (byte_idx * 8) + 4;
         const int lo_lsb = byte_idx * 8;
         // hi nibble
         emit_bitfield(buf, /*is_64=*/1, /*UBFM=*/2, /*N=*/1,

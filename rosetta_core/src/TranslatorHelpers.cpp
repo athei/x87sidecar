@@ -302,8 +302,7 @@ auto compute_mem_operand_address(TranslationResult& result, bool is_64bit, IROpe
                 return scratch_reg;
             }
             return result_reg;
-        } else {
-            // No displacement: result = base + index*scale
+        }             // No displacement: result = base + index*scale
             if (dst_reg == GPR::XZR) {
                 result_reg = alloc_scratch_gpr(result);
 }
@@ -311,7 +310,7 @@ auto compute_mem_operand_address(TranslationResult& result, bool is_64bit, IROpe
             emit_add_sub_shifted_reg(result.insn_buf, is_64bit, 0, 0, 0, index_idx,
                                      operand->mem.shift_amount, base_idx, result_reg);
             return result_reg;
-        }
+       
     }
 
     // =========================================================================
@@ -357,8 +356,7 @@ auto compute_mem_operand_address(TranslationResult& result, bool is_64bit, IROpe
             emit_add_imm(result.insn_buf, is_64bit, /*is_sub=*/!is_add, 0, imm_shift,
                          (int64_t)imm_value, base_idx, result_reg);
             return result_reg;
-        } else {
-            // No displacement
+        }             // No displacement
             if (!is_64bit) {
                 // 32-bit: must emit a W-register MOV to zero-extend properly.
                 // Returning the source register directly is incorrect here.
@@ -371,7 +369,7 @@ auto compute_mem_operand_address(TranslationResult& result, bool is_64bit, IROpe
             }
             // 64-bit: can return the register number directly — no instruction needed.
             return base_idx;
-        }
+       
     }
 
     // =========================================================================
