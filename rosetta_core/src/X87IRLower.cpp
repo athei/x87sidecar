@@ -109,7 +109,7 @@ static void emit_rc_preamble(AssemblerBuffer& buf, int Xbase, int Wd_out) {
     // LDRH Wd_out, [Xbase, #0]  — control_word is at offset 0x00
     emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*LDR*/1, /*imm12=*/0, Xbase, Wd_out);
     // UBFX Wd_out, Wd_out, #10, #2  — extract RC field (bits 11:10)
-    emit_bitfield(buf, /*is_64=*/0, /*UBFM*/2, /*N*/0, /*immr*/10, /*imms*/11, Wd_out, Wd_out);
+    emit_bitfield(buf, /*is_64bit=*/0, /*UBFM*/2, /*N*/0, /*immr*/10, /*imms*/11, Wd_out, Wd_out);
 }
 
 // ── Cached RC dispatch for FISTP/FIST ──────────────────────────────────────
@@ -160,16 +160,16 @@ static void emit_frint_dispatch_cached(AssemblerBuffer& buf, int Dd, int Dn,
     emit_add_imm(buf, 0, 1, 0, 0, 1, Wd_rc_scratch, Wd_rc_scratch);
     emit_cbz(buf, 0, 0, Wd_rc_scratch, 7);
     // RC=3: FRINTZ (truncate) — fall-through
-    emit_fp_dp1(buf, 1, /*FRINTZ=*/11, Dd, Dn);
+    emit_fp_dp1(buf, 1, /*opcode=*/11 /*FRINTZ*/, Dd, Dn);
     emit_b(buf, 6);
     // RC=0: FRINTN (nearest)
-    emit_fp_dp1(buf, 1, /*FRINTN=*/8, Dd, Dn);
+    emit_fp_dp1(buf, 1, /*opcode=*/8 /*FRINTN*/, Dd, Dn);
     emit_b(buf, 4);
     // RC=1: FRINTM (floor)
-    emit_fp_dp1(buf, 1, /*FRINTM=*/10, Dd, Dn);
+    emit_fp_dp1(buf, 1, /*opcode=*/10 /*FRINTM*/, Dd, Dn);
     emit_b(buf, 2);
     // RC=2: FRINTP (ceil)
-    emit_fp_dp1(buf, 1, /*FRINTP=*/9, Dd, Dn);
+    emit_fp_dp1(buf, 1, /*opcode=*/9 /*FRINTP*/, Dd, Dn);
 }
 
 // ── Rounding-mode dispatch for FISTP/FIST ──────────────────────────────────
@@ -185,18 +185,18 @@ static void emit_rcmode_dispatch(AssemblerBuffer& buf, int Wd_int, int Dd_val,
                             Wd_int, Dd_val);
     } else {
         // [0] LDRH Wd_rc, [Xbase, #0]  ; control_word
-        emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*LDR*/ 1, /*imm12=*/0, Xbase, Wd_rc);
+        emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/1 /*LDR*/, /*imm12=*/0, Xbase, Wd_rc);
         // [1] UBFX Wd_rc, Wd_rc, #10, #2
-        emit_bitfield(buf, /*is_64=*/0, /*UBFM*/ 2, /*N*/ 0, /*immr*/ 10, /*imms*/ 11,
+        emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/2 /*UBFM*/, /*N*/ 0, /*immr*/ 10, /*imms*/ 11,
                       Wd_rc, Wd_rc);
         // [2] CBZ Wd_rc, +7 → [9] FCVTNS
         emit_cbz(buf, /*is_64bit=*/0, /*is_nz=*/0, Wd_rc, 7);
         // [3] SUB Wd_rc, Wd_rc, #1
-        emit_add_imm(buf, /*is_64=*/0, /*is_sub*/ 1, /*S*/ 0, /*shift*/ 0, 1, Wd_rc, Wd_rc);
+        emit_add_imm(buf, /*is_64bit=*/0, /*is_sub*/ 1, /*S*/ 0, /*shift*/ 0, 1, Wd_rc, Wd_rc);
         // [4] CBZ Wd_rc, +7 → [11] FCVTMS
         emit_cbz(buf, /*is_64bit=*/0, /*is_nz=*/0, Wd_rc, 7);
         // [5] SUB Wd_rc, Wd_rc, #1
-        emit_add_imm(buf, /*is_64=*/0, /*is_sub*/ 1, /*S*/ 0, /*shift*/ 0, 1, Wd_rc, Wd_rc);
+        emit_add_imm(buf, /*is_64bit=*/0, /*is_sub*/ 1, /*S*/ 0, /*shift*/ 0, 1, Wd_rc, Wd_rc);
         // [6] CBZ Wd_rc, +7 → [13] FCVTPS
         emit_cbz(buf, /*is_64bit=*/0, /*is_nz=*/0, Wd_rc, 7);
         // [7] FCVTZS (rmode=3)  RC=3 truncate
@@ -291,10 +291,10 @@ void lower(Context& ctx, TranslationResult* result) {
             int addr = compute_operand_address(*result, true, n.mem_operand, GPR::XZR);
             int Wd_val = alloc_free_gpr(*result);
             // LDRSH Wd_val, [addr] — sign-extending load
-            emit_ldrs(buf, /*is_64=*/0, /*size=S16*/1, Wd_val, addr);
+            emit_ldrs(buf, /*is_64bit=*/0, /*size=S16*/1, Wd_val, addr);
             free_gpr(*result, addr);
             // SCVTF Dd, Wd_val
-            emit_scvtf(buf, /*is_64_int=*/0, /*ftype=f64*/1, Dd, Wd_val);
+            emit_scvtf(buf, /*is_64bit_int=*/0, /*ftype=f64*/1, Dd, Wd_val);
             free_gpr(*result, Wd_val);
             break;
         }
@@ -306,7 +306,7 @@ void lower(Context& ctx, TranslationResult* result) {
             emit_ldr_imm(buf, /*size=S32*/2, Wd_val, addr, 0);
             free_gpr(*result, addr);
             // SXTW + SCVTF: sign-extend 32→64 then convert
-            emit_scvtf(buf, /*is_64_int=*/0, /*ftype=f64*/1, Dd, Wd_val);
+            emit_scvtf(buf, /*is_64bit_int=*/0, /*ftype=f64*/1, Dd, Wd_val);
             free_gpr(*result, Wd_val);
             break;
         }
@@ -458,7 +458,7 @@ void lower(Context& ctx, TranslationResult* result) {
 
             if (g_rosetta_config && g_rosetta_config->fast_round) {
                 // Fast path: RC=0 → FRINTN
-                emit_fp_dp1(buf, /*type=*/1, /*FRINTN=*/8, Dd, Dn);
+                emit_fp_dp1(buf, /*type=*/1, /*opcode=*/8 /*FRINTN*/, Dd, Dn);
             } else if (Wd_rc_cached >= 0) {
                 // RC caching: emit preamble on first use, then reuse cached RC.
                 if (!rc_cache_valid) {
@@ -479,16 +479,16 @@ void lower(Context& ctx, TranslationResult* result) {
                 emit_add_imm(buf, 0, 1, 0, 0, 1, Wd_rc, Wd_rc);       // SUB 1
                 emit_cbz(buf, 0, 0, Wd_rc, 7);                         // RC==2 → FRINTP
                 // RC=3: FRINTZ (truncate) — fall-through
-                emit_fp_dp1(buf, 1, /*FRINTZ=*/11, Dd, Dn);
+                emit_fp_dp1(buf, 1, /*opcode=*/11 /*FRINTZ*/, Dd, Dn);
                 emit_b(buf, 6);
                 // RC=0: FRINTN (nearest)
-                emit_fp_dp1(buf, 1, /*FRINTN=*/8, Dd, Dn);
+                emit_fp_dp1(buf, 1, /*opcode=*/8 /*FRINTN*/, Dd, Dn);
                 emit_b(buf, 4);
                 // RC=1: FRINTM (floor)
-                emit_fp_dp1(buf, 1, /*FRINTM=*/10, Dd, Dn);
+                emit_fp_dp1(buf, 1, /*opcode=*/10 /*FRINTM*/, Dd, Dn);
                 emit_b(buf, 2);
                 // RC=2: FRINTP (ceil)
-                emit_fp_dp1(buf, 1, /*FRINTP=*/9, Dd, Dn);
+                emit_fp_dp1(buf, 1, /*opcode=*/9 /*FRINTP*/, Dd, Dn);
                 free_gpr(*result, Wd_rc);
             }
             break;
@@ -613,9 +613,9 @@ void lower(Context& ctx, TranslationResult* result) {
             int Wd_v = alloc_free_gpr(*result);
             int Wd_c = alloc_free_gpr(*result);
 
-            emit_cset(buf, /*is_64bit=*/0, /*EQ=*/0, Wd_z);   // 1 if equal
-            emit_cset(buf, /*is_64bit=*/0, /*VS=*/6, Wd_v);   // 1 if unordered
-            emit_cset(buf, /*is_64bit=*/0, /*CS=*/2, Wd_c);   // 1 if carry set
+            emit_cset(buf, /*is_64bit=*/0, /*cond=*/0 /*EQ*/, Wd_z);   // 1 if equal
+            emit_cset(buf, /*is_64bit=*/0, /*cond=*/6 /*VS*/, Wd_v);   // 1 if unordered
+            emit_cset(buf, /*is_64bit=*/0, /*cond=*/2 /*CS*/, Wd_c);   // 1 if carry set
 
             // Z_new = Z | V  (equal or unordered → ZF)
             emit_logical_shifted_reg(buf, 0, /*ORR*/1, 0, /*LSL*/0, Wd_v, 0, Wd_z, Wd_z);
@@ -623,7 +623,7 @@ void lower(Context& ctx, TranslationResult* result) {
             emit_logical_shifted_reg(buf, 0, /*AND*/0, /*N=invert rhs*/1, /*LSL*/0, Wd_v, 0, Wd_c, Wd_c);
 
             // Pack NZCV: bit30=ZF, bit29=CF, bit28=V(PF for FCMOV), bit26=PF
-            emit_bitfield(buf, /*is_64=*/0, /*UBFM=*/2, /*N=*/0,
+            emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/2 /*UBFM*/, /*N=*/0,
                           /*immr=*/2, /*imms=*/1, Wd_z, Wd_z);
             emit_logical_shifted_reg(buf, 0, /*ORR*/1, 0, /*LSL*/0, Wd_c, 29, Wd_z, Wd_z);
             emit_logical_shifted_reg(buf, 0, /*ORR*/1, 0, /*LSL*/0, Wd_v, 28, Wd_z, Wd_z);

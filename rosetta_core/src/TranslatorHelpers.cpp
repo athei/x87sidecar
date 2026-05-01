@@ -135,7 +135,7 @@ auto emit_load_immediate(TranslationResult& result, int is_64bit, uint64_t value
     for (int i = hi_chunk - 1; i >= lo_chunk; i--) {
         auto chunk = static_cast<uint16_t>(v >> (16 * i));
         if (chunk != trivial) {
-            emit_movn(result.insn_buf, is_64bit, /*MOVK=*/3, i, chunk, reg);
+            emit_movn(result.insn_buf, is_64bit, /*opc=*/3 /*MOVK*/, i, chunk, reg);
 }
     }
 
@@ -146,7 +146,7 @@ auto emit_load_immediate_no_xzr(TranslationResult& result, int is_64bit, uint64_
                                 int dst_reg) -> void {
     int result_reg = emit_load_immediate(result, is_64bit, value, dst_reg);
     if (result_reg == GPR::XZR) {
-        emit_movn(result.insn_buf, is_64bit, /*MOVZ=*/2, 0, 0, dst_reg);
+        emit_movn(result.insn_buf, is_64bit, /*opc=*/2 /*MOVZ*/, 0, 0, dst_reg);
     } else {
         assert(result_reg == dst_reg && "unexpected emit_load_immediate result register");
     }
@@ -282,7 +282,7 @@ auto compute_mem_operand_address(TranslationResult& result, bool is_64bit, IROpe
                              static_cast<int64_t>(imm_value), base_idx, result_reg);
                 // scratch_reg = result_reg + index*scale
                 emit_add_sub_shifted_reg(result.insn_buf, is_64bit,
-                                         /*is_sub=*/0, /*set_flags=*/0,
+                                         /*is_sub=*/0, /*is_set_flags=*/0,
                                          /*shift_type=*/0 /*LSL*/, index_idx,
                                          operand->mem.shift_amount, result_reg, scratch_reg);
             } else {

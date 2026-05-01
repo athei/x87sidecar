@@ -206,7 +206,7 @@ void emit_apply_qn_sign(TranslationResult& a1, AssemblerBuffer& buf,
                          int Dy_in, int Xqn, int Dd_out) {
     const int Xy = alloc_free_gpr(a1);
     emit_fmov_d_to_x(buf, Xy, Dy_in);
-    emit_logical_shifted_reg(buf, /*is_64=*/1, /*EOR=*/2, /*n=*/0,
+    emit_logical_shifted_reg(buf, /*is_64bit=*/1, /*opc=*/2 /*EOR*/, /*n=*/0,
                              /*shift_type=LSL*/0, /*Rm=*/Xqn,
                              /*shift_amount=*/63, /*Rn=*/Xy, /*Rd=*/Xy);
     emit_fmov_x_to_d(buf, Dd_out, Xy);
@@ -398,14 +398,14 @@ void emit_inline_f2xm1(TranslationResult& a1, AssemblerBuffer& buf,
         //      Dscale = bits_to_double(Xtmp1)
         //      free Xtmp1
         const int Xtmp1 = alloc_free_gpr(a1);
-        emit_and_imm(buf, /*is_64=*/1, Xtmp1, /*N=*/1, /*immr=*/0, /*imms=*/6, Xu);  // Xtmp1 = Xu & 0x7f
+        emit_and_imm(buf, /*is_64bit=*/1, Xtmp1, /*N=*/1, /*immr=*/0, /*imms=*/6, Xu);  // Xtmp1 = Xu & 0x7f
         const int Xtmp2 = alloc_free_gpr(a1);
-        emit_add_imm(buf, /*is_64=*/1, /*is_sub=*/0, /*is_set_flags=*/0, /*shift=*/0,
+        emit_add_imm(buf, /*is_64bit=*/1, /*is_sub=*/0, /*is_set_flags=*/0, /*shift=*/0,
                      /*imm12=*/ConstOff::ExpTableByteOff, Xconst, Xtmp2);            // Xtmp2 = Xconst + ExpTableByteOff
         emit_ldr_str_reg(buf, /*size=*/3, /*is_fp=*/0, /*opc=LDR*/1, /*Rm=*/Xtmp1,
                          /*shift=*/1, /*Rn=*/Xtmp2, /*Rt=*/Xtmp1);                   // LDR Xtmp1, [Xtmp2, Xtmp1, LSL #3]
         free_gpr(a1, Xtmp2);
-        emit_add_sub_shifted_reg(buf, /*is_64=*/1, /*is_sub=*/0, /*is_set_flags=*/0,
+        emit_add_sub_shifted_reg(buf, /*is_64bit=*/1, /*is_sub=*/0, /*is_set_flags=*/0,
                                   /*shift_type=LSL*/0, /*Rm=*/Xu,
                                   /*shift_amount=*/45, /*Rn=*/Xtmp1, /*Rd=*/Xtmp1);  // Xtmp1 += Xu << 45
         const int Dscale = alloc_free_fpr(a1);
@@ -426,13 +426,13 @@ void emit_inline_f2xm1(TranslationResult& a1, AssemblerBuffer& buf,
 
         //    idx = (u & 0x3f) + 24·is_neg
         const int Xidx = alloc_free_gpr(a1);
-        emit_and_imm(buf, /*is_64=*/1, Xidx, /*N=*/1, /*immr=*/0, /*imms=*/5, Xu);   // Xidx = Xu & 0x3f
+        emit_and_imm(buf, /*is_64bit=*/1, Xidx, /*N=*/1, /*immr=*/0, /*imms=*/5, Xu);   // Xidx = Xu & 0x3f
         free_gpr(a1, Xu);
 
         const int Xneg = alloc_free_gpr(a1);
-        emit_cset(buf, /*is_64=*/1, /*cond=LT*/11, Xneg);                            // Xneg = (x < rnd2zero) ? 1 : 0
-        emit_add_sub_shifted_reg(buf, 1, 0, 0, /*LSL*/0, Xneg, /*amount=*/4, Xidx, Xidx);  // Xidx += 16·neg
-        emit_add_sub_shifted_reg(buf, 1, 0, 0, /*LSL*/0, Xneg, /*amount=*/3, Xidx, Xidx);  // Xidx +=  8·neg → +24·neg
+        emit_cset(buf, /*is_64bit=*/1, /*cond=LT*/11, Xneg);                            // Xneg = (x < rnd2zero) ? 1 : 0
+        emit_add_sub_shifted_reg(buf, 1, 0, 0, /*LSL*/0, Xneg, /*shift_amount=*/4, Xidx, Xidx);  // Xidx += 16·neg
+        emit_add_sub_shifted_reg(buf, 1, 0, 0, /*LSL*/0, Xneg, /*shift_amount=*/3, Xidx, Xidx);  // Xidx +=  8·neg → +24·neg
         free_gpr(a1, Xneg);
 
         // 9. scalem1_b = scalem1_table[idx]
@@ -489,7 +489,7 @@ void emit_inline_log2(TranslationResult& a1, AssemblerBuffer& buf,
     {
         const int Xtmp = alloc_free_gpr(a1);
         emit_ldr_imm(buf, /*size=*/3, Xtmp, Xconst, ConstOff::Log2Off);
-        emit_subs_reg(buf, /*is_64=*/1, Xu, Xtmp, Xu_off);   // Xu_off = Xu - off
+        emit_subs_reg(buf, /*is_64bit=*/1, Xu, Xtmp, Xu_off);   // Xu_off = Xu - off
         free_gpr(a1, Xtmp);
     }
 
@@ -499,7 +499,7 @@ void emit_inline_log2(TranslationResult& a1, AssemblerBuffer& buf,
     {
         const int Xk = alloc_free_gpr(a1);
         // ASR Xk, Xu_off, #52  — encoded as SBFM Xk, Xu_off, #52, #63.
-        emit_bitfield(buf, /*is_64=*/1, /*opc=SBFM*/0, /*N=*/1,
+        emit_bitfield(buf, /*is_64bit=*/1, /*opc=SBFM*/0, /*N=*/1,
                       /*immr=*/52, /*imms=*/63, Xu_off, Xk);
         emit_scvtf_x_to_d(buf, Dkd, Xk);
         free_gpr(a1, Xk);
@@ -511,10 +511,10 @@ void emit_inline_log2(TranslationResult& a1, AssemblerBuffer& buf,
     {
         const int Xtmp = alloc_free_gpr(a1);
         emit_ldr_imm(buf, /*size=*/3, Xtmp, Xconst, ConstOff::Log2SignExpMask);
-        emit_logical_shifted_reg(buf, /*is_64=*/1, /*AND=*/0, /*n=*/0,
+        emit_logical_shifted_reg(buf, /*is_64bit=*/1, /*opc=*/0 /*AND*/, /*n=*/0,
                                   /*shift_type=LSL*/0, /*Rm=*/Xtmp,
                                   /*shift_amount=*/0, /*Rn=*/Xu_off, /*Rd=*/Xtmp);  // Xtmp = u_off & mask
-        emit_subs_reg(buf, /*is_64=*/1, Xu, Xtmp, Xu);                              // Xu = Xu - Xtmp = iz
+        emit_subs_reg(buf, /*is_64bit=*/1, Xu, Xtmp, Xu);                              // Xu = Xu - Xtmp = iz
         free_gpr(a1, Xtmp);
     }
     const int Dz = alloc_free_fpr(a1);
@@ -524,7 +524,7 @@ void emit_inline_log2(TranslationResult& a1, AssemblerBuffer& buf,
     // 4. idx = (u_off >> 45) & 0x7f
     const int Xidx = alloc_free_gpr(a1);
     // UBFM Xidx, Xu_off, #45, #51  — extracts bits 45..51 right-aligned.
-    emit_bitfield(buf, /*is_64=*/1, /*opc=UBFM*/2, /*N=*/1,
+    emit_bitfield(buf, /*is_64bit=*/1, /*opc=UBFM*/2, /*N=*/1,
                   /*immr=*/45, /*imms=*/51, Xu_off, Xidx);
     free_gpr(a1, Xu_off);
 
@@ -532,7 +532,7 @@ void emit_inline_log2(TranslationResult& a1, AssemblerBuffer& buf,
     const int Dinvc = alloc_free_fpr(a1);
     {
         const int Xtbl = alloc_free_gpr(a1);
-        emit_add_imm(buf, /*is_64=*/1, /*is_sub=*/0, /*is_set_flags=*/0, /*shift=*/0,
+        emit_add_imm(buf, /*is_64bit=*/1, /*is_sub=*/0, /*is_set_flags=*/0, /*shift=*/0,
                      /*imm12=*/ConstOff::Log2InvcByteOff, Xconst, Xtbl);
         emit_fldr_reg(buf, /*size=*/3, Dinvc, Xtbl, Xidx, /*shift=*/1);
         free_gpr(a1, Xtbl);
@@ -540,7 +540,7 @@ void emit_inline_log2(TranslationResult& a1, AssemblerBuffer& buf,
     const int Dlog2c = alloc_free_fpr(a1);
     {
         const int Xtbl = alloc_free_gpr(a1);
-        emit_add_imm(buf, /*is_64=*/1, /*is_sub=*/0, /*is_set_flags=*/0, /*shift=*/0,
+        emit_add_imm(buf, /*is_64bit=*/1, /*is_sub=*/0, /*is_set_flags=*/0, /*shift=*/0,
                      /*imm12=*/ConstOff::Log2Log2cByteOff, Xconst, Xtbl);
         emit_fldr_reg(buf, /*size=*/3, Dlog2c, Xtbl, Xidx, /*shift=*/1);
         free_gpr(a1, Xtbl);
@@ -679,12 +679,12 @@ void emit_inline_fpatan(TranslationResult& a1, AssemblerBuffer& buf,
         const int Xtmp = alloc_free_gpr(a1);
         emit_fmov_d_to_x(buf, Xsign_xy, Dx);
         emit_fmov_d_to_x(buf, Xtmp, Dy);
-        emit_logical_shifted_reg(buf, /*is_64=*/1, /*EOR=*/2, /*n=*/0,
+        emit_logical_shifted_reg(buf, /*is_64bit=*/1, /*opc=*/2 /*EOR*/, /*n=*/0,
                                   /*shift_type=LSL*/0, /*Rm=*/Xtmp,
                                   /*shift_amount=*/0, /*Rn=*/Xsign_xy, /*Rd=*/Xsign_xy);
         // AND Xsign_xy, Xsign_xy, #0x8000000000000000  (sign bit only).
         // Bitmask immediate: N=1, immr=1, imms=0  (1 one, rotated right by 1).
-        emit_and_imm(buf, /*is_64=*/1, Xsign_xy, /*N=*/1, /*immr=*/1, /*imms=*/0, Xsign_xy);
+        emit_and_imm(buf, /*is_64bit=*/1, Xsign_xy, /*N=*/1, /*immr=*/1, /*imms=*/0, Xsign_xy);
         free_gpr(a1, Xtmp);
     }
 
@@ -777,7 +777,7 @@ void emit_inline_fpatan(TranslationResult& a1, AssemblerBuffer& buf,
     {
         const int Xret = alloc_free_gpr(a1);
         emit_fmov_d_to_x(buf, Xret, Dz);
-        emit_logical_shifted_reg(buf, /*is_64=*/1, /*EOR=*/2, /*n=*/0,
+        emit_logical_shifted_reg(buf, /*is_64bit=*/1, /*opc=*/2 /*EOR*/, /*n=*/0,
                                   /*shift_type=LSL*/0, /*Rm=*/Xsign_xy,
                                   /*shift_amount=*/0, /*Rn=*/Xret, /*Rd=*/Xret);
         emit_fmov_x_to_d(buf, /*Dd=*/0, Xret);
@@ -947,7 +947,7 @@ void emit_inline_fptan(TranslationResult& a1, AssemblerBuffer& buf,
     emit_fneg_f64(buf, Dneg_d, Dd);
 
     // TST Xqi, #1   (encoded as ANDS XZR, Xqi, #1)
-    emit_logical_imm(buf, /*is_64=*/1, /*opc=ANDS*/3, /*N=*/1,
+    emit_logical_imm(buf, /*is_64bit=*/1, /*opc=ANDS*/3, /*N=*/1,
                      /*immr=*/0, /*imms=*/0, /*Rn=*/Xqi, /*Rd=*/31);
     free_gpr(a1, Xqi);
 

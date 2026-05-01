@@ -248,7 +248,7 @@ auto translate_fld(TranslationResult* a1, IRInstr* a2) -> void {
         emit_ldr_imm(buf, /*size=*/3, Xmant, Xaddr, /*imm12=*/0);
         const int Wexp  = alloc_free_gpr(*a1);
         // LDRH Wexp, [Xaddr, #8] — imm12 scales by 2 for halfword.
-        emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*LDR=*/1,
+        emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/1 /*LDR*/,
                          /*imm12=*/4, Xaddr, Wexp);
         free_gpr(*a1, Xaddr);
 
@@ -348,7 +348,7 @@ auto translate_fbld(TranslationResult* a1, IRInstr* a2) -> void {
     const int Wten  = alloc_free_gpr(*a1);
 
     // Wten = 10
-    emit_movn(buf, /*is_64=*/0, /*MOVZ=*/2, /*hw=*/0, /*imm=*/10, Wten);
+    emit_movn(buf, /*is_64bit=*/0, /*opc=*/2 /*MOVZ*/, /*hw=*/0, /*imm16=*/10, Wten);
 
     // Inline 64-bit MADD encoder: Xd = Xn * Xm + Xa
     //   1 0 0 11011 000 Rm 0 Ra Rn Rd  (sf=1)
@@ -363,11 +363,11 @@ auto translate_fbld(TranslationResult* a1, IRInstr* a2) -> void {
 
     // Initialise Xacc = digit_17 (high nibble of byte 8 = bits 4..7 of Whigh).
     //   UBFX Wacc, Whigh, #4, #4
-    emit_bitfield(buf, /*is_64=*/0, /*UBFM=*/2, /*N=*/0,
+    emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/2 /*UBFM*/, /*N=*/0,
                   /*immr=*/4, /*imms=*/7, Whigh, Xacc);
 
     // digit_16 = Whigh[3:0]
-    emit_bitfield(buf, /*is_64=*/0, /*UBFM=*/2, /*N=*/0,
+    emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/2 /*UBFM*/, /*N=*/0,
                   /*immr=*/0, /*imms=*/3, Whigh, Wd_tmp);
     emit_madd64(Xacc, Xacc, Wten, Wd_tmp);
 
@@ -376,12 +376,12 @@ auto translate_fbld(TranslationResult* a1, IRInstr* a2) -> void {
         const int hi_lsb = (byte_idx * 8) + 4;
         const int lo_lsb = byte_idx * 8;
         // hi nibble
-        emit_bitfield(buf, /*is_64=*/1, /*UBFM=*/2, /*N=*/1,
+        emit_bitfield(buf, /*is_64bit=*/1, /*opc=*/2 /*UBFM*/, /*N=*/1,
                       /*immr=*/static_cast<int8_t>(hi_lsb), /*imms=*/static_cast<int8_t>(hi_lsb + 3),
                       Xlow, Wd_tmp);
         emit_madd64(Xacc, Xacc, Wten, Wd_tmp);
         // lo nibble
-        emit_bitfield(buf, /*is_64=*/1, /*UBFM=*/2, /*N=*/1,
+        emit_bitfield(buf, /*is_64bit=*/1, /*opc=*/2 /*UBFM*/, /*N=*/1,
                       /*immr=*/static_cast<int8_t>(lo_lsb), /*imms=*/static_cast<int8_t>(lo_lsb + 3),
                       Xlow, Wd_tmp);
         emit_madd64(Xacc, Xacc, Wten, Wd_tmp);
@@ -402,12 +402,12 @@ auto translate_fbld(TranslationResult* a1, IRInstr* a2) -> void {
     //   ORR  Xbits, Xbits, Xsign, LSL #63
     //   FMOV Dd_val, Xbits             ; bits back to FPR
     const int Wsign = alloc_free_gpr(*a1);
-    emit_bitfield(buf, /*is_64=*/0, /*UBFM=*/2, /*N=*/0,
+    emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/2 /*UBFM*/, /*N=*/0,
                   /*immr=*/15, /*imms=*/15, Whigh, Wsign);
     free_gpr(*a1, Whigh);
     // Reuse Xacc as the bits-shuttle GPR — its previous value is no longer needed.
     emit_fmov_d_to_x(buf, Xacc, Dd_val);
-    emit_logical_shifted_reg(buf, /*is_64=*/1, /*ORR=*/1, /*n=*/0,
+    emit_logical_shifted_reg(buf, /*is_64bit=*/1, /*opc=*/1 /*ORR*/, /*n=*/0,
                              /*shift_type=LSL=*/0, /*Rm=*/Wsign,
                              /*shift_amount=*/63, /*Rn=*/Xacc, /*Rd=*/Xacc);
     emit_fmov_x_to_d(buf, Dd_val, Xacc);
@@ -1584,7 +1584,7 @@ auto translate_fxam(TranslationResult* a1, IRInstr* /*a2*/) -> void {
     const int Wd_b = alloc_free_gpr(*a1);
 
     LogicalImmEncoding enc_mantmask;
-    is_bitmask_immediate(/*is_64=*/true, 0x000FFFFFFFFFFFFFULL, enc_mantmask);
+    is_bitmask_immediate(/*is_64bit=*/true, 0x000FFFFFFFFFFFFFULL, enc_mantmask);
 
     // Inline raw emitters — no helpers exist for ANDS-imm, CSEL, LSRV.
     auto emit_ands_imm = [&](int is_64, int N, int immr, int imms, int Rn, int Rd) {
@@ -1619,62 +1619,62 @@ auto translate_fxam(TranslationResult* a1, IRInstr* /*a2*/) -> void {
     };
 
     // Default w_class = 0x0400  (Normal).
-    emit_movn(buf, 0, /*MOVZ=*/2, /*hw=*/0, /*imm=*/0x0400, Wd_class);
+    emit_movn(buf, 0, /*opc=*/2 /*MOVZ*/, /*hw=*/0, /*imm16=*/0x0400, Wd_class);
 
     // ── Phase A: if exp == 0 → either Zero (0x4000) or Denormal (0x4400) ────
     emit_movn(buf, 0, 2, 0, 0x4000, Wd_a);                  // w_a = zero
     emit_movn(buf, 0, 2, 0, 0x4400, Wd_b);                  // w_b = denorm
-    emit_ands_imm(/*is_64=*/1, enc_mantmask.N,
+    emit_ands_imm(/*is_64bit=*/1, enc_mantmask.N,
                   enc_mantmask.immr, enc_mantmask.imms, Xv, /*Rd=*/31);
-    emit_csel(/*is_64=*/0, Wd_a, /*Rn=*/Wd_a, /*Rm=*/Wd_b, /*EQ=*/0);  // mant_zero ? a : b
+    emit_csel(/*is_64bit=*/0, Wd_a, /*Rn=*/Wd_a, /*Rm=*/Wd_b, /*cond=*/0 /*EQ*/);  // mant_zero ? a : b
     // Re-extract exp into Wd_b (UBFX is_64=1 so Xv→Wb's low 32 bits)
-    emit_bitfield(buf, /*is_64=*/1, /*UBFM=*/2, /*N=*/1,
+    emit_bitfield(buf, /*is_64bit=*/1, /*opc=*/2 /*UBFM*/, /*N=*/1,
                   /*immr=*/52, /*imms=*/62, Xv, Wd_b);
-    emit_add_imm(buf, /*is_64=*/0, /*is_sub=*/1, /*is_set_flags=*/1,
+    emit_add_imm(buf, /*is_64bit=*/0, /*is_sub=*/1, /*is_set_flags=*/1,
                  /*shift=*/0, /*imm12=*/0, Wd_b, /*Rd=*/31);             // CMP w_b, #0
-    emit_csel(0, Wd_class, Wd_a, Wd_class, /*EQ=*/0);
+    emit_csel(0, Wd_class, Wd_a, Wd_class, /*cond=*/0 /*EQ*/);
 
     // ── Phase B: if exp == 0x7FF → Inf (0x0500) or NaN (0x0100) ─────────────
     emit_movn(buf, 0, 2, 0, 0x0500, Wd_a);                  // w_a = inf
     emit_movn(buf, 0, 2, 0, 0x0100, Wd_b);                  // w_b = nan
     emit_ands_imm(1, enc_mantmask.N,
                   enc_mantmask.immr, enc_mantmask.imms, Xv, 31);
-    emit_csel(0, Wd_a, Wd_a, Wd_b, /*EQ=*/0);
+    emit_csel(0, Wd_a, Wd_a, Wd_b, /*cond=*/0 /*EQ*/);
     emit_bitfield(buf, 1, 2, 1, 52, 62, Xv, Wd_b);          // re-extract exp
     emit_add_imm(buf, 0, 1, 1, 0, 0x7FF, Wd_b, 31);          // CMP w_b, #0x7FF
-    emit_csel(0, Wd_class, Wd_a, Wd_class, /*EQ=*/0);
+    emit_csel(0, Wd_class, Wd_a, Wd_class, /*cond=*/0 /*EQ*/);
 
     // ── Phase C: if tag(top) == 3 → Empty override (0x4100) ─────────────────
-    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*LDR=*/1,
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/1 /*LDR*/,
                      kX87TagWordImm12, Xbase, Wd_a);          // w_a = tag_word
     // w_b = w_top << 1
     emit_bitfield(buf, 0, 2, 0, 31, 30, Wd_top, Wd_b);
     emit_lsrv(0, Wd_a, Wd_a, Wd_b);
     LogicalImmEncoding enc3;
-    is_bitmask_immediate(/*is_64=*/false, 3, enc3);
+    is_bitmask_immediate(/*is_64bit=*/false, 3, enc3);
     emit_and_imm(buf, 0, Wd_a, enc3.N, enc3.immr, enc3.imms, Wd_a);
     emit_add_imm(buf, 0, 1, 1, 0, 3, Wd_a, 31);              // CMP w_a, #3
     emit_movn(buf, 0, 2, 0, 0x4100, Wd_a);                  // w_a = empty
-    emit_csel(0, Wd_class, Wd_a, Wd_class, /*EQ=*/0);
+    emit_csel(0, Wd_class, Wd_a, Wd_class, /*cond=*/0 /*EQ*/);
 
     // ── Phase D: OR sign bit into w_class at position 9 (C1). ───────────────
     // Extract only bit 63 (avoids leaking exp bits into C0/C2/C3 through the
     // shift), then OR-LSL by 9 into w_class. We reuse Wd_a as the 1-bit
     // scratch since the previous mov to it (#0x4100) is no longer needed.
-    emit_bitfield(buf, /*is_64=*/1, /*UBFM=*/2, /*N=*/1,
+    emit_bitfield(buf, /*is_64bit=*/1, /*opc=*/2 /*UBFM*/, /*N=*/1,
                   /*immr=*/63, /*imms=*/63, Xv, Wd_a);
-    emit_logical_shifted_reg(buf, /*is_64=*/0, /*ORR=*/1, /*N=*/0, /*LSL=*/0,
-                             /*Rm=*/Wd_a, /*amt=*/9,
+    emit_logical_shifted_reg(buf, /*is_64bit=*/0, /*opc=*/1 /*ORR*/, /*N=*/0, /*shift_type=*/0 /*LSL*/,
+                             /*Rm=*/Wd_a, /*shift_amount=*/9,
                              /*Rn=*/Wd_class, /*Rd=*/Wd_class);
     free_gpr(*a1, Xv);
 
     // ── Phase E: read sw, clear bits {8,9,10,14}, OR in w_class, write back.
     emit_movn(buf, 0, 2, 0, 0x4700, Wd_a);                  // w_a = mask
-    emit_logical_shifted_reg(buf, 0, /*AND=*/0, 0, 0, Wd_a, 0, Wd_class, Wd_class);
-    emit_ldr_str_imm(buf, 1, 0, /*LDR=*/1, kX87StatusWordImm12, Xbase, Wd_b);
-    emit_logical_shifted_reg(buf, 0, /*AND=*/0, /*N=*/1, 0, Wd_a, 0, Wd_b, Wd_b);  // BIC
-    emit_logical_shifted_reg(buf, 0, /*ORR=*/1, 0, 0, Wd_class, 0, Wd_b, Wd_b);
-    emit_ldr_str_imm(buf, 1, 0, /*STR=*/0, kX87StatusWordImm12, Xbase, Wd_b);
+    emit_logical_shifted_reg(buf, 0, /*opc=*/0 /*AND*/, 0, 0, Wd_a, 0, Wd_class, Wd_class);
+    emit_ldr_str_imm(buf, 1, 0, /*opc=*/1 /*LDR*/, kX87StatusWordImm12, Xbase, Wd_b);
+    emit_logical_shifted_reg(buf, 0, /*opc=*/0 /*AND*/, /*N=*/1, 0, Wd_a, 0, Wd_b, Wd_b);  // BIC
+    emit_logical_shifted_reg(buf, 0, /*opc=*/1 /*ORR*/, 0, 0, Wd_class, 0, Wd_b, Wd_b);
+    emit_ldr_str_imm(buf, 1, 0, /*opc=*/0 /*STR*/, kX87StatusWordImm12, Xbase, Wd_b);
 
     free_gpr(*a1, Wd_b);
     free_gpr(*a1, Wd_a);
@@ -1907,7 +1907,7 @@ auto translate_fxch(TranslationResult* a1, IRInstr* a2) -> void {
     const int Dd_a = alloc_free_fpr(*a1);
     const int Dd_b = alloc_free_fpr(*a1);
 
-    const int Wk15 = emit_load_st(buf, Xbase, Wd_top, /*depth=*/0, Wd_off0, Dd_a,
+    const int Wk15 = emit_load_st(buf, Xbase, Wd_top, /*stack_depth=*/0, Wd_off0, Dd_a,
                                   Xst_base);  // Wd_off0 = offset(0)
     const int Wk14 =
         emit_load_st(buf, Xbase, Wd_top, depth, Wd_offi, Dd_b, Xst_base);  // Wd_offi = offset(i)
@@ -2151,24 +2151,24 @@ auto translate_fistp(TranslationResult* a1, IRInstr* a2) -> void {
         //  [14] ; done — fall through to store
 
         // [0] LDRH Wd_rc, [Xbase, #0]  ; control_word (offset 0, imm12=0)
-        emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*LDR*/ 1, /*imm12=*/0, Xbase, Wd_rc);
+        emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/1 /*LDR*/, /*imm12=*/0, Xbase, Wd_rc);
 
         // [1] UBFX Wd_rc, Wd_rc, #10, #2  → bits[11:10] in bits[1:0]
         // UBFM: immr=lsb=10, imms=lsb+width-1=11
-        emit_bitfield(buf, /*is_64=*/0, /*UBFM*/ 2, /*N*/ 0, /*immr*/ 10, /*imms*/ 11, Wd_rc,
+        emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/2 /*UBFM*/, /*N*/ 0, /*immr*/ 10, /*imms*/ 11, Wd_rc,
                       Wd_rc);
 
         // [2] CBZ Wd_rc, +28  (+7 instructions → idx 9)
         emit_cbz(buf, /*is_64bit=*/0, /*is_nz=*/0, Wd_rc, 7);
 
         // [3] SUB Wd_rc, Wd_rc, #1
-        emit_add_imm(buf, /*is_64=*/0, /*is_sub*/ 1, /*S*/ 0, /*shift*/ 0, 1, Wd_rc, Wd_rc);
+        emit_add_imm(buf, /*is_64bit=*/0, /*is_sub*/ 1, /*S*/ 0, /*shift*/ 0, 1, Wd_rc, Wd_rc);
 
         // [4] CBZ Wd_rc, +28  (+7 instructions → idx 11)
         emit_cbz(buf, /*is_64bit=*/0, /*is_nz=*/0, Wd_rc, 7);
 
         // [5] SUB Wd_rc, Wd_rc, #1
-        emit_add_imm(buf, /*is_64=*/0, /*is_sub*/ 1, /*S*/ 0, /*shift*/ 0, 1, Wd_rc, Wd_rc);
+        emit_add_imm(buf, /*is_64bit=*/0, /*is_sub*/ 1, /*S*/ 0, /*shift*/ 0, 1, Wd_rc, Wd_rc);
 
         // [6] CBZ Wd_rc, +28  (+7 instructions → idx 13)
         emit_cbz(buf, /*is_64bit=*/0, /*is_nz=*/0, Wd_rc, 7);
@@ -2582,15 +2582,15 @@ auto translate_frndint(TranslationResult* a1, IRInstr* /*a2*/) -> void {
 
     if (g_rosetta_config && g_rosetta_config->fast_round) {
         // Fast path: assume RC=0 (round-to-nearest). Single FRINTN instruction.
-        emit_fp_dp1(buf, /*type=*/1 /*f64*/, /*FRINTN=*/8, Dd, Dd);
+        emit_fp_dp1(buf, /*type=*/1 /*f64*/, /*opcode=*/8 /*FRINTN*/, Dd, Dd);
     } else {
         // ── Read and extract x87 RC field ────────────────────────────────────────
         // control_word is at [Xbase + 0] (X87State offset 0).
         // LDRH Wd_rc, [Xbase, #0]   imm12=0 → byte offset 0
-        emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*LDR*/ 1, /*imm12=*/0, Xbase, Wd_rc);
+        emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/1 /*LDR*/, /*imm12=*/0, Xbase, Wd_rc);
         // UBFX Wd_rc, Wd_rc, #10, #2   →  bits[11:10] in bits[1:0]
         // UBFM immr=10, imms=11  (width = imms-immr+1 = 2 bits → RC values 0..3)
-        emit_bitfield(buf, /*is_64=*/0, /*UBFM*/ 2, /*N*/ 0, /*immr*/ 10, /*imms*/ 11, Wd_rc,
+        emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/2 /*UBFM*/, /*N*/ 0, /*immr*/ 10, /*imms*/ 11, Wd_rc,
                       Wd_rc);
 
         // ── Runtime dispatch: CBZ/SUB chain ──────────────────────────────────────
@@ -2598,31 +2598,31 @@ auto translate_frndint(TranslationResult* a1, IRInstr* /*a2*/) -> void {
         // [D+0] CBZ Wd_rc, +28  (imm19=7 → branch offset 28 bytes → [D+28] FRINTN)
         emit_cbz(buf, /*is_64bit=*/0, /*is_nz=*/0, Wd_rc, 7);
         // [D+4] SUB Wd_rc, Wd_rc, #1
-        emit_add_imm(buf, /*is_64=*/0, /*sub*/ 1, /*S*/ 0, /*shift*/ 0, 1, Wd_rc, Wd_rc);
+        emit_add_imm(buf, /*is_64bit=*/0, /*sub*/ 1, /*S*/ 0, /*shift*/ 0, 1, Wd_rc, Wd_rc);
         // [D+8] CBZ Wd_rc, +28  (target = D+8+28 = D+36 → [D+36] FRINTM)
         emit_cbz(buf, /*is_64bit=*/0, /*is_nz=*/0, Wd_rc, 7);
         // [D+12] SUB Wd_rc, Wd_rc, #1
-        emit_add_imm(buf, /*is_64=*/0, /*sub*/ 1, /*S*/ 0, /*shift*/ 0, 1, Wd_rc, Wd_rc);
+        emit_add_imm(buf, /*is_64bit=*/0, /*sub*/ 1, /*S*/ 0, /*shift*/ 0, 1, Wd_rc, Wd_rc);
         // [D+16] CBZ Wd_rc, +28  (target = D+16+28 = D+44 → [D+44] FRINTP)
         emit_cbz(buf, /*is_64bit=*/0, /*is_nz=*/0, Wd_rc, 7);
 
         // [D+20] FRINTZ Dd, Dd   RC=3 (truncate) — fall-through path
-        emit_fp_dp1(buf, /*type=*/1 /*f64*/, /*FRINTZ=*/11, Dd, Dd);
+        emit_fp_dp1(buf, /*type=*/1 /*f64*/, /*opcode=*/11 /*FRINTZ*/, Dd, Dd);
         // [D+24] B +24           skip to done  (imm26=6 → offset 24 → D+24+24 = D+48)
         emit_b(buf, 6);
 
         // [D+28] FRINTN Dd, Dd   RC=0 (round nearest, ties to even)
-        emit_fp_dp1(buf, /*type=*/1 /*f64*/, /*FRINTN=*/8, Dd, Dd);
+        emit_fp_dp1(buf, /*type=*/1 /*f64*/, /*opcode=*/8 /*FRINTN*/, Dd, Dd);
         // [D+32] B +16           (imm26=4 → offset 16 → D+32+16 = D+48)
         emit_b(buf, 4);
 
         // [D+36] FRINTM Dd, Dd   RC=1 (floor, toward −∞)
-        emit_fp_dp1(buf, /*type=*/1 /*f64*/, /*FRINTM=*/10, Dd, Dd);
+        emit_fp_dp1(buf, /*type=*/1 /*f64*/, /*opcode=*/10 /*FRINTM*/, Dd, Dd);
         // [D+40] B +8            (imm26=2 → offset 8 → D+40+8 = D+48)
         emit_b(buf, 2);
 
         // [D+44] FRINTP Dd, Dd   RC=2 (ceil, toward +∞)
-        emit_fp_dp1(buf, /*type=*/1 /*f64*/, /*FRINTP=*/9, Dd, Dd);
+        emit_fp_dp1(buf, /*type=*/1 /*f64*/, /*opcode=*/9 /*FRINTP*/, Dd, Dd);
         // [D+48] done ─────────────────────────────────────────────────────────────
     }
 
@@ -2705,9 +2705,9 @@ auto translate_fcomi(TranslationResult* a1, IRInstr* a2) -> void {
     const int Wd_c = alloc_free_gpr(*a1);
 
     // All three CSETs must execute before any MSR clobbers NZCV.
-    emit_cset(buf, /*is_64bit=*/0, /*EQ=*/0, Wd_z);     // 1 if equal
-    emit_cset(buf, /*is_64bit=*/0, /*VS=*/6, Wd_v);     // 1 if overflow (unordered)
-    emit_cset(buf, /*is_64bit=*/0, /*CS=*/2, Wd_c);     // 1 if carry set
+    emit_cset(buf, /*is_64bit=*/0, /*cond=*/0 /*EQ*/, Wd_z);     // 1 if equal
+    emit_cset(buf, /*is_64bit=*/0, /*cond=*/6 /*VS*/, Wd_v);     // 1 if overflow (unordered)
+    emit_cset(buf, /*is_64bit=*/0, /*cond=*/2 /*CS*/, Wd_c);     // 1 if carry set
 
     // Z_new = Z | V  (EQ or unordered)
     emit_logical_shifted_reg(buf, 0, /*ORR*/1, 0, /*LSL*/0, Wd_v, 0, Wd_z, Wd_z);
@@ -2721,7 +2721,7 @@ auto translate_fcomi(TranslationResult* a1, IRInstr* a2) -> void {
     //   bit 28: AArch64 FCSEL VS/VC conditions (used by translate_fcmov)
     // Set Wd_v at both positions to satisfy both consumers.
     // LSL Wd_z, Wd_z, #30
-    emit_bitfield(buf, /*is_64=*/0, /*UBFM=*/2, /*N=*/0,
+    emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/2 /*UBFM*/, /*N=*/0,
                   /*immr=*/2, /*imms=*/1, Wd_z, Wd_z);
     // ORR Wd_z, Wd_z, Wd_c, LSL #29
     emit_logical_shifted_reg(buf, 0, /*ORR*/1, 0, /*LSL*/0, Wd_c, 29, Wd_z, Wd_z);
@@ -2840,19 +2840,19 @@ auto translate_fist(TranslationResult* a1, IRInstr* a2) -> void {
                             Dd_val);
     } else {
         // [0] LDRH Wd_rc, [Xbase, #0]
-        emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*LDR*/ 1, /*imm12=*/0, Xbase, Wd_rc);
+        emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/1 /*LDR*/, /*imm12=*/0, Xbase, Wd_rc);
         // [1] UBFX Wd_rc, Wd_rc, #10, #2
-        emit_bitfield(buf, /*is_64=*/0, /*UBFM*/ 2, /*N*/ 0, /*immr*/ 10, /*imms*/ 11, Wd_rc,
+        emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/2 /*UBFM*/, /*N*/ 0, /*immr*/ 10, /*imms*/ 11, Wd_rc,
                       Wd_rc);
 
         // [2] CBZ Wd_rc, +28 → [9] FCVTNS
         emit_cbz(buf, /*is_64bit=*/0, /*is_nz=*/0, Wd_rc, 7);
         // [3] SUB Wd_rc, Wd_rc, #1
-        emit_add_imm(buf, /*is_64=*/0, /*is_sub*/ 1, /*S*/ 0, /*shift*/ 0, 1, Wd_rc, Wd_rc);
+        emit_add_imm(buf, /*is_64bit=*/0, /*is_sub*/ 1, /*S*/ 0, /*shift*/ 0, 1, Wd_rc, Wd_rc);
         // [4] CBZ Wd_rc, +28 → [11] FCVTMS
         emit_cbz(buf, /*is_64bit=*/0, /*is_nz=*/0, Wd_rc, 7);
         // [5] SUB Wd_rc, Wd_rc, #1
-        emit_add_imm(buf, /*is_64=*/0, /*is_sub*/ 1, /*S*/ 0, /*shift*/ 0, 1, Wd_rc, Wd_rc);
+        emit_add_imm(buf, /*is_64bit=*/0, /*is_sub*/ 1, /*S*/ 0, /*shift*/ 0, 1, Wd_rc, Wd_rc);
         // [6] CBZ Wd_rc, +28 → [13] FCVTPS
         emit_cbz(buf, /*is_64bit=*/0, /*is_nz=*/0, Wd_rc, 7);
 
@@ -3222,12 +3222,12 @@ auto translate_fscale(TranslationResult* a1, IRInstr* /*a2*/) -> void {
     // ── Build multiplier bits in Wd_e (reused as 64-bit Xd_bits below) ──
     // exp_new = 1023 + k
     const int Wd_e = alloc_free_gpr(*a1);
-    emit_add_imm(buf, /*is_64=*/0, /*is_sub=*/0, /*set_flags=*/0,
+    emit_add_imm(buf, /*is_64bit=*/0, /*is_sub=*/0, /*is_set_flags=*/0,
                  /*shift=*/0, /*imm12=*/1023, Wd_k, Wd_e);
     // UBFIZ Xd_bits, Wd_e, #52, #11   → exp_new at bits[62:52], rest zero
     // 32-bit ADD zero-extends; the X view of Wd_e has high 32 bits zero, so
     // UBFM N=1 immr=12 imms=10 reads low 11 bits and rotates to bits 52..62.
-    emit_bitfield(buf, /*is_64=*/1, /*UBFM=*/2, /*N=*/1,
+    emit_bitfield(buf, /*is_64bit=*/1, /*opc=*/2 /*UBFM*/, /*N=*/1,
                   /*immr=*/12, /*imms=*/10, /*Rn=*/Wd_e, /*Rd=*/Wd_e);
 
     // CSEL helper (no GPR variant exists in our helpers).
@@ -3245,23 +3245,23 @@ auto translate_fscale(TranslationResult* a1, IRInstr* /*a2*/) -> void {
     constexpr int kVS = 0x6;  // overflow set (FP unordered)
 
     // CMP Wd_k, #1023.  GT (signed) → k > 1023 → overflow.
-    emit_add_imm(buf, /*is_64=*/0, /*is_sub=*/1, /*set_flags=*/1,
+    emit_add_imm(buf, /*is_64bit=*/0, /*is_sub=*/1, /*is_set_flags=*/1,
                  /*shift=*/0, /*imm12=*/1023, Wd_k, /*Rd=*/31);
     {
         const int Xtemp = alloc_free_gpr(*a1);
         // +Inf bits = 0x7FF0_0000_0000_0000 = MOVZ #0x7FF0 LSL #48
-        emit_movn(buf, /*is_64=*/1, /*MOVZ=*/2, /*hw=*/3, 0x7FF0, Xtemp);
-        emit_csel(/*is_64=*/1, /*Rd=*/Wd_e, /*Rn=*/Xtemp, /*Rm=*/Wd_e, kGT);
+        emit_movn(buf, /*is_64bit=*/1, /*opc=*/2 /*MOVZ*/, /*hw=*/3, 0x7FF0, Xtemp);
+        emit_csel(/*is_64bit=*/1, /*Rd=*/Wd_e, /*Rn=*/Xtemp, /*Rm=*/Wd_e, kGT);
         free_gpr(*a1, Xtemp);
     }
 
     // CMN Wd_k, #1022 → flags as Wd_k + 1022.  LT → k < -1022 → underflow.
     // CMN imm12: ADDS Rd=XZR, Rn, #imm12.  Use emit_add_imm with is_sub=0,
     // set_flags=1, Rd=31.
-    emit_add_imm(buf, /*is_64=*/0, /*is_sub=*/0, /*set_flags=*/1,
+    emit_add_imm(buf, /*is_64bit=*/0, /*is_sub=*/0, /*is_set_flags=*/1,
                  /*shift=*/0, /*imm12=*/1022, Wd_k, /*Rd=*/31);
     // CSEL Wd_e = (LT) ? XZR : Wd_e — underflow → multiplier = 0.
-    emit_csel(/*is_64=*/1, /*Rd=*/Wd_e, /*Rn=*/31 /*XZR*/, /*Rm=*/Wd_e, kLT);
+    emit_csel(/*is_64bit=*/1, /*Rd=*/Wd_e, /*Rn=*/31 /*XZR*/, /*Rm=*/Wd_e, kLT);
     free_gpr(*a1, Wd_k);
 
     // FMOV multiplier into FPR.
@@ -3330,7 +3330,7 @@ auto translate_fxtract(TranslationResult* a1, IRInstr* /*a2*/) -> void {
     const int Xv = alloc_free_gpr(*a1);
     emit_fmov_d_to_x(buf, Xv, Dd_v);
     const int Wd_e = alloc_free_gpr(*a1);
-    emit_bitfield(buf, /*is_64=*/1, /*UBFM=*/2, /*N=*/1,
+    emit_bitfield(buf, /*is_64bit=*/1, /*opc=*/2 /*UBFM*/, /*N=*/1,
                   /*immr=*/52, /*imms=*/62, Xv, Wd_e);
 
     // GPR free-pool budget is tight (~3 in cache-active mode), so we serialise
@@ -3352,7 +3352,7 @@ auto translate_fxtract(TranslationResult* a1, IRInstr* /*a2*/) -> void {
     // ── Phase A: build exponent in Dd_exp ─────────────────────────────────
     // SUB Wd_em (32-bit) = Wd_e - 1023; SCVTF; FMOV → Dd_norm.
     int Wd_em = alloc_free_gpr(*a1);
-    emit_add_imm(buf, /*is_64=*/0, /*is_sub=*/1, /*set_flags=*/0,
+    emit_add_imm(buf, /*is_64bit=*/0, /*is_sub=*/1, /*is_set_flags=*/0,
                  /*shift=*/0, /*imm12=*/1023, Wd_e, Wd_em);
     const int Dd_norm = alloc_free_fpr(*a1);
     emit_scvtf(buf, /*is_64bit_int=*/0, /*ftype=*/1 /*f64*/, Dd_norm, Wd_em);
@@ -3361,17 +3361,17 @@ auto translate_fxtract(TranslationResult* a1, IRInstr* /*a2*/) -> void {
     // Constants in FPR via Xtemp (one rotating GPR for the 16-bit-shifted MOVZ).
     const int Xtemp   = alloc_free_gpr(*a1);
     const int Dd_inf  = alloc_free_fpr(*a1);
-    emit_movn(buf, /*is_64=*/1, /*MOVZ=*/2, /*hw=*/3 /*<<48*/, 0x7FF0, Xtemp);
+    emit_movn(buf, /*is_64bit=*/1, /*opc=*/2 /*MOVZ*/, /*hw=*/3 /*<<48*/, 0x7FF0, Xtemp);
     emit_fmov_x_to_d(buf, Dd_inf, Xtemp);
     const int Dd_minf = alloc_free_fpr(*a1);
-    emit_movn(buf, /*is_64=*/1, /*MOVZ=*/2, /*hw=*/3, 0xFFF0, Xtemp);
+    emit_movn(buf, /*is_64bit=*/1, /*opc=*/2 /*MOVZ*/, /*hw=*/3, 0xFFF0, Xtemp);
     emit_fmov_x_to_d(buf, Dd_minf, Xtemp);
     free_gpr(*a1, Xtemp);
 
     // ANDS XZR, Xv, #0x000FFFFFFFFFFFFF — Z=1 iff mantissa==0.
     LogicalImmEncoding enc_mant;
-    is_bitmask_immediate(/*is_64=*/true, 0x000FFFFFFFFFFFFFULL, enc_mant);
-    emit_logical_imm(buf, /*is_64=*/1, /*ANDS=*/3,
+    is_bitmask_immediate(/*is_64bit=*/true, 0x000FFFFFFFFFFFFFULL, enc_mant);
+    emit_logical_imm(buf, /*is_64bit=*/1, /*opc=*/3 /*ANDS*/,
                      enc_mant.N, enc_mant.immr, enc_mant.imms,
                      /*Rn=*/Xv, /*Rd=*/31 /*XZR*/);
     // FCSEL Dd_pos = (mant==0) ? Dd_inf : Dd_v   (Inf for true-Inf, NaN for NaN)
@@ -3381,7 +3381,7 @@ auto translate_fxtract(TranslationResult* a1, IRInstr* /*a2*/) -> void {
     free_fpr(*a1, Dd_v);
 
     // CMP Wd_e, #0x7FF
-    emit_add_imm(buf, /*is_64=*/0, /*is_sub=*/1, /*set_flags=*/1,
+    emit_add_imm(buf, /*is_64bit=*/0, /*is_sub=*/1, /*is_set_flags=*/1,
                  /*shift=*/0, /*imm12=*/0x7FF, Wd_e, /*Rd=*/31);
     // FCSEL Dd_exp = (exp==0x7FF) ? Dd_pos : Dd_norm
     const int Dd_exp = alloc_free_fpr(*a1);
@@ -3390,37 +3390,37 @@ auto translate_fxtract(TranslationResult* a1, IRInstr* /*a2*/) -> void {
     free_fpr(*a1, Dd_norm);
 
     // CMP Wd_e, #0
-    emit_add_imm(buf, /*is_64=*/0, /*is_sub=*/1, /*set_flags=*/1,
+    emit_add_imm(buf, /*is_64bit=*/0, /*is_sub=*/1, /*is_set_flags=*/1,
                  /*shift=*/0, /*imm12=*/0, Wd_e, /*Rd=*/31);
     // FCSEL Dd_exp = (exp==0) ? Dd_minf : Dd_exp
     emit_fcsel_f64(buf, Dd_exp, Dd_minf, Dd_exp, kEQ);
     free_fpr(*a1, Dd_minf);
 
     // Write exp into the OLD ST(0) slot (depth=0 here, becomes depth=1 after push).
-    emit_store_st(buf, Xbase, Wd_top, /*depth=*/0, Wd_tmp, Dd_exp, Xst_base);
+    emit_store_st(buf, Xbase, Wd_top, /*stack_depth=*/0, Wd_tmp, Dd_exp, Xst_base);
     free_fpr(*a1, Dd_exp);
 
     // ── Phase B: build significand bits in Xs, FMOV, push, store ──────────
     // Xs = sign | 0x3FF<<52 | mantissa  (normal case).  Special cases preserve Xv.
     const int Xs = alloc_free_gpr(*a1);
-    emit_mov_reg(buf, /*is_64=*/1, Xs, Xv);
+    emit_mov_reg(buf, /*is_64bit=*/1, Xs, Xv);
     // BFI Xs, XZR, #52, #11 — clear exp field.
-    emit_bitfield(buf, /*is_64=*/1, /*BFM=*/1, /*N=*/1,
+    emit_bitfield(buf, /*is_64bit=*/1, /*opc=*/1 /*BFM*/, /*N=*/1,
                   /*immr=*/12, /*imms=*/10, /*Rn=*/31, /*Rd=*/Xs);
     // ORR Xs, Xs, #0x3FF0_0000_0000_0000 — set exp=bias 0.
     LogicalImmEncoding enc_bias;
-    is_bitmask_immediate(/*is_64=*/true, 0x3FF0000000000000ULL, enc_bias);
-    emit_orr_imm(buf, /*is_64=*/1, /*Rd=*/Xs, /*Rn=*/Xs,
+    is_bitmask_immediate(/*is_64bit=*/true, 0x3FF0000000000000ULL, enc_bias);
+    emit_orr_imm(buf, /*is_64bit=*/1, /*Rd=*/Xs, /*Rn=*/Xs,
                  enc_bias.N, enc_bias.immr, enc_bias.imms);
 
     // CMP Wd_e, #0x7FF; CSEL Xs = (eq) ? Xv : Xs
-    emit_add_imm(buf, /*is_64=*/0, /*is_sub=*/1, /*set_flags=*/1,
+    emit_add_imm(buf, /*is_64bit=*/0, /*is_sub=*/1, /*is_set_flags=*/1,
                  /*shift=*/0, /*imm12=*/0x7FF, Wd_e, /*Rd=*/31);
-    emit_csel(/*is_64=*/1, /*Rd=*/Xs, /*Rn=*/Xv, /*Rm=*/Xs, kEQ);
+    emit_csel(/*is_64bit=*/1, /*Rd=*/Xs, /*Rn=*/Xv, /*Rm=*/Xs, kEQ);
     // CMP Wd_e, #0; CSEL Xs = (eq) ? Xv : Xs
-    emit_add_imm(buf, /*is_64=*/0, /*is_sub=*/1, /*set_flags=*/1,
+    emit_add_imm(buf, /*is_64bit=*/0, /*is_sub=*/1, /*is_set_flags=*/1,
                  /*shift=*/0, /*imm12=*/0, Wd_e, /*Rd=*/31);
-    emit_csel(/*is_64=*/1, /*Rd=*/Xs, /*Rn=*/Xv, /*Rm=*/Xs, kEQ);
+    emit_csel(/*is_64bit=*/1, /*Rd=*/Xs, /*Rn=*/Xv, /*Rm=*/Xs, kEQ);
     free_gpr(*a1, Wd_e);
     free_gpr(*a1, Xv);
 
@@ -3432,7 +3432,7 @@ auto translate_fxtract(TranslationResult* a1, IRInstr* /*a2*/) -> void {
     x87_push(buf, *a1, Xbase, Wd_top, Wd_tmp, Wd_tmp2);
 
     // Store sig at new ST(0).
-    emit_store_st(buf, Xbase, Wd_top, /*depth=*/0, Wd_tmp, Dd_sig, Xst_base);
+    emit_store_st(buf, Xbase, Wd_top, /*stack_depth=*/0, Wd_tmp, Dd_sig, Xst_base);
     free_fpr(*a1, Dd_sig);
     free_gpr(*a1, Wd_tmp2);
 
@@ -3555,7 +3555,7 @@ auto translate_ffree(TranslationResult* a1, IRInstr* a2) -> void {
     // Compute physical slot index in Wd_bitpos.
     if (depth == 0) {
         // bitpos = Wd_top * 2  (no add needed)
-        emit_bitfield(buf, /*is_64=*/0, /*UBFM*/ 2, /*N=*/0,
+        emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/2 /*UBFM*/, /*N=*/0,
                       /*immr=*/31, /*imms=*/30, Wd_top, Wd_bitpos);
     } else {
         // ADD Wd_bitpos, Wd_top, #depth
@@ -3565,24 +3565,24 @@ auto translate_ffree(TranslationResult* a1, IRInstr* a2) -> void {
         emit_and_imm(buf, /*is_64bit=*/0, /*Rd=*/Wd_bitpos,
                      /*N=*/0, /*immr=*/0, /*imms=*/2, /*Rn=*/Wd_bitpos);
         // LSL Wd_bitpos, Wd_bitpos, #1  → 2*phys
-        emit_bitfield(buf, /*is_64=*/0, /*UBFM*/ 2, /*N=*/0,
+        emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/2 /*UBFM*/, /*N=*/0,
                       /*immr=*/31, /*imms=*/30, Wd_bitpos, Wd_bitpos);
     }
 
     // MOVZ Wd_mask, #3
-    emit_movn(buf, /*is_64=*/0, /*MOVZ opc=*/2, /*hw=*/0, /*imm=*/3, Wd_mask);
+    emit_movn(buf, /*is_64bit=*/0, /*MOVZ opc=*/2, /*hw=*/0, /*imm16=*/3, Wd_mask);
     // LSLV Wd_mask, Wd_mask, Wd_bitpos   → mask = 3 << (2*phys)
-    emit_lslv(buf, /*is_64=*/0, /*Rm=*/Wd_bitpos, /*Rn=*/Wd_mask, /*Rd=*/Wd_mask);
+    emit_lslv(buf, /*is_64bit=*/0, /*Rm=*/Wd_bitpos, /*Rn=*/Wd_mask, /*Rd=*/Wd_mask);
 
     // LDRH Wd_bitpos, [Xbase, #tag_word]   (reuse Wd_bitpos as tag-word reg)
-    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*LDR=*/1,
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/1 /*LDR*/,
                      kX87TagWordImm12, Xbase, Wd_bitpos);
     // ORR Wd_bitpos, Wd_bitpos, Wd_mask
-    emit_logical_shifted_reg(buf, /*is_64=*/0, /*ORR=*/1, /*N=*/0,
-                             /*LSL=*/0, /*Rm=*/Wd_mask, /*shift=*/0,
+    emit_logical_shifted_reg(buf, /*is_64bit=*/0, /*opc=*/1 /*ORR*/, /*N=*/0,
+                             /*shift_type=*/0 /*LSL*/, /*Rm=*/Wd_mask, /*shift_amount=*/0,
                              /*Rn=*/Wd_bitpos, /*Rd=*/Wd_bitpos);
     // STRH Wd_bitpos, [Xbase, #tag_word]
-    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*STR=*/0,
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/0 /*STR*/,
                      kX87TagWordImm12, Xbase, Wd_bitpos);
 
     free_gpr(*a1, Wd_mask);
@@ -3672,8 +3672,8 @@ auto translate_fbstp(TranslationResult* a1, IRInstr* a2) -> void {
 
     // Step 3: CW.RC bits 11:10 → Wd_rc.
     const int Wd_rc = alloc_free_gpr(*a1);
-    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*LDR=*/1, kX87CtrlWordImm12, Xbase, Wd_rc);
-    emit_bitfield(buf, /*is_64=*/0, /*UBFM=*/2, /*N=*/0, /*immr=*/10, /*imms=*/11, Wd_rc, Wd_rc);
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/1 /*LDR*/, kX87CtrlWordImm12, Xbase, Wd_rc);
+    emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/2 /*UBFM*/, /*N=*/0, /*immr=*/10, /*imms=*/11, Wd_rc, Wd_rc);
 
     // Step 4: 4-way parallel FRINT + FCSEL chain.
     const int Dn = alloc_free_fpr(*a1);
@@ -3681,18 +3681,18 @@ auto translate_fbstp(TranslationResult* a1, IRInstr* a2) -> void {
     const int Dp = alloc_free_fpr(*a1);
     const int Dz = alloc_free_fpr(*a1);
 
-    emit_fp_dp1(buf, /*type=*/1, /*FRINTN=*/8,  Dn, Dd_val);
-    emit_fp_dp1(buf, /*type=*/1, /*FRINTP=*/9,  Dp, Dd_val);
-    emit_fp_dp1(buf, /*type=*/1, /*FRINTM=*/10, Dm, Dd_val);
-    emit_fp_dp1(buf, /*type=*/1, /*FRINTZ=*/11, Dz, Dd_val);
+    emit_fp_dp1(buf, /*type=*/1, /*opcode=*/8 /*FRINTN*/,  Dn, Dd_val);
+    emit_fp_dp1(buf, /*type=*/1, /*opcode=*/9 /*FRINTP*/,  Dp, Dd_val);
+    emit_fp_dp1(buf, /*type=*/1, /*opcode=*/10 /*FRINTM*/, Dm, Dd_val);
+    emit_fp_dp1(buf, /*type=*/1, /*opcode=*/11 /*FRINTZ*/, Dz, Dd_val);
 
     // CMP Wd_rc, #1; FCSEL Dn, Dm, Dn, EQ
-    emit_add_imm(buf, /*is_64=*/0, /*sub=*/1, /*S=*/1, /*shift=*/0, /*imm12=*/1, Wd_rc, GPR::XZR);
-    emit_fcsel_f64(buf, Dn, Dm, Dn, /*EQ=*/0);
-    emit_add_imm(buf, /*is_64=*/0, /*sub=*/1, /*S=*/1, /*shift=*/0, /*imm12=*/2, Wd_rc, GPR::XZR);
-    emit_fcsel_f64(buf, Dn, Dp, Dn, /*EQ=*/0);
-    emit_add_imm(buf, /*is_64=*/0, /*sub=*/1, /*S=*/1, /*shift=*/0, /*imm12=*/3, Wd_rc, GPR::XZR);
-    emit_fcsel_f64(buf, Dn, Dz, Dn, /*EQ=*/0);
+    emit_add_imm(buf, /*is_64bit=*/0, /*is_sub=*/1, /*is_set_flags=*/1, /*shift=*/0, /*imm12=*/1, Wd_rc, GPR::XZR);
+    emit_fcsel_f64(buf, Dn, Dm, Dn, /*cond=*/0 /*EQ*/);
+    emit_add_imm(buf, /*is_64bit=*/0, /*is_sub=*/1, /*is_set_flags=*/1, /*shift=*/0, /*imm12=*/2, Wd_rc, GPR::XZR);
+    emit_fcsel_f64(buf, Dn, Dp, Dn, /*cond=*/0 /*EQ*/);
+    emit_add_imm(buf, /*is_64bit=*/0, /*is_sub=*/1, /*is_set_flags=*/1, /*shift=*/0, /*imm12=*/3, Wd_rc, GPR::XZR);
+    emit_fcsel_f64(buf, Dn, Dz, Dn, /*cond=*/0 /*EQ*/);
     free_fpr(*a1, Dz);
     free_fpr(*a1, Dp);
     free_fpr(*a1, Dm);
@@ -3709,14 +3709,14 @@ auto translate_fbstp(TranslationResult* a1, IRInstr* a2) -> void {
     emit_fabs_f64(buf, Dd_abs, Dd_round);
     emit_fcmp_f64(buf, Dd_abs, Dd_thresh);
     const int Wovf = alloc_free_gpr(*a1);
-    emit_cset(buf, /*is_64=*/0, /*HS=CS=*/2, Wovf);
+    emit_cset(buf, /*is_64bit=*/0, /*HS=CS=*/2, Wovf);
 
     emit_fcmp_f64(buf, Dd_round, Dd_round);
     const int Wnan = alloc_free_gpr(*a1);
-    emit_cset(buf, /*is_64=*/0, /*VS=*/6, Wnan);
+    emit_cset(buf, /*is_64bit=*/0, /*cond=*/6 /*VS*/, Wnan);
 
-    emit_logical_shifted_reg(buf, /*is_64=*/0, /*ORR=*/1, /*N=*/0, /*LSL=*/0,
-                             /*Rm=*/Wnan, /*shift=*/0, /*Rn=*/Wovf, /*Rd=*/Wovf);
+    emit_logical_shifted_reg(buf, /*is_64bit=*/0, /*opc=*/1 /*ORR*/, /*N=*/0, /*shift_type=*/0 /*LSL*/,
+                             /*Rm=*/Wnan, /*shift_amount=*/0, /*Rn=*/Wovf, /*Rd=*/Wovf);
     free_gpr(*a1, Wnan);
     free_fpr(*a1, Dd_abs);
     free_fpr(*a1, Dd_thresh);
@@ -3726,7 +3726,7 @@ auto translate_fbstp(TranslationResult* a1, IRInstr* a2) -> void {
     emit_fmov_d_to_x(buf, Xbits, Dd_round);
     const int Wsign = alloc_free_gpr(*a1);
     // UBFX Wsign, Xbits, #63, #1  — i.e. immr=63 imms=63 with N=1 (64-bit)
-    emit_bitfield(buf, /*is_64=*/1, /*UBFM=*/2, /*N=*/1, /*immr=*/63, /*imms=*/63, Xbits, Wsign);
+    emit_bitfield(buf, /*is_64bit=*/1, /*opc=*/2 /*UBFM*/, /*N=*/1, /*immr=*/63, /*imms=*/63, Xbits, Wsign);
     free_gpr(*a1, Xbits);
 
     // Step 7: FCVTZS Xint, Dd_round.  Dd_round is integer-valued so no
@@ -3738,17 +3738,17 @@ auto translate_fbstp(TranslationResult* a1, IRInstr* a2) -> void {
     // Step 8: precompute |Xint|, sign byte, Xten.
     const int Xneg = alloc_free_gpr(*a1);
     // SUB Xneg, XZR, Xint  (no flags)  → NEG Xneg, Xint
-    emit_add_sub_shifted_reg(buf, /*is_64=*/1, /*sub=*/1, /*S=*/0, /*shift_type=*/0,
-                             /*Rm=*/Xint, /*shift=*/0, /*Rn=*/GPR::XZR, /*Rd=*/Xneg);
+    emit_add_sub_shifted_reg(buf, /*is_64bit=*/1, /*is_sub=*/1, /*is_set_flags=*/0, /*shift_type=*/0,
+                             /*Rm=*/Xint, /*shift_amount=*/0, /*Rn=*/GPR::XZR, /*Rd=*/Xneg);
     // CMP Xint, #0  (sets flags via SUBS Rd=XZR, Rn=Xint, imm=0)
-    emit_add_imm(buf, /*is_64=*/1, /*sub=*/1, /*S=*/1, /*shift=*/0, /*imm12=*/0, Xint, GPR::XZR);
+    emit_add_imm(buf, /*is_64bit=*/1, /*is_sub=*/1, /*is_set_flags=*/1, /*shift=*/0, /*imm12=*/0, Xint, GPR::XZR);
     // CSEL Xint, Xneg, Xint, LT  → Xint = (Xint < 0) ? Xneg : Xint = |Xint|
-    emit_csel(/*is_64=*/1, /*Rd=*/Xint, /*Rn=*/Xneg, /*Rm=*/Xint, /*LT=*/11);
+    emit_csel(/*is_64bit=*/1, /*Rd=*/Xint, /*Rn=*/Xneg, /*Rm=*/Xint, /*cond=*/11 /*LT*/);
     free_gpr(*a1, Xneg);
 
     // Xten = 10
     const int Xten = alloc_free_gpr(*a1);
-    emit_movn(buf, /*is_64=*/0, /*MOVZ=*/2, /*hw=*/0, /*imm=*/10, Xten);
+    emit_movn(buf, /*is_64bit=*/0, /*opc=*/2 /*MOVZ*/, /*hw=*/0, /*imm16=*/10, Xten);
 
     // Sign byte = Wsign << 7, computed in place to keep peak GPR
     // allocation at 8 (= pool size).  Previously a separate WsignByte
@@ -3757,8 +3757,8 @@ auto translate_fbstp(TranslationResult* a1, IRInstr* a2) -> void {
     // that became a hard abort at JIT-time.
     //
     // ORR Wsign, WZR, Wsign, LSL #7 = LSL Wsign, Wsign, #7.
-    emit_logical_shifted_reg(buf, /*is_64=*/0, /*ORR=*/1, /*N=*/0, /*LSL=*/0,
-                             /*Rm=*/Wsign, /*shift=*/7, /*Rn=*/GPR::XZR, /*Rd=*/Wsign);
+    emit_logical_shifted_reg(buf, /*is_64bit=*/0, /*opc=*/1 /*ORR*/, /*N=*/0, /*shift_type=*/0 /*LSL*/,
+                             /*Rm=*/Wsign, /*shift_amount=*/7, /*Rn=*/GPR::XZR, /*Rd=*/Wsign);
     const int WsignByte = Wsign;
 
     // Step 9: branch on Wovf.  Layout (instruction indices relative to CBNZ):
@@ -3775,11 +3775,11 @@ auto translate_fbstp(TranslationResult* a1, IRInstr* a2) -> void {
     // STRB + 54 divmod + 1 B = 56 insns in the non-indef block.
     constexpr int kNonIndefLen = 56;
     constexpr int kIndefLen    = 5;
-    emit_cbz(buf, /*is_64=*/0, /*is_nz=*/1, Wovf, kNonIndefLen + 1);
+    emit_cbz(buf, /*is_64bit=*/0, /*is_nz=*/1, Wovf, kNonIndefLen + 1);
     free_gpr(*a1, Wovf);
 
     // [insn 0] STRB WsignByte, [Xaddr, #9]
-    emit_ldr_str_imm(buf, /*size=*/0, /*is_fp=*/0, /*STR=*/0,
+    emit_ldr_str_imm(buf, /*size=*/0, /*is_fp=*/0, /*opc=*/0 /*STR*/,
                      /*imm12=*/9, Xaddr, WsignByte);
     free_gpr(*a1, WsignByte);  // = Wsign — freed before divmod's Xb/Wlo.
 
@@ -3799,10 +3799,10 @@ auto translate_fbstp(TranslationResult* a1, IRInstr* a2) -> void {
         emit_msub64(/*Rd=*/Xb, /*Rn=*/Xa, /*Rm=*/Xten, /*Ra=*/Xb);
 
         // [insn 4] ORR Wlo, Wlo, Xb, LSL #4   — pack high digit into upper nibble
-        emit_logical_shifted_reg(buf, /*is_64=*/0, /*ORR=*/1, /*N=*/0, /*LSL=*/0,
-                                 /*Rm=*/Xb, /*shift=*/4, /*Rn=*/Wlo, /*Rd=*/Wlo);
+        emit_logical_shifted_reg(buf, /*is_64bit=*/0, /*opc=*/1 /*ORR*/, /*N=*/0, /*shift_type=*/0 /*LSL*/,
+                                 /*Rm=*/Xb, /*shift_amount=*/4, /*Rn=*/Wlo, /*Rd=*/Wlo);
         // [insn 5] STRB Wlo, [Xaddr, #byte_i]
-        emit_ldr_str_imm(buf, /*size=*/0, /*is_fp=*/0, /*STR=*/0,
+        emit_ldr_str_imm(buf, /*size=*/0, /*is_fp=*/0, /*opc=*/0 /*STR*/,
                          /*imm12=*/static_cast<int16_t>(byte_i), Xaddr, Wlo);
     }
 
@@ -3814,16 +3814,16 @@ auto translate_fbstp(TranslationResult* a1, IRInstr* a2) -> void {
 
     // Indef block: 5 instructions writing { 0,0,0,0,0,0,0,0xC0,0xFF,0xFF }.
     // [insn 56] STR XZR, [Xaddr]                       — bytes 0..7 = 0
-    emit_ldr_str_imm(buf, /*size=*/3, /*is_fp=*/0, /*STR=*/0, /*imm12=*/0, Xaddr, GPR::XZR);
+    emit_ldr_str_imm(buf, /*size=*/3, /*is_fp=*/0, /*opc=*/0 /*STR*/, /*imm12=*/0, Xaddr, GPR::XZR);
     // [insn 57] MOVZ Wt, #0xC000, LSL #16              — Wt = 0xC0000000
     const int Wt = alloc_free_gpr(*a1);
-    emit_movn(buf, /*is_64=*/0, /*MOVZ=*/2, /*hw=*/1, /*imm=*/0xC000, Wt);
+    emit_movn(buf, /*is_64bit=*/0, /*opc=*/2 /*MOVZ*/, /*hw=*/1, /*imm16=*/0xC000, Wt);
     // [insn 58] STR Wt, [Xaddr, #4]                    — byte 7 = 0xC0
-    emit_ldr_str_imm(buf, /*size=*/2, /*is_fp=*/0, /*STR=*/0, /*imm12=*/1, Xaddr, Wt);
+    emit_ldr_str_imm(buf, /*size=*/2, /*is_fp=*/0, /*opc=*/0 /*STR*/, /*imm12=*/1, Xaddr, Wt);
     // [insn 59] MOVN Wt, #0                            — Wt = 0xFFFFFFFF
-    emit_movn(buf, /*is_64=*/0, /*MOVN=*/0, /*hw=*/0, /*imm=*/0, Wt);
+    emit_movn(buf, /*is_64bit=*/0, /*opc=*/0 /*MOVN*/, /*hw=*/0, /*imm16=*/0, Wt);
     // [insn 60] STRH Wt, [Xaddr, #8]                   — bytes 8,9 = 0xFF, 0xFF
-    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*STR=*/0, /*imm12=*/4, Xaddr, Wt);
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/0 /*STR*/, /*imm12=*/4, Xaddr, Wt);
     free_gpr(*a1, Wt);
 
     free_gpr(*a1, Xint);
@@ -3912,19 +3912,19 @@ auto translate_frstor(TranslationResult* a1, IRInstr* a2) -> void {
 
     // ── Env header ──
     // CW: [Xaddr, #0] -> [Xbase, #0]
-    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*LDR=*/1, /*imm12=*/0, Xaddr, Wd_tmp);
-    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*STR=*/0, kX87CtrlWordImm12, Xbase, Wd_tmp);
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/1 /*LDR*/, /*imm12=*/0, Xaddr, Wd_tmp);
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/0 /*STR*/, kX87CtrlWordImm12, Xbase, Wd_tmp);
 
     // SW: [Xaddr, #4] -> [Xbase, #2].  Re-derive Wd_top from new SW.TOP.
-    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*LDR=*/1, kSrcSwImm12, Xaddr, Wd_tmp);
-    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*STR=*/0, kX87StatusWordImm12, Xbase, Wd_tmp);
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/1 /*LDR*/, kSrcSwImm12, Xaddr, Wd_tmp);
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/0 /*STR*/, kX87StatusWordImm12, Xbase, Wd_tmp);
     // UBFX Wd_top, Wd_tmp, #11, #3
-    emit_bitfield(buf, /*is_64=*/0, /*UBFM=*/2, /*N=*/0, /*immr=*/11, /*imms=*/13,
+    emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/2 /*UBFM*/, /*N=*/0, /*immr=*/11, /*imms=*/13,
                   Wd_tmp, Wd_top);
 
     // TW: [Xaddr, #8] -> [Xbase, #4]
-    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*LDR=*/1, kSrcTwImm12, Xaddr, Wd_tmp);
-    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*STR=*/0, kX87TagWordImm12, Xbase, Wd_tmp);
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/1 /*LDR*/, kSrcTwImm12, Xaddr, Wd_tmp);
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/0 /*STR*/, kX87TagWordImm12, Xbase, Wd_tmp);
 
     // ── 8 ST slots — unrolled f80 -> f64 conversion ──
     //
@@ -3954,12 +3954,12 @@ auto translate_frstor(TranslationResult* a1, IRInstr* a2) -> void {
     for (int i = 0; i < 8; ++i) {
         const int delta = (i == 0) ? 0x1C : 10;
         // Bump Xaddr to the start of the current slot.
-        emit_add_imm(buf, /*is_64=*/1, /*is_sub=*/0, /*set_flags=*/0,
+        emit_add_imm(buf, /*is_64bit=*/1, /*is_sub=*/0, /*is_set_flags=*/0,
                      /*shift=*/0, delta, Xaddr, Xaddr);
         // LDR Xmant, [Xaddr, #0] — 8-byte mantissa.
         emit_ldr_imm(buf, /*size=*/3, Xmant, Xaddr, /*imm12=*/0);
         // LDRH Wexp, [Xaddr, #8] — 2-byte sign+exp word.
-        emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*LDR=*/1,
+        emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/1 /*LDR*/,
                          /*imm12=*/4, Xaddr, Wexp);
         emit_f80_to_f64_convert(buf, Xmant, Wexp, Xsign, Wd_aux, Wd_tmp);
         emit_fmov_x_to_d(buf, Dd_val, Xmant);
@@ -3978,7 +3978,7 @@ auto translate_frstor(TranslationResult* a1, IRInstr* a2) -> void {
         // Re-derive Xst_base = Xbase + kX87RegFileOff and put it back in
         // the cached slot (slot 6 = x28 by convention).
         const int Xst_base_new = alloc_gpr(*a1, 6);
-        emit_add_imm(buf, /*is_64=*/1, /*is_sub=*/0, /*set_flags=*/0,
+        emit_add_imm(buf, /*is_64bit=*/1, /*is_sub=*/0, /*is_set_flags=*/0,
                      /*shift=*/0, kX87RegFileOff, Xbase, Xst_base_new);
         a1->x87_cache.st_base_gpr = static_cast<int8_t>(Xst_base_new);
     }
@@ -4038,16 +4038,16 @@ auto translate_fsave(TranslationResult* a1, IRInstr* a2) -> void {
     const int Xaddr = compute_operand_address(*a1, addr_is_64, &a2->operands[0], GPR::XZR);
 
     // ── Env header: CW/SW/TW + 16 zero bytes for FIP/FCS/FOP/FDP/FDS ──
-    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*LDR=*/1, kX87CtrlWordImm12, Xbase, Wd_tmp);
-    emit_ldr_str_imm(buf, /*size=*/2, /*is_fp=*/0, /*STR=*/0, /*imm12=*/0, Xaddr, Wd_tmp);
-    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*LDR=*/1, kX87StatusWordImm12, Xbase, Wd_tmp);
-    emit_ldr_str_imm(buf, /*size=*/2, /*is_fp=*/0, /*STR=*/0, /*imm12=*/1, Xaddr, Wd_tmp);
-    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*LDR=*/1, kX87TagWordImm12, Xbase, Wd_tmp);
-    emit_ldr_str_imm(buf, /*size=*/2, /*is_fp=*/0, /*STR=*/0, /*imm12=*/2, Xaddr, Wd_tmp);
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/1 /*LDR*/, kX87CtrlWordImm12, Xbase, Wd_tmp);
+    emit_ldr_str_imm(buf, /*size=*/2, /*is_fp=*/0, /*opc=*/0 /*STR*/, /*imm12=*/0, Xaddr, Wd_tmp);
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/1 /*LDR*/, kX87StatusWordImm12, Xbase, Wd_tmp);
+    emit_ldr_str_imm(buf, /*size=*/2, /*is_fp=*/0, /*opc=*/0 /*STR*/, /*imm12=*/1, Xaddr, Wd_tmp);
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/1 /*LDR*/, kX87TagWordImm12, Xbase, Wd_tmp);
+    emit_ldr_str_imm(buf, /*size=*/2, /*is_fp=*/0, /*opc=*/0 /*STR*/, /*imm12=*/2, Xaddr, Wd_tmp);
     // 16 zero bytes at offsets 12..27.
-    emit_ldr_str_imm(buf, /*size=*/2, /*is_fp=*/0, /*STR=*/0, /*imm12=*/3, Xaddr, GPR::XZR);
-    emit_ldr_str_imm(buf, /*size=*/3, /*is_fp=*/0, /*STR=*/0, /*imm12=*/2, Xaddr, GPR::XZR);
-    emit_ldr_str_imm(buf, /*size=*/2, /*is_fp=*/0, /*STR=*/0, /*imm12=*/6, Xaddr, GPR::XZR);
+    emit_ldr_str_imm(buf, /*size=*/2, /*is_fp=*/0, /*opc=*/0 /*STR*/, /*imm12=*/3, Xaddr, GPR::XZR);
+    emit_ldr_str_imm(buf, /*size=*/3, /*is_fp=*/0, /*opc=*/0 /*STR*/, /*imm12=*/2, Xaddr, GPR::XZR);
+    emit_ldr_str_imm(buf, /*size=*/2, /*is_fp=*/0, /*opc=*/0 /*STR*/, /*imm12=*/6, Xaddr, GPR::XZR);
 
     // ── 8 ST slots — unrolled f64 -> f80 conversion ──
     //
@@ -4070,7 +4070,7 @@ auto translate_fsave(TranslationResult* a1, IRInstr* a2) -> void {
         emit_load_st(buf, Xbase, Wd_top, /*stack_depth=*/i, Wd_tmp, Dd_src, Xst_base);
         // Bump Xaddr to the start of the current slot.
         const int delta = (i == 0) ? 0x1C : 10;
-        emit_add_imm(buf, /*is_64=*/1, /*is_sub=*/0, /*set_flags=*/0,
+        emit_add_imm(buf, /*is_64bit=*/1, /*is_sub=*/0, /*is_set_flags=*/0,
                      /*shift=*/0, delta, Xaddr, Xaddr);
         // Convert and store 10 bytes at [Xaddr, #0..#9].
         emit_f64_to_f80(buf, Xaddr, Dd_src, Xbits, Wexp, Wd_tmp);
@@ -4086,15 +4086,15 @@ auto translate_fsave(TranslationResult* a1, IRInstr* a2) -> void {
     // by the env-header path above.  Reset Wd_top to 0 to match new SW.TOP
     // and clear cache flags — the in-memory state is fresh.
     // CW = 0x037F via MOVZ.
-    emit_movn(buf, /*is_64=*/0, /*MOVZ=*/2, /*hw=*/0, /*imm=*/0x037F, Wd_tmp);
-    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*STR=*/0, kX87CtrlWordImm12, Xbase, Wd_tmp);
+    emit_movn(buf, /*is_64bit=*/0, /*opc=*/2 /*MOVZ*/, /*hw=*/0, /*imm16=*/0x037F, Wd_tmp);
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/0 /*STR*/, kX87CtrlWordImm12, Xbase, Wd_tmp);
     // SW = 0.
-    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*STR=*/0, kX87StatusWordImm12, Xbase, GPR::XZR);
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/0 /*STR*/, kX87StatusWordImm12, Xbase, GPR::XZR);
     // TW = 0xFFFF via MOVN W, #0 (gives 0xFFFFFFFF; STRH writes low 16).
-    emit_movn(buf, /*is_64=*/0, /*MOVN=*/0, /*hw=*/0, /*imm=*/0, Wd_tmp);
-    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*STR=*/0, kX87TagWordImm12, Xbase, Wd_tmp);
+    emit_movn(buf, /*is_64bit=*/0, /*opc=*/0 /*MOVN*/, /*hw=*/0, /*imm16=*/0, Wd_tmp);
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/0 /*STR*/, kX87TagWordImm12, Xbase, Wd_tmp);
     // Reset cached Wd_top to 0 (matches new SW.TOP=0).
-    emit_movn(buf, /*is_64=*/0, /*MOVZ=*/2, /*hw=*/0, /*imm=*/0, Wd_top);
+    emit_movn(buf, /*is_64bit=*/0, /*opc=*/2 /*MOVZ*/, /*hw=*/0, /*imm16=*/0, Wd_top);
     // Cache flags are already zero (we flushed top/tags/perm earlier; deferred_pop_count is 0).
     a1->x87_cache.top_dirty = 0;
 
@@ -4182,7 +4182,7 @@ auto translate_fptan(TranslationResult* a1, IRInstr* /*a2*/) -> void {
     x87_push(buf, *a1, Xbase, Wd_top, Wd_tmp, Wd_tmp2);
     const int Dd_one = alloc_free_fpr(*a1);
     emit_fmov_d_one(buf, Dd_one);
-    emit_store_st(buf, Xbase, Wd_top, /*depth=*/0, Wd_tmp, Dd_one, Xst_base);
+    emit_store_st(buf, Xbase, Wd_top, /*stack_depth=*/0, Wd_tmp, Dd_one, Xst_base);
     free_fpr(*a1, Dd_one);
 
     free_gpr(*a1, Wd_tmp2);
@@ -4213,7 +4213,7 @@ auto translate_fsincos(TranslationResult* a1, IRInstr* /*a2*/) -> void {
     // Push and write cos (d1) at new ST(0).  perm_flush_before_stack_change
     // is handled inside x87_push.
     x87_push(buf, *a1, Xbase, Wd_top, Wd_tmp, Wd_tmp2);
-    emit_store_st(buf, Xbase, Wd_top, /*depth=*/0, Wd_tmp, /*Dd=*/1, Xst_base);
+    emit_store_st(buf, Xbase, Wd_top, /*stack_depth=*/0, Wd_tmp, /*Dd=*/1, Xst_base);
 
     free_gpr(*a1, Wd_tmp2);
     x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp);

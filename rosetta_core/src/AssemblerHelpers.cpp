@@ -180,13 +180,13 @@ auto emit_movz_movk_abs64(AssemblerBuffer& buf, int Rd, uint64_t addr) -> void {
     // the code size is uniform regardless of address (the top MOVK is
     // a no-op-ish movk #0 on macOS userland, but emitting it keeps every
     // call site the same number of bytes).
-    emit_movn(buf, /*is_64=*/1, /*opc=MOVZ*/2, /*hw=*/0,
+    emit_movn(buf, /*is_64bit=*/1, /*opc=MOVZ*/2, /*hw=*/0,
               static_cast<uint16_t>(addr & 0xFFFF), Rd);
-    emit_movn(buf, /*is_64=*/1, /*opc=MOVK*/3, /*hw=*/1,
+    emit_movn(buf, /*is_64bit=*/1, /*opc=MOVK*/3, /*hw=*/1,
               static_cast<uint16_t>((addr >> 16) & 0xFFFF), Rd);
-    emit_movn(buf, /*is_64=*/1, /*opc=MOVK*/3, /*hw=*/2,
+    emit_movn(buf, /*is_64bit=*/1, /*opc=MOVK*/3, /*hw=*/2,
               static_cast<uint16_t>((addr >> 32) & 0xFFFF), Rd);
-    emit_movn(buf, /*is_64=*/1, /*opc=MOVK*/3, /*hw=*/3,
+    emit_movn(buf, /*is_64bit=*/1, /*opc=MOVK*/3, /*hw=*/3,
               static_cast<uint16_t>((addr >> 48) & 0xFFFF), Rd);
 }
 
@@ -211,7 +211,7 @@ auto emit_lslv(AssemblerBuffer& buf, int is_64bit, int Rm, int Rn, int Rd) -> vo
 }
 
 auto emit_subs_reg(AssemblerBuffer& buf, int is_64bit, int Rn, int Rm, int Rd) -> void {
-    emit_add_sub_shifted_reg(buf, is_64bit, /*is_sub=*/1, /*set_flags=*/1,
+    emit_add_sub_shifted_reg(buf, is_64bit, /*is_sub=*/1, /*is_set_flags=*/1,
                              /*shift_type=*/0, Rm, /*shift_amount=*/0, Rn, Rd);
 }
 
@@ -349,16 +349,16 @@ auto emit_fp_dp2(AssemblerBuffer& buf, int type, int opcode, int Rd, int Rn, int
 }
 
 auto emit_fadd_f64(AssemblerBuffer& buf, int Dd, int Dn, int Dm) -> void {
-    emit_fp_dp2(buf, /*type=*/1, /*FADD=*/2, Dd, Dn, Dm);
+    emit_fp_dp2(buf, /*type=*/1, /*opcode=*/2 /*FADD*/, Dd, Dn, Dm);
 }
 auto emit_fsub_f64(AssemblerBuffer& buf, int Dd, int Dn, int Dm) -> void {
-    emit_fp_dp2(buf, /*type=*/1, /*FSUB=*/3, Dd, Dn, Dm);
+    emit_fp_dp2(buf, /*type=*/1, /*opcode=*/3 /*FSUB*/, Dd, Dn, Dm);
 }
 auto emit_fmul_f64(AssemblerBuffer& buf, int Dd, int Dn, int Dm) -> void {
-    emit_fp_dp2(buf, /*type=*/1, /*FMUL=*/0, Dd, Dn, Dm);
+    emit_fp_dp2(buf, /*type=*/1, /*opcode=*/0 /*FMUL*/, Dd, Dn, Dm);
 }
 auto emit_fdiv_f64(AssemblerBuffer& buf, int Dd, int Dn, int Dm) -> void {
-    emit_fp_dp2(buf, /*type=*/1, /*FDIV=*/1, Dd, Dn, Dm);
+    emit_fp_dp2(buf, /*type=*/1, /*opcode=*/1 /*FDIV*/, Dd, Dn, Dm);
 }
 
 auto emit_fp_dp3(AssemblerBuffer& buf, int type, int o1, int o0, int Rd, int Rn, int Rm,
@@ -401,28 +401,28 @@ auto emit_fp_dp1(AssemblerBuffer& buf, int type, int opcode, int Rd, int Rn) -> 
 }
 
 auto emit_fmov_f64(AssemblerBuffer& buf, int Dd, int Dn) -> void {
-    emit_fp_dp1(buf, /*type=*/1, /*FMOV=*/0, Dd, Dn);
+    emit_fp_dp1(buf, /*type=*/1, /*opcode=*/0 /*FMOV*/, Dd, Dn);
 }
 auto emit_fabs_f64(AssemblerBuffer& buf, int Dd, int Dn) -> void {
-    emit_fp_dp1(buf, /*type=*/1, /*FABS=*/1, Dd, Dn);
+    emit_fp_dp1(buf, /*type=*/1, /*opcode=*/1 /*FABS*/, Dd, Dn);
 }
 auto emit_fneg_f64(AssemblerBuffer& buf, int Dd, int Dn) -> void {
-    emit_fp_dp1(buf, /*type=*/1, /*FNEG=*/2, Dd, Dn);
+    emit_fp_dp1(buf, /*type=*/1, /*opcode=*/2 /*FNEG*/, Dd, Dn);
 }
 auto emit_fsqrt_f64(AssemblerBuffer& buf, int Dd, int Dn) -> void {
-    emit_fp_dp1(buf, /*type=*/1, /*FSQRT=*/3, Dd, Dn);
+    emit_fp_dp1(buf, /*type=*/1, /*opcode=*/3 /*FSQRT*/, Dd, Dn);
 }
 auto emit_frinta_f64(AssemblerBuffer& buf, int Dd, int Dn) -> void {
     // FRINTA: round to integral, ties-away-from-zero.  DP1 opcode 0b001100.
-    emit_fp_dp1(buf, /*type=*/1, /*FRINTA=*/0xC, Dd, Dn);
+    emit_fp_dp1(buf, /*type=*/1, /*opcode=*/0xC /*FRINTA*/, Dd, Dn);
 }
 auto emit_frintz_f64(AssemblerBuffer& buf, int Dd, int Dn) -> void {
     // FRINTZ: round to integral, toward zero (truncate).  DP1 opcode 0b001011.
-    emit_fp_dp1(buf, /*type=*/1, /*FRINTZ=*/0xB, Dd, Dn);
+    emit_fp_dp1(buf, /*type=*/1, /*opcode=*/0xB /*FRINTZ*/, Dd, Dn);
 }
 auto emit_frintn_f64(AssemblerBuffer& buf, int Dd, int Dn) -> void {
     // FRINTN: round to integral, ties-to-even (IEEE default).  DP1 opcode 0b001000.
-    emit_fp_dp1(buf, /*type=*/1, /*FRINTN=*/0x8, Dd, Dn);
+    emit_fp_dp1(buf, /*type=*/1, /*opcode=*/0x8 /*FRINTN*/, Dd, Dn);
 }
 
 auto emit_fp_cmp(AssemblerBuffer& buf, int type, int Rn, int Rm) -> void {
@@ -495,10 +495,10 @@ auto emit_fcvt(AssemblerBuffer& buf, int dst_type, int src_type, int Rd, int Rn)
 }
 
 auto emit_fcvt_s_to_d(AssemblerBuffer& buf, int Dd, int Sn) -> void {
-    emit_fcvt(buf, /*dst=*/1, /*src=*/0, Dd, Sn);
+    emit_fcvt(buf, /*dst_type=*/1, /*src_type=*/0, Dd, Sn);
 }
 auto emit_fcvt_d_to_s(AssemblerBuffer& buf, int Sd, int Dn) -> void {
-    emit_fcvt(buf, /*dst=*/0, /*src=*/1, Sd, Dn);
+    emit_fcvt(buf, /*dst_type=*/0, /*src_type=*/1, Sd, Dn);
 }
 
 auto emit_fmov_gpr_fpr(AssemblerBuffer& buf, int dir, int gpr, int fpr) -> void {
@@ -679,8 +679,8 @@ auto emit_add_reg(AssemblerBuffer& buf, int is_64bit, int dst, int lhs, int rhs)
         v |= static_cast<uint32_t>(dst & 0x1F);
         buf.emit(v);
     } else {
-        emit_add_sub_shifted_reg(buf, is_64bit, /*is_sub=*/0, /*set_flags=*/0,
-                                 /*shift=*/0, rhs, /*shift_amt=*/0, lhs, dst);
+        emit_add_sub_shifted_reg(buf, is_64bit, /*is_sub=*/0, /*is_set_flags=*/0,
+                                 /*shift_type=*/0, rhs, /*shift_amount=*/0, lhs, dst);
     }
 }
 

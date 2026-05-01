@@ -12,9 +12,9 @@ namespace TranslatorX87 {
 // inline sites in translate_fld / translate_fst encoded CSEL via a local
 // lambda; reproduce it here so we don't pollute the public header just for
 // these helpers.
-static inline void emit_csel(AssemblerBuffer& buf, int is_64, int Rd, int Rn, int Rm, int cond) {
+static inline void emit_csel(AssemblerBuffer& buf, int is_64bit, int Rd, int Rn, int Rm, int cond) {
     uint32_t insn = 0x1A800000U;
-    insn |= static_cast<uint32_t>(is_64 != 0) << 31;
+    insn |= static_cast<uint32_t>(is_64bit != 0) << 31;
     insn |= static_cast<uint32_t>(Rm   & 0x1F) << 16;
     insn |= static_cast<uint32_t>(cond & 0xF)  << 12;
     insn |= static_cast<uint32_t>(Rn   & 0x1F) << 5;
@@ -52,11 +52,11 @@ void emit_f80_to_f64_convert(AssemblerBuffer& buf,
     // constants are needed.
 
     // Sign bit -> Xsign[0]; clear sign in Wexp so it holds exp_low.
-    emit_bitfield(buf, /*is_64=*/1, /*UBFM=*/2, /*N=*/1,
+    emit_bitfield(buf, /*is_64bit=*/1, /*opc=*/2 /*UBFM*/, /*N=*/1,
                   /*immr=*/15, /*imms=*/15, Wexp, Xsign);
     LogicalImmEncoding enc_15bits;
-    is_bitmask_immediate(/*is_64=*/false, 0x7FFFU, enc_15bits);
-    emit_and_imm(buf, /*is_64=*/0, Wexp,
+    is_bitmask_immediate(/*is_64bit=*/false, 0x7FFFU, enc_15bits);
+    emit_and_imm(buf, /*is_64bit=*/0, Wexp,
                  enc_15bits.N, enc_15bits.immr, enc_15bits.imms, Wexp);
 
     // Pre-round: add 0x400 (= half of the 11-bit slack we'll truncate)
@@ -68,57 +68,57 @@ void emit_f80_to_f64_convert(AssemblerBuffer& buf,
     // to all-ones, the addition wraps past bit 63 and the integer bit
     // is lost.  Compensate by incrementing the f64 exponent (e.g.,
     // 1.999... -> 2.0).
-    emit_add_imm(buf, /*is_64=*/1, /*is_sub=*/0, /*set_flags=*/1,
+    emit_add_imm(buf, /*is_64bit=*/1, /*is_sub=*/0, /*is_set_flags=*/1,
                  /*shift=*/0, /*imm12=*/0x400, Xmant_inout, Xmant_inout);
-    emit_cset(buf, /*is_64=*/0, /*CS=*/2, Wd_aux);
+    emit_cset(buf, /*is_64bit=*/0, /*cond=*/2 /*CS*/, Wd_aux);
 
     // Mantissa: drop integer bit + low 11 fractional bits -> 52-bit value.
-    emit_bitfield(buf, /*is_64=*/1, /*UBFM=*/2, /*N=*/1,
+    emit_bitfield(buf, /*is_64bit=*/1, /*opc=*/2 /*UBFM*/, /*N=*/1,
                   /*immr=*/11, /*imms=*/63, Xmant_inout, Xmant_inout);
     LogicalImmEncoding enc_mant52;
-    is_bitmask_immediate(/*is_64=*/true, 0x000FFFFFFFFFFFFFULL, enc_mant52);
-    emit_and_imm(buf, /*is_64=*/1, Xmant_inout,
+    is_bitmask_immediate(/*is_64bit=*/true, 0x000FFFFFFFFFFFFFULL, enc_mant52);
+    emit_and_imm(buf, /*is_64bit=*/1, Xmant_inout,
                  enc_mant52.N, enc_mant52.immr, enc_mant52.imms, Xmant_inout);
 
     // If exp_low == 0 (zero/denormal): zero out mantissa.
     // CMP Wexp, #0; CSEL Xmant_inout, XZR, Xmant_inout, EQ.
-    emit_add_imm(buf, /*is_64=*/0, /*is_sub=*/1, /*is_set_flags=*/1,
+    emit_add_imm(buf, /*is_64bit=*/0, /*is_sub=*/1, /*is_set_flags=*/1,
                  /*shift=*/0, /*imm12=*/0, Wexp, /*Rd=*/31);
-    emit_csel(buf, /*is_64=*/1, Xmant_inout, /*Rn=*/31, /*Rm=*/Xmant_inout, /*EQ=*/0);
+    emit_csel(buf, /*is_64bit=*/1, Xmant_inout, /*Rn=*/31, /*Rm=*/Xmant_inout, /*cond=*/0 /*EQ*/);
 
     // Compute exp_adj normal case in Wd_tmp:
     //   SUB Wd_tmp, Wexp, #0x4000, LSL #12   (-16384)
     //   ADD Wd_tmp, Wd_tmp, #0x400           (+1024 -> -15360)
-    emit_add_imm(buf, /*is_64=*/0, /*is_sub=*/1, /*set_flags=*/0,
+    emit_add_imm(buf, /*is_64bit=*/0, /*is_sub=*/1, /*is_set_flags=*/0,
                  /*shift=*/1, /*imm12=*/4, Wexp, Wd_tmp);
-    emit_add_imm(buf, /*is_64=*/0, /*is_sub=*/0, /*set_flags=*/0,
+    emit_add_imm(buf, /*is_64bit=*/0, /*is_sub=*/0, /*is_set_flags=*/0,
                  /*shift=*/0, /*imm12=*/0x400, Wd_tmp, Wd_tmp);
 
     // Apply round-overflow carry from the +0x400 ADDS at the top:
     // exp_adj += Wd_aux.
-    emit_add_sub_shifted_reg(buf, /*is_64=*/0, /*is_sub=*/0, /*set_flags=*/0,
-                             /*shift=*/0, /*Rm=*/Wd_aux, /*amt=*/0,
+    emit_add_sub_shifted_reg(buf, /*is_64bit=*/0, /*is_sub=*/0, /*is_set_flags=*/0,
+                             /*shift_type=*/0, /*Rm=*/Wd_aux, /*shift_amount=*/0,
                              /*Rn=*/Wd_tmp, /*Rd=*/Wd_tmp);
 
     // exp_adj override for exp == 0: CMP Wexp, #0; CSEL exp_adj, WZR, exp_adj, EQ
-    emit_add_imm(buf, /*is_64=*/0, /*is_sub=*/1, /*is_set_flags=*/1,
+    emit_add_imm(buf, /*is_64bit=*/0, /*is_sub=*/1, /*is_set_flags=*/1,
                  /*shift=*/0, /*imm12=*/0, Wexp, /*Rd=*/31);
-    emit_csel(buf, /*is_64=*/0, Wd_tmp, /*Rn=*/31, /*Rm=*/Wd_tmp, /*EQ=*/0);
+    emit_csel(buf, /*is_64bit=*/0, Wd_tmp, /*Rn=*/31, /*Rm=*/Wd_tmp, /*cond=*/0 /*EQ*/);
 
     // exp_adj override for exp == 0x7FFF: load 0x7FFF into Wd_aux for
     // the CMP, then 0x7FF for the override value.
-    emit_movn(buf, /*is_64=*/0, /*MOVZ=*/2, /*hw=*/0, /*imm=*/0x7FFF, Wd_aux);
-    emit_subs_reg(buf, /*is_64=*/0, /*Rn=*/Wexp, /*Rm=*/Wd_aux, /*Rd=*/31);
-    emit_movn(buf, /*is_64=*/0, /*MOVZ=*/2, /*hw=*/0, /*imm=*/0x7FF, Wd_aux);
-    emit_csel(buf, /*is_64=*/0, Wd_tmp, /*Rn=*/Wd_aux, /*Rm=*/Wd_tmp, /*EQ=*/0);
+    emit_movn(buf, /*is_64bit=*/0, /*opc=*/2 /*MOVZ*/, /*hw=*/0, /*imm16=*/0x7FFF, Wd_aux);
+    emit_subs_reg(buf, /*is_64bit=*/0, /*Rn=*/Wexp, /*Rm=*/Wd_aux, /*Rd=*/31);
+    emit_movn(buf, /*is_64bit=*/0, /*opc=*/2 /*MOVZ*/, /*hw=*/0, /*imm16=*/0x7FF, Wd_aux);
+    emit_csel(buf, /*is_64bit=*/0, Wd_tmp, /*Rn=*/Wd_aux, /*Rm=*/Wd_tmp, /*cond=*/0 /*EQ*/);
 
     // Build f64 raw bits in Xmant_inout via two BFIs.
     //   BFI Xmant_inout, Xd_tmp, #52, #11   -> bits [62:52] = exp_adj[10:0]
     //   BFI Xmant_inout, Xsign,  #63, #1    -> bit 63 = sign[0]
     // BFI is BFM with opc=01.  For lsb,width: immr=(64-lsb)%64, imms=width-1.
-    emit_bitfield(buf, /*is_64=*/1, /*BFM=*/1, /*N=*/1,
+    emit_bitfield(buf, /*is_64bit=*/1, /*opc=*/1 /*BFM*/, /*N=*/1,
                   /*immr=*/12, /*imms=*/10, Wd_tmp, Xmant_inout);
-    emit_bitfield(buf, /*is_64=*/1, /*BFM=*/1, /*N=*/1,
+    emit_bitfield(buf, /*is_64bit=*/1, /*opc=*/1 /*BFM*/, /*N=*/1,
                   /*immr=*/1,  /*imms=*/0,  Xsign,  Xmant_inout);
 }
 
@@ -172,7 +172,7 @@ void emit_f64_to_f80(AssemblerBuffer& buf,
                  /*shift=*/0, /*imm12=*/0x7FF, Wexp, /*Rd=*/31);
 
     // [7] B.EQ .inf_nan (+11 insns = +44 bytes)
-    emit_b_cond(buf, /*EQ=*/0, 11);
+    emit_b_cond(buf, /*cond=*/0 /*EQ*/, 11);
 
     // ── Normal number ──
     // [8] ORR Xbits, Xbits, #0x8000000000000000 — set explicit integer bit

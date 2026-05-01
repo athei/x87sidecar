@@ -158,10 +158,10 @@ int emit_load_st(AssemblerBuffer& buf, int Xbase, int Wd_top, int stack_depth, i
     // Uncached path: compute byte offset into Wd_tmp.
     emit_phys_index(buf, Wd_top, stack_depth, Wd_tmp);
     // LSL Wd_tmp, Wd_tmp, #3   (index * 8)
-    emit_bitfield(buf, /*is_64=*/0, /*UBFM*/ 2, /*N*/ 0,
+    emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/2 /*UBFM*/, /*N*/ 0,
                   /*immr*/ 29, /*imms*/ 28, Wd_tmp, Wd_tmp);
     // ADD Wd_tmp, Wd_tmp, #8   (+ st[] base offset)
-    emit_add_imm(buf, /*is_64=*/0, /*is_sub=*/0, /*is_set_flags=*/0,
+    emit_add_imm(buf, /*is_64bit=*/0, /*is_sub=*/0, /*is_set_flags=*/0,
                  /*shift=*/0, kX87RegFileOff, Wd_tmp, Wd_tmp);
     // LDR Dd, [Xbase, Wd_tmp, SXTW]
     emit_ldr_str_reg(buf, /*size=*/3, /*is_fp=*/1, /*opc=*/1, Wd_tmp, /*shift=*/0, Xbase, Dd);
@@ -189,9 +189,9 @@ void emit_store_st(AssemblerBuffer& buf, int Xbase, int Wd_top, int stack_depth,
 
     // Uncached path
     emit_phys_index(buf, Wd_top, stack_depth, Wd_tmp);
-    emit_bitfield(buf, /*is_64=*/0, /*UBFM*/ 2, /*N*/ 0,
+    emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/2 /*UBFM*/, /*N*/ 0,
                   /*immr*/ 29, /*imms*/ 28, Wd_tmp, Wd_tmp);
-    emit_add_imm(buf, /*is_64=*/0, /*is_sub=*/0, /*is_set_flags=*/0,
+    emit_add_imm(buf, /*is_64bit=*/0, /*is_sub=*/0, /*is_set_flags=*/0,
                  /*shift=*/0, kX87RegFileOff, Wd_tmp, Wd_tmp);
     emit_ldr_str_reg(buf, /*size=*/3, /*is_fp=*/1, /*opc=*/0, Wd_tmp, /*shift=*/0, Xbase, Dd);
 }
@@ -241,24 +241,24 @@ void emit_x87_push(AssemblerBuffer& buf, int Xbase, int Wd_top, int Wd_tmp, int 
     // ── tagWord &= ~(3 << (newTop * 2))  →  mark new slot kValid ─────────────
 
     // LSL   Wd_tmp2, Wd_top, #1       ; bit_pos = newTop * 2
-    emit_bitfield(buf, /*is_64=*/0, /*UBFM*/ 2, /*N*/ 0,
+    emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/2 /*UBFM*/, /*N*/ 0,
                   /*immr*/ 31, /*imms*/ 30, Wd_top, Wd_tmp2);
 
     // MOVZ  Wd_tmp, #3                ; mask seed
-    emit_movn(buf, /*is_64=*/0, /*MOVZ opc*/ 2, /*hw*/ 0, 3, Wd_tmp);
+    emit_movn(buf, /*is_64bit=*/0, /*MOVZ opc*/ 2, /*hw*/ 0, 3, Wd_tmp);
 
     // LSLV  Wd_tmp, Wd_tmp, Wd_tmp2  ; mask = 3 << bit_pos
     emit_lslv(buf, 0, Wd_tmp2, Wd_tmp, Wd_tmp);
 
     // LDRH  Wd_tmp2, [Xbase, #4]      ; tagWord
-    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*LDR*/ 1, kX87TagWordImm12, Xbase, Wd_tmp2);
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/1 /*LDR*/, kX87TagWordImm12, Xbase, Wd_tmp2);
 
     // BIC   Wd_tmp2, Wd_tmp2, Wd_tmp  ; tagWord &= ~mask
-    emit_logical_shifted_reg(buf, /*is_64=*/0, /*AND*/ 0, /*N=invert*/ 1,
-                             /*LSL*/ 0, Wd_tmp, /*shift_amt*/ 0, Wd_tmp2, Wd_tmp2);
+    emit_logical_shifted_reg(buf, /*is_64bit=*/0, /*opc=*/0 /*AND*/, /*N=invert*/ 1,
+                             /*shift_type=*/0 /*LSL*/, Wd_tmp, /*shift_amt*/ 0, Wd_tmp2, Wd_tmp2);
 
     // STRH  Wd_tmp2, [Xbase, #4]      ; write back tagWord
-    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*STR*/ 0, kX87TagWordImm12, Xbase, Wd_tmp2);
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/0 /*STR*/, kX87TagWordImm12, Xbase, Wd_tmp2);
 
     // Wd_top still holds newTop — no restore needed.
 }
@@ -285,14 +285,14 @@ void emit_x87_push_deferred(AssemblerBuffer& buf, int Xbase, int Wd_top, int Wd_
 
     // ── tagWord &= ~(3 << (newTop * 2)) ──────────────────────────────────
 
-    emit_bitfield(buf, /*is_64=*/0, /*UBFM*/ 2, /*N*/ 0,
+    emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/2 /*UBFM*/, /*N*/ 0,
                   /*immr*/ 31, /*imms*/ 30, Wd_top, Wd_tmp2);
-    emit_movn(buf, /*is_64=*/0, /*MOVZ opc*/ 2, /*hw*/ 0, 3, Wd_tmp);
+    emit_movn(buf, /*is_64bit=*/0, /*MOVZ opc*/ 2, /*hw*/ 0, 3, Wd_tmp);
     emit_lslv(buf, 0, Wd_tmp2, Wd_tmp, Wd_tmp);
-    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*LDR*/ 1, kX87TagWordImm12, Xbase, Wd_tmp2);
-    emit_logical_shifted_reg(buf, /*is_64=*/0, /*AND*/ 0, /*N=invert*/ 1,
-                             /*LSL*/ 0, Wd_tmp, /*shift_amt*/ 0, Wd_tmp2, Wd_tmp2);
-    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*STR*/ 0, kX87TagWordImm12, Xbase, Wd_tmp2);
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/1 /*LDR*/, kX87TagWordImm12, Xbase, Wd_tmp2);
+    emit_logical_shifted_reg(buf, /*is_64bit=*/0, /*opc=*/0 /*AND*/, /*N=invert*/ 1,
+                             /*shift_type=*/0 /*LSL*/, Wd_tmp, /*shift_amt*/ 0, Wd_tmp2, Wd_tmp2);
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/0 /*STR*/, kX87TagWordImm12, Xbase, Wd_tmp2);
 }
 
 // =============================================================================
@@ -318,24 +318,24 @@ void emit_x87_pop(AssemblerBuffer& buf, int Xbase, int Wd_top, int Wd_tmp, int W
     // ── tagWord |= (3 << (oldTop * 2))  →  mark popped slot kEmpty ──────────
 
     // LSL   Wd_tmp2, Wd_top, #1       ; bit_pos = oldTop * 2
-    emit_bitfield(buf, /*is_64=*/0, /*UBFM*/ 2, /*N*/ 0,
+    emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/2 /*UBFM*/, /*N*/ 0,
                   /*immr*/ 31, /*imms*/ 30, Wd_top, Wd_tmp2);
 
     // MOVZ  Wd_tmp, #3                ; mask seed
-    emit_movn(buf, /*is_64=*/0, /*MOVZ opc*/ 2, /*hw*/ 0, 3, Wd_tmp);
+    emit_movn(buf, /*is_64bit=*/0, /*MOVZ opc*/ 2, /*hw*/ 0, 3, Wd_tmp);
 
     // LSLV  Wd_tmp, Wd_tmp, Wd_tmp2  ; mask = 3 << bit_pos
     emit_lslv(buf, 0, Wd_tmp2, Wd_tmp, Wd_tmp);
 
     // LDRH  Wd_tmp2, [Xbase, #4]      ; tagWord
-    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*LDR*/ 1, kX87TagWordImm12, Xbase, Wd_tmp2);
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/1 /*LDR*/, kX87TagWordImm12, Xbase, Wd_tmp2);
 
     // ORR   Wd_tmp2, Wd_tmp2, Wd_tmp  ; tagWord |= mask  (set kEmpty = 0b11)
-    emit_logical_shifted_reg(buf, /*is_64=*/0, /*ORR*/ 1, /*N=*/0,
-                             /*LSL*/ 0, Wd_tmp, /*shift_amt*/ 0, Wd_tmp2, Wd_tmp2);
+    emit_logical_shifted_reg(buf, /*is_64bit=*/0, /*opc=*/1 /*ORR*/, /*N=*/0,
+                             /*shift_type=*/0 /*LSL*/, Wd_tmp, /*shift_amt*/ 0, Wd_tmp2, Wd_tmp2);
 
     // STRH  Wd_tmp2, [Xbase, #4]      ; write back tagWord
-    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*STR*/ 0, kX87TagWordImm12, Xbase, Wd_tmp2);
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/0 /*STR*/, kX87TagWordImm12, Xbase, Wd_tmp2);
 
     // ── Compute newTop = (oldTop + 1) & 7 ────────────────────────────────────
 
@@ -366,14 +366,14 @@ void emit_x87_pop(AssemblerBuffer& buf, int Xbase, int Wd_top, int Wd_tmp, int W
 void emit_x87_pop_deferred(AssemblerBuffer& buf, int Xbase, int Wd_top, int Wd_tmp, int Wd_tmp2) {
     // ── tagWord |= (3 << (oldTop * 2))  →  mark popped slot kEmpty ──────────
 
-    emit_bitfield(buf, /*is_64=*/0, /*UBFM*/ 2, /*N*/ 0,
+    emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/2 /*UBFM*/, /*N*/ 0,
                   /*immr*/ 31, /*imms*/ 30, Wd_top, Wd_tmp2);
-    emit_movn(buf, /*is_64=*/0, /*MOVZ opc*/ 2, /*hw*/ 0, 3, Wd_tmp);
+    emit_movn(buf, /*is_64bit=*/0, /*MOVZ opc*/ 2, /*hw*/ 0, 3, Wd_tmp);
     emit_lslv(buf, 0, Wd_tmp2, Wd_tmp, Wd_tmp);
-    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*LDR*/ 1, kX87TagWordImm12, Xbase, Wd_tmp2);
-    emit_logical_shifted_reg(buf, /*is_64=*/0, /*ORR*/ 1, /*N=*/0,
-                             /*LSL*/ 0, Wd_tmp, /*shift_amt*/ 0, Wd_tmp2, Wd_tmp2);
-    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*STR*/ 0, kX87TagWordImm12, Xbase, Wd_tmp2);
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/1 /*LDR*/, kX87TagWordImm12, Xbase, Wd_tmp2);
+    emit_logical_shifted_reg(buf, /*is_64bit=*/0, /*opc=*/1 /*ORR*/, /*N=*/0,
+                             /*shift_type=*/0 /*LSL*/, Wd_tmp, /*shift_amt*/ 0, Wd_tmp2, Wd_tmp2);
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/0 /*STR*/, kX87TagWordImm12, Xbase, Wd_tmp2);
 
     // ── Compute newTop = (oldTop + 1) & 7  (register only) ──────────────────
 
@@ -407,28 +407,28 @@ void emit_x87_pop_n(AssemblerBuffer& buf, int Xbase, int Wd_top, int Wd_tmp, int
         // Compute bit_pos = ((oldTop + i) & 7) * 2 → Wd_tmp2
         if (i == 0) {
             // oldTop is already in Wd_top
-            emit_bitfield(buf, /*is_64=*/0, /*UBFM*/ 2, /*N*/ 0,
+            emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/2 /*UBFM*/, /*N*/ 0,
                           /*immr*/ 31, /*imms*/ 30, Wd_top, Wd_tmp2);
         } else {
             // phys = (oldTop + i) & 7
-            emit_add_imm(buf, /*is_64=*/0, /*is_sub=*/0, /*is_set_flags=*/0,
+            emit_add_imm(buf, /*is_64bit=*/0, /*is_sub=*/0, /*is_set_flags=*/0,
                          /*shift=*/0, i, Wd_top, Wd_tmp2);
-            emit_and_imm(buf, /*is_64=*/0, Wd_tmp2,
+            emit_and_imm(buf, /*is_64bit=*/0, Wd_tmp2,
                          /*N=*/0, /*immr=*/0, /*imms=*/2, Wd_tmp2);
             // bit_pos = phys * 2
-            emit_bitfield(buf, /*is_64=*/0, /*UBFM*/ 2, /*N*/ 0,
+            emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/2 /*UBFM*/, /*N*/ 0,
                           /*immr*/ 31, /*imms*/ 30, Wd_tmp2, Wd_tmp2);
         }
 
         // mask = 3 << bit_pos → Wd_tmp
-        emit_movn(buf, /*is_64=*/0, /*MOVZ opc*/ 2, /*hw*/ 0, 3, Wd_tmp);
+        emit_movn(buf, /*is_64bit=*/0, /*MOVZ opc*/ 2, /*hw*/ 0, 3, Wd_tmp);
         emit_lslv(buf, 0, Wd_tmp2, Wd_tmp, Wd_tmp);
 
         // tagWord |= mask  (LDRH, ORR, STRH)
-        emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*LDR*/ 1, kX87TagWordImm12, Xbase, Wd_tmp2);
-        emit_logical_shifted_reg(buf, /*is_64=*/0, /*ORR*/ 1, /*N=*/0,
-                                 /*LSL*/ 0, Wd_tmp, /*shift_amt*/ 0, Wd_tmp2, Wd_tmp2);
-        emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*STR*/ 0, kX87TagWordImm12, Xbase, Wd_tmp2);
+        emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/1 /*LDR*/, kX87TagWordImm12, Xbase, Wd_tmp2);
+        emit_logical_shifted_reg(buf, /*is_64bit=*/0, /*opc=*/1 /*ORR*/, /*N=*/0,
+                                 /*shift_type=*/0 /*LSL*/, Wd_tmp, /*shift_amt*/ 0, Wd_tmp2, Wd_tmp2);
+        emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/0 /*STR*/, kX87TagWordImm12, Xbase, Wd_tmp2);
     }
 
     // ── Compute newTop = (oldTop + n) & 7 ────────────────────────────────────
@@ -454,26 +454,26 @@ void emit_x87_pop_n_deferred(AssemblerBuffer& buf, int Xbase, int Wd_top, int Wd
                              int n) {
     for (int i = 0; i < n; i++) {
         if (i == 0) {
-            emit_bitfield(buf, /*is_64=*/0, /*UBFM*/ 2, /*N*/ 0,
+            emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/2 /*UBFM*/, /*N*/ 0,
                           /*immr*/ 31, /*imms*/ 30, Wd_top, Wd_tmp2);
         } else {
-            emit_add_imm(buf, /*is_64=*/0, /*is_sub=*/0, /*is_set_flags=*/0,
+            emit_add_imm(buf, /*is_64bit=*/0, /*is_sub=*/0, /*is_set_flags=*/0,
                          /*shift=*/0, i, Wd_top, Wd_tmp2);
-            emit_and_imm(buf, /*is_64=*/0, Wd_tmp2,
+            emit_and_imm(buf, /*is_64bit=*/0, Wd_tmp2,
                          /*N=*/0, /*immr=*/0, /*imms=*/2, Wd_tmp2);
-            emit_bitfield(buf, /*is_64=*/0, /*UBFM*/ 2, /*N*/ 0,
+            emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/2 /*UBFM*/, /*N*/ 0,
                           /*immr*/ 31, /*imms*/ 30, Wd_tmp2, Wd_tmp2);
         }
 
-        emit_movn(buf, /*is_64=*/0, /*MOVZ opc*/ 2, /*hw*/ 0, 3, Wd_tmp);
+        emit_movn(buf, /*is_64bit=*/0, /*MOVZ opc*/ 2, /*hw*/ 0, 3, Wd_tmp);
         emit_lslv(buf, 0, Wd_tmp2, Wd_tmp, Wd_tmp);
 
-        emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*LDR*/ 1,
+        emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/1 /*LDR*/,
                          kX87TagWordImm12, Xbase, Wd_tmp2);
-        emit_logical_shifted_reg(buf, /*is_64=*/0, /*ORR*/ 1, /*N=*/0,
-                                 /*LSL*/ 0, Wd_tmp, /*shift_amt*/ 0,
+        emit_logical_shifted_reg(buf, /*is_64bit=*/0, /*opc=*/1 /*ORR*/, /*N=*/0,
+                                 /*shift_type=*/0 /*LSL*/, Wd_tmp, /*shift_amt*/ 0,
                                  Wd_tmp2, Wd_tmp2);
-        emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*STR*/ 0,
+        emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/0 /*STR*/,
                          kX87TagWordImm12, Xbase, Wd_tmp2);
     }
 
@@ -533,19 +533,19 @@ void emit_x87_pop_top_only(AssemblerBuffer& buf, int Wd_top) {
 // =============================================================================
 void emit_x87_tag_clear(AssemblerBuffer& buf, int Xbase, int Wd_top, int Wd_tmp, int Wd_tmp2) {
     // LSL   Wd_tmp2, Wd_top, #1
-    emit_bitfield(buf, /*is_64=*/0, /*UBFM*/ 2, /*N*/ 0,
+    emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/2 /*UBFM*/, /*N*/ 0,
                   /*immr*/ 31, /*imms*/ 30, Wd_top, Wd_tmp2);
     // MOVZ  Wd_tmp, #3
-    emit_movn(buf, /*is_64=*/0, /*MOVZ opc*/ 2, /*hw*/ 0, 3, Wd_tmp);
+    emit_movn(buf, /*is_64bit=*/0, /*MOVZ opc*/ 2, /*hw*/ 0, 3, Wd_tmp);
     // LSLV  Wd_tmp, Wd_tmp, Wd_tmp2
     emit_lslv(buf, 0, Wd_tmp2, Wd_tmp, Wd_tmp);
     // LDRH  Wd_tmp2, [Xbase, #4]  (tagWord)
-    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*LDR*/ 1, kX87TagWordImm12, Xbase, Wd_tmp2);
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/1 /*LDR*/, kX87TagWordImm12, Xbase, Wd_tmp2);
     // BIC   Wd_tmp2, Wd_tmp2, Wd_tmp  (tagWord &= ~mask → kValid)
-    emit_logical_shifted_reg(buf, /*is_64=*/0, /*AND*/ 0, /*N=invert*/ 1,
-                             /*LSL*/ 0, Wd_tmp, /*shift_amt*/ 0, Wd_tmp2, Wd_tmp2);
+    emit_logical_shifted_reg(buf, /*is_64bit=*/0, /*opc=*/0 /*AND*/, /*N=invert*/ 1,
+                             /*shift_type=*/0 /*LSL*/, Wd_tmp, /*shift_amt*/ 0, Wd_tmp2, Wd_tmp2);
     // STRH  Wd_tmp2, [Xbase, #4]
-    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*STR*/ 0, kX87TagWordImm12, Xbase, Wd_tmp2);
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/0 /*STR*/, kX87TagWordImm12, Xbase, Wd_tmp2);
 }
 
 // =============================================================================
@@ -563,31 +563,31 @@ void emit_x87_tag_clear(AssemblerBuffer& buf, int Xbase, int Wd_top, int Wd_tmp,
 void emit_x87_tag_set_empty_batch(AssemblerBuffer& buf, int Xbase, int Wd_top,
                                    int Wd_tmp, int Wd_tmp2, int Wd_tagw, int count) {
     // LDRH  Wd_tagw, [Xbase, #4]  — load tag word once
-    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*LDR*/ 1, kX87TagWordImm12, Xbase, Wd_tagw);
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/1 /*LDR*/, kX87TagWordImm12, Xbase, Wd_tagw);
 
     for (int i = 0; i < count; i++) {
         // Compute slot = (Wd_top - count + i) & 7 → Wd_tmp
         const int offset_from_top = count - i;  // positive offset back from current TOP
         // SUB Wd_tmp, Wd_top, #offset_from_top
-        emit_add_imm(buf, /*is_64=*/0, /*is_sub=*/1, /*is_set_flags=*/0,
+        emit_add_imm(buf, /*is_64bit=*/0, /*is_sub=*/1, /*is_set_flags=*/0,
                      /*shift=*/0, offset_from_top, Wd_top, Wd_tmp);
         // AND Wd_tmp, Wd_tmp, #7
-        emit_and_imm(buf, /*is_64=*/0, Wd_tmp,
+        emit_and_imm(buf, /*is_64bit=*/0, Wd_tmp,
                      /*N=*/0, /*immr=*/0, /*imms=*/2, Wd_tmp);
         // LSL Wd_tmp, Wd_tmp, #1  (bit_pos = slot * 2)
-        emit_bitfield(buf, /*is_64=*/0, /*UBFM*/ 2, /*N*/ 0,
+        emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/2 /*UBFM*/, /*N*/ 0,
                       /*immr*/ 31, /*imms*/ 30, Wd_tmp, Wd_tmp);
         // MOVZ Wd_tmp2, #3
-        emit_movn(buf, /*is_64=*/0, /*MOVZ opc*/ 2, /*hw*/ 0, 3, Wd_tmp2);
+        emit_movn(buf, /*is_64bit=*/0, /*MOVZ opc*/ 2, /*hw*/ 0, 3, Wd_tmp2);
         // LSLV Wd_tmp2, Wd_tmp2, Wd_tmp  → mask = 3 << bit_pos
         emit_lslv(buf, 0, Wd_tmp, Wd_tmp2, Wd_tmp2);
         // ORR Wd_tagw, Wd_tagw, Wd_tmp2
-        emit_logical_shifted_reg(buf, /*is_64=*/0, /*ORR*/ 1, /*N=*/0,
-                                 /*LSL*/ 0, Wd_tmp2, /*shift_amt*/ 0, Wd_tagw, Wd_tagw);
+        emit_logical_shifted_reg(buf, /*is_64bit=*/0, /*opc=*/1 /*ORR*/, /*N=*/0,
+                                 /*shift_type=*/0 /*LSL*/, Wd_tmp2, /*shift_amt*/ 0, Wd_tagw, Wd_tagw);
     }
 
     // STRH  Wd_tagw, [Xbase, #4]  — write tag word once
-    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*STR*/ 0, kX87TagWordImm12, Xbase, Wd_tagw);
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/0 /*STR*/, kX87TagWordImm12, Xbase, Wd_tagw);
 }
 
 // =============================================================================
@@ -606,30 +606,30 @@ void emit_x87_tag_set_empty_batch(AssemblerBuffer& buf, int Xbase, int Wd_top,
 void emit_x87_tag_set_valid_batch(AssemblerBuffer& buf, int Xbase, int Wd_top,
                                    int Wd_tmp, int Wd_tmp2, int Wd_tagw, int count) {
     // LDRH  Wd_tagw, [Xbase, #4]  — load tag word once
-    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*LDR*/ 1, kX87TagWordImm12, Xbase, Wd_tagw);
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/1 /*LDR*/, kX87TagWordImm12, Xbase, Wd_tagw);
 
     // bit_pos = top * 2  (LSL #1 via UBFM)
-    emit_bitfield(buf, /*is_64=*/0, /*UBFM*/ 2, /*N*/ 0,
+    emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/2 /*UBFM*/, /*N*/ 0,
                   /*immr*/ 31, /*imms*/ 30, Wd_top, Wd_tmp);
 
     // mask = (1 << (2 * count)) - 1  — covers count adjacent 2-bit pairs
     const auto mask = static_cast<uint16_t>((1U << (2 * count)) - 1);
-    emit_movn(buf, /*is_64=*/0, /*MOVZ opc*/ 2, /*hw*/ 0, mask, Wd_tmp2);
+    emit_movn(buf, /*is_64bit=*/0, /*MOVZ opc*/ 2, /*hw*/ 0, mask, Wd_tmp2);
 
     // LSLV Wd_tmp2, Wd_tmp2, Wd_tmp  — shift mask into position
     emit_lslv(buf, 0, Wd_tmp, Wd_tmp2, Wd_tmp2);
 
     // Handle circular wrap: fold overflow bits back into low 16
     // ORR Wd_tmp2, Wd_tmp2, Wd_tmp2, LSR #16
-    emit_logical_shifted_reg(buf, /*is_64=*/0, /*ORR*/ 1, /*N=*/0,
-                             /*LSR*/ 1, Wd_tmp2, /*shift_amt*/ 16, Wd_tmp2, Wd_tmp2);
+    emit_logical_shifted_reg(buf, /*is_64bit=*/0, /*opc=*/1 /*ORR*/, /*N=*/0,
+                             /*shift_type=*/1 /*LSR*/, Wd_tmp2, /*shift_amt*/ 16, Wd_tmp2, Wd_tmp2);
 
     // BIC Wd_tagw, Wd_tagw, Wd_tmp2  — clear all tag bits at once (kValid = 0b00)
-    emit_logical_shifted_reg(buf, /*is_64=*/0, /*AND*/ 0, /*N=1→BIC*/ 1,
-                             /*LSL*/ 0, Wd_tmp2, /*shift_amt*/ 0, Wd_tagw, Wd_tagw);
+    emit_logical_shifted_reg(buf, /*is_64bit=*/0, /*opc=*/0 /*AND*/, /*N=1→BIC*/ 1,
+                             /*shift_type=*/0 /*LSL*/, Wd_tmp2, /*shift_amt*/ 0, Wd_tagw, Wd_tagw);
 
     // STRH  Wd_tagw, [Xbase, #4]  — write tag word once
-    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*STR*/ 0, kX87TagWordImm12, Xbase, Wd_tagw);
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/0 /*STR*/, kX87TagWordImm12, Xbase, Wd_tagw);
 }
 
 // =============================================================================
@@ -782,9 +782,9 @@ void emit_fcom_cc_pack(AssemblerBuffer& buf, TranslationResult& a1,
     const int Wd_vs = alloc_free_gpr(a1);
 
     // Extract individual flag conditions (all 3 must precede MSR)
-    emit_cset(buf, /*is_64bit=*/0, /*CC=*/3, Wd_cc);    // 1 if carry clear (LT)
-    emit_cset(buf, /*is_64bit=*/0, /*VS=*/6, Wd_vs);    // 1 if overflow (UN)
-    emit_cset(buf, /*is_64bit=*/0, /*EQ=*/0, Wd_result); // 1 if equal
+    emit_cset(buf, /*is_64bit=*/0, /*cond=*/3 /*CC*/, Wd_cc);    // 1 if carry clear (LT)
+    emit_cset(buf, /*is_64bit=*/0, /*cond=*/6 /*VS*/, Wd_vs);    // 1 if overflow (UN)
+    emit_cset(buf, /*is_64bit=*/0, /*cond=*/0 /*EQ*/, Wd_result); // 1 if equal
 
     // MSR NZCV, Wd_save — restore saved x86 EFLAGS (all CSETs done)
     emit_msr_nzcv(buf, Wd_save);
@@ -797,7 +797,7 @@ void emit_fcom_cc_pack(AssemblerBuffer& buf, TranslationResult& a1,
 
     // Pack: Wd_result = (C0 << 8) | (C2 << 10) | (C3 << 14)
     // Step 1: C0 << 8
-    emit_bitfield(buf, /*is_64=*/0, /*UBFM=*/2, /*N=*/0,
+    emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/2 /*UBFM*/, /*N=*/0,
                   /*immr=*/24, /*imms=*/23, Wd_cc, Wd_cc);  // LSL #8
     // Step 2: ORR with C2(=VS) << 10
     emit_logical_shifted_reg(buf, 0, /*ORR*/1, 0, /*LSL*/0, Wd_vs, 10, Wd_cc, Wd_cc);
