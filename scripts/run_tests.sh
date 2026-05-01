@@ -75,6 +75,10 @@ ALL_TESTS=(
     test_fbstp
     test_fldenv
     test_fstenv
+    test_fclex_compose
+    test_finit_compose
+    test_fldenv_compose
+    test_fstenv_compose
     test_frstor
     test_fsave
     test_fxrstor
@@ -226,6 +230,29 @@ if [[ $NATIVE_ONLY -eq 0 ]]; then
         fi
         EXIT=0
         OUT=$(ROSETTA_X87_DISABLE_IR=1 ROSETTA_X87_DISABLE_ALL_FUSIONS=1 "$LOADER" "$BINARY" 2>/dev/null | filter_runtime_lines) || EXIT=$?
+        check_output "$t" "$OUT" "$EXIT"
+    done
+fi
+
+# ── Phase 5: rosettax87 --disable-hook (stock translate_insn only) ───────
+# Validates that the deliberate-fall-through ops (fxsave, fxrstor, and
+# the metadata-only set in kKnownFallThrough) compose correctly with
+# stock's emit.  A FAIL here indicates an m108-style internal-offset
+# bug — see project_native_rosetta_lazy_f80.md.  The compose tests
+# (test_*_compose.c) are the primary target of this phase.
+if [[ $NATIVE_ONLY -eq 0 ]]; then
+    echo ""
+    echo -e "${BOLD}=== Phase 5: rosettax87 --disable-hook (stock emit) ===${NC}"
+
+    for t in "${TESTS[@]}"; do
+        BINARY="$TESTS_BIN/$t"
+        if [[ ! -x "$BINARY" ]]; then
+            echo -e "${YELLOW}SKIP${NC}  $t  (binary not found)"
+            ERRORS=$((ERRORS + 1))
+            continue
+        fi
+        EXIT=0
+        OUT=$("$LOADER" --disable-hook "$BINARY" 2>/dev/null | filter_runtime_lines) || EXIT=$?
         check_output "$t" "$OUT" "$EXIT"
     done
 fi
