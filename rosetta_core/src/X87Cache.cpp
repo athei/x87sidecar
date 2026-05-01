@@ -1,6 +1,6 @@
 #include "rosetta_core/X87Cache.h"
 
-#include "rosetta_config/Config.h"
+#include "rosetta_core/Config.h"
 #include "rosetta_core/IRInstr.h"
 #include "rosetta_core/Opcode.h"
 

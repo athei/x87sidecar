@@ -1,4 +1,4 @@
-#include <rosetta_config/Config.h>
+#include "rosetta_core/Config.h"
 #include <sys/mman.h>
 
 #include <cstdint>
@@ -11,20 +11,69 @@
 #include <vector>
 
 #include "RosettaAotApi.h"
+#include "rosetta_core/ConfigCli.h"
 #include "rosetta_core/CoreConfig.h"
 #include "rosetta_core/CustomTranslationHook.h"
 #include "rosetta_core/hook.h"
 
-int main(int argc, char** argv) try {
-    RosettaConfig cfg = parse_config_from_env();
-    rosetta_set_config(&cfg);
+namespace {
 
-    if (argc < 3 || argc > 4) {
-        std::print("Usage: aotinvoke <input.bin> <output.bin> [--verbose]\n");
-        return 1;
+void aotinvoke_usage(const char* prog) {
+    std::print("usage: {} [flags] <input.bin> <output.bin>\n"
+               "\n"
+               "Flags:\n"
+               "  --help       print this message and exit\n"
+               "  --verbose    dump the parsed IR module before translation\n"
+               "\n",
+               prog);
+    print_translator_flag_help(stdout);
+}
+
+}  // namespace
+
+int main(int argc, char** argv) try {
+    static RosettaConfig cfg{};
+    bool verbose = false;
+    int positional[2];
+    int positional_count = 0;
+
+    for (int i = 1; i < argc; ++i) {
+        std::string_view a{argv[i]};
+        if (a == "--help") {
+            aotinvoke_usage(argv[0]);
+            return 0;
+        }
+        if (a == "--verbose") {
+            verbose = true;
+            continue;
+        }
+        if (a.starts_with("--")) {
+            const char* bad = nullptr;
+            if (apply_translator_flag(a, cfg, bad)) {
+                continue;
+            }
+            if (bad != nullptr) {
+                std::fprintf(stderr, "%s: unknown fusion name in %s: %s\n", argv[0], argv[i], bad);
+            } else {
+                std::fprintf(stderr, "%s: unknown flag: %s (try --help)\n", argv[0], argv[i]);
+            }
+            return 2;
+        }
+        if (positional_count >= 2) {
+            std::fprintf(stderr, "%s: too many positional arguments (try --help)\n", argv[0]);
+            return 2;
+        }
+        positional[positional_count++] = i;
     }
 
-    const bool verbose = (argc == 4 && std::string_view(argv[3]) == "--verbose");
+    if (positional_count != 2) {
+        aotinvoke_usage(argv[0]);
+        return 2;
+    }
+
+    rosetta_set_config(&cfg);
+    char* input_arg = argv[positional[0]];
+    char* output_arg = argv[positional[1]];
 
     if (!load_rosetta_aot()) {
         std::print("Failed to load libRosettaAot.dylib\n");
@@ -43,8 +92,8 @@ int main(int argc, char** argv) try {
 
     g_rosetta_aot.register_thread_context_offsets(&g_thread_context_offsets);
 
-    const std::filesystem::path blob_path(argv[1]);
-    const std::filesystem::path out_path(argv[2]);
+    const std::filesystem::path blob_path(input_arg);
+    const std::filesystem::path out_path(output_arg);
 
     std::ifstream blob_file(blob_path, std::ios::binary | std::ios::ate);
     if (!blob_file) {

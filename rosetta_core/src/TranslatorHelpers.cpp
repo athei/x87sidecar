@@ -1,6 +1,6 @@
 #include "rosetta_core/TranslatorHelpers.hpp"
 
-#include "rosetta_config/Config.h"
+#include "rosetta_core/Config.h"
 #include "rosetta_core/AssemblerHelpers.hpp"
 #include "rosetta_core/CoreConfig.h"
 #include "rosetta_core/IROperand.h"

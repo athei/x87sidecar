@@ -1,7 +1,7 @@
 #include <mach-o/dyld.h>
 #include <mach-o/dyld_images.h>
 #include <mach/mach_vm.h>
-#include <rosetta_config/Config.h>
+#include "rosetta_core/Config.h"
 #include <sched.h>
 #include <sys/event.h>
 #include <sys/mman.h>
@@ -19,8 +19,11 @@
 #include <string>
 #include <vector>
 
+#include "cli_args.hpp"
 #include "macho_loader.hpp"
 #include "offset_finder.hpp"
+#include "rosetta_core/Config.h"
+#include "rosetta_core/CoreConfig.h"
 #include "rosetta_core/TranscendentalHelper.h"
 #include "rosetta_core/TranslationResult.h"
 #include "sidecar.hpp"
@@ -527,7 +530,9 @@ public:
 const unsigned int MuhDebugger::AARCH64_BREAKPOINT = 0xD4200000;
 
 // Resolve a Windows-style path (e.g. "C:\foo\bar.exe") to a macOS path
-// using the Wine prefix dosdevices mapping.
+// using the Wine prefix dosdevices mapping.  WINEPREFIX / HOME are
+// Wine's own conventions (not part of our config surface), so reading
+// them here is fine — the rest of the loader is exclusively CLI-driven.
 static std::string resolveWinePath(const char* winPath) {
     const char* prefix = getenv("WINEPREFIX");
     std::string winePrefix = prefix ? prefix : (std::string(getenv("HOME")) + "/.wine");
@@ -652,19 +657,25 @@ static AttachDecision classifyAttachTarget(int argc, char* argv[]) {
 }
 
 int main(int argc, char* argv[]) try {
-    if (argc < 2) {
-        fprintf(stdout, "%s <path to program>\n", argv[0]);
-        return 1;
+    CliArgs cli = parse_cli_args(argc, argv);
+    if (cli.exit_early) {
+        return cli.exit_code;
     }
+    // Shift argv so argv[1] is the target program (downstream code already
+    // assumes that layout; saves us from threading the index through).
+    argc -= cli.program_argv_idx - 1;
+    argv += cli.program_argv_idx - 1;
 
-    logsEnabled = getenv("ROSETTA_X87_LOGS");
+    static RosettaConfig g_cfg = cli.cfg;
+    rosetta_set_config(&g_cfg);
+    logsEnabled = g_cfg.loader_logs ? "1" : nullptr;
 
     AttachDecision decision = classifyAttachTarget(argc, argv);
     const std::string summaryPath =
         decision.displayPath.empty() ? std::string(argv[1]) : decision.displayPath;
 
     // Skip debugger attachment for 64-bit Windows programs (no x87 needed)
-    if (!getenv("ROSETTA_X87_FORCE_ATTACH") && decision.skip) {
+    if (!g_cfg.loader_force_attach && decision.skip) {
         printf("[rosettax87] skipped: %s (%s)\n", summaryPath.c_str(), decision.reason);
         fflush(stdout);
         VERBOSE_LOG("Program is x64 PE, skipping x87 JIT. Passing through.\n");
@@ -792,6 +803,32 @@ int main(int argc, char* argv[]) try {
 
     dbg.writeMemory(runtimeBase + offsetFinder.offsetDisableAot_, &g_disable_aot_value,
                     sizeof(g_disable_aot_value));
+
+    // --disable-hook — passthrough mode for benchmarks.
+    //
+    // We've now disabled Apple's AOT cache + interpreter modes (the
+    // single-byte g_disable_aot=1 write does that, see
+    // project_native_runtime_interprets_trivial_loops.md).  Detach now
+    // and let the parent run with stock translate_insn unmodified.
+    // Result: the same translation environment our normal mode produces
+    // for non-x87 instructions, but without our hook landing for x87 —
+    // so x87 emits use stock's JIT codegen instead of our optimised
+    // inline emit.  This is the apples-to-apples baseline `run_benchmarks.sh`
+    // compares against.
+    if (g_cfg.loader_disable_hook) {
+        VERBOSE_LOG("--disable-hook: passthrough mode; detaching after disable_aot write\n");
+        dbg.detach();
+        // Block until parent exits (mirror the post-stub-install path below).
+        int kq = kqueue();
+        if (kq != -1) {
+            struct kevent ev;
+            EV_SET(&ev, parentPid, EVFILT_PROC, EV_ADD, NOTE_EXIT, 0, nullptr);
+            kevent(kq, &ev, 1, nullptr, 0, nullptr);
+            kevent(kq, nullptr, 0, &ev, 1, nullptr);
+            close(kq);
+        }
+        return 0;
+    }
 
     dbg.setBreakpoint(runtimeBase + offsetFinder.offsetExportsFetch_);
     dbg.continueExecution();

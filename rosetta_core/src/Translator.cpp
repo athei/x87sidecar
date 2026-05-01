@@ -3,7 +3,7 @@
 #include <cstdio>
 
 #include "TranslatorX87Internal.hpp"
-#include "rosetta_config/Config.h"
+#include "rosetta_core/Config.h"
 #include "rosetta_core/CoreConfig.h"
 #include "rosetta_core/IRInstr.h"
 #include "rosetta_core/Opcode.h"

@@ -62,7 +62,6 @@ endforeach()
 
 include(cmake/AddX86Sample.cmake)
 
-add_subdirectory(rosetta_config)
 add_subdirectory(rosetta_core)
 add_subdirectory(rosetta_loader)
 add_subdirectory(aotinvoke)

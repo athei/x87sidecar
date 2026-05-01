@@ -1,4 +1,5 @@
 add_library(rosetta_core STATIC
+    src/ConfigCli.cpp
     src/CoreConfig.cpp
     src/CustomTranslationHook.cpp
     src/hook.cpp
@@ -20,4 +21,3 @@ add_library(rosetta_core STATIC
 )
 
 target_include_directories(rosetta_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(rosetta_core PUBLIC rosetta_config)
