@@ -27,7 +27,7 @@ auto MachoLoader::machHeader() const -> mach_header_64* {
 }
 
 auto MachoLoader::imageSize() const -> size_t {
-    auto header = machHeader();
+    auto *header = machHeader();
 
     size_t imageSize = 0;
 
@@ -35,7 +35,7 @@ auto MachoLoader::imageSize() const -> size_t {
 
     for (auto i = 0; i < header->ncmds; i++) {
         if (cmd->cmd == LC_SEGMENT_64) {
-            auto seg = (segment_command_64*)cmd;
+            auto *seg = (segment_command_64*)cmd;
 
             uint64_t segEnd = seg->vmaddr + seg->vmsize;
             if (segEnd > imageSize) {
@@ -51,13 +51,13 @@ auto MachoLoader::imageSize() const -> size_t {
 }
 
 auto MachoLoader::getSection(const char* segment, const char* section) -> section_64* {
-    auto header = machHeader();
+    auto *header = machHeader();
 
     load_command* cmd = (load_command*)(header + 1);
 
     for (auto i = 0; i < header->ncmds; i++) {
         if (cmd->cmd == LC_SEGMENT_64) {
-            auto seg = (segment_command_64*)cmd;
+            auto *seg = (segment_command_64*)cmd;
 
             if (strcmp(seg->segname, segment) == 0) {
                 section_64* sect = (section_64*)(seg + 1);
@@ -79,13 +79,13 @@ auto MachoLoader::getSection(const char* segment, const char* section) -> sectio
 }
 
 auto MachoLoader::getSegment(const char* segment) -> segment_command_64* {
-    auto header = machHeader();
+    auto *header = machHeader();
 
     load_command* cmd = (load_command*)(header + 1);
 
     for (auto i = 0; i < header->ncmds; i++) {
         if (cmd->cmd == LC_SEGMENT_64) {
-            auto seg = (segment_command_64*)cmd;
+            auto *seg = (segment_command_64*)cmd;
 
             if (strcmp(seg->segname, segment) == 0) {
                 return seg;
@@ -99,13 +99,13 @@ auto MachoLoader::getSegment(const char* segment) -> segment_command_64* {
 }
 
 auto MachoLoader::forEachSegment(std::function<void(segment_command_64* segm)> callback) -> void {
-    auto header = machHeader();
+    auto *header = machHeader();
 
     load_command* cmd = (load_command*)(header + 1);
 
     for (auto i = 0; i < header->ncmds; i++) {
         if (cmd->cmd == LC_SEGMENT_64) {
-            auto seg = (segment_command_64*)cmd;
+            auto *seg = (segment_command_64*)cmd;
 
             // Skip __PAGEZERO and any other unmapped segments (initprot=NONE, no file backing)
             if (seg->initprot != VM_PROT_NONE) {

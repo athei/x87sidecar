@@ -94,11 +94,11 @@ int main(int argc, char** argv) {
         g_rosetta_aot.module_print(module_result, 1);
     }
 
-    auto translate_result = g_rosetta_aot.translate(module_result);
+    auto *translate_result = g_rosetta_aot.translate(module_result);
 
 
     auto translate_data_size = g_rosetta_aot.translator_get_size(translate_result);
-    auto translate_data = g_rosetta_aot.translator_get_data(translate_result);
+    const auto *translate_data = g_rosetta_aot.translator_get_data(translate_result);
 
     g_rosetta_aot.apply_internal_fixups(translate_result, 0x1000, (std::uint8_t*)translate_data);
     g_rosetta_aot.apply_segmented_runtime_routine_fixups(translate_result,

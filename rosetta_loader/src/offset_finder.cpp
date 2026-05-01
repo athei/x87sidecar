@@ -148,7 +148,7 @@ auto OffsetFinder::determineRuntimeOffsets() -> bool {
         return false;
     }
 
-    auto text_section = libRosettaRuntimeLoader.getSection("__TEXT", "__text");
+    auto *text_section = libRosettaRuntimeLoader.getSection("__TEXT", "__text");
     if (!text_section) {
         fprintf(stdout,
                 "Failed to find __TEXT.__text section in libRosettaRuntime Mach-O file to "
@@ -181,7 +181,7 @@ auto OffsetFinder::determineRuntimeOffsets() -> bool {
     offsetTransactionResultSize_ = results[0];
     offsetTranslateInsn_ = results[1];
 
-    auto exports_section = libRosettaRuntimeLoader.getSection("__DATA", "exports");
+    auto *exports_section = libRosettaRuntimeLoader.getSection("__DATA", "exports");
     if (!exports_section) {
         fprintf(stdout,
                 "Failed to find __DATA.exports section in libRosettaRuntime Mach-O file to "

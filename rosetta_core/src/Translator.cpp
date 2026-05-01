@@ -17,7 +17,7 @@
 auto Translator::translate_instruction(TranslationResult* translation_result, IRBlock* block,
                                        IRInstr* instr_array, int64_t num_instrs, int64_t insn_idx)
     -> std::optional<int64_t> {
-    const auto cur_instr = &instr_array[insn_idx];
+    auto *const cur_instr = &instr_array[insn_idx];
     const auto opcode = cur_instr->opcode;
     auto& cache = translation_result->x87_cache;
 

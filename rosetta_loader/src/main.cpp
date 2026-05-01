@@ -471,7 +471,7 @@ public:
         kern_return_t kr;
         __block std::vector<uintptr_t> moduleList;
 
-        auto processInfo = _dyld_process_info_create(taskPort_, 0, &kr);
+        auto *processInfo = _dyld_process_info_create(taskPort_, 0, &kr);
         if (kr != KERN_SUCCESS) {
             fprintf(stdout, "Failed to get dyld process info (error 0x%x: %s)\n", kr,
                     mach_error_string(kr));
@@ -834,9 +834,9 @@ int main(int argc, char* argv[]) {
         uint64_t textVmSize = 0;
         const uint8_t* p = lcBuf.data();
         for (uint32_t i = 0; i < mh.ncmds; i++) {
-            auto* lc = (const load_command*)p;
+            const auto* lc = (const load_command*)p;
             if (lc->cmd == LC_SEGMENT_64) {
-                auto* seg = (const segment_command_64*)p;
+                const auto* seg = (const segment_command_64*)p;
                 if (strncmp(seg->segname, "__TEXT", 16) == 0) {
                     textVmAddr = seg->vmaddr;
                     textVmSize = seg->vmsize;

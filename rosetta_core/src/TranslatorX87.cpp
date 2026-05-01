@@ -3883,7 +3883,8 @@ auto translate_frstor(TranslationResult* a1, IRInstr* a2) -> void {
     static constexpr int16_t kSrcSwImm12 = 2;  // byte 4 -> halfword imm12=2
     static constexpr int16_t kSrcTwImm12 = 4;  // byte 8 -> halfword imm12=4
 
-    int Xbase, Wd_top;
+    int Xbase;
+    int Wd_top;
     const bool standalone = (a1->x87_cache.run_remaining == 0);
     if (standalone) {
         // Mini-prologue: skip emit_load_top — SW.TOP is about to be

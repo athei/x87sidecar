@@ -92,7 +92,8 @@ auto emit_load_immediate(TranslationResult& result, int is_64bit, uint64_t value
     }
 
     // Count zero 16-bit chunks and 0xFFFF chunks to choose MOVZ vs MOVN
-    int zeros = 0, ones = 0;
+    int zeros = 0;
+    int ones = 0;
     int chunks = is_64bit ? 4 : 2;
     for (int i = 0; i < chunks; i++) {
         uint16_t chunk = (uint16_t)(v >> (16 * i));
@@ -108,7 +109,8 @@ auto emit_load_immediate(TranslationResult& result, int is_64bit, uint64_t value
     uint64_t working = use_movz ? v : ~v;
 
     // Find the highest non-trivial chunk
-    int hi_chunk = 0, lo_chunk = 0;
+    int hi_chunk = 0;
+    int lo_chunk = 0;
     for (int i = chunks - 1; i >= 0; i--) {
         uint16_t chunk = (uint16_t)(working >> (16 * i));
         if (chunk) {

@@ -51,7 +51,7 @@ bool find_patterns(uintptr_t aot_base, uintptr_t& trans_insn_addr,
 
     for (auto i = 0; i < header->ncmds; i++) {
         if (cmd->cmd == LC_SEGMENT_64) {
-            auto seg = (segment_command_64*)cmd;
+            auto *seg = (segment_command_64*)cmd;
 
             if (strcmp(seg->segname, "__TEXT") == 0) {
                 section_64* sections = (section_64*)(uintptr_t(seg) + sizeof(segment_command_64));

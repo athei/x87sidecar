@@ -52,7 +52,7 @@ struct FPRState {
         memset(last_use, -1, sizeof(last_use));
         memset(node_fpr, -1, sizeof(node_fpr));
         for (int i = 0; i < ctx.num_nodes; i++) {
-            auto& n = ctx.nodes[i];
+            const auto& n = ctx.nodes[i];
             if (n.flags & kDead) { continue;
 }
             for (int j = 0; j < 3; j++) {
@@ -344,7 +344,8 @@ void lower(Context& ctx, TranslationResult* result) {
 
         // ── Binary arithmetic ───────────────────────────────────────────
         case Op::FAdd: {
-            int Dn = fprs.get(n.inputs[0]), Dm = fprs.get(n.inputs[1]);
+            int Dn = fprs.get(n.inputs[0]);
+            int Dm = fprs.get(n.inputs[1]);
             int Dd = fprs.try_reuse_input(ctx, i);
             if (Dd < 0) { Dd = alloc_free_fpr(*result);
 }
@@ -353,7 +354,8 @@ void lower(Context& ctx, TranslationResult* result) {
             break;
         }
         case Op::FSub: {
-            int Dn = fprs.get(n.inputs[0]), Dm = fprs.get(n.inputs[1]);
+            int Dn = fprs.get(n.inputs[0]);
+            int Dm = fprs.get(n.inputs[1]);
             int Dd = fprs.try_reuse_input(ctx, i);
             if (Dd < 0) { Dd = alloc_free_fpr(*result);
 }
@@ -362,7 +364,8 @@ void lower(Context& ctx, TranslationResult* result) {
             break;
         }
         case Op::FMul: {
-            int Dn = fprs.get(n.inputs[0]), Dm = fprs.get(n.inputs[1]);
+            int Dn = fprs.get(n.inputs[0]);
+            int Dm = fprs.get(n.inputs[1]);
             int Dd = fprs.try_reuse_input(ctx, i);
             if (Dd < 0) { Dd = alloc_free_fpr(*result);
 }
@@ -371,7 +374,8 @@ void lower(Context& ctx, TranslationResult* result) {
             break;
         }
         case Op::FDiv: {
-            int Dn = fprs.get(n.inputs[0]), Dm = fprs.get(n.inputs[1]);
+            int Dn = fprs.get(n.inputs[0]);
+            int Dm = fprs.get(n.inputs[1]);
             int Dd = fprs.try_reuse_input(ctx, i);
             if (Dd < 0) { Dd = alloc_free_fpr(*result);
 }
@@ -384,7 +388,8 @@ void lower(Context& ctx, TranslationResult* result) {
         case Op::FMAdd: {
             // FMADD Dd, Dn, Dm, Da → Da + Dn * Dm
             // inputs[0] = Dn, inputs[1] = Dm, inputs[2] = Da
-            int Dn = fprs.get(n.inputs[0]), Dm = fprs.get(n.inputs[1]);
+            int Dn = fprs.get(n.inputs[0]);
+            int Dm = fprs.get(n.inputs[1]);
             int Da = fprs.get(n.inputs[2]);
             int Dd = fprs.try_reuse_input(ctx, i);
             if (Dd < 0) { Dd = alloc_free_fpr(*result);
@@ -395,7 +400,8 @@ void lower(Context& ctx, TranslationResult* result) {
         }
         case Op::FMSub: {
             // FMSUB Dd, Dn, Dm, Da → Da - Dn * Dm
-            int Dn = fprs.get(n.inputs[0]), Dm = fprs.get(n.inputs[1]);
+            int Dn = fprs.get(n.inputs[0]);
+            int Dm = fprs.get(n.inputs[1]);
             int Da = fprs.get(n.inputs[2]);
             int Dd = fprs.try_reuse_input(ctx, i);
             if (Dd < 0) { Dd = alloc_free_fpr(*result);
@@ -406,7 +412,8 @@ void lower(Context& ctx, TranslationResult* result) {
         }
         case Op::FNMSub: {
             // FNMSUB Dd, Dn, Dm, Da → Dn * Dm - Da
-            int Dn = fprs.get(n.inputs[0]), Dm = fprs.get(n.inputs[1]);
+            int Dn = fprs.get(n.inputs[0]);
+            int Dm = fprs.get(n.inputs[1]);
             int Da = fprs.get(n.inputs[2]);
             int Dd = fprs.try_reuse_input(ctx, i);
             if (Dd < 0) { Dd = alloc_free_fpr(*result);
