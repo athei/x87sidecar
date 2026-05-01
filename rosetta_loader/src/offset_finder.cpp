@@ -118,8 +118,9 @@ __text:00000000000147B4 08 F1 4F 39                 LDRB            W8, [X8,#dis
     uint64_t immhi = (adrp_instruction >> 5) & 0x7FFFF;
     int64_t imm = (int64_t)((immhi << 2) | immlo) << 12;
     // Sign-extend from 33 bits
-    if (imm & (1ULL << 32))
+    if (imm & (1ULL << 32)) {
         imm |= ~((1ULL << 33) - 1);
+}
 
     uint64_t adrp_page = (adrp_offset & ~0xFFF) + imm;
 

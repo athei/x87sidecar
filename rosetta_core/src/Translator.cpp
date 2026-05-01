@@ -58,8 +58,9 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
             const int ir_consumed = X87IR::compile_run(
                 translation_result, instr_array, num_instrs, insn_idx, cache.run_remaining);
             if (ir_consumed > 0) {
-                for (int i = 0; i < ir_consumed; i++)
+                for (int i = 0; i < ir_consumed; i++) {
                     cache.tick();
+}
                 if (cache.active()) {
                     translation_result->free_gpr_mask = kGprScratchMask & ~cache.pinned_mask();
                 } else {

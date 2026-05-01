@@ -82,7 +82,8 @@ struct TranslateOutcome {
 };
 
 bool readParent(mach_port_t task, uint64_t addr, void* dst, size_t size) {
-    if (size == 0) return true;
+    if (size == 0) { return true;
+}
     mach_vm_size_t got = 0;
     kern_return_t kr = mach_vm_read_overwrite(task, addr, size,
                                               (mach_vm_address_t)dst, &got);
@@ -90,7 +91,8 @@ bool readParent(mach_port_t task, uint64_t addr, void* dst, size_t size) {
 }
 
 bool writeParent(mach_port_t task, uint64_t addr, const void* src, size_t size) {
-    if (size == 0) return true;
+    if (size == 0) { return true;
+}
     return mach_vm_write(task, addr, (vm_offset_t)const_cast<void*>(src), size) ==
            KERN_SUCCESS;
 }
@@ -107,8 +109,9 @@ mach_vm_address_t allocAndAppendInParent(mach_port_t parentTask,
     newCap = (newCap + 0xFFF) & ~uint64_t(0xFFF);
     mach_vm_address_t parentNew = 0;
     if (mach_vm_allocate(parentTask, &parentNew, newCap, VM_FLAGS_ANYWHERE) !=
-        KERN_SUCCESS)
+        KERN_SUCCESS) {
         return 0;
+}
     if (origLive > 0) {
         std::vector<uint8_t> stash(origLive);
         if (!readParent(parentTask, origAddr, stash.data(), origLive) ||
@@ -134,14 +137,17 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask,
     TranslateOutcome out{false, 0};
 
     constexpr uint64_t kMaxNumInstrs = 0x10000;
-    if (req.num_instrs == 0 || req.num_instrs > kMaxNumInstrs) return out;
-    if (req.insn_idx >= req.num_instrs) return out;
+    if (req.num_instrs == 0 || req.num_instrs > kMaxNumInstrs) { return out;
+}
+    if (req.insn_idx >= req.num_instrs) { return out;
+}
 
     // Read parent's TR. Default-constructed local; we sterilise its list
     // pointers before scope end so `~TransactionalList` runs `::operator
     // delete(nullptr)` (a no-op) instead of freeing arbitrary parent VAs.
     TranslationResult tr;
-    if (!readParent(parentTask, req.tr_addr, &tr, sizeof(tr))) return out;
+    if (!readParent(parentTask, req.tr_addr, &tr, sizeof(tr))) { return out;
+}
 
     TransactionalList<Fixup>* lists[kListCount] = {
         &tr.external_fixups, &tr.internal_fixups, &tr._fixups,
@@ -179,12 +185,15 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask,
     // Read IR array + ThreadContextOffsets.
     std::vector<IRInstr> localIR(req.num_instrs);
     if (!readParent(parentTask, req.instr_array, localIR.data(),
-                    req.num_instrs * sizeof(IRInstr))) return out;
+                    req.num_instrs * sizeof(IRInstr))) { return out;
+}
 
-    if (origTCO == nullptr) return out;
+    if (origTCO == nullptr) { return out;
+}
     ThreadContextOffsets localTCO{};
     if (!readParent(parentTask, (uint64_t)origTCO, &localTCO,
-                    sizeof(localTCO))) return out;
+                    sizeof(localTCO))) { return out;
+}
 
     // x87_cache is OUR addition (OPT-1) — see comment in TranslationResult.h.
     // The loader's M2 init patched stock's TR allocator to allocate
@@ -234,9 +243,11 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask,
         uint8_t* insn_buf;       // null if Translator never grew (vec owns)
         Fixup* lists[kListCount];
         ~LocalCleanup() {
-            if (insn_buf) free(insn_buf);
+            if (insn_buf) { free(insn_buf);
+}
             for (size_t i = 0; i < kListCount; i++) {
-                if (lists[i]) ::operator delete(lists[i]);
+                if (lists[i]) { ::operator delete(lists[i]);
+}
             }
         }
     } _cleanup{insnGrew ? localInsnData : nullptr,
@@ -283,14 +294,16 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask,
                 if (!writeParent(parentTask,
                                  (uint64_t)origInsnData + origInsnEnd,
                                  localInsnData + origInsnEnd,
-                                 insnEmitted)) return out;
+                                 insnEmitted)) { return out;
+}
             }
         } else {
             uint64_t newCap = std::max(origInsnCap * 2, finalInsnEnd);
             mach_vm_address_t parentNew = allocAndAppendInParent(
                 parentTask, (uint64_t)origInsnData, origInsnEnd, newCap,
                 localInsnData + origInsnEnd, insnEmitted);
-            if (parentNew == 0) return out;
+            if (parentNew == 0) { return out;
+}
             finalInsnData = reinterpret_cast<uint32_t*>(parentNew);
             finalInsnCap  = (newCap + 0xFFF) & ~uint64_t(0xFFF);
         }
@@ -310,7 +323,8 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask,
             if (newLive <= parentCap) {
                 if (added > 0) {
                     if (!writeParent(parentTask, (uint64_t)orig.end,
-                                     localPushed[i], added)) return out;
+                                     localPushed[i], added)) { return out;
+}
                 }
                 lists[i]->end = (Fixup*)((uint8_t*)orig.begin + newLive);
             } else {
@@ -318,7 +332,8 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask,
                 mach_vm_address_t parentNew = allocAndAppendInParent(
                     parentTask, (uint64_t)orig.begin, parentLive, newCap,
                     localPushed[i], added);
-                if (parentNew == 0) return out;
+                if (parentNew == 0) { return out;
+}
                 uint64_t roundedCap = (newCap + 0xFFF) & ~uint64_t(0xFFF);
                 lists[i]->begin   = (Fixup*)parentNew;
                 lists[i]->end     = (Fixup*)(parentNew + newLive);
@@ -333,7 +348,8 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask,
     // allocator to sizeof(TranslationResult), so parent's allocation has
     // room for our appended x87_cache field — persisting it across calls
     // is what restores OPT-1's cross-instruction reuse.
-    if (!writeParent(parentTask, req.tr_addr, &tr, sizeof(tr))) return out;
+    if (!writeParent(parentTask, req.tr_addr, &tr, sizeof(tr))) { return out;
+}
 
     if (result.has_value()) {
         out.reply_some = true;

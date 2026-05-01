@@ -16,8 +16,9 @@
 // Internal helpers from TranslatorX87Internal.hpp that we need.
 namespace TranslatorX87 {
 inline auto x87_begin(TranslationResult& a1, AssemblerBuffer& buf) -> std::pair<int, int> {
-    if (a1.x87_cache.run_remaining > 0 && a1.x87_cache.gprs_valid)
+    if (a1.x87_cache.run_remaining > 0 && a1.x87_cache.gprs_valid) {
         return {a1.x87_cache.base_gpr, a1.x87_cache.top_gpr};
+}
     const int Xbase = alloc_gpr(a1, 0);
     const int Wd_top = alloc_gpr(a1, 1);
     emit_x87_base(buf, a1, Xbase);
@@ -52,16 +53,19 @@ struct FPRState {
         memset(node_fpr, -1, sizeof(node_fpr));
         for (int i = 0; i < ctx.num_nodes; i++) {
             auto& n = ctx.nodes[i];
-            if (n.flags & kDead) continue;
+            if (n.flags & kDead) { continue;
+}
             for (int j = 0; j < 3; j++) {
-                if (n.inputs[j] >= 0) last_use[n.inputs[j]] = static_cast<int16_t>(i);
+                if (n.inputs[j] >= 0) { last_use[n.inputs[j]] = static_cast<int16_t>(i);
+}
             }
         }
         // Final stack values are live past all nodes.
         for (int d = 0; d < 8; d++) {
             int16_t val = ctx.slot_val[d];
-            if (val >= 0 && val < ctx.num_nodes)
+            if (val >= 0 && val < ctx.num_nodes) {
                 last_use[val] = static_cast<int16_t>(ctx.num_nodes);
+}
         }
     }
 
@@ -77,7 +81,8 @@ struct FPRState {
     }
 
     int get(int16_t node_id) const {
-        if (node_id < 0 || node_id >= kMaxNodes) return -1;
+        if (node_id < 0 || node_id >= kMaxNodes) { return -1;
+}
         return node_fpr[node_id];
     }
 
@@ -237,21 +242,24 @@ void lower(Context& ctx, TranslationResult* result) {
         bool use_rc_cache = false;
         for (int i = 0; i < ctx.num_nodes; i++) {
             auto& n = ctx.nodes[i];
-            if (n.flags & kDead) continue;
+            if (n.flags & kDead) { continue;
+}
             if (n.op == Op::StoreCW) { continue; }
             bool is_rc = (n.op == Op::FRndInt) ||
                 ((n.op == Op::StoreI16 || n.op == Op::StoreI32 || n.op == Op::StoreI64)
                  && !(n.flags & kTruncate));
             if (is_rc && ++rc_count >= 2) { use_rc_cache = true; break; }
         }
-        if (use_rc_cache)
+        if (use_rc_cache) {
             Wd_rc_cached = alloc_gpr(*result, 3);
+}
     }
 
     // ── Emit each IR node ───────────────────────────────────────────────────
     for (int i = 0; i < ctx.num_nodes; i++) {
         auto& n = ctx.nodes[i];
-        if (n.flags & kDead) continue;
+        if (n.flags & kDead) { continue;
+}
 
         switch (n.op) {
 
@@ -338,7 +346,8 @@ void lower(Context& ctx, TranslationResult* result) {
         case Op::FAdd: {
             int Dn = fprs.get(n.inputs[0]), Dm = fprs.get(n.inputs[1]);
             int Dd = fprs.try_reuse_input(ctx, i);
-            if (Dd < 0) Dd = alloc_free_fpr(*result);
+            if (Dd < 0) { Dd = alloc_free_fpr(*result);
+}
             fprs.node_fpr[i] = static_cast<int8_t>(Dd);
             emit_fadd_f64(buf, Dd, Dn, Dm);
             break;
@@ -346,7 +355,8 @@ void lower(Context& ctx, TranslationResult* result) {
         case Op::FSub: {
             int Dn = fprs.get(n.inputs[0]), Dm = fprs.get(n.inputs[1]);
             int Dd = fprs.try_reuse_input(ctx, i);
-            if (Dd < 0) Dd = alloc_free_fpr(*result);
+            if (Dd < 0) { Dd = alloc_free_fpr(*result);
+}
             fprs.node_fpr[i] = static_cast<int8_t>(Dd);
             emit_fsub_f64(buf, Dd, Dn, Dm);
             break;
@@ -354,7 +364,8 @@ void lower(Context& ctx, TranslationResult* result) {
         case Op::FMul: {
             int Dn = fprs.get(n.inputs[0]), Dm = fprs.get(n.inputs[1]);
             int Dd = fprs.try_reuse_input(ctx, i);
-            if (Dd < 0) Dd = alloc_free_fpr(*result);
+            if (Dd < 0) { Dd = alloc_free_fpr(*result);
+}
             fprs.node_fpr[i] = static_cast<int8_t>(Dd);
             emit_fmul_f64(buf, Dd, Dn, Dm);
             break;
@@ -362,7 +373,8 @@ void lower(Context& ctx, TranslationResult* result) {
         case Op::FDiv: {
             int Dn = fprs.get(n.inputs[0]), Dm = fprs.get(n.inputs[1]);
             int Dd = fprs.try_reuse_input(ctx, i);
-            if (Dd < 0) Dd = alloc_free_fpr(*result);
+            if (Dd < 0) { Dd = alloc_free_fpr(*result);
+}
             fprs.node_fpr[i] = static_cast<int8_t>(Dd);
             emit_fdiv_f64(buf, Dd, Dn, Dm);
             break;
@@ -375,7 +387,8 @@ void lower(Context& ctx, TranslationResult* result) {
             int Dn = fprs.get(n.inputs[0]), Dm = fprs.get(n.inputs[1]);
             int Da = fprs.get(n.inputs[2]);
             int Dd = fprs.try_reuse_input(ctx, i);
-            if (Dd < 0) Dd = alloc_free_fpr(*result);
+            if (Dd < 0) { Dd = alloc_free_fpr(*result);
+}
             fprs.node_fpr[i] = static_cast<int8_t>(Dd);
             emit_fmadd_f64(buf, Dd, Dn, Dm, Da);
             break;
@@ -385,7 +398,8 @@ void lower(Context& ctx, TranslationResult* result) {
             int Dn = fprs.get(n.inputs[0]), Dm = fprs.get(n.inputs[1]);
             int Da = fprs.get(n.inputs[2]);
             int Dd = fprs.try_reuse_input(ctx, i);
-            if (Dd < 0) Dd = alloc_free_fpr(*result);
+            if (Dd < 0) { Dd = alloc_free_fpr(*result);
+}
             fprs.node_fpr[i] = static_cast<int8_t>(Dd);
             emit_fmsub_f64(buf, Dd, Dn, Dm, Da);
             break;
@@ -395,7 +409,8 @@ void lower(Context& ctx, TranslationResult* result) {
             int Dn = fprs.get(n.inputs[0]), Dm = fprs.get(n.inputs[1]);
             int Da = fprs.get(n.inputs[2]);
             int Dd = fprs.try_reuse_input(ctx, i);
-            if (Dd < 0) Dd = alloc_free_fpr(*result);
+            if (Dd < 0) { Dd = alloc_free_fpr(*result);
+}
             fprs.node_fpr[i] = static_cast<int8_t>(Dd);
             emit_fnmsub_f64(buf, Dd, Dn, Dm, Da);
             break;
@@ -405,7 +420,8 @@ void lower(Context& ctx, TranslationResult* result) {
         case Op::FNeg: {
             int Dn = fprs.get(n.inputs[0]);
             int Dd = fprs.try_reuse_input(ctx, i);
-            if (Dd < 0) Dd = alloc_free_fpr(*result);
+            if (Dd < 0) { Dd = alloc_free_fpr(*result);
+}
             fprs.node_fpr[i] = static_cast<int8_t>(Dd);
             emit_fneg_f64(buf, Dd, Dn);
             break;
@@ -413,7 +429,8 @@ void lower(Context& ctx, TranslationResult* result) {
         case Op::FAbs: {
             int Dn = fprs.get(n.inputs[0]);
             int Dd = fprs.try_reuse_input(ctx, i);
-            if (Dd < 0) Dd = alloc_free_fpr(*result);
+            if (Dd < 0) { Dd = alloc_free_fpr(*result);
+}
             fprs.node_fpr[i] = static_cast<int8_t>(Dd);
             emit_fabs_f64(buf, Dd, Dn);
             break;
@@ -421,7 +438,8 @@ void lower(Context& ctx, TranslationResult* result) {
         case Op::FSqrt: {
             int Dn = fprs.get(n.inputs[0]);
             int Dd = fprs.try_reuse_input(ctx, i);
-            if (Dd < 0) Dd = alloc_free_fpr(*result);
+            if (Dd < 0) { Dd = alloc_free_fpr(*result);
+}
             fprs.node_fpr[i] = static_cast<int8_t>(Dd);
             emit_fsqrt_f64(buf, Dd, Dn);
             break;
@@ -429,7 +447,8 @@ void lower(Context& ctx, TranslationResult* result) {
         case Op::FRndInt: {
             int Dn = fprs.get(n.inputs[0]);
             int Dd = fprs.try_reuse_input(ctx, i);
-            if (Dd < 0) Dd = alloc_free_fpr(*result);
+            if (Dd < 0) { Dd = alloc_free_fpr(*result);
+}
             fprs.node_fpr[i] = static_cast<int8_t>(Dd);
 
             if (g_rosetta_config && g_rosetta_config->fast_round) {
@@ -475,7 +494,8 @@ void lower(Context& ctx, TranslationResult* result) {
             int Dn = fprs.get(n.inputs[0]);   // ST(0) — false arm
             int Dm = fprs.get(n.inputs[1]);   // ST(i) — true arm
             int Dd = fprs.try_reuse_input(ctx, i);
-            if (Dd < 0) Dd = alloc_free_fpr(*result);
+            if (Dd < 0) { Dd = alloc_free_fpr(*result);
+}
             fprs.node_fpr[i] = static_cast<int8_t>(Dd);
             int cond = static_cast<int>(n.imm_bits & 0xF);
             // FCSEL Dd, Dn_true, Dm_false, cond → Dd = cond ? Dn : Dm
@@ -669,10 +689,11 @@ void lower(Context& ctx, TranslationResult* result) {
                 int16_t td = n.inputs[2];  // top_delta snapshot
                 if (td != 0) {
                     int Wd_adj = alloc_free_gpr(*result);
-                    if (td < 0)
+                    if (td < 0) {
                         emit_add_imm(buf, 0, /*is_sub=*/1, 0, 0, -td, Wd_top, Wd_adj);
-                    else
+                    } else {
                         emit_add_imm(buf, 0, /*is_sub=*/0, 0, 0, td, Wd_top, Wd_adj);
+}
                     emit_and_imm(buf, 0, Wd_adj, 0, 0, 2, Wd_adj);
                     // BFI Wd_sw, Wd_adj, #11, #3 — patch TOP field
                     emit_bitfield(buf, 0, /*BFM*/1, 0, /*immr=*/21, /*imms=*/2,
@@ -712,14 +733,17 @@ void lower(Context& ctx, TranslationResult* result) {
     // should be at logical depth d relative to the final TOP.
     for (int d = 0; d < 8; d++) {
         int16_t val = ctx.slot_val[d];
-        if (val < 0) continue;  // initial slot, unchanged (no store needed)
+        if (val < 0) { continue;  // initial slot, unchanged (no store needed)
+}
         // Skip redundant write-back: if the value is a ReadSt loaded from the
         // same physical slot it would be stored to, the store is a no-op.
         if (ctx.nodes[val].op == Op::ReadSt &&
-            ctx.nodes[val].initial_depth == d + ctx.top_delta)
+            ctx.nodes[val].initial_depth == d + ctx.top_delta) {
             continue;
+}
         int Dd = fprs.get(val);
-        if (Dd < 0) continue;   // dead or already freed
+        if (Dd < 0) { continue;   // dead or already freed
+}
         emit_store_st(buf, Xbase, Wd_top, d, Wd_tmp, Dd, Xst_base);
     }
 
@@ -763,8 +787,9 @@ void lower(Context& ctx, TranslationResult* result) {
     result->x87_cache.reset_perm();
 
     // 7. Free scratch GPRs.
-    if (Wd_rc_cached >= 0)
+    if (Wd_rc_cached >= 0) {
         free_gpr(*result, Wd_rc_cached);
+}
     free_gpr(*result, Wd_tmp);
 
     // 8. If cache is about to expire (run_remaining will hit 0 after ticks),
@@ -811,8 +836,10 @@ int peak_live_gprs(const Context& ctx) {
         int rc_count = 0;
         for (int i = 0; i < ctx.num_nodes; i++) {
             const auto& n = ctx.nodes[i];
-            if (n.flags & kDead) continue;
-            if (n.op == Op::StoreCW) continue;
+            if (n.flags & kDead) { continue;
+}
+            if (n.op == Op::StoreCW) { continue;
+}
             bool is_rc = (n.op == Op::FRndInt) ||
                 ((n.op == Op::StoreI16 || n.op == Op::StoreI32 || n.op == Op::StoreI64)
                  && !(n.flags & kTruncate));
@@ -821,7 +848,8 @@ int peak_live_gprs(const Context& ctx) {
     }
 
     int pinned = 4;  // Xbase, Wd_top, Wd_tmp, Xst_base
-    if (rc_cache) pinned++;  // Wd_rc_cached
+    if (rc_cache) { pinned++;  // Wd_rc_cached
+}
 
     // Simulate GPR pressure across IR nodes.
     // "held" tracks GPRs held alive across node boundaries (fused FCmp→FStsw).
@@ -830,7 +858,8 @@ int peak_live_gprs(const Context& ctx) {
 
     for (int i = 0; i < ctx.num_nodes; i++) {
         const auto& n = ctx.nodes[i];
-        if (n.flags & kDead) continue;
+        if (n.flags & kDead) { continue;
+}
 
         int transient = 0;  // per-node transient GPR demand
 
@@ -862,7 +891,8 @@ int peak_live_gprs(const Context& ctx) {
 
         // FRndInt: 1 GPR if no RC cache (alloc_gpr(3) for Wd_rc), 0 with cache
         case Op::FRndInt:
-            if (!rc_cache) transient = 1;
+            if (!rc_cache) { transient = 1;
+}
             break;
 
         // FCmp/FTst: 4 peak inside emit_fcom_cc_pack
@@ -902,13 +932,15 @@ int peak_live_gprs(const Context& ctx) {
         }
 
         int node_total = pinned + held + transient;
-        if (node_total > peak) peak = node_total;
+        if (node_total > peak) { peak = node_total;
+}
     }
 
     // Epilogue: if top_delta != 0, needs 2 more transient GPRs (Wd_tmp2 + Wd_tagw)
     if (ctx.top_delta != 0) {
         int epilogue_total = pinned + held + 2;
-        if (epilogue_total > peak) peak = epilogue_total;
+        if (epilogue_total > peak) { peak = epilogue_total;
+}
     }
 
     return peak;
@@ -936,15 +968,18 @@ int peak_live_fprs(const Context& ctx) {
     memset(last_use, -1, sizeof(last_use));
     for (int i = 0; i < ctx.num_nodes; i++) {
         const auto& n = ctx.nodes[i];
-        if (n.flags & kDead) continue;
+        if (n.flags & kDead) { continue;
+}
         for (int j = 0; j < 3; j++) {
-            if (n.inputs[j] >= 0) last_use[n.inputs[j]] = static_cast<int16_t>(i);
+            if (n.inputs[j] >= 0) { last_use[n.inputs[j]] = static_cast<int16_t>(i);
+}
         }
     }
     for (int d = 0; d < 8; d++) {
         int16_t val = ctx.slot_val[d];
-        if (val >= 0 && val < ctx.num_nodes)
+        if (val >= 0 && val < ctx.num_nodes) {
             last_use[val] = static_cast<int16_t>(ctx.num_nodes);
+}
     }
 
     // Step 2: simulate FPR allocation order, tracking live count.
@@ -959,7 +994,8 @@ int peak_live_fprs(const Context& ctx) {
 
     for (int i = 0; i < ctx.num_nodes; i++) {
         const auto& n = ctx.nodes[i];
-        if (n.flags & kDead) continue;
+        if (n.flags & kDead) { continue;
+}
 
         // Allocate FPR for nodes that produce an FPR-bearing value.
         bool produces_fpr = false;
@@ -981,14 +1017,16 @@ int peak_live_fprs(const Context& ctx) {
         if (produces_fpr) {
             live++;
             holding[i] = true;
-            if (live > peak) peak = live;
+            if (live > peak) { peak = live;
+}
         }
 
         // StoreF32 allocates a transient Ds_tmp (fcvt d→s narrowing) that is
         // freed before the node finishes.  Model as a +1 spike on top of the
         // current live count.
-        if (n.op == Op::StoreF32 && live + 1 > peak)
+        if (n.op == Op::StoreF32 && live + 1 > peak) {
             peak = live + 1;
+}
 
         // Free inputs whose last use is this node.
         for (int j = 0; j < 3; j++) {
@@ -1009,8 +1047,9 @@ int compile_run(TranslationResult* result, IRInstr* instr_array, int64_t num_ins
                 int64_t start_idx, int run_length) {
     Context ctx;
 
-    if (!build(ctx, instr_array, num_instrs, start_idx, run_length))
+    if (!build(ctx, instr_array, num_instrs, start_idx, run_length)) {
         return 0;
+}
 
     optimize(ctx);
 

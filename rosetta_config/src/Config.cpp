@@ -29,8 +29,9 @@ static const NameBit kFusionBits[] = {
 static void apply_mask_from_env(const char* env_var, uint64_t& mask,
                                 const NameBit* table, int table_len) {
     const char* v = std::getenv(env_var);
-    if (!v || !*v)
+    if (!v || !*v) {
         return;
+}
 
     char buf[512];
     std::strncpy(buf, v, sizeof(buf) - 1);
@@ -52,24 +53,31 @@ static void apply_mask_from_env(const char* env_var, uint64_t& mask,
 RosettaConfig parse_config_from_env() {
     RosettaConfig cfg = {};
 
-    if (const char* v = std::getenv("ROSETTA_X87_DISABLE_CACHE"))
+    if (const char* v = std::getenv("ROSETTA_X87_DISABLE_CACHE")) {
         cfg.disable_x87_cache = (*v == '1') ? 1 : 0;
+}
 
-    if (const char* v = std::getenv("ROSETTA_X87_FAST_ROUND"))
+    if (const char* v = std::getenv("ROSETTA_X87_FAST_ROUND")) {
         cfg.fast_round = (*v == '1') ? 1 : 0;
+}
 
-    if (const char* v = std::getenv("ROSETTA_X87_DISABLE_DEFERRED_FXCH"))
+    if (const char* v = std::getenv("ROSETTA_X87_DISABLE_DEFERRED_FXCH")) {
         cfg.disable_deferred_fxch = (*v == '1') ? 1 : 0;
+}
 
-    if (const char* v = std::getenv("ROSETTA_X87_DISABLE_IR"))
+    if (const char* v = std::getenv("ROSETTA_X87_DISABLE_IR")) {
         cfg.disable_x87_ir = (*v == '1') ? 1 : 0;
+}
 
-    if (const char* v = std::getenv("ROSETTA_X87_EXTENDED_FPR_SCRATCH"))
+    if (const char* v = std::getenv("ROSETTA_X87_EXTENDED_FPR_SCRATCH")) {
         cfg.extended_fpr_scratch = (*v == '1') ? 1 : 0;
+}
 
-    if (const char* v = std::getenv("ROSETTA_X87_DISABLE_ALL_FUSIONS"))
-        if (*v == '1')
+    if (const char* v = std::getenv("ROSETTA_X87_DISABLE_ALL_FUSIONS")) {
+        if (*v == '1') {
             cfg.disabled_fusions_mask = ~0ULL;
+}
+}
 
     constexpr int kFusionCount = sizeof(kFusionBits) / sizeof(kFusionBits[0]);
 

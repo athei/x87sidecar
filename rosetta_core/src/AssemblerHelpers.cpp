@@ -25,13 +25,15 @@ bool is_bitmask_immediate(bool is_64bit, uint64_t value, LogicalImmEncoding& out
 
     if (is_64bit) {
         // value + 1 < 2  means value == 0 or value == 0xFFFFFFFFFFFFFFFF
-        if (value + 1 < 2)
+        if (value + 1 < 2) {
             return false;
+}
         element_size = 64;
     } else {
         // 32-bit: truncate, then same check
-        if ((uint32_t)(value + 1) < 2)
+        if ((uint32_t)(value + 1) < 2) {
             return false;
+}
         value = (uint32_t)value;
         element_size = 32;
     }
@@ -77,13 +79,15 @@ bool is_bitmask_immediate(bool is_64bit, uint64_t value, LogicalImmEncoding& out
     // Not a contiguous run of 1s — try the complement (run of 0s)
     {
         uint64_t zeros = element_mask & ~value;
-        if (zeros == 0)
+        if (zeros == 0) {
             return false;
+}
 
         // Check if zeros is a contiguous run of 1s
         uint64_t filled_z = (zeros - 1) | zeros;
-        if (((filled_z + 1) & filled_z) != 0)
+        if (((filled_z + 1) & filled_z) != 0) {
             return false;
+}
 
         // zeros is contiguous — decode rotation and run length
         // Uses CLZ (not CTZ) — different from the 1s path
@@ -188,11 +192,12 @@ auto emit_movz_movk_abs64(AssemblerBuffer& buf, int Rd, uint64_t addr) -> void {
 
 auto emit_mov_reg(AssemblerBuffer& buf, int is_64bit, int Rd, int Rn) -> void {
     // SP case: MOV Xd, SP  →  ADD Xd, SP, #0
-    if (Rd == GPR::SP || Rn == GPR::SP)
+    if (Rd == GPR::SP || Rn == GPR::SP) {
         emit_add_imm(buf, is_64bit, 0, 0, 0, 0, Rn, Rd);
-    else
+    } else {
         // ORR Xd, XZR, Xn  (opc=1, n=0, shift=0, shift_amount=0, Rn=XZR=0x1F)
         emit_logical_shifted_reg(buf, is_64bit, 1, 0, 0, Rn, 0, GPR::XZR, Rd);
+}
 }
 
 auto emit_lslv(AssemblerBuffer& buf, int is_64bit, int Rm, int Rn, int Rd) -> void {

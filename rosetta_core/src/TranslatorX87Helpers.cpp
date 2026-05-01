@@ -108,8 +108,9 @@ void emit_store_top(AssemblerBuffer& buf, int Xbase, int Wd_new_top, int Wd_tmp)
 
 void emit_phys_index(AssemblerBuffer& buf, int Wd_top, int stack_depth, int Wd_out) {
     if (stack_depth == 0) {
-        if (Wd_out != Wd_top)
+        if (Wd_out != Wd_top) {
             emit_mov_reg(buf, /*is_64bit=*/0, Wd_out, Wd_top);
+}
         return;
     }
 
@@ -729,8 +730,9 @@ void emit_x87_perm_flush(AssemblerBuffer& buf, int Xbase, int Wd_top, int Wd_tmp
     bool visited[8] = {};
 
     for (int i = 0; i < 8; i++) {
-        if (visited[i] || perm[i] == i)
+        if (visited[i] || perm[i] == i) {
             continue;
+}
 
         // Cycle rotation using 2 temp FPRs:
         //   Dd_save ← ST(cycle[0])              // save first element

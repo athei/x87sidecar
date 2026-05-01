@@ -17,7 +17,8 @@ static int16_t build_fp_load(Context& ctx, IROperand* op) {
         default: return -1;  // m80 → bail
     }
     auto id = ctx.add_node(load_op);
-    if (id < 0) return -1;
+    if (id < 0) { return -1;
+}
     ctx.nodes[id].mem_operand = op;
     return id;
 }
@@ -31,7 +32,8 @@ static int16_t build_int_load(Context& ctx, IROperand* op) {
         default: return -1;
     }
     auto id = ctx.add_node(load_op);
-    if (id < 0) return -1;
+    if (id < 0) { return -1;
+}
     ctx.nodes[id].mem_operand = op;
     return id;
 }
@@ -39,7 +41,8 @@ static int16_t build_int_load(Context& ctx, IROperand* op) {
 // Build a constant-push (FLDL2E, FLDL2T, etc.)
 static int16_t build_const(Context& ctx, uint64_t bits) {
     auto id = ctx.add_node(Op::ConstF64);
-    if (id < 0) return -1;
+    if (id < 0) { return -1;
+}
     ctx.nodes[id].imm_bits = bits;
     return id;
 }
@@ -53,7 +56,8 @@ static bool build_fp_store(Context& ctx, IROperand* op, int16_t val_node) {
         default: return false;  // m80 → bail
     }
     auto id = ctx.add_node(store_op, val_node);
-    if (id < 0) return false;
+    if (id < 0) { return false;
+}
     ctx.nodes[id].mem_operand = op;
     return true;
 }
@@ -68,9 +72,11 @@ static bool build_int_store(Context& ctx, IROperand* op, int16_t val_node, bool 
         default: return false;
     }
     auto id = ctx.add_node(store_op, val_node);
-    if (id < 0) return false;
+    if (id < 0) { return false;
+}
     ctx.nodes[id].mem_operand = op;
-    if (truncate) ctx.nodes[id].flags |= kTruncate;
+    if (truncate) { ctx.nodes[id].flags |= kTruncate;
+}
     return true;
 }
 
@@ -86,22 +92,27 @@ static bool build_arith(Context& ctx, IRInstr* instr, Op base_op, bool reversed)
         int depth_src = instr->operands[1].reg.reg.index();
         auto dst_val = ctx.resolve(depth_dst);
         auto src_val = ctx.resolve(depth_src);
-        if (dst_val < 0 || src_val < 0) return false;
+        if (dst_val < 0 || src_val < 0) { return false;
+}
         auto id = reversed
             ? ctx.add_node(base_op, src_val, dst_val)
             : ctx.add_node(base_op, dst_val, src_val);
-        if (id < 0) return false;
+        if (id < 0) { return false;
+}
         ctx.slot_val[depth_dst] = id;
     } else {
         // Memory path: ST(0) op= mem (or ST(0) = mem op ST(0) for reversed)
         auto st0 = ctx.resolve(0);
-        if (st0 < 0) return false;
+        if (st0 < 0) { return false;
+}
         auto mem_val = build_fp_load(ctx, &instr->operands[0]);
-        if (mem_val < 0) return false;
+        if (mem_val < 0) { return false;
+}
         auto id = reversed
             ? ctx.add_node(base_op, mem_val, st0)
             : ctx.add_node(base_op, st0, mem_val);
-        if (id < 0) return false;
+        if (id < 0) { return false;
+}
         ctx.slot_val[0] = id;
     }
     return true;
@@ -112,11 +123,13 @@ static bool build_arithp(Context& ctx, IRInstr* instr, Op base_op, bool reversed
     int depth_dst = instr->operands[0].reg.reg.index();
     auto dst_val = ctx.resolve(depth_dst);
     auto src_val = ctx.resolve(0);
-    if (dst_val < 0 || src_val < 0) return false;
+    if (dst_val < 0 || src_val < 0) { return false;
+}
     auto id = reversed
         ? ctx.add_node(base_op, src_val, dst_val)
         : ctx.add_node(base_op, dst_val, src_val);
-    if (id < 0) return false;
+    if (id < 0) { return false;
+}
     ctx.slot_val[depth_dst] = id;
     ctx.pop();
     return true;
@@ -126,7 +139,8 @@ static bool build_arithp(Context& ctx, IRInstr* instr, Op base_op, bool reversed
 
 static bool build_fcom(Context& ctx, IRInstr* instr, int num_pops, bool is_fcompp) {
     int16_t lhs = ctx.resolve(0);
-    if (lhs < 0) return false;
+    if (lhs < 0) { return false;
+}
 
     int16_t rhs;
     if (is_fcompp) {
@@ -141,13 +155,16 @@ static bool build_fcom(Context& ctx, IRInstr* instr, int num_pops, bool is_fcomp
         // FCOM/FCOMP m32fp / m64fp: memory operand is operands[1].
         rhs = build_fp_load(ctx, &instr->operands[1]);
     }
-    if (rhs < 0) return false;
+    if (rhs < 0) { return false;
+}
 
     auto id = ctx.add_node(Op::FCmp, lhs, rhs);
-    if (id < 0) return false;
+    if (id < 0) { return false;
+}
     ctx.last_fcmp = id;
 
-    for (int i = 0; i < num_pops; i++) ctx.pop();
+    for (int i = 0; i < num_pops; i++) { ctx.pop();
+}
     return true;
 }
 
@@ -155,17 +172,21 @@ static bool build_fcom(Context& ctx, IRInstr* instr, int num_pops, bool is_fcomp
 
 static bool build_ficom(Context& ctx, IRInstr* instr, bool is_popping) {
     int16_t lhs = ctx.resolve(0);
-    if (lhs < 0) return false;
+    if (lhs < 0) { return false;
+}
 
     // FICOM/FICOMP: operands[0] = m16int/m32int MemRef (like FIADD).
     int16_t rhs = build_int_load(ctx, &instr->operands[0]);
-    if (rhs < 0) return false;
+    if (rhs < 0) { return false;
+}
 
     auto id = ctx.add_node(Op::FCmp, lhs, rhs);
-    if (id < 0) return false;
+    if (id < 0) { return false;
+}
     ctx.last_fcmp = id;
 
-    if (is_popping) ctx.pop();
+    if (is_popping) { ctx.pop();
+}
     return true;
 }
 
@@ -173,21 +194,26 @@ static bool build_ficom(Context& ctx, IRInstr* instr, bool is_popping) {
 
 static bool build_fcomi(Context& ctx, IRInstr* instr, bool is_popping) {
     int16_t st0 = ctx.resolve(0);
-    if (st0 < 0) return false;
+    if (st0 < 0) { return false;
+}
 
     // Comparand is always a register ST(i); Rosetta encodes as [ST(0), ST(i)].
     int src_depth = instr->operands[1].reg.reg.index();
     int16_t src = ctx.resolve(src_depth);
-    if (src < 0) return false;
+    if (src < 0) { return false;
+}
 
     auto id = ctx.add_node(Op::FComI, st0, src);
-    if (id < 0) return false;
-    if (is_popping) ctx.nodes[id].flags |= kFcomIPopping;
+    if (id < 0) { return false;
+}
+    if (is_popping) { ctx.nodes[id].flags |= kFcomIPopping;
+}
 
     // Do NOT update ctx.last_fcmp — FComI sets NZCV directly, not status_word CC.
     ctx.last_fcomi = id;
 
-    if (is_popping) ctx.pop();
+    if (is_popping) { ctx.pop();
+}
     return true;
 }
 
@@ -196,17 +222,21 @@ static bool build_fcomi(Context& ctx, IRInstr* instr, bool is_popping) {
 static bool build_fcmov(Context& ctx, IRInstr* instr, int aarch64_cond) {
     // Safety: FCMOV reads NZCV set by a prior FCOMI. If no FComI
     // was built in this run, we cannot guarantee NZCV state → bail.
-    if (ctx.last_fcomi < 0) return false;
+    if (ctx.last_fcomi < 0) { return false;
+}
 
     int16_t st0 = ctx.resolve(0);
-    if (st0 < 0) return false;
+    if (st0 < 0) { return false;
+}
 
     int src_depth = instr->operands[1].reg.reg.index();
     int16_t src = ctx.resolve(src_depth);
-    if (src < 0) return false;
+    if (src < 0) { return false;
+}
 
     auto id = ctx.add_node(Op::FCSel, st0, src);
-    if (id < 0) return false;
+    if (id < 0) { return false;
+}
     ctx.nodes[id].imm_bits = static_cast<uint64_t>(aarch64_cond);
 
     ctx.slot_val[0] = id;
@@ -300,15 +330,17 @@ bool build(Context& ctx, IRInstr* instr_array, int64_t num_instrs, int64_t start
                 if (instr->operands[0].kind == IROperandKind::Register) {
                     // Register path: copy ST(0) → ST(i)
                     int dst_depth = instr->operands[0].reg.reg.index();
-                    if (dst_depth != 0)
+                    if (dst_depth != 0) {
                         ctx.slot_val[dst_depth] = st0;
+}
                 } else {
                     // Memory path
                     if (!build_fp_store(ctx, &instr->operands[0], st0)) {
                         ok = false; break;
                     }
                 }
-                if (is_pop) ctx.pop();
+                if (is_pop) { ctx.pop();
+}
                 break;
             }
 
@@ -322,7 +354,8 @@ bool build(Context& ctx, IRInstr* instr_array, int64_t num_instrs, int64_t start
                                      op == kOpcodeName_fisttp)) {
                     ok = false; break;
                 }
-                if (op != kOpcodeName_fist) ctx.pop();
+                if (op != kOpcodeName_fist) { ctx.pop();
+}
                 break;
             }
 
@@ -556,7 +589,8 @@ bool build(Context& ctx, IRInstr* instr_array, int64_t num_instrs, int64_t start
                 break;
         }
 
-        if (!ok) break;
+        if (!ok) { break;
+}
         ctx.consumed = static_cast<int16_t>(i + 1);
     }
 

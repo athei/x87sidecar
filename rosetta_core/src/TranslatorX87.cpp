@@ -612,8 +612,9 @@ auto translate_fadd(TranslationResult* a1, IRInstr* a2) -> void {
         free_gpr(*a1, addr_reg);
 
         // Step 4: widen f32 → f64 if needed
-        if (is_f32)
+        if (is_f32) {
             emit_fcvt_s_to_d(buf, Dd_src, Dd_src);
+}
 
         // Step 5: add
         emit_fadd_f64(buf, Dd_dst, Dd_dst, Dd_src);
@@ -746,10 +747,11 @@ auto translate_fsub(TranslationResult* a1, IRInstr* a2) -> void {
         emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, depth_src), Wd_tmp, Dd_src, Xst_base);
         const int Wk4 = emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, depth_dst), Wd_tmp, Dd_dst, Xst_base);
 
-        if (is_fsubr)
+        if (is_fsubr) {
             emit_fsub_f64(buf, Dd_dst, Dd_src, Dd_dst);  // dst = src - dst
-        else
+        } else {
             emit_fsub_f64(buf, Dd_dst, Dd_dst, Dd_src);  // dst = dst - src
+}
 
         emit_store_st_at_offset(buf, Xbase, Wk4, Dd_dst, Xst_base);
     } else {
@@ -771,13 +773,15 @@ auto translate_fsub(TranslationResult* a1, IRInstr* a2) -> void {
         emit_fldr_imm(buf, is_f32 ? 2 : 3, Dd_src, addr_reg, /*imm12=*/0);
         free_gpr(*a1, addr_reg);
 
-        if (is_f32)
+        if (is_f32) {
             emit_fcvt_s_to_d(buf, Dd_src, Dd_src);
+}
 
-        if (is_fsubr)
+        if (is_fsubr) {
             emit_fsub_f64(buf, Dd_dst, Dd_src, Dd_dst);  // ST(0) = mem - ST(0)
-        else
+        } else {
             emit_fsub_f64(buf, Dd_dst, Dd_dst, Dd_src);  // ST(0) = ST(0) - mem
+}
 
         // Opt 3: addr_reg is a separate free-pool register; Wd_tmp still holds
         // the ST(0) byte offset set by emit_load_st above.
@@ -834,10 +838,11 @@ auto translate_fsubp(TranslationResult* a1, IRInstr* a2) -> void {
     emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Dd_src, Xst_base);
     const int Wk6 = emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, depth_dst), Wd_tmp, Dd_dst, Xst_base);
 
-    if (is_fsubrp)
+    if (is_fsubrp) {
         emit_fsub_f64(buf, Dd_dst, Dd_src, Dd_dst);  // ST(i) = ST(0) - ST(i)
-    else
+    } else {
         emit_fsub_f64(buf, Dd_dst, Dd_dst, Dd_src);  // ST(i) = ST(i) - ST(0)
+}
 
     emit_store_st_at_offset(buf, Xbase, Wk6, Dd_dst, Xst_base);
 
@@ -915,10 +920,11 @@ auto translate_fdiv(TranslationResult* a1, IRInstr* a2) -> void {
         emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, depth_src), Wd_tmp, Dd_src, Xst_base);
         const int Wk7 = emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, depth_dst), Wd_tmp, Dd_dst, Xst_base);
 
-        if (is_fdivr)
+        if (is_fdivr) {
             emit_fdiv_f64(buf, Dd_dst, Dd_src, Dd_dst);  // dst = src / dst
-        else
+        } else {
             emit_fdiv_f64(buf, Dd_dst, Dd_dst, Dd_src);  // dst = dst / src
+}
 
         emit_store_st_at_offset(buf, Xbase, Wk7, Dd_dst, Xst_base);
     } else {
@@ -940,13 +946,15 @@ auto translate_fdiv(TranslationResult* a1, IRInstr* a2) -> void {
         emit_fldr_imm(buf, is_f32 ? 2 : 3, Dd_src, addr_reg, /*imm12=*/0);
         free_gpr(*a1, addr_reg);
 
-        if (is_f32)
+        if (is_f32) {
             emit_fcvt_s_to_d(buf, Dd_src, Dd_src);
+}
 
-        if (is_fdivr)
+        if (is_fdivr) {
             emit_fdiv_f64(buf, Dd_dst, Dd_src, Dd_dst);  // ST(0) = mem / ST(0)
-        else
+        } else {
             emit_fdiv_f64(buf, Dd_dst, Dd_dst, Dd_src);  // ST(0) = ST(0) / mem
+}
 
         // Opt 3: addr_reg is a separate free-pool register; Wd_tmp still holds
         // the ST(0) byte offset set by emit_load_st above.
@@ -1003,10 +1011,11 @@ auto translate_fdivp(TranslationResult* a1, IRInstr* a2) -> void {
     emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Dd_src, Xst_base);
     const int Wk9 = emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, depth_dst), Wd_tmp, Dd_dst, Xst_base);
 
-    if (is_fdivrp)
+    if (is_fdivrp) {
         emit_fdiv_f64(buf, Dd_dst, Dd_src, Dd_dst);  // ST(i) = ST(0) / ST(i)
-    else
+    } else {
         emit_fdiv_f64(buf, Dd_dst, Dd_dst, Dd_src);  // ST(i) = ST(i) / ST(0)
+}
 
     emit_store_st_at_offset(buf, Xbase, Wk9, Dd_dst, Xst_base);
 
@@ -1229,8 +1238,9 @@ auto translate_fmul(TranslationResult* a1, IRInstr* a2) -> void {
         free_gpr(*a1, addr_reg);
 
         // Step 4: widen f32 → f64 if needed
-        if (is_f32)
+        if (is_f32) {
             emit_fcvt_s_to_d(buf, Dd_src, Dd_src);
+}
 
         // Step 5: multiply
         emit_fmul_f64(buf, Dd_dst, Dd_dst, Dd_src);
@@ -1343,8 +1353,9 @@ auto translate_fst(TranslationResult* a1, IRInstr* a2) -> void {
         free_gpr(*a1, Xbits);
 
         // Pop (always true for m80fp — there is no non-popping FST m80fp)
-        if (is_fstp)
+        if (is_fstp) {
             x87_pop(buf, *a1, Xbase, Wd_top, Wd_tmp);
+}
 
         x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp);
         free_gpr(*a1, Wd_tmp);
@@ -1381,8 +1392,9 @@ auto translate_fst(TranslationResult* a1, IRInstr* a2) -> void {
 
         // Load ST(0) as f64, then narrow to f32 if needed.
         emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Dd_src, Xst_base);
-        if (is_f32)
+        if (is_f32) {
             emit_fcvt_d_to_s(buf, Dd_src, Dd_src);
+}
 
         const int addr_reg =
             compute_operand_address(*a1, /*is_64bit=*/true, &a2->operands[0], GPR::XZR);
@@ -1391,8 +1403,9 @@ auto translate_fst(TranslationResult* a1, IRInstr* a2) -> void {
     }
 
     // Pop if FSTP / FSTP_STACK: TOP = (TOP + 1) & 7.
-    if (is_fstp)
+    if (is_fstp) {
         x87_pop(buf, *a1, Xbase, Wd_top, Wd_tmp);
+}
 
     free_fpr(*a1, Dd_src);
     x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp);
@@ -1504,8 +1517,9 @@ auto translate_fstsw(TranslationResult* a1, IRInstr* a2) -> void {
     }
 
     free_gpr(*a1, Wd_sw);
-    if (!base_cached)
+    if (!base_cached) {
         free_gpr(*a1, Xbase);
+}
 }
 
 // =============================================================================
@@ -1761,8 +1775,9 @@ auto translate_fcom(TranslationResult* a1, IRInstr* a2) -> void {
         emit_fldr_imm(buf, is_f32 ? 2 : 3, Dd_src, addr_reg, /*imm12=*/0);
         free_gpr(*a1, addr_reg);
 
-        if (is_f32)
+        if (is_f32) {
             emit_fcvt_s_to_d(buf, Dd_src, Dd_src);
+}
     }
 
     // Step 3: Save host NZCV, compare, map flags branchlessly, restore NZCV.
@@ -1811,10 +1826,11 @@ auto translate_fcom(TranslationResult* a1, IRInstr* a2) -> void {
     // Step 5: pop the stack as required.
     // Wd_tmp is dead after the status_word store — safe to reuse as RMW scratch.
     if (is_popping) {
-        if (is_fcompp)
+        if (is_fcompp) {
             x87_pop_n(buf, *a1, Xbase, Wd_top, Wd_tmp, 2);  // OPT-A: fused double-pop
-        else
+        } else {
             x87_pop(buf, *a1, Xbase, Wd_top, Wd_tmp);
+}
     }
 
     x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp);
@@ -2723,8 +2739,9 @@ auto translate_fcomi(TranslationResult* a1, IRInstr* a2) -> void {
     free_gpr(*a1, Wd_z);
 
     // Pop if FCOMIP / FUCOMIP.
-    if (is_popping)
+    if (is_popping) {
         x87_pop(buf, *a1, Xbase, Wd_top, Wd_tmp);
+}
 
     x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp);
     free_gpr(*a1, Wd_tmp);
@@ -3075,8 +3092,9 @@ auto translate_ficom(TranslationResult* a1, IRInstr* a2) -> void {
     emit_fcom_cc_write_sw(buf, *a1, Xbase, Wd_tmp);
 
     // Step 7: pop if FICOMP.
-    if (is_popping)
+    if (is_popping) {
         x87_pop(buf, *a1, Xbase, Wd_top, Wd_tmp);
+}
 
     x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp);
     free_gpr(*a1, Wd_tmp);

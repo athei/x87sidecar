@@ -520,16 +520,18 @@ static std::string resolveWinePath(const char* winPath) {
     std::string winePrefix = prefix ? prefix : (std::string(getenv("HOME")) + "/.wine");
 
     // Find drive letter (e.g. "C:")
-    if (strlen(winPath) < 3 || winPath[1] != ':')
+    if (strlen(winPath) < 3 || winPath[1] != ':') {
         return {};
+}
 
     char driveLetter = tolower(winPath[0]);
     std::string dosDevice = winePrefix + "/dosdevices/" + driveLetter + ":";
 
     // Resolve the symlink to get the real drive root
     char resolved[PATH_MAX];
-    if (!realpath(dosDevice.c_str(), resolved))
+    if (!realpath(dosDevice.c_str(), resolved)) {
         return {};
+}
 
     // Convert the rest of the path: skip "C:", replace backslashes
     std::string result = resolved;
@@ -547,8 +549,9 @@ enum class PeArch { NotPE, X86, X64 };
 
 static PeArch classifyPE(const std::string& path) {
     FILE* f = fopen(path.c_str(), "rb");
-    if (!f)
+    if (!f) {
         return PeArch::NotPE;
+}
 
     uint16_t dosMagic;
     if (fread(&dosMagic, 2, 1, f) != 1 || dosMagic != 0x5A4D) {
