@@ -3688,7 +3688,8 @@ auto translate_fclex(TranslationResult* a1, IRInstr* /*a2*/) -> void {
     // Custom prologue when fclex is alone (run_remaining == 0): allocate
     // only Xbase, skip emit_load_top.  When in a run, fall through to
     // x87_begin so subsequent ops see a pinned Wd_top.
-    int Xbase, Wd_top;
+    int Xbase;
+    int Wd_top;
     bool wd_top_unused = false;
     if (a1->x87_cache.run_remaining == 0) {
         Xbase = alloc_gpr(*a1, 0);
@@ -3704,18 +3705,18 @@ auto translate_fclex(TranslationResult* a1, IRInstr* /*a2*/) -> void {
     const int Wd_tmp = alloc_gpr(*a1, 2);
 
     // LDRH Wd_tmp, [Xbase, #status_word]
-    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*LDR=*/1,
-                     kX87StatusWordImm12, Xbase, Wd_tmp);
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/1 /*LDR*/, kX87StatusWordImm12, Xbase,
+                     Wd_tmp);
 
     // AND  Wd_tmp, Wd_tmp, #0x7F00  — keep bits 8..14
     LogicalImmEncoding enc_keep;
     is_bitmask_immediate(/*is_64bit=*/false, 0x00007F00ULL, enc_keep);
-    emit_and_imm(buf, /*is_64bit=*/0, /*Rd=*/Wd_tmp, enc_keep.N, enc_keep.immr,
-                 enc_keep.imms, /*Rn=*/Wd_tmp);
+    emit_and_imm(buf, /*is_64bit=*/0, /*Rd=*/Wd_tmp, enc_keep.N, enc_keep.immr, enc_keep.imms,
+                 /*Rn=*/Wd_tmp);
 
     // STRH Wd_tmp, [Xbase, #status_word]
-    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*STR=*/0,
-                     kX87StatusWordImm12, Xbase, Wd_tmp);
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/0 /*STR*/, kX87StatusWordImm12, Xbase,
+                     Wd_tmp);
 
     if (wd_top_unused) {
         free_gpr(*a1, Wd_tmp);
@@ -3750,7 +3751,8 @@ auto translate_finit(TranslationResult* a1, IRInstr* /*a2*/) -> void {
     static constexpr int16_t kX87StatusWordImm12 = kX87StatusWordOff / 2;  // = 1
     static constexpr int16_t kX87TagWordImm12 = kX87TagWordOff / 2;        // = 2
 
-    int Xbase, Wd_top;
+    int Xbase;
+    int Wd_top;
     const bool standalone = (a1->x87_cache.run_remaining == 0);
     if (standalone) {
         Xbase = alloc_gpr(*a1, 0);
@@ -3765,17 +3767,18 @@ auto translate_finit(TranslationResult* a1, IRInstr* /*a2*/) -> void {
     const int Wd_tmp = alloc_gpr(*a1, 2);
 
     // CW <- 0x037F
-    emit_movn(buf, /*is_64=*/0, /*MOVZ opc=*/2, /*hw=*/0, /*imm=*/0x037F, Wd_tmp);
-    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*STR=*/0, kX87CtrlWordImm12, Xbase,
+    emit_movn(buf, /*is_64bit=*/0, /*opc=*/2 /*MOVZ*/, /*hw=*/0, /*imm16=*/0x037F, Wd_tmp);
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/0 /*STR*/, kX87CtrlWordImm12, Xbase,
                      Wd_tmp);
 
     // SW <- 0  (also resets SW.TOP to 0)
-    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*STR=*/0, kX87StatusWordImm12, Xbase,
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/0 /*STR*/, kX87StatusWordImm12, Xbase,
                      GPR::XZR);
 
     // TW <- 0xFFFF
-    emit_movn(buf, /*is_64=*/0, /*MOVZ opc=*/2, /*hw=*/0, /*imm=*/0xFFFF, Wd_tmp);
-    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*STR=*/0, kX87TagWordImm12, Xbase, Wd_tmp);
+    emit_movn(buf, /*is_64bit=*/0, /*opc=*/2 /*MOVZ*/, /*hw=*/0, /*imm16=*/0xFFFF, Wd_tmp);
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/0 /*STR*/, kX87TagWordImm12, Xbase,
+                     Wd_tmp);
 
     if (standalone) {
         free_gpr(*a1, Wd_tmp);
@@ -3787,7 +3790,7 @@ auto translate_finit(TranslationResult* a1, IRInstr* /*a2*/) -> void {
         a1->x87_cache.deferred_pop_count = 0;
         a1->x87_cache.reset_perm();
         // MOVZ Wd_top, #0  — match the new SW.TOP for the rest of the run.
-        emit_movn(buf, /*is_64=*/0, /*MOVZ opc=*/2, /*hw=*/0, /*imm=*/0, Wd_top);
+        emit_movn(buf, /*is_64bit=*/0, /*opc=*/2 /*MOVZ*/, /*hw=*/0, /*imm16=*/0, Wd_top);
 
         x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp);
         free_gpr(*a1, Wd_tmp);
@@ -4074,7 +4077,8 @@ auto translate_fldenv(TranslationResult* a1, IRInstr* a2) -> void {
     static constexpr int16_t kSrcSwImm12 = 2;  // byte 4 → halfword imm12=2
     static constexpr int16_t kSrcTwImm12 = 4;  // byte 8 → halfword imm12=4
 
-    int Xbase, Wd_top;
+    int Xbase;
+    int Wd_top;
     const bool standalone = (a1->x87_cache.run_remaining == 0);
     if (standalone) {
         // Mini-prologue: skip emit_load_top — the existing SW.TOP is about
@@ -4100,23 +4104,23 @@ auto translate_fldenv(TranslationResult* a1, IRInstr* a2) -> void {
     const int Xaddr = compute_operand_address(*a1, addr_is_64, &a2->operands[0], GPR::XZR);
 
     // CW: [Xaddr, #0] → [Xbase, #0]
-    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*LDR=*/1, /*imm12=*/0, Xaddr, Wd_tmp);
-    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*STR=*/0, kX87CtrlWordImm12, Xbase,
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/1 /*LDR*/, /*imm12=*/0, Xaddr, Wd_tmp);
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/0 /*STR*/, kX87CtrlWordImm12, Xbase,
                      Wd_tmp);
 
     // SW: [Xaddr, #4] → [Xbase, #2].  Re-derive Wd_top from new SW.TOP.
-    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*LDR=*/1, kSrcSwImm12, Xaddr, Wd_tmp);
-    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*STR=*/0, kX87StatusWordImm12, Xbase,
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/1 /*LDR*/, kSrcSwImm12, Xaddr, Wd_tmp);
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/0 /*STR*/, kX87StatusWordImm12, Xbase,
                      Wd_tmp);
     if (!standalone) {
         // UBFX Wd_top, Wd_tmp, #11, #3
-        emit_bitfield(buf, /*is_64=*/0, /*UBFM=*/2, /*N=*/0, /*immr=*/11, /*imms=*/13,
+        emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/2 /*UBFM*/, /*N=*/0, /*immr=*/11, /*imms=*/13,
                       Wd_tmp, Wd_top);
     }
 
     // TW: [Xaddr, #8] → [Xbase, #4]
-    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*LDR=*/1, kSrcTwImm12, Xaddr, Wd_tmp);
-    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*STR=*/0, kX87TagWordImm12, Xbase,
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/1 /*LDR*/, kSrcTwImm12, Xaddr, Wd_tmp);
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/0 /*STR*/, kX87TagWordImm12, Xbase,
                      Wd_tmp);
 
     free_gpr(*a1, Xaddr);
@@ -4173,23 +4177,24 @@ auto translate_fstenv(TranslationResult* a1, IRInstr* a2) -> void {
 
     // CW: [Xbase, #0] → [Xaddr, #0..3]   (LDRH zero-extends; 32-bit STR
     // writes the field + 2 reserved zero bytes in one shot.)
-    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*LDR=*/1, kX87CtrlWordImm12, Xbase,
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/1 /*LDR*/, kX87CtrlWordImm12, Xbase,
                      Wd_tmp);
-    emit_ldr_str_imm(buf, /*size=*/2, /*is_fp=*/0, /*STR=*/0, /*imm12=*/0, Xaddr, Wd_tmp);
+    emit_ldr_str_imm(buf, /*size=*/2, /*is_fp=*/0, /*opc=*/0 /*STR*/, /*imm12=*/0, Xaddr, Wd_tmp);
 
     // SW: [Xbase, #2] → [Xaddr, #4..7]
-    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*LDR=*/1, kX87StatusWordImm12, Xbase,
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/1 /*LDR*/, kX87StatusWordImm12, Xbase,
                      Wd_tmp);
-    emit_ldr_str_imm(buf, /*size=*/2, /*is_fp=*/0, /*STR=*/0, /*imm12=*/1, Xaddr, Wd_tmp);
+    emit_ldr_str_imm(buf, /*size=*/2, /*is_fp=*/0, /*opc=*/0 /*STR*/, /*imm12=*/1, Xaddr, Wd_tmp);
 
     // TW: [Xbase, #4] → [Xaddr, #8..11]
-    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*LDR=*/1, kX87TagWordImm12, Xbase, Wd_tmp);
-    emit_ldr_str_imm(buf, /*size=*/2, /*is_fp=*/0, /*STR=*/0, /*imm12=*/2, Xaddr, Wd_tmp);
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/1 /*LDR*/, kX87TagWordImm12, Xbase,
+                     Wd_tmp);
+    emit_ldr_str_imm(buf, /*size=*/2, /*is_fp=*/0, /*opc=*/0 /*STR*/, /*imm12=*/2, Xaddr, Wd_tmp);
 
     // 16 zero bytes at offsets 12..27 — 3 stores: 4B at 12, 8B at 16, 4B at 24.
-    emit_ldr_str_imm(buf, /*size=*/2, /*is_fp=*/0, /*STR=*/0, /*imm12=*/3, Xaddr, GPR::XZR);
-    emit_ldr_str_imm(buf, /*size=*/3, /*is_fp=*/0, /*STR=*/0, /*imm12=*/2, Xaddr, GPR::XZR);
-    emit_ldr_str_imm(buf, /*size=*/2, /*is_fp=*/0, /*STR=*/0, /*imm12=*/6, Xaddr, GPR::XZR);
+    emit_ldr_str_imm(buf, /*size=*/2, /*is_fp=*/0, /*opc=*/0 /*STR*/, /*imm12=*/3, Xaddr, GPR::XZR);
+    emit_ldr_str_imm(buf, /*size=*/3, /*is_fp=*/0, /*opc=*/0 /*STR*/, /*imm12=*/2, Xaddr, GPR::XZR);
+    emit_ldr_str_imm(buf, /*size=*/2, /*is_fp=*/0, /*opc=*/0 /*STR*/, /*imm12=*/6, Xaddr, GPR::XZR);
 
     free_gpr(*a1, Xaddr);
 

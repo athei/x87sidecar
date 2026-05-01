@@ -388,9 +388,7 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask, const Translate
             kOpcodeName_fxrstor,
         };
         const uint16_t op = localIR[req.insn_idx].opcode;
-        const bool deliberate = std::find(kKnownFallThrough.begin(),
-                                          kKnownFallThrough.end(), op)
-                                != kKnownFallThrough.end();
+        const bool deliberate = std::ranges::find(kKnownFallThrough, op) != kKnownFallThrough.end();
         if (!deliberate) {
             const char* name = (op < kOpcodeNames.size()) ? kOpcodeNames[op] : "?";
             fprintf(stdout,
@@ -398,8 +396,7 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask, const Translate
                     "insn_idx=%lld; falling through to stock — add a "
                     "translate_* and dispatch case, or extend "
                     "kKnownFallThrough if this is a deliberate-stock op\n",
-                    name, static_cast<unsigned>(op),
-                    static_cast<long long>(req.insn_idx));
+                    name, static_cast<unsigned>(op), static_cast<long long>(req.insn_idx));
             fflush(stdout);
         }
     }

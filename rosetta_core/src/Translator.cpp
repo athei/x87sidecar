@@ -362,19 +362,23 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                 TranslatorX87::translate_fprem1(translation_result, cur_instr);
                 break;
 
-            case Opcode::kOpcodeName_fxsave:
-            case Opcode::kOpcodeName_fxrstor:
-                // Deliberate fall-through to stock.  These are the SSE-era
-                // extended save/restore — 512 bytes including 8 ST slots in
-                // x86-spec f80 plus 16 XMM/YMM registers and MXCSR.  We
-                // don't translate SSE, and inlining the f80 conversion would
-                // inherit frstor's 0.38× eager-conversion regression for no
-                // benefit.  is_handled_x87 returns false for them, so the
-                // run terminates before this point and the preceding
-                // translate_*'s x87_end has already flushed deferred state
-                // to memory — stock reads coherent X87State via x22.  The
-                // sidecar's known-fall-through allowlist suppresses the
-                // "UNHANDLED" warning for these specifically.
+            // Identical body to default: is intentional — the explicit
+            // case documents the "deliberate fall-through" set and pairs
+            // with the sidecar's kKnownFallThrough allowlist that
+            // suppresses the UNHANDLED warning for these opcodes only.
+            // Don't merge with default:.
+            //
+            // Deliberate fall-through to stock.  These are the SSE-era
+            // extended save/restore — 512 bytes including 8 ST slots in
+            // x86-spec f80 plus 16 XMM/YMM registers and MXCSR.  We
+            // don't translate SSE, and inlining the f80 conversion would
+            // inherit frstor's 0.38× eager-conversion regression for no
+            // benefit.  is_handled_x87 returns false for them, so the
+            // run terminates before this point and the preceding
+            // translate_*'s x87_end has already flushed deferred state
+            // to memory — stock reads coherent X87State via x22.
+            case Opcode::kOpcodeName_fxsave:   // NOLINT(bugprone-branch-clone)
+            case Opcode::kOpcodeName_fxrstor:  // NOLINT(bugprone-branch-clone)
                 return std::nullopt;
 
             default:
