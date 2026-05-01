@@ -357,27 +357,11 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask,
 }
 
 void runReceiveLoop(mach_port_t servicePort, mach_port_t parentTaskPort) {
-    // Counter file we update on each successful receive — survives process
-    // exit so post-mortem can verify whether the loop ever drained anything,
-    // AND how many of those hits resulted in a Some vs None reply (i.e. how
-    // often our local Translator actually produced a result).
-    auto bumpCounter = [](uint64_t hits, uint64_t some, uint64_t none,
-                          uint64_t lastErr) {
-        FILE* f = fopen("/tmp/rosettax87_jit_sidecar_count", "w");
-        if (!f) return;
-        fprintf(f, "hits=%llu some=%llu none=%llu lastErr=0x%llx\n",
-                hits, some, none, lastErr);
-        fclose(f);
-    };
-    bumpCounter(0, 0, 0, 0);
-
     struct alignas(8) {
         uint8_t bytes[kRecvBufferSize];
     } buf;
 
     uint64_t hits = 0;
-    uint64_t someCount = 0;
-    uint64_t noneCount = 0;
     for (;;) {
         mach_msg_header_t* hdr = reinterpret_cast<mach_msg_header_t*>(buf.bytes);
         hdr->msgh_local_port = servicePort;
@@ -389,7 +373,6 @@ void runReceiveLoop(mach_port_t servicePort, mach_port_t parentTaskPort) {
         if (kr != KERN_SUCCESS) {
             fprintf(stdout, "sidecar: mach_msg(RCV) returned 0x%x (%s)\n", kr,
                     mach_error_string(kr));
-            bumpCounter(hits, someCount, noneCount, uint64_t(kr));
             return;
         }
 
@@ -410,10 +393,6 @@ void runReceiveLoop(mach_port_t servicePort, mach_port_t parentTaskPort) {
 
             TranslateOutcome outcome =
                 processTranslateRequest(parentTaskPort, req);
-
-            if (outcome.reply_some) someCount++;
-            else                    noneCount++;
-            bumpCounter(hits, someCount, noneCount, 0);
 
             struct ReplyMsg {
                 mach_msg_header_t hdr;

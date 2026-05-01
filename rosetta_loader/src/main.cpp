@@ -1377,26 +1377,6 @@ int main(int argc, char* argv[]) {
         VERBOSE_LOG("M2: transcendental constants installed at 0x%llx (%zu B)\n",
                     constsAddr, sizeof(kTransConstants));
 
-        // ── DIAGNOSTIC (temporary): replace ENTRY with `mov x0, #0xCAFE; ret`
-        // padded with nops so we can tell whether translate_insn is even
-        // being called after our patch lands. If test_arith behaves
-        // differently from a no-patch baseline, the patch IS being hit.
-        if (getenv("ROSETTA_X87_DIAG_ENTRY_RET")) {
-            blobs.entry.clear();
-            // movz x0, #0xCAFE
-            uint32_t movzInsn = 0xD2800000u | (uint32_t(0xCAFE) << 5) | 0;
-            // ret  (= BR x30)
-            uint32_t retInsn  = 0xD65F03C0u;
-            uint32_t nopInsn  = 0xD503201Fu;
-            for (uint32_t insn : {movzInsn, retInsn, nopInsn, nopInsn}) {
-                blobs.entry.push_back(uint8_t(insn));
-                blobs.entry.push_back(uint8_t(insn >> 8));
-                blobs.entry.push_back(uint8_t(insn >> 16));
-                blobs.entry.push_back(uint8_t(insn >> 24));
-            }
-            VERBOSE_LOG("M2: DIAG_ENTRY_RET active — entry replaced with mov x0,#0xCAFE; ret\n");
-        }
-
         // ── Patch translate_insn[0..16] with the abs-jump ENTRY ────────────
         if (!dbg.adjustMemoryProtection(
                 translateInsnAddr, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY,
@@ -1417,49 +1397,6 @@ int main(int argc, char* argv[]) {
         }
         VERBOSE_LOG("M2: translate_insn entry patched (abs-jump to 0x%llx)\n",
             padStartAddr);
-
-        // Read-back verification: confirm the patch actually landed, and
-        // dump the FULL handler so we can decode each instruction post-mortem.
-        uint8_t verifyEntry[16];
-        if (dbg.readMemory(translateInsnAddr, verifyEntry, 16)) {
-            VERBOSE_LOG("M2: post-patch translate_insn[0..16]: %02x%02x%02x%02x "
-                "%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x\n",
-                verifyEntry[0], verifyEntry[1], verifyEntry[2], verifyEntry[3],
-                verifyEntry[4], verifyEntry[5], verifyEntry[6], verifyEntry[7],
-                verifyEntry[8], verifyEntry[9], verifyEntry[10],
-                verifyEntry[11], verifyEntry[12], verifyEntry[13],
-                verifyEntry[14], verifyEntry[15]);
-        }
-        std::vector<uint8_t> verifyHandler(blobs.handler.size(), 0);
-        if (dbg.readMemory(padStartAddr, verifyHandler.data(),
-                            verifyHandler.size())) {
-            VERBOSE_LOG("M2: handler full dump (%zu bytes), 4 insns/line:\n",
-                verifyHandler.size());
-            for (size_t i = 0; i < verifyHandler.size(); i += 16) {
-                VERBOSE_LOG("  +0x%03zx: %02x%02x%02x%02x %02x%02x%02x%02x "
-                    "%02x%02x%02x%02x %02x%02x%02x%02x\n",
-                    i,
-                    verifyHandler[i + 0], verifyHandler[i + 1],
-                    verifyHandler[i + 2], verifyHandler[i + 3],
-                    verifyHandler[i + 4], verifyHandler[i + 5],
-                    verifyHandler[i + 6], verifyHandler[i + 7],
-                    verifyHandler[i + 8], verifyHandler[i + 9],
-                    verifyHandler[i + 10], verifyHandler[i + 11],
-                    verifyHandler[i + 12], verifyHandler[i + 13],
-                    verifyHandler[i + 14], verifyHandler[i + 15]);
-            }
-        }
-
-        // Marker file so external smoke tests can confirm M2 actually ran.
-        if (FILE* f = fopen("/tmp/rosettax87_jit_m2_marker", "w")) {
-            fprintf(f, "translate_insn=0x%llx\n", translateInsnAddr);
-            fprintf(f, "handler=0x%llx\n", padStartAddr);
-            fprintf(f, "handler_bytes=%zu\n", blobs.handler.size());
-            fprintf(f, "padding_bytes=%llu\n", padBytes);
-            fprintf(f, "parent_req_name=0x%x\n", parentReqName);
-            fprintf(f, "parent_reply_name=0x%x\n", parentReplyName);
-            fclose(f);
-        }
 
         // Capture the parent's task port BEFORE detach. The send-right is
         // held in MuhDebugger::taskPort_ and stays valid past dbg.detach()
