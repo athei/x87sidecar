@@ -358,9 +358,16 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                 // non-x87 op also reaches here; that path falls back to
                 // stock translate_insn unchanged.  We stay silent so the
                 // AOT path isn't spammed.
-                translation_result->free_gpr_mask = kGprScratchMask;
-                translation_result->free_fpr_mask =
-                    translation_result->_unoccupied_temporary_fprs_for_xmm_scalars;
+                //
+                // Critical: do NOT mutate free_gpr_mask / free_fpr_mask
+                // before returning nullopt.  Stock's translate_insn (run
+                // by the stub's STASH abs-jump in JIT mode, or by
+                // original_translate_insn in AOT mode) carries its own
+                // register-allocation state across instructions in a
+                // basic block.  Overwriting those masks with our scratch
+                // values forces stock to redo allocation as if every
+                // instruction starts a fresh block, costing several extra
+                // ARM instructions per instruction.  Pass-through clean.
                 return std::nullopt;
         }
     }
