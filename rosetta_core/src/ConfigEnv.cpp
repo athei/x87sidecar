@@ -89,6 +89,7 @@ RosettaConfig load_config_from_env() {
     cfg.loader_logs = env_truthy("X87_LOGS") ? 1 : 0;
     cfg.loader_force_attach = env_truthy("X87_FORCE_ATTACH") ? 1 : 0;
     cfg.loader_disable_hook = env_truthy("X87_DISABLE_HOOK") ? 1 : 0;
+    cfg.loader_always_none = env_truthy("X87_ALWAYS_NONE") ? 1 : 0;
 
     return cfg;
 }
@@ -108,6 +109,10 @@ void print_env_help(std::FILE* out) {
                  "                                apples-to-apples baseline against the\n"
                  "                                optimised path (both have AOT cache +\n"
                  "                                interpreter disabled).\n"
+                 "  X87_ALWAYS_NONE=1             diagnostic: sidecar always replies None,\n"
+                 "                                so the stub falls through to stock for every\n"
+                 "                                request.  Use to A/B whether a freeze is in\n"
+                 "                                our JIT output or the IPC marshalling itself.\n"
                  "  X87_DISABLE_CACHE=1           drop the cross-instruction GPR cache\n"
                  "  X87_FAST_ROUND=1              skip RC dispatch; always emit FCVTNS/FRINTN\n"
                  "                                (round-to-nearest only — UNSAFE for code that\n"

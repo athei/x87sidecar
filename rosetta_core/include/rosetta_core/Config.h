@@ -53,7 +53,14 @@ struct RosettaConfig {
                                   //                  apples-to-apples comparison against
                                   //                  the optimised path (both have AOT
                                   //                  cache + interpreter disabled).
-    uint8_t _pad_b[5];
+    uint8_t loader_always_none;   // X87_ALWAYS_NONE  diagnostic: sidecar replies None for
+                                  //                  every translate_insn request, so the
+                                  //                  stub falls through to stock for all
+                                  //                  ops.  Hook + IPC mechanics still run;
+                                  //                  only our JIT output is bypassed.
+                                  //                  Used to A/B "is the freeze in our
+                                  //                  emitted code or in the marshalling?"
+    uint8_t _pad_b[4];
 };
 static_assert(sizeof(RosettaConfig) == 0x18);
 

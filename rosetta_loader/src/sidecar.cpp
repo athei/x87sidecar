@@ -15,6 +15,8 @@
 #include <ctime>
 #include <vector>
 
+#include "rosetta_core/Config.h"
+#include "rosetta_core/CoreConfig.h"
 #include "rosetta_core/Fixup.h"
 #include "rosetta_core/IRInstr.h"
 #include "rosetta_core/Opcode.h"
@@ -142,6 +144,16 @@ mach_vm_address_t allocAndAppendInParent(mach_port_t parentTask, uint64_t origAd
 // otherwise returns None (the stub falls through to stock translate_insn).
 TranslateOutcome processTranslateRequest(mach_port_t parentTask, const TranslateRequest& req) {
     TranslateOutcome out{.reply_some = false, .value = 0};
+
+    // X87_ALWAYS_NONE: short-circuit before any cross-process I/O.  The stub
+    // sees a None reply, falls through to STASH, and stock translates the
+    // op.  Hook + IPC mechanics still exercise (so we can A/B it against
+    // X87_DISABLE_HOOK=1, which skips the hook entirely).  If a real
+    // freeze repros under DISABLE_HOOK=0 + ALWAYS_NONE=1, the bug is in
+    // the marshalling itself; if not, it's in our emitted code.
+    if (g_rosetta_config != nullptr && g_rosetta_config->loader_always_none != 0U) {
+        return out;
+    }
 
     constexpr uint64_t kMaxNumInstrs = 0x10000;
     if (req.num_instrs == 0 || req.num_instrs > kMaxNumInstrs) {
