@@ -415,6 +415,10 @@ auto emit_frintz_f64(AssemblerBuffer& buf, int Dd, int Dn) -> void {
     // FRINTZ: round to integral, toward zero (truncate).  DP1 opcode 0b001011.
     emit_fp_dp1(buf, /*type=*/1, /*FRINTZ=*/0xB, Dd, Dn);
 }
+auto emit_frintn_f64(AssemblerBuffer& buf, int Dd, int Dn) -> void {
+    // FRINTN: round to integral, ties-to-even (IEEE default).  DP1 opcode 0b001000.
+    emit_fp_dp1(buf, /*type=*/1, /*FRINTN=*/0x8, Dd, Dn);
+}
 
 auto emit_fp_cmp(AssemblerBuffer& buf, int type, int Rn, int Rm) -> void {
     // FCMP: [31:24]=0x1E [23:22]=type [21]=1 [20:16]=Rm [15:14]=00

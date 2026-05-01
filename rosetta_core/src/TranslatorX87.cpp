@@ -4588,8 +4588,7 @@ auto translate_fprem1(TranslationResult* a1, IRInstr* /*a2*/) -> void {
     auto [Xbase, Wd_top] = x87_begin(*a1, buf);
     const int Wd_tmp = alloc_gpr(*a1, 2);
 
-    emit_transcendental_ipc(*a1, buf, Xbase, Wd_top, Wd_tmp,
-                            rosetta_core::kTransFprem1, /*num_inputs=*/2);
+    emit_inline_fprem1(*a1, buf, Xbase, Wd_top, Wd_tmp);
 
     const int Xst_base = x87_get_st_base(*a1);
     const int depth_st0 = resolve_depth(*a1, 0);

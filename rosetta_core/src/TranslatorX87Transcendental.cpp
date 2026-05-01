@@ -1041,6 +1041,31 @@ void emit_inline_fprem(TranslationResult& a1, AssemblerBuffer& buf,
     free_fpr(a1, Da);
 }
 
+// fprem1: ST(0) := IEEE-remainder(ST(0), ST(1)).  Same emit shape as
+// fprem; differs only in FRINTN (round-to-nearest-even) instead of
+// FRINTZ.  std::remainder uses round-to-nearest-even rounding for the
+// quotient, which FRINTN gives directly.
+void emit_inline_fprem1(TranslationResult& a1, AssemblerBuffer& buf,
+                         int Xbase, int Wd_top, int Wd_tmp) {
+    const int Xst_base  = x87_get_st_base(a1);
+    const int depth_st0 = resolve_depth(a1, 0);
+    const int depth_st1 = resolve_depth(a1, 1);
+
+    const int Da = alloc_free_fpr(a1);
+    emit_load_st(buf, Xbase, Wd_top, depth_st0, Wd_tmp, Da, Xst_base);
+    const int Db = alloc_free_fpr(a1);
+    emit_load_st(buf, Xbase, Wd_top, depth_st1, Wd_tmp, Db, Xst_base);
+
+    const int Dq = alloc_free_fpr(a1);
+    emit_fdiv_f64(buf, Dq, Da, Db);            // q = a / b
+    emit_frintn_f64(buf, Dq, Dq);              // q = round(q) (ties-to-even)
+    emit_fmsub_f64(buf, /*Dd=*/0, Dq, Db, Da); // d0 = a - q · b
+
+    free_fpr(a1, Dq);
+    free_fpr(a1, Db);
+    free_fpr(a1, Da);
+}
+
 void emit_inline_fyl2xp1(TranslationResult& a1, AssemblerBuffer& buf,
                           int Xbase, int Wd_top, int Wd_tmp) {
     // x86 fyl2xp1: ST(1) := ST(1) * log2(ST(0) + 1); pop.  x87 spec

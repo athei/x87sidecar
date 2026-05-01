@@ -167,6 +167,10 @@ auto emit_frinta_f64(AssemblerBuffer& buf, int Dd, int Dn) -> void;
 // Used by fprem to extract the integer quotient of a/b.
 auto emit_frintz_f64(AssemblerBuffer& buf, int Dd, int Dn) -> void;
 
+// FRINTN Dd, Dn — round to integral, ties-to-even (IEEE default, f64).
+// Used by fprem1 to extract the IEEE-style quotient of a/b.
+auto emit_frintn_f64(AssemblerBuffer& buf, int Dd, int Dn) -> void;
+
 // FCMP scalar — sets NZCV, no result register
 // type: 0=f32  1=f64
 auto emit_fp_cmp(AssemblerBuffer& buf, int type, int Rn, int Rm) -> void;

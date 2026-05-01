@@ -92,4 +92,10 @@ void emit_inline_fptan(TranslationResult& a1, AssemblerBuffer& buf,
 void emit_inline_fprem(TranslationResult& a1, AssemblerBuffer& buf,
                         int Xbase, int Wd_top, int Wd_tmp);
 
+// fprem1: ST(0) := IEEE-remainder(ST(0), ST(1)).  Single-shot via
+// FDIV + FRINTN + FMSUB.  Same simplification as fprem; FRINTN uses
+// ties-to-even rounding to match std::remainder.  Result in d0.
+void emit_inline_fprem1(TranslationResult& a1, AssemblerBuffer& buf,
+                         int Xbase, int Wd_top, int Wd_tmp);
+
 }  // namespace TranslatorX87
