@@ -77,7 +77,7 @@ int main(int argc, char** argv) {
     std::vector<std::uint64_t> data_in_code;
 
     auto* module_result =
-        g_rosetta_aot.ir_create((uintptr_t)blob,  // absolute mapped base = "file offset 0"
+        g_rosetta_aot.ir_create(reinterpret_cast<uintptr_t>(blob),  // absolute mapped base = "file offset 0"
                                 0,                // min_vmaddr   — irrelevant
                                 0,                // max_vmaddr   — irrelevant
                                 0,                // text_vmaddr_range — irrelevant

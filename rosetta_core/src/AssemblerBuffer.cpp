@@ -8,8 +8,8 @@
 void* mmap_anonymous_rw(size_t size, int tag) {
     void* result;  // x0
 
-    result = mmap((void*)0x100000000LL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS,
-                  tag << 0x18, 0);
+    result = mmap(reinterpret_cast<void*>(0x100000000LL), size, PROT_READ | PROT_WRITE,
+                  MAP_PRIVATE | MAP_ANONYMOUS, tag << 0x18, 0);
     return result;
 }
 

@@ -25,7 +25,7 @@ auto MachoLoader::open(std::filesystem::path const& path) -> bool {
 }
 
 auto MachoLoader::machHeader() const -> mach_header_64* {
-    return (mach_header_64*)buffer_.data();
+    return reinterpret_cast<mach_header_64*>(const_cast<uint8_t*>(buffer_.data()));
 }
 
 auto MachoLoader::imageSize() const -> size_t {

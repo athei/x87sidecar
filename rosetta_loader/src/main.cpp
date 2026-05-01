@@ -73,7 +73,7 @@ private:
             }
             // Spurious signal; suppress it and continue
             VERBOSE_LOG("Suppressing unexpected signal %d (waiting for %d)\n", sig, expectedSignal);
-            if (ptrace(PT_CONTINUE, childPid_, (caddr_t)1, 0) < 0) {
+            if (ptrace(PT_CONTINUE, childPid_, reinterpret_cast<caddr_t>(1), 0) < 0) {
                 fprintf(stdout, "ptrace(PT_CONTINUE suppress): %s\n", strerror(errno));
                 return false;
             }
@@ -107,7 +107,7 @@ public:
 
     // Continue the traced process and wait for it to stop at execv (SIGTRAP).
     bool waitForExecStop() {
-        if (ptrace(PT_CONTINUE, childPid_, (caddr_t)1, 0) < 0) {
+        if (ptrace(PT_CONTINUE, childPid_, reinterpret_cast<caddr_t>(1), 0) < 0) {
             fprintf(stdout, "ptrace(PT_CONTINUE for exec): %s\n", strerror(errno));
             return false;
         }
@@ -125,7 +125,7 @@ public:
     }
 
     bool continueExecution() {
-        if (ptrace(PT_CONTINUE, childPid_, (caddr_t)1, 0) < 0) {
+        if (ptrace(PT_CONTINUE, childPid_, reinterpret_cast<caddr_t>(1), 0) < 0) {
             fprintf(stdout, "ptrace(PT_CONTINUE): %s\n", strerror(errno));
             return false;
         }
@@ -136,7 +136,7 @@ public:
     }
 
     [[nodiscard]] bool detach() const {
-        if (ptrace(PT_DETACH, childPid_, (caddr_t)1, 0) < 0) {
+        if (ptrace(PT_DETACH, childPid_, reinterpret_cast<caddr_t>(1), 0) < 0) {
             fprintf(stdout, "ptrace(PT_DETACH): %s\n", strerror(errno));
             return false;
         }
@@ -293,7 +293,7 @@ public:
         for (unsigned int i = 0; i < threadCount; i++) {
             mach_port_deallocate(mach_task_self(), threadList[i]);
         }
-        vm_deallocate(mach_task_self(), (vm_address_t)threadList, sizeof(thread_t) * threadCount);
+        vm_deallocate(mach_task_self(), reinterpret_cast<vm_address_t>(threadList), sizeof(thread_t) * threadCount);
 
         return value;
     }
@@ -356,7 +356,7 @@ public:
         for (uint i = 0; i < threadCount; i++) {
             mach_port_deallocate(mach_task_self(), threadList[i]);
         }
-        vm_deallocate(mach_task_self(), (vm_address_t)threadList, sizeof(thread_t) * threadCount);
+        vm_deallocate(mach_task_self(), reinterpret_cast<vm_address_t>(threadList), sizeof(thread_t) * threadCount);
 
         return true;
     }
@@ -385,7 +385,7 @@ public:
         mach_vm_size_t readSize;
 
         kern_return_t kr =
-            mach_vm_read_overwrite(taskPort_, address, size, (mach_vm_address_t)buffer, &readSize);
+            mach_vm_read_overwrite(taskPort_, address, size, reinterpret_cast<mach_vm_address_t>(buffer), &readSize);
 
         if (kr != KERN_SUCCESS) {
             fprintf(stdout, "Failed to read memory at 0x%llx (error 0x%x: %s)\n", address, kr,
@@ -397,7 +397,7 @@ public:
     }
 
     bool writeMemory(uint64_t address, const void* buffer, size_t size) const {
-        kern_return_t kr = mach_vm_write(taskPort_, address, (vm_offset_t)buffer, size);
+        kern_return_t kr = mach_vm_write(taskPort_, address, reinterpret_cast<vm_offset_t>(buffer), size);
 
         if (kr != KERN_SUCCESS) {
             fprintf(stdout, "Failed to write memory at 0x%llx (error 0x%x: %s)\n", address, kr,
@@ -425,7 +425,7 @@ public:
         for (uint i = 0; i < threadCount; i++) {
             mach_port_deallocate(mach_task_self(), threadList[i]);
         }
-        vm_deallocate(mach_task_self(), (vm_address_t)threadList, sizeof(thread_t) * threadCount);
+        vm_deallocate(mach_task_self(), reinterpret_cast<vm_address_t>(threadList), sizeof(thread_t) * threadCount);
 
         if (kr != KERN_SUCCESS) {
             fprintf(stdout, "Failed to get thread state (error 0x%x: %s)\n", kr,
@@ -446,14 +446,15 @@ public:
             return false;
         }
 
-        kr = thread_set_state(threadList[0], ARM_THREAD_STATE64, (thread_state_t)&state,
+        kr = thread_set_state(threadList[0], ARM_THREAD_STATE64,
+                              reinterpret_cast<thread_state_t>(const_cast<arm_thread_state64_t*>(&state)),
                               ARM_THREAD_STATE64_COUNT);
 
         // Cleanup
         for (uint i = 0; i < threadCount; i++) {
             mach_port_deallocate(mach_task_self(), threadList[i]);
         }
-        vm_deallocate(mach_task_self(), (vm_address_t)threadList, sizeof(thread_t) * threadCount);
+        vm_deallocate(mach_task_self(), reinterpret_cast<vm_address_t>(threadList), sizeof(thread_t) * threadCount);
 
         if (kr != KERN_SUCCESS) {
             fprintf(stdout, "Failed to set thread state (error 0x%x: %s)\n", kr,

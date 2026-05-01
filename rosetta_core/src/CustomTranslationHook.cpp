@@ -12,7 +12,7 @@ void init_custom_translation_hook(uintptr_t translate_insn_addr,
                  reinterpret_cast<void*>(hook_translate_insn),
                  reinterpret_cast<void**>(&original_translate_insn));
 
-    patch_movz_imm((void*)transaction_result_size_addr, 0x400);
+    patch_movz_imm(reinterpret_cast<void*>(transaction_result_size_addr), 0x400);
 }
 
 int64_t hook_translate_insn(TranslationResult* result, IRBlock* block, IRInstr* instr_array,

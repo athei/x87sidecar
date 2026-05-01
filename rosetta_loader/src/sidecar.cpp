@@ -86,14 +86,14 @@ bool readParent(mach_port_t task, uint64_t addr, void* dst, size_t size) {
 }
     mach_vm_size_t got = 0;
     kern_return_t kr = mach_vm_read_overwrite(task, addr, size,
-                                              (mach_vm_address_t)dst, &got);
+                                              reinterpret_cast<mach_vm_address_t>(dst), &got);
     return kr == KERN_SUCCESS && got == size;
 }
 
 bool writeParent(mach_port_t task, uint64_t addr, const void* src, size_t size) {
     if (size == 0) { return true;
 }
-    return mach_vm_write(task, addr, (vm_offset_t)const_cast<void*>(src), size) ==
+    return mach_vm_write(task, addr, reinterpret_cast<vm_offset_t>(const_cast<void*>(src)), size) ==
            KERN_SUCCESS;
 }
 
@@ -191,7 +191,7 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask,
     if (origTCO == nullptr) { return out;
 }
     ThreadContextOffsets localTCO{};
-    if (!readParent(parentTask, (uint64_t)origTCO, &localTCO,
+    if (!readParent(parentTask, reinterpret_cast<uint64_t>(origTCO), &localTCO,
                     sizeof(localTCO))) { return out;
 }
 
@@ -292,7 +292,7 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask,
         if (!insnGrew && finalInsnEnd <= origInsnCap) {
             if (insnEmitted > 0) {
                 if (!writeParent(parentTask,
-                                 (uint64_t)origInsnData + origInsnEnd,
+                                 reinterpret_cast<uint64_t>(origInsnData) + origInsnEnd,
                                  localInsnData + origInsnEnd,
                                  insnEmitted)) { return out;
 }
@@ -300,7 +300,7 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask,
         } else {
             uint64_t newCap = std::max(origInsnCap * 2, finalInsnEnd);
             mach_vm_address_t parentNew = allocAndAppendInParent(
-                parentTask, (uint64_t)origInsnData, origInsnEnd, newCap,
+                parentTask, reinterpret_cast<uint64_t>(origInsnData), origInsnEnd, newCap,
                 localInsnData + origInsnEnd, insnEmitted);
             if (parentNew == 0) { return out;
 }
@@ -322,7 +322,7 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask,
 
             if (newLive <= parentCap) {
                 if (added > 0) {
-                    if (!writeParent(parentTask, (uint64_t)orig.end,
+                    if (!writeParent(parentTask, reinterpret_cast<uint64_t>(orig.end),
                                      localPushed[i], added)) { return out;
 }
                 }
@@ -330,14 +330,14 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask,
             } else {
                 uint64_t newCap = std::max(parentCap * 2, newLive);
                 mach_vm_address_t parentNew = allocAndAppendInParent(
-                    parentTask, (uint64_t)orig.begin, parentLive, newCap,
+                    parentTask, reinterpret_cast<uint64_t>(orig.begin), parentLive, newCap,
                     localPushed[i], added);
                 if (parentNew == 0) { return out;
 }
                 uint64_t roundedCap = (newCap + 0xFFF) & ~static_cast<uint64_t>(0xFFF);
-                lists[i]->begin   = (Fixup*)parentNew;
-                lists[i]->end     = (Fixup*)(parentNew + newLive);
-                lists[i]->end_cap = (Fixup*)(parentNew + roundedCap);
+                lists[i]->begin   = reinterpret_cast<Fixup*>(parentNew);
+                lists[i]->end     = reinterpret_cast<Fixup*>(parentNew + newLive);
+                lists[i]->end_cap = reinterpret_cast<Fixup*>(parentNew + roundedCap);
             }
         }
     }
