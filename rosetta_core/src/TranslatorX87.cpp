@@ -4474,32 +4474,6 @@ auto translate_fsincos(TranslationResult* a1, IRInstr* /*a2*/) -> void {
     free_gpr(*a1, Wd_tmp);
 }
 
-// =============================================================================
-// 2-input/1-output transcendentals with pop semantics: fpatan, fyl2x,
-// fyl2xp1.  All share the same emit shape — load ST(0)→d0, ST(1)→d1,
-// IPC computes a function of (in0, in1) and returns it in d0, store d0
-// at depth=1 (old ST(1) slot, becomes new ST(0)), then x87_pop.
-// =============================================================================
-namespace {
-inline void emit_2in_pop_translate(TranslationResult& a1, AssemblerBuffer& buf,
-                                    uint8_t opcode_tag) {
-    auto [Xbase, Wd_top] = x87_begin(a1, buf);
-    const int Wd_tmp = alloc_gpr(a1, 2);
-
-    emit_transcendental_ipc(a1, buf, Xbase, Wd_top, Wd_tmp,
-                            opcode_tag, /*num_inputs=*/2);
-
-    const int Xst_base = x87_get_st_base(a1);
-    const int depth_st1 = resolve_depth(a1, 1);
-    emit_store_st(buf, Xbase, Wd_top, depth_st1, Wd_tmp, /*Dd=*/0, Xst_base);
-
-    x87_pop(buf, a1, Xbase, Wd_top, Wd_tmp);
-
-    x87_end(a1, buf, Xbase, Wd_top, Wd_tmp);
-    free_gpr(a1, Wd_tmp);
-}
-}  // namespace
-
 auto translate_fpatan(TranslationResult* a1, IRInstr* /*a2*/) -> void {
     AssemblerBuffer& buf = a1->insn_buf;
     auto [Xbase, Wd_top] = x87_begin(*a1, buf);

@@ -5,33 +5,21 @@
 #include "rosetta_core/AssemblerBuffer.h"
 #include "rosetta_core/TranslationResult.h"
 
-// JIT-emit primitive shared by all 10 x87 transcendental opcodes
-// (f2xm1, fsin, fcos, fsincos, fptan, fpatan, fyl2x, fyl2xp1, fprem,
-// fprem1).  Loads ST(0) (and ST(1) if num_inputs==2) into d0/d1, sets
-// x0 = opcode_tag, then BLRs into the parent-side trampoline installed
-// at loader time.  On return d0 holds result1; d1 holds result2 (only
-// meaningful for num_outputs==2 / fsincos).
-//
-// Caller is responsible for the per-op writeback semantics (replace
-// ST(0), push, pop, etc.) — see translate_fsin / translate_fpatan /
-// translate_fsincos in TranslatorX87.cpp for the patterns.
+// JIT-emit primitives for the 10 x87 transcendental opcodes (f2xm1,
+// fsin, fcos, fsincos, fptan, fpatan, fyl2x, fyl2xp1, fprem, fprem1).
+// All inline ARM64 — no IPC.  Each function leaves its result in d0
+// (and d1 for fsincos's second output).  Caller is responsible for
+// the per-op writeback semantics (replace ST(0), push, pop, etc.) —
+// see translate_<op> in TranslatorX87.cpp.
 //
 // Pre/post conditions:
-//   - Caller must have done x87_begin already and own (Xbase, Wd_top, Wd_tmp).
-//   - On entry, no caller-saved FPRs (d0..d7, d16..d31) are live across
-//     the call.  d0/d1 are clobbered (they're the input/output regs).
-//     d24..d31 (FPR scratch pool) are caller-saved by AAPCS64; we don't
-//     hold any in this code path so the BLR is safe.
-//   - x16 is clobbered (used as branch target).  Cache state held in
-//     callee-saved GPRs (x22..x29) survives.
+//   - Caller must have done x87_begin and own (Xbase, Wd_top, Wd_tmp).
+//   - Polynomial constants and lookup tables live in the trailing pad
+//     at the address registered via set_transcendental_constants_addr;
+//     each emit materialises that address into a scratch GPR.
 namespace TranslatorX87 {
 
-void emit_transcendental_ipc(TranslationResult& a1, AssemblerBuffer& buf,
-                              int Xbase, int Wd_top, int Wd_tmp,
-                              uint8_t opcode_tag, int num_inputs);
-
-// Inline ARM64 polynomial approximations of sin(x) / cos(x), replacing
-// the IPC roundtrips for fsin / fcos.  Sources:
+// Inline ARM64 polynomial approximations of sin(x) / cos(x).  Source:
 // ARM-software/optimized-routines' math/aarch64/advsimd/{sin,cos}.c
 // scalarised.  ULP <= 3.3 in [-pi/2,pi/2], 2.73 ULP in [-2^23, 2^23].
 // For |x| >= 2^23 the 3-step Cody-Waite reduction degrades and the
@@ -39,9 +27,6 @@ void emit_transcendental_ipc(TranslationResult& a1, AssemblerBuffer& buf,
 //
 // Both share three helpers internally (emit_trig_range_reduce,
 // emit_sin_poly_estrin, emit_apply_qn_sign) — see the .cpp.
-//
-// Pre/post conditions match emit_transcendental_ipc: caller has done
-// x87_begin and owns (Xbase, Wd_top, Wd_tmp).  Result lands in d0.
 void emit_inline_fsin(TranslationResult& a1, AssemblerBuffer& buf,
                       int Xbase, int Wd_top, int Wd_tmp);
 
@@ -49,9 +34,9 @@ void emit_inline_fcos(TranslationResult& a1, AssemblerBuffer& buf,
                       int Xbase, int Wd_top, int Wd_tmp);
 
 // fsincos: replace ST(0) with sin(ST(0)); push cos(ST(0)) onto the
-// stack.  Result convention matches the prior IPC path — sin in d0,
-// cos in d1.  Both pipelines share the loaded Dx and the Xconst
-// pointer; range reductions and sign flips are distinct.
+// stack.  Convention: sin in d0, cos in d1.  Both pipelines share the
+// loaded Dx and the Xconst pointer; range reductions and sign flips
+// are distinct.
 void emit_inline_fsincos(TranslationResult& a1, AssemblerBuffer& buf,
                           int Xbase, int Wd_top, int Wd_tmp);
 

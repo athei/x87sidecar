@@ -51,27 +51,4 @@ StubBlobs build(uint64_t handlerAddr, uint64_t translateInsnAddr,
                 const uint8_t origPrologue16[16], uint32_t sidecarReqName,
                 uint32_t parentReplyName);
 
-// Build the runtime transcendental-IPC trampoline bytes.
-//
-// Called from JIT-emitted code via `BLR x16` after loading the absolute
-// address of this trampoline into x16.  Performs a Mach IPC roundtrip to
-// the sidecar with msgh_id=0x10000002 carrying (opcode_tag, ST(0), ST(1));
-// receives back two doubles (out0, out1).
-//
-// Calling convention:
-//   On entry  : x0=opcode_tag, d0=ST(0), d1=ST(1) (or undefined for 1-input ops)
-//   On return : d0=result1, d1=result2 (only meaningful for fsincos)
-//   Preserves : x19..x28, d8..d15, x29, x30, sp (AAPCS64 callee-saved)
-//   Clobbers  : x0..x18, d0..d7 (except as outputs), d16..d31
-//
-// Lives in libRosettaRuntime's __TEXT trailing pad so the parent's PC
-// stays inside Rosetta-registered pages — same panic-class fix as the
-// translate-time stub.
-//
-// Returns the raw instruction bytes; caller installs them at a chosen
-// absolute address in the parent and exposes that address to the sidecar
-// (see rosetta_core::set_transcendental_helper_addr).
-std::vector<uint8_t> buildTranscendentalHelper(uint32_t sidecarReqName,
-                                                uint32_t parentReplyName);
-
 }  // namespace stub_asm
