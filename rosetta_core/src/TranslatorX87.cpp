@@ -4217,6 +4217,59 @@ auto translate_fstenv(TranslationResult* a1, IRInstr* a2) -> void {
 // about to overwrite, so discard them (don't flush).  Re-derive Wd_top
 // from the new SW.TOP for the rest of the run.  FIP/FCS/FOP/FDP/FDS
 // pointer fields are skipped — we don't model them.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// Why we *override* stock — stock's m108 frstor is broken for our use.
+//
+// The shared X87State (`X18 + x87_state_offset`, see X87State.h) holds the
+// 8 ST register slots as IEEE-754 doubles at stride 8 starting at offset
+// 0x08.  This layout was deliberately chosen so every hot x87 op
+// (FLD/FSTP/FADD/...) becomes a single `LDR Dd, [Xbase, idx, SXTW #3]` —
+// no per-op f80↔f64 conversion.  Apple's modern x87 path (FXSAVE/FXRSTOR
+// + arithmetic ops) uses the *same* stride-8/0x08 f64 layout, which is
+// why we can compose with stock for every other x87 op.
+//
+// Apple's m108 path does NOT.  Three byte-dump experiments (2026-05-01)
+// directly inspected stock's emit:
+//
+//   1. FRSTOR experiment: pre-fill X87State with sentinels via our handled
+//      FLDs (writes f64 stride-8/0x08), compose FRSTOR with a target
+//      buffer, read X87State via our handled FSTPs.  All 8 slots came
+//      back as the input f80 bytes shifted by 2 — i.e., stock writes
+//      raw f80 stride-10 starting at offset 0x06, OVERLAPPING our
+//      `_pad06` field.  No conversion: just an 80-byte memcpy of the
+//      m108 ST area into the wrong layout.
+//
+//   2. FSAVE experiment (symmetric): push known doubles via our FLDs,
+//      compose FSAVE.  The output m108 buffer's f80 ST area decoded to
+//      garbage — exactly what stride-10/0x06 reads of stride-8/0x08
+//      data would produce.  All 8 slots failed (env round-trips fine
+//      since CW/SW/TW offsets agree).
+//
+//   3. FXRSTOR experiment: compose FXRSTOR (which empirically passes
+//      our test_st_round_trip), then dump the stride-10/0x06 view via
+//      a composed FNSAVE.  Output bytes were *identical* to experiment
+//      2 — i.e., FXRSTOR did NOT write stride-10/0x06.  So Apple's
+//      m108 (FNSAVE/FRSTOR) and m512 (FXSAVE/FXRSTOR) paths use
+//      different incompatible layouts INSIDE STOCK.  They don't even
+//      interop with each other in non-hooked Rosetta — the m108 path
+//      is dead code on macOS-64 (modern programs don't emit FNSAVE/
+//      FRSTOR), so Apple never had to make them consistent.
+//
+// Why this matters for performance:
+//   Stock's m108 frstor is just LDP/STP-Q × 4 (80 bytes) — no
+//   conversion — so it benches at ~2.3 ns/iter.  Ours converts each
+//   f80 to f64 (~250 inline ARM instructions) and writes stride-8
+//   f64 — ~6.4 ns/iter, the headline 0.38× regression in
+//   bench_frstor.  Stock is faster *only because it produces wrong
+//   output*; the bytes it writes aren't read by anything else
+//   (stock-FLD reads stride-8/0x08, not stride-10/0x06).
+//
+// We can't compose with stock, can't avoid the conversion, and the
+// regression only shows up in synthetic tight-loop benches because
+// real workloads do many arithmetic ops per FRSTOR.  See
+// `project_native_rosetta_lazy_f80.md` for the full investigation
+// (the "lazy decode" hypothesis was falsified by these experiments).
 // =============================================================================
 auto translate_frstor(TranslationResult* a1, IRInstr* a2) -> void {
     AssemblerBuffer& buf = a1->insn_buf;
@@ -4359,6 +4412,28 @@ auto translate_frstor(TranslationResult* a1, IRInstr* a2) -> void {
 // dirty the depth->physical mapping is permuted.  After saving, we
 // re-initialize FPU memory state (CW=0x37F, SW=0, TW=0xFFFF) and reset
 // Wd_top to 0 so the rest of the run sees the new TOP.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// Why we *override* stock — symmetric to translate_frstor.
+//
+// Stock's m108 FSAVE *reads* the X87State at stride-10 starting at
+// offset 0x06, treating those bytes as raw f80 — the same wrong layout
+// stock's FRSTOR *writes*.  Our X87State holds f64 at stride-8/0x08
+// (matching Apple's modern m512 path and our own arithmetic ops), so
+// composing with stock here would produce a m108 buffer whose ST area
+// is just our f64 bytes viewed through the stride-10 lens — i.e.,
+// undecodable garbage.  The 2026-05-01 FSAVE experiment confirmed
+// this: pushing 8 known doubles via JIT-handled FLDs and then
+// composing FSAVE produced 8 ST-slot byte sequences that decoded to
+// values bearing no relationship to the inputs (env CW/SW/TW
+// round-tripped fine because those offsets agree).  See
+// translate_frstor's banner and `project_native_rosetta_lazy_f80.md`
+// for the full investigation.
+//
+// We do the f64→f80 conversion ourselves and write the spec-compliant
+// m108 layout — slower than stock's would-be 80-byte memcpy, but
+// produces correct bytes that any consumer (other CPU, debugger,
+// disassembler) can decode.
 // =============================================================================
 auto translate_fsave(TranslationResult* a1, IRInstr* a2) -> void {
     AssemblerBuffer& buf = a1->insn_buf;

@@ -10,17 +10,20 @@
 // Used by lookahead to determine consecutive x87 run lengths.
 //
 // A few memory-block x87 opcodes are deliberately *excluded*
-// (fxsave/fxrstor only) even though they're "x87" in the broad sense.  Stock's emit for them is
-// pure block memory I/O via the shared x22 = X87State*; native does it
-// at hardware speed (zero ARM instructions for the NOP family,
-// tightly-tuned blocks for the env family).  frstor stays inline
-// because stock's m108 frstor doesn't handle x86-spec f80 ST slots
-// (test_frstor regresses if it's composed against stock).  We let the
-// run break before each one, x87_end flushes deferred state, the stub
-// abs-jumps to STASH, and stock translates them in isolation.  See
+// (fxsave/fxrstor only) even though they're "x87" in the broad sense.
+// Stock's emit for them is pure block memory I/O via the shared x22 =
+// X87State*; native does it at hardware speed.  We let the run break
+// before each one, x87_end flushes deferred state, the stub abs-jumps
+// to STASH, and stock translates them in isolation.  See
 // feedback_no_per_opcode_fallback.md for why this is safe only for
 // memory-block opcodes (transcendentals would clash on stock's
 // {x22, w23} helper-call ABI).
+//
+// fsave / frstor stay INLINE — see translate_fsave / translate_frstor
+// for the full story.  TL;DR: stock's m108 path uses an incompatible
+// stride-10/0x06 raw-f80 ST layout that doesn't interoperate with
+// our (and stock's modern m512-path) stride-8/0x08 f64 layout.
+// Composing them was empirically validated to corrupt all 8 ST slots.
 // =============================================================================
 
 static bool is_handled_x87(uint16_t op) {
