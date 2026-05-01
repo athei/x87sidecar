@@ -249,6 +249,15 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask, const Translate
     }
     tr.thread_context_offsets = &localTCO;
 
+    if (g_rosetta_config != nullptr && g_rosetta_config->loader_log_ops != 0U) {
+        const uint16_t op = localIR[req.insn_idx].opcode;
+        const char* name = (op < kOpcodeNames.size()) ? kOpcodeNames[op] : "?";
+        fprintf(stdout, "[rosettax87] op %s (0x%x) idx=%lld/%lld\n", name,
+                static_cast<unsigned>(op), static_cast<long long>(req.insn_idx),
+                static_cast<long long>(req.num_instrs));
+        fflush(stdout);
+    }
+
     auto result = Translator::translate_instruction(
         &tr, reinterpret_cast<IRBlock*>(req.block), localIR.data(),
         static_cast<int64_t>(req.num_instrs), static_cast<int64_t>(req.insn_idx));

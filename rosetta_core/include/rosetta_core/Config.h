@@ -60,7 +60,13 @@ struct RosettaConfig {
                                   //                  only our JIT output is bypassed.
                                   //                  Used to A/B "is the freeze in our
                                   //                  emitted code or in the marshalling?"
-    uint8_t _pad_b[4];
+    uint8_t loader_log_ops;       // X87_LOG_OPS      diagnostic: sidecar prints one line
+                                  //                  per processTranslateRequest call with
+                                  //                  the opcode name and insn_idx.  Use
+                                  //                  with a deterministic freeze repro to
+                                  //                  see which op is the last one before
+                                  //                  the hang.
+    uint8_t _pad_b[3];
 };
 static_assert(sizeof(RosettaConfig) == 0x18);
 
