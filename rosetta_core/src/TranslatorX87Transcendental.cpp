@@ -53,6 +53,17 @@ struct ConstOff {
     // Tables (byte offsets, used directly with imm12+reg-offset LDR)
     static constexpr int ExpTableByteOff   = 25 * 8;     // 200
     static constexpr int ExpScalem1ByteOff = (25 + 128) * 8;  // 1224
+    // log2 / fyl2x / fyl2xp1
+    static constexpr int Log2Off          = 25 + 128 + 88 + 0;  // = 241
+    static constexpr int Log2SignExpMask  = 25 + 128 + 88 + 1;  // = 242
+    static constexpr int Log2InvLn2       = 25 + 128 + 88 + 2;  // = 243
+    static constexpr int Log2C0           = 25 + 128 + 88 + 3;  // = 244
+    static constexpr int Log2C1           = 25 + 128 + 88 + 4;  // = 245
+    static constexpr int Log2C2           = 25 + 128 + 88 + 5;  // = 246
+    static constexpr int Log2C3           = 25 + 128 + 88 + 6;  // = 247
+    static constexpr int Log2C4           = 25 + 128 + 88 + 7;  // = 248
+    static constexpr int Log2InvcByteOff   = (25 + 128 + 88 + 8) * 8;  // 1992
+    static constexpr int Log2Log2cByteOff  = (25 + 128 + 88 + 8 + 128) * 8;  // 3016
 };
 
 static_assert(offsetof(rosetta_core::TranscendentalConstants, inv_pi)            == ConstOff::InvPi          * 8, "ConstOff::InvPi drift");
@@ -72,6 +83,13 @@ static_assert(offsetof(rosetta_core::TranscendentalConstants, exp2m1_tablebound)
 static_assert(offsetof(rosetta_core::TranscendentalConstants, one)               == ConstOff::One            * 8, "ConstOff::One drift");
 static_assert(offsetof(rosetta_core::TranscendentalConstants, exp_table)         == ConstOff::ExpTableByteOff,     "ConstOff::ExpTableByteOff drift");
 static_assert(offsetof(rosetta_core::TranscendentalConstants, exp_scalem1)       == ConstOff::ExpScalem1ByteOff,   "ConstOff::ExpScalem1ByteOff drift");
+static_assert(offsetof(rosetta_core::TranscendentalConstants, log2_off)          == ConstOff::Log2Off          * 8, "ConstOff::Log2Off drift");
+static_assert(offsetof(rosetta_core::TranscendentalConstants, log2_sign_exp_mask)== ConstOff::Log2SignExpMask  * 8, "ConstOff::Log2SignExpMask drift");
+static_assert(offsetof(rosetta_core::TranscendentalConstants, log2_invln2)       == ConstOff::Log2InvLn2       * 8, "ConstOff::Log2InvLn2 drift");
+static_assert(offsetof(rosetta_core::TranscendentalConstants, log2_c0)           == ConstOff::Log2C0           * 8, "ConstOff::Log2C0 drift");
+static_assert(offsetof(rosetta_core::TranscendentalConstants, log2_c4)           == ConstOff::Log2C4           * 8, "ConstOff::Log2C4 drift");
+static_assert(offsetof(rosetta_core::TranscendentalConstants, log2_invc)         == ConstOff::Log2InvcByteOff,     "ConstOff::Log2InvcByteOff drift");
+static_assert(offsetof(rosetta_core::TranscendentalConstants, log2_log2c)        == ConstOff::Log2Log2cByteOff,    "ConstOff::Log2Log2cByteOff drift");
 
 enum class TrigReduceMode { Sin, Cos };
 
@@ -474,6 +492,173 @@ void emit_inline_f2xm1(TranslationResult& a1, AssemblerBuffer& buf,
 
     free_gpr(a1, Xconst);
     free_fpr(a1, Dx);
+}
+
+// Body of inline_log2: given Din (a positive double, 0/inf/NaN excluded
+// per x87 spec) and a materialised Xconst, computes log2(Din) into
+// Dd_out.  Port of optimized-routines' AdvSIMD inline_log2
+// (math/aarch64/advsimd/log2.c).
+//
+// Allocates internal scratch.  Caller still owns Din and Xconst — this
+// function neither frees nor modifies them.
+//
+// GPR pressure: peaks at 4 scratch (Xu, Xu_off, Xtmp, plus Xconst).
+// FPR pressure: peaks at ~6 (Dz, Dr, Dr2, Dinvc, Dlog2c, Dkd, Dhi, Dy_poly).
+void emit_inline_log2(TranslationResult& a1, AssemblerBuffer& buf,
+                       int Din, int Xconst, int Dd_out) {
+    // 1. u = bits(Din);  u_off = u - off
+    const int Xu = alloc_free_gpr(a1);
+    emit_fmov_d_to_x(buf, Xu, Din);
+
+    const int Xu_off = alloc_free_gpr(a1);
+    {
+        const int Xtmp = alloc_free_gpr(a1);
+        emit_ldr_imm(buf, /*size=*/3, Xtmp, Xconst, ConstOff::Log2Off);
+        emit_subs_reg(buf, /*is_64=*/1, Xu, Xtmp, Xu_off);   // Xu_off = Xu - off
+        free_gpr(a1, Xtmp);
+    }
+
+    // 2. kd = (double)((s64) u_off >> 52)
+    //    Compute k in a scratch GPR, convert to FPR, then free GPR.
+    const int Dkd = alloc_free_fpr(a1);
+    {
+        const int Xk = alloc_free_gpr(a1);
+        // ASR Xk, Xu_off, #52  — encoded as SBFM Xk, Xu_off, #52, #63.
+        emit_bitfield(buf, /*is_64=*/1, /*opc=SBFM*/0, /*N=*/1,
+                      /*immr=*/52, /*imms=*/63, Xu_off, Xk);
+        emit_scvtf_x_to_d(buf, Dkd, Xk);
+        free_gpr(a1, Xk);
+    }
+
+    // 3. iz = u - (u_off & sign_exp_mask);  z = bits_to_double(iz)
+    //    Compute in-place in Xu (Xu's original value is no longer needed
+    //    after this sequence), then FMOV Dz, Xu and free Xu.
+    {
+        const int Xtmp = alloc_free_gpr(a1);
+        emit_ldr_imm(buf, /*size=*/3, Xtmp, Xconst, ConstOff::Log2SignExpMask);
+        emit_logical_shifted_reg(buf, /*is_64=*/1, /*AND=*/0, /*n=*/0,
+                                  /*shift_type=LSL*/0, /*Rm=*/Xtmp,
+                                  /*shift_amount=*/0, /*Rn=*/Xu_off, /*Rd=*/Xtmp);  // Xtmp = u_off & mask
+        emit_subs_reg(buf, /*is_64=*/1, Xu, Xtmp, Xu);                              // Xu = Xu - Xtmp = iz
+        free_gpr(a1, Xtmp);
+    }
+    const int Dz = alloc_free_fpr(a1);
+    emit_fmov_x_to_d(buf, Dz, Xu);
+    free_gpr(a1, Xu);
+
+    // 4. idx = (u_off >> 45) & 0x7f
+    const int Xidx = alloc_free_gpr(a1);
+    // UBFM Xidx, Xu_off, #45, #51  — extracts bits 45..51 right-aligned.
+    emit_bitfield(buf, /*is_64=*/1, /*opc=UBFM*/2, /*N=*/1,
+                  /*immr=*/45, /*imms=*/51, Xu_off, Xidx);
+    free_gpr(a1, Xu_off);
+
+    // 5. Lookup invc[idx], log2c[idx] from the two split tables.
+    const int Dinvc = alloc_free_fpr(a1);
+    {
+        const int Xtbl = alloc_free_gpr(a1);
+        emit_add_imm(buf, /*is_64=*/1, /*is_sub=*/0, /*is_set_flags=*/0, /*shift=*/0,
+                     /*imm12=*/ConstOff::Log2InvcByteOff, Xconst, Xtbl);
+        emit_fldr_reg(buf, /*size=*/3, Dinvc, Xtbl, Xidx, /*shift=*/1);
+        free_gpr(a1, Xtbl);
+    }
+    const int Dlog2c = alloc_free_fpr(a1);
+    {
+        const int Xtbl = alloc_free_gpr(a1);
+        emit_add_imm(buf, /*is_64=*/1, /*is_sub=*/0, /*is_set_flags=*/0, /*shift=*/0,
+                     /*imm12=*/ConstOff::Log2Log2cByteOff, Xconst, Xtbl);
+        emit_fldr_reg(buf, /*size=*/3, Dlog2c, Xtbl, Xidx, /*shift=*/1);
+        free_gpr(a1, Xtbl);
+    }
+    free_gpr(a1, Xidx);
+
+    // 6. r = -1 + z * invc   (FMADD with Da = -1.0)
+    const int Dr = alloc_free_fpr(a1);
+    {
+        const int Dneg_one = alloc_free_fpr(a1);
+        emit_fmov_d_one(buf, Dneg_one);
+        emit_fneg_f64(buf, Dneg_one, Dneg_one);
+        emit_fmadd_f64(buf, Dr, Dz, Dinvc, Dneg_one);
+        free_fpr(a1, Dneg_one);
+    }
+    free_fpr(a1, Dz);
+    free_fpr(a1, Dinvc);
+
+    // 7. r2 = r * r
+    const int Dr2 = alloc_free_fpr(a1);
+    emit_fmul_f64(buf, Dr2, Dr, Dr);
+
+    // 8. hi = (log2c + kd) + r * invln2
+    const int Dhi = alloc_free_fpr(a1);
+    emit_fadd_f64(buf, Dhi, Dlog2c, Dkd);                             // Dhi = log2c + kd
+    free_fpr(a1, Dlog2c);
+    free_fpr(a1, Dkd);
+    {
+        const int Dtmp = alloc_free_fpr(a1);
+        emit_fldr_imm(buf, 3, Dtmp, Xconst, ConstOff::Log2InvLn2);
+        emit_fmadd_f64(buf, Dhi, Dr, Dtmp, Dhi);                      // Dhi += r * invln2
+        free_fpr(a1, Dtmp);
+    }
+
+    // 9. Polynomial:
+    //    y = c2 + r * c3
+    //    p = c0 + r * c1
+    //    y = y + r² * c4
+    //    y = p + r² * y_prev
+    const int Dy = alloc_free_fpr(a1);
+    {
+        const int Dtmp = alloc_free_fpr(a1);
+        emit_fldr_imm(buf, 3, Dy,   Xconst, ConstOff::Log2C2);
+        emit_fldr_imm(buf, 3, Dtmp, Xconst, ConstOff::Log2C3);
+        emit_fmadd_f64(buf, Dy, Dr, Dtmp, Dy);                        // y = c2 + r*c3
+
+        const int Dp = alloc_free_fpr(a1);
+        emit_fldr_imm(buf, 3, Dp,   Xconst, ConstOff::Log2C0);
+        emit_fldr_imm(buf, 3, Dtmp, Xconst, ConstOff::Log2C1);
+        emit_fmadd_f64(buf, Dp, Dr, Dtmp, Dp);                        // p = c0 + r*c1
+
+        emit_fldr_imm(buf, 3, Dtmp, Xconst, ConstOff::Log2C4);
+        emit_fmadd_f64(buf, Dy, Dr2, Dtmp, Dy);                       // y += r²*c4
+        emit_fmadd_f64(buf, Dy, Dr2, Dy, Dp);                         // y = p + r²*y_prev
+        free_fpr(a1, Dp);
+        free_fpr(a1, Dtmp);
+    }
+    free_fpr(a1, Dr);
+
+    // 10. result = hi + y * r²   →  Dd_out
+    emit_fmadd_f64(buf, Dd_out, Dy, Dr2, Dhi);
+
+    free_fpr(a1, Dy);
+    free_fpr(a1, Dr2);
+    free_fpr(a1, Dhi);
+}
+
+void emit_inline_fyl2x(TranslationResult& a1, AssemblerBuffer& buf,
+                        int Xbase, int Wd_top, int Wd_tmp) {
+    // x86 fyl2x: ST(0) := ST(1) * log2(ST(0)); pop.
+    // Caller (emit_2in_pop_translate) handles the writeback at depth 1
+    // and the x87_pop afterwards — we just leave the result in d0.
+    const int Xst_base  = x87_get_st_base(a1);
+    const int depth_st0 = resolve_depth(a1, 0);
+    const int depth_st1 = resolve_depth(a1, 1);
+
+    const int Dx = alloc_free_fpr(a1);
+    emit_load_st(buf, Xbase, Wd_top, depth_st0, Wd_tmp, Dx, Xst_base);
+
+    const int Dy = alloc_free_fpr(a1);
+    emit_load_st(buf, Xbase, Wd_top, depth_st1, Wd_tmp, Dy, Xst_base);
+
+    const int Xconst = alloc_free_gpr(a1);
+    const uint64_t consts_addr = rosetta_core::get_transcendental_constants_addr();
+    assert(consts_addr != 0 && "transcendental constants not installed");
+    emit_movz_movk_abs64(buf, Xconst, consts_addr);
+
+    emit_inline_log2(a1, buf, Dx, Xconst, /*Dd_out=*/0);              // d0 = log2(x)
+    free_fpr(a1, Dx);
+    free_gpr(a1, Xconst);
+
+    emit_fmul_f64(buf, /*Dd=*/0, /*Dn=*/0, /*Dm=*/Dy);                // d0 = y * log2(x)
+    free_fpr(a1, Dy);
 }
 
 void emit_inline_fsincos(TranslationResult& a1, AssemblerBuffer& buf,

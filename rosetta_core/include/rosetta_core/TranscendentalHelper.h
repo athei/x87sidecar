@@ -72,6 +72,28 @@ struct alignas(8) TranscendentalConstants {
     // (negative x, indexed via offset 24).  Source: scalem1[] in
     // exp2m1.c.
     uint64_t exp_scalem1[88];
+
+    // ── log2 / fyl2x / fyl2xp1 (advsimd/log2.c) ──────────────────────────
+    // Algorithm: u = bits(x); u_off = u - off; k = (s64)u_off >> 52;
+    // iz = u - (u_off & sign_exp_mask); z = bits_to_double(iz);
+    // idx = (u_off >> 45) & 0x7f; r = z*invc[idx] - 1;
+    // hi = log2c[idx] + (double)k + r*invln2;
+    // y = c0 + r*c1 + r²·(c2 + r*c3 + r²·c4);
+    // log2(x) = hi + y * r².
+    uint64_t log2_off;            // 0x3fe6900900000000
+    uint64_t log2_sign_exp_mask;  // 0xfff0000000000000
+    double   log2_invln2;         // 0x1.71547652b82fep0
+    double   log2_c0;             // -0x1.71547652b83p-1
+    double   log2_c1;             // 0x1.ec709dc340953p-2
+    double   log2_c2;             // -0x1.71547651c8f35p-2
+    double   log2_c3;             // 0x1.2777ebe12dda5p-2
+    double   log2_c4;             // -0x1.ec738d616fe26p-3
+
+    // Split into two parallel 128-entry tables (instead of an array of
+    // {invc, log2c} pairs) so each lookup is a single LDR D, [base, idx,
+    // LSL #3] — no per-pair stride arithmetic.
+    double   log2_invc[128];      // 1024 B
+    double   log2_log2c[128];     // 1024 B
 };
 
 void set_transcendental_constants_addr(uint64_t addr);
