@@ -1,6 +1,7 @@
 #include "rosetta_core/Translator.h"
 
 #include <cstdint>
+#include <cstdio>
 #include <optional>
 
 #include "rosetta_core/Config.h"
@@ -13,6 +14,17 @@
 #include "rosetta_core/TranslatorX87Fusion.h"
 #include "rosetta_core/X87Cache.h"
 #include "rosetta_core/X87IR.h"
+
+// True for opcode IDs in the two x87 ranges that Rosetta assigns to x87
+// instructions.  Mirrors the JIT stub's FILTER prologue range check at
+// rosetta_loader/src/stub_asm.cpp:464-467.  Used by the dispatch default
+// case so we only complain about *x87* ops we forgot to handle — the AOT
+// path (CustomTranslationHook) sees every non-x87 op too and would
+// otherwise spam stdout.
+static bool is_x87_opcode(uint16_t op) {
+    return (op >= kOpcodeName_fcmovb && op <= kOpcodeName_fucomip) ||
+           (op >= kOpcodeName_f2xm1 && op <= kOpcodeName_fyl2xp1);
+}
 
 auto Translator::translate_instruction(TranslationResult* translation_result, IRBlock* block,
                                        IRInstr* instr_array, int64_t num_instrs, int64_t insn_idx)
@@ -368,27 +380,27 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
             // terminates before this point and the preceding handled
             // op's x87_end has already flushed deferred state to
             // memory — stock reads coherent X87State via x22.
-            case Opcode::kOpcodeName_fclex:    // NOLINT(bugprone-branch-clone)
-            case Opcode::kOpcodeName_finit:    // NOLINT(bugprone-branch-clone)
-            case Opcode::kOpcodeName_fldenv:   // NOLINT(bugprone-branch-clone)
-            case Opcode::kOpcodeName_fstenv:   // NOLINT(bugprone-branch-clone)
-            case Opcode::kOpcodeName_fxsave:   // NOLINT(bugprone-branch-clone)
-            case Opcode::kOpcodeName_fxrstor:  // NOLINT(bugprone-branch-clone)
+            case Opcode::kOpcodeName_fclex:
+            case Opcode::kOpcodeName_finit:
+            case Opcode::kOpcodeName_fldenv:
+            case Opcode::kOpcodeName_fstenv:
+            case Opcode::kOpcodeName_fxsave:
+            case Opcode::kOpcodeName_fxrstor:
                 return std::nullopt;
 
             default:
                 // Returning nullopt means "I have no handler for this
                 // opcode."  In the runtime/sidecar flow, the stub's FILTER
                 // prologue routes only x87 opcodes to us, so reaching here
-                // means an x87 op we *forgot* to handle — the sidecar will
-                // log a loud UNHANDLED warning so we notice.  Add a
-                // translate_* and dispatch case, or extend
-                // kKnownFallThrough on the sidecar side if it's a new
-                // deliberate-stock op like fxsave/fxrstor.
+                // with an x87 opcode means an op we *forgot* to handle —
+                // log a loud line so we notice.  Add a translate_* and
+                // dispatch case, or list it as deliberate fall-through
+                // above (and extend kKnownFallThrough on the sidecar side
+                // for a new stock-only op like fxsave/fxrstor).
                 // In the offline AOT flow (CustomTranslationHook), every
                 // non-x87 op also reaches here; that path falls back to
-                // stock translate_insn unchanged.  We stay silent so the
-                // AOT path isn't spammed.
+                // stock translate_insn unchanged.  is_x87_opcode gates the
+                // log so the AOT path isn't spammed for non-x87 ops.
                 //
                 // Critical: do NOT mutate free_gpr_mask / free_fpr_mask
                 // before returning nullopt.  Stock's translate_insn (run
@@ -399,6 +411,15 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                 // values forces stock to redo allocation as if every
                 // instruction starts a fresh block, costing several extra
                 // ARM instructions per instruction.  Pass-through clean.
+                if (is_x87_opcode(opcode)) {
+                    const char* name = (opcode < kOpcodeNames.size()) ? kOpcodeNames[opcode] : "?";
+                    fprintf(stdout,
+                            "[rosettax87] unexpected x87 opcode %s (0x%x) reached "
+                            "translator default — add a translate_* and dispatch "
+                            "case, or list it as deliberate fall-through above\n",
+                            name, static_cast<unsigned>(opcode));
+                    fflush(stdout);
+                }
                 return std::nullopt;
         }
     }
