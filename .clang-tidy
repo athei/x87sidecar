@@ -1,0 +1,25 @@
+---
+# Conservative starter checks. The codebase does plenty of legitimate
+# pointer arithmetic, bit-twiddling and JIT-buffer manipulation, so the
+# noisier checks are disabled to keep the signal usable.
+Checks: >
+  -*,
+  bugprone-*,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-narrowing-conversions,
+  performance-*,
+  modernize-*,
+  -modernize-use-trailing-return-type,
+  -modernize-avoid-c-arrays,
+  readability-*,
+  -readability-identifier-length,
+  -readability-magic-numbers,
+  -readability-function-cognitive-complexity
+
+WarningsAsErrors: ''
+
+# Restrict header diagnostics to project headers; otherwise clang-tidy
+# spams system / SDK headers reached via transitive includes.
+HeaderFilterRegex: '^(rosetta_core|rosetta_loader|rosetta_config|aotinvoke)/.*'
+
+FormatStyle: file

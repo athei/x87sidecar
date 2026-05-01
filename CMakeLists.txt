@@ -23,6 +23,10 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# Emit build/compile_commands.json so clangd (Zed LSP, etc.) and clang-tidy work
+# without per-invocation flags. A repo-root symlink points at it.
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 # Keep assert() active in optimized builds.  Release-only UB has
 # repeatedly bitten us (alloc_free_gpr returning ctz(0)=32 on an empty
 # pool, is_bitmask_immediate's signed-shift UB) — the tiny per-instr
