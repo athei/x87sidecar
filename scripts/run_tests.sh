@@ -77,6 +77,8 @@ ALL_TESTS=(
     test_fstenv
     test_frstor
     test_fsave
+    test_fxrstor
+    test_fxsave
     test_fsin
     test_fcos
     test_f2xm1
