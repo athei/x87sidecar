@@ -61,6 +61,8 @@ ALL_BENCHMARKS=(
     bench_fstenv
     bench_frstor
     bench_fsave
+    bench_fxsave
+    bench_fxrstor
     bench_fsin
     bench_fcos
     bench_f2xm1
