@@ -68,6 +68,12 @@ struct ConstOff {
     static constexpr int Atan2NegTwo       = 505;
     static constexpr int Atan2PiOver2      = 506;
     static constexpr int Atan2C0           = 507;  // c0..c19 contiguous → C(i) = 507 + i
+    // fptan (after atan2_c[20])
+    static constexpr int TanTwoOverPi      = 527;
+    static constexpr int TanHalfPiHi       = 528;
+    static constexpr int TanHalfPiLo       = 529;
+    static constexpr int TanShift          = 530;
+    static constexpr int TanPoly0          = 531;  // poly[0..8] contiguous → P(i) = 531 + i
 };
 
 static_assert(offsetof(rosetta_core::TranscendentalConstants, inv_pi)            == ConstOff::InvPi          * 8, "ConstOff::InvPi drift");
@@ -97,6 +103,11 @@ static_assert(offsetof(rosetta_core::TranscendentalConstants, log2_log2c)       
 static_assert(offsetof(rosetta_core::TranscendentalConstants, atan2_neg_two)     == ConstOff::Atan2NegTwo      * 8, "ConstOff::Atan2NegTwo drift");
 static_assert(offsetof(rosetta_core::TranscendentalConstants, atan2_pi_over_2)   == ConstOff::Atan2PiOver2     * 8, "ConstOff::Atan2PiOver2 drift");
 static_assert(offsetof(rosetta_core::TranscendentalConstants, atan2_c)           == ConstOff::Atan2C0          * 8, "ConstOff::Atan2C0 drift");
+static_assert(offsetof(rosetta_core::TranscendentalConstants, tan_two_over_pi)   == ConstOff::TanTwoOverPi     * 8, "ConstOff::TanTwoOverPi drift");
+static_assert(offsetof(rosetta_core::TranscendentalConstants, tan_half_pi_hi)    == ConstOff::TanHalfPiHi      * 8, "ConstOff::TanHalfPiHi drift");
+static_assert(offsetof(rosetta_core::TranscendentalConstants, tan_half_pi_lo)    == ConstOff::TanHalfPiLo      * 8, "ConstOff::TanHalfPiLo drift");
+static_assert(offsetof(rosetta_core::TranscendentalConstants, tan_shift)         == ConstOff::TanShift         * 8, "ConstOff::TanShift drift");
+static_assert(offsetof(rosetta_core::TranscendentalConstants, tan_poly)          == ConstOff::TanPoly0         * 8, "ConstOff::TanPoly0 drift");
 
 enum class TrigReduceMode { Sin, Cos };
 
@@ -818,6 +829,187 @@ void emit_inline_fpatan(TranslationResult& a1, AssemblerBuffer& buf,
     free_gpr(a1, Xsign_xy);
     free_gpr(a1, Xconst);
     free_fpr(a1, Dz);
+}
+
+// fptan: replace ST(0) with tan(ST(0)); push 1.0.  Port of
+// optimized-routines' AdvSIMD tan (math/aarch64/advsimd/tan.c).
+//
+// Algorithm:
+//   q = round(x · 2/π) via shift trick (FMA + subtract)
+//   qi = (s64) q
+//   r = (x - q·π/2_hi - q·π/2_lo) / 2
+//   r2 = r·r;  r4 = r2·r2;  r8 = r4·r4
+//   Order-7 Estrin polynomial in r² over poly[1..8]:
+//     p07 = (poly[1] + r²·poly[2]) + r⁴·(poly[3] + r²·poly[4])
+//         + r⁸·((poly[5] + r²·poly[6]) + r⁴·(poly[7] + r²·poly[8]))
+//   p = poly[0] + r²·p07
+//   p = r + r²·(p · r)            // tan(r) approximation, |r| ≤ π/8
+//   n = p² - 1;  d = 2·p
+//   Recombine via tan(2x) = 2·tan(x)/(1 - tan²(x)) and
+//   tan(x) = 1/tan(π/2 - x), selecting numerator/denominator on
+//   parity of qi:
+//     even qi (qi&1 == 0): result = -d / n  (tan(2r))
+//     odd  qi (qi&1 == 1): result =  n / d  ((p²-1)/(2p) = -cot(2r))
+//
+// Caller (translate_fptan) then pushes 1.0 onto the stack post-tan.
+void emit_inline_fptan(TranslationResult& a1, AssemblerBuffer& buf,
+                        int Xbase, int Wd_top, int Wd_tmp) {
+    const int Xst_base  = x87_get_st_base(a1);
+    const int depth_st0 = resolve_depth(a1, 0);
+
+    // 1. Load Dx = ST(0)
+    const int Dx = alloc_free_fpr(a1);
+    emit_load_st(buf, Xbase, Wd_top, depth_st0, Wd_tmp, Dx, Xst_base);
+
+    const int Xconst = alloc_free_gpr(a1);
+    const uint64_t consts_addr = rosetta_core::get_transcendental_constants_addr();
+    assert(consts_addr != 0 && "transcendental constants not installed");
+    emit_movz_movk_abs64(buf, Xconst, consts_addr);
+
+    // 2. q = round(x · 2/π) via FMA shift trick
+    const int Dq = alloc_free_fpr(a1);
+    {
+        const int Dshift = alloc_free_fpr(a1);
+        const int Dtwopi = alloc_free_fpr(a1);
+        emit_fldr_imm(buf, 3, Dshift, Xconst, ConstOff::TanShift);
+        emit_fldr_imm(buf, 3, Dtwopi, Xconst, ConstOff::TanTwoOverPi);
+        emit_fmadd_f64(buf, Dq, Dx, Dtwopi, Dshift);                  // Dq = shift + x·2/π
+        emit_fsub_f64(buf, Dq, Dq, Dshift);                           // Dq -= shift  → Dq = round(x·2/π)
+        free_fpr(a1, Dshift);
+        free_fpr(a1, Dtwopi);
+    }
+
+    // 3. qi = (s64) Dq
+    const int Xqi = alloc_free_gpr(a1);
+    emit_fcvtzs(buf, /*ftype=*/1, /*is_64bit_int=*/1, Xqi, Dq);
+
+    // 4. r = x - q·half_pi_hi - q·half_pi_lo
+    const int Dr = alloc_free_fpr(a1);
+    {
+        const int Dtmp = alloc_free_fpr(a1);
+        emit_fldr_imm(buf, 3, Dtmp, Xconst, ConstOff::TanHalfPiHi);
+        emit_fmsub_f64(buf, Dr, Dq, Dtmp, Dx);                        // r = x - q·hpi_hi
+        emit_fldr_imm(buf, 3, Dtmp, Xconst, ConstOff::TanHalfPiLo);
+        emit_fmsub_f64(buf, Dr, Dq, Dtmp, Dr);                        // r -= q·hpi_lo
+        // r *= 0.5
+        emit_fldr_imm(buf, 3, Dtmp, Xconst, ConstOff::Half);
+        emit_fmul_f64(buf, Dr, Dr, Dtmp);
+        free_fpr(a1, Dtmp);
+    }
+    free_fpr(a1, Dx);
+    free_fpr(a1, Dq);
+
+    // 5. r2, r4, r8
+    const int Dr2 = alloc_free_fpr(a1);
+    const int Dr4 = alloc_free_fpr(a1);
+    const int Dr8 = alloc_free_fpr(a1);
+    emit_fmul_f64(buf, Dr2, Dr, Dr);
+    emit_fmul_f64(buf, Dr4, Dr2, Dr2);
+    emit_fmul_f64(buf, Dr8, Dr4, Dr4);
+
+    // 6. Order-7 Estrin in r²:
+    //    p01 = poly[1] + r²·poly[2]
+    //    p23 = poly[3] + r²·poly[4]
+    //    p03 = p01 + r⁴·p23
+    //    p45 = poly[5] + r²·poly[6]
+    //    p67 = poly[7] + r²·poly[8]
+    //    p47 = p45 + r⁴·p67
+    //    p07 = p03 + r⁸·p47
+    const int Dp_acc = alloc_free_fpr(a1);
+    {
+        const int Dtmp = alloc_free_fpr(a1);
+        const int Dp_b = alloc_free_fpr(a1);
+
+        // p01 → Dp_acc
+        emit_fldr_imm(buf, 3, Dp_acc, Xconst, ConstOff::TanPoly0 + 1);
+        emit_fldr_imm(buf, 3, Dtmp,   Xconst, ConstOff::TanPoly0 + 2);
+        emit_fmadd_f64(buf, Dp_acc, Dr2, Dtmp, Dp_acc);
+
+        // p23 → Dp_b
+        emit_fldr_imm(buf, 3, Dp_b,   Xconst, ConstOff::TanPoly0 + 3);
+        emit_fldr_imm(buf, 3, Dtmp,   Xconst, ConstOff::TanPoly0 + 4);
+        emit_fmadd_f64(buf, Dp_b, Dr2, Dtmp, Dp_b);
+
+        // p03 = p01 + r⁴·p23
+        emit_fmadd_f64(buf, Dp_acc, Dr4, Dp_b, Dp_acc);
+
+        // p45 → Dp_b
+        emit_fldr_imm(buf, 3, Dp_b,   Xconst, ConstOff::TanPoly0 + 5);
+        emit_fldr_imm(buf, 3, Dtmp,   Xconst, ConstOff::TanPoly0 + 6);
+        emit_fmadd_f64(buf, Dp_b, Dr2, Dtmp, Dp_b);
+
+        // p67 → Dtmp (after using it for poly[6] load, reuse slot)
+        const int Dp_c = alloc_free_fpr(a1);
+        emit_fldr_imm(buf, 3, Dp_c,   Xconst, ConstOff::TanPoly0 + 7);
+        emit_fldr_imm(buf, 3, Dtmp,   Xconst, ConstOff::TanPoly0 + 8);
+        emit_fmadd_f64(buf, Dp_c, Dr2, Dtmp, Dp_c);
+
+        // p47 = p45 + r⁴·p67
+        emit_fmadd_f64(buf, Dp_b, Dr4, Dp_c, Dp_b);
+        free_fpr(a1, Dp_c);
+
+        // p07 = p03 + r⁸·p47
+        emit_fmadd_f64(buf, Dp_acc, Dr8, Dp_b, Dp_acc);
+        free_fpr(a1, Dp_b);
+
+        // 7. p = poly[0] + r²·p07
+        emit_fldr_imm(buf, 3, Dtmp,   Xconst, ConstOff::TanPoly0 + 0);
+        emit_fmadd_f64(buf, Dp_acc, Dr2, Dp_acc, Dtmp);
+        free_fpr(a1, Dtmp);
+    }
+    free_fpr(a1, Dr8);
+    free_fpr(a1, Dr4);
+
+    // 8. p = r + r²·(p · r)
+    {
+        const int Dpr = alloc_free_fpr(a1);
+        emit_fmul_f64(buf, Dpr, Dp_acc, Dr);                          // pr = p · r
+        emit_fmadd_f64(buf, Dp_acc, Dr2, Dpr, Dr);                    // p = r + r²·pr
+        free_fpr(a1, Dpr);
+    }
+    free_fpr(a1, Dr);
+    free_fpr(a1, Dr2);
+
+    // 9. n = p² - 1   (FMADD with Da = -1)
+    const int Dn = alloc_free_fpr(a1);
+    {
+        const int Dneg_one = alloc_free_fpr(a1);
+        emit_fmov_d_one(buf, Dneg_one);
+        emit_fneg_f64(buf, Dneg_one, Dneg_one);
+        emit_fmadd_f64(buf, Dn, Dp_acc, Dp_acc, Dneg_one);            // n = -1 + p·p
+        free_fpr(a1, Dneg_one);
+    }
+
+    // 10. d = 2·p
+    const int Dd = alloc_free_fpr(a1);
+    emit_fadd_f64(buf, Dd, Dp_acc, Dp_acc);
+    free_fpr(a1, Dp_acc);
+
+    // 11. Recombine: TST Xqi, #1.  If odd → tan = n/d;  if even → tan = -d/n.
+    const int Dneg_d = alloc_free_fpr(a1);
+    emit_fneg_f64(buf, Dneg_d, Dd);
+
+    // TST Xqi, #1   (encoded as ANDS XZR, Xqi, #1)
+    emit_logical_imm(buf, /*is_64=*/1, /*opc=ANDS*/3, /*N=*/1,
+                     /*immr=*/0, /*imms=*/0, /*Rn=*/Xqi, /*Rd=*/31);
+    free_gpr(a1, Xqi);
+
+    // Numerator:   ne (qi odd) → n;     eq (qi even) → -d
+    // Denominator: ne          → d;     eq            →  n
+    const int Dnum_final = alloc_free_fpr(a1);
+    const int Dden_final = alloc_free_fpr(a1);
+    emit_fcsel_f64(buf, Dnum_final, Dn,    Dneg_d, /*cond=NE*/1);
+    emit_fcsel_f64(buf, Dden_final, Dd,    Dn,     /*cond=NE*/1);
+    free_fpr(a1, Dneg_d);
+    free_fpr(a1, Dn);
+    free_fpr(a1, Dd);
+
+    // 12. result = num / den → d0
+    emit_fdiv_f64(buf, /*Dd=*/0, Dnum_final, Dden_final);
+
+    free_fpr(a1, Dnum_final);
+    free_fpr(a1, Dden_final);
+    free_gpr(a1, Xconst);
 }
 
 void emit_inline_fyl2xp1(TranslationResult& a1, AssemblerBuffer& buf,

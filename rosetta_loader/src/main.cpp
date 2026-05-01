@@ -1383,6 +1383,20 @@ int main(int argc, char* argv[]) {
         consts.atan2_c[17] =  0x1.ba3da3de903e8p-11;
         consts.atan2_c[18] = -0x1.44a4b059b6f67p-13;
         consts.atan2_c[19] =  0x1.c4a45029e5a91p-17;
+        // fptan polynomial (advsimd/tan.c).
+        consts.tan_two_over_pi = 0x1.45f306dc9c883p-1;
+        consts.tan_half_pi_hi  = 0x1.921fb54442d18p+0;
+        consts.tan_half_pi_lo  = 0x1.1a62633145c07p-54;
+        consts.tan_shift       = 0x1.8p52;
+        consts.tan_poly[0] = 0x1.5555555555556p-2;
+        consts.tan_poly[1] = 0x1.1111111110a63p-3;
+        consts.tan_poly[2] = 0x1.ba1ba1bb46414p-5;
+        consts.tan_poly[3] = 0x1.664f47e5b5445p-6;
+        consts.tan_poly[4] = 0x1.226e5e5ecdfa3p-7;
+        consts.tan_poly[5] = 0x1.d6c7ddbf87047p-9;
+        consts.tan_poly[6] = 0x1.7ea75d05b583ep-10;
+        consts.tan_poly[7] = 0x1.289f22964a03cp-11;
+        consts.tan_poly[8] = 0x1.4e4fd14147622p-12;
         const uint64_t constsEnd = constsAddr + sizeof(consts);
         if (constsEnd > padStartAddr + padBytes) {
             fprintf(stdout,

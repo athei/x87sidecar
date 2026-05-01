@@ -102,6 +102,17 @@ struct alignas(8) TranscendentalConstants {
     double atan2_neg_two;          // -2.0   (shift = -2 if x < 0)
     double atan2_pi_over_2;        // π/2
     double atan2_c[20];            // c0..c19
+
+    // ── fptan (advsimd/tan.c) ────────────────────────────────────────────
+    // Order-7 Estrin polynomial in r² over poly[1..8] plus poly[0] for the
+    // r³ coefficient.  Range reduction snaps x to multiples of π/2 via
+    // shift trick, halves the residue, then the double-angle formula
+    // recombines tan(2r) = 2·tan(r)/(1 - tan²(r)).
+    double tan_two_over_pi;        // 0x1.45f306dc9c883p-1 = 2/π
+    double tan_half_pi_hi;         // 0x1.921fb54442d18p+0 = π/2 (high)
+    double tan_half_pi_lo;         // 0x1.1a62633145c07p-54 = π/2 (low residue)
+    double tan_shift;              // 0x1.8p52  (round-to-nearest shift trick)
+    double tan_poly[9];            // poly[0..8] from optimized-routines tan.c
 };
 
 void set_transcendental_constants_addr(uint64_t addr);

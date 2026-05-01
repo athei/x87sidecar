@@ -4426,8 +4426,7 @@ auto translate_fptan(TranslationResult* a1, IRInstr* /*a2*/) -> void {
     const int Wd_tmp = alloc_gpr(*a1, 2);
     const int Wd_tmp2 = alloc_free_gpr(*a1);
 
-    emit_transcendental_ipc(*a1, buf, Xbase, Wd_top, Wd_tmp,
-                            rosetta_core::kTransFptan, /*num_inputs=*/1);
+    emit_inline_fptan(*a1, buf, Xbase, Wd_top, Wd_tmp);
 
     const int Xst_base = x87_get_st_base(*a1);
     const int depth_st0 = resolve_depth(*a1, 0);

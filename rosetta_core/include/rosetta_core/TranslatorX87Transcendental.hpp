@@ -81,4 +81,9 @@ void emit_inline_fyl2xp1(TranslationResult& a1, AssemblerBuffer& buf,
 void emit_inline_fpatan(TranslationResult& a1, AssemblerBuffer& buf,
                          int Xbase, int Wd_top, int Wd_tmp);
 
+// fptan: replace ST(0) with tan(ST(0)) (caller pushes 1.0 afterwards).
+// Order-7 Estrin in r² + double-angle recombination.  Result in d0.
+void emit_inline_fptan(TranslationResult& a1, AssemblerBuffer& buf,
+                        int Xbase, int Wd_top, int Wd_tmp);
+
 }  // namespace TranslatorX87
