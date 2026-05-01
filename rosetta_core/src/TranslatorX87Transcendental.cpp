@@ -7,6 +7,7 @@
 #include "TranslatorX87Internal.hpp"
 #include "rosetta_core/AssemblerBuffer.h"
 #include "rosetta_core/AssemblerHelpers.hpp"
+#include "rosetta_core/Register.h"
 #include "rosetta_core/TranscendentalHelper.h"
 #include "rosetta_core/TranslationResult.h"
 #include "rosetta_core/TranslatorHelpers.hpp"
@@ -1044,12 +1045,21 @@ void emit_inline_fptan(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, i
 
 // fprem: ST(0) := fmod(ST(0), ST(1)).  No pop.  Single-shot impl
 // (one call covers what stock x87 does iteratively in k≤64 quotient
-// bits); same simplification the prior IPC sidecar used.  C0/C1/C2/C3
-// flag bits in status_word are not updated (we don't track them).
+// bits); same simplification the prior IPC sidecar used.
+//
+// IMPORTANT: x87 fprem signals "reduction complete" via C2=0 in the
+// status word; callers (e.g. wine's argument-reduction loop in
+// math/aarch64) loop on `fprem; fstsw ax; test ah, 0x04; jnz loop`.
+// Since we always complete in one shot, we MUST clear C2 (and the
+// quotient-bit flags C0/C1/C3 which we don't compute) so that loop
+// terminates.  Forgetting this caused the WoW world-load freeze:
+// wine entered the reduction loop with stale C2=1, our fprem didn't
+// touch SW, the loop never exited.
 //
 // Algorithm:
 //   q = trunc(a / b)        (FDIV + FRINTZ)
 //   result = a - q · b      (FMSUB)
+//   status_word &= ~0x4700  (clear C0/C1/C2/C3)
 void emit_inline_fprem(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, int Wd_top,
                        int Wd_tmp) {
     const int Xst_base = x87_get_st_base(a1);
@@ -1069,12 +1079,29 @@ void emit_inline_fprem(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, i
     free_fpr(a1, Dq);
     free_fpr(a1, Db);
     free_fpr(a1, Da);
+
+    // Clear C0/C1/C2/C3 in status_word (mask 0x4700).  Same BFI-from-XZR
+    // pattern as the FCOM+FSTSW fusion's OPT-F1 (TranslatorX87Fusion.cpp).
+    static constexpr int16_t kX87SwImm12 = kX87StatusWordOff / 2;
+    const int Wd_sw = alloc_free_gpr(a1);
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=LDR=*/1, kX87SwImm12, Xbase, Wd_sw);
+    // BFI sw[10:8] := 0 (clears C0/C1/C2): immr=24 (=32-lsb), imms=2 (=width-1)
+    emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/1, /*N=*/0, /*immr=*/24, /*imms=*/2, GPR::XZR,
+                  Wd_sw);
+    // BFI sw[14] := 0 (clears C3): immr=18 (=32-14), imms=0 (width=1)
+    emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/1, /*N=*/0, /*immr=*/18, /*imms=*/0, GPR::XZR,
+                  Wd_sw);
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=STR=*/0, kX87SwImm12, Xbase, Wd_sw);
+    free_gpr(a1, Wd_sw);
 }
 
 // fprem1: ST(0) := IEEE-remainder(ST(0), ST(1)).  Same emit shape as
 // fprem; differs only in FRINTN (round-to-nearest-even) instead of
 // FRINTZ.  std::remainder uses round-to-nearest-even rounding for the
 // quotient, which FRINTN gives directly.
+//
+// Same C0/C1/C2/C3-clearing as fprem (see comment there) — fprem1
+// shares the iterative-completion contract.
 void emit_inline_fprem1(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, int Wd_top,
                         int Wd_tmp) {
     const int Xst_base = x87_get_st_base(a1);
@@ -1094,6 +1121,16 @@ void emit_inline_fprem1(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, 
     free_fpr(a1, Dq);
     free_fpr(a1, Db);
     free_fpr(a1, Da);
+
+    static constexpr int16_t kX87SwImm12 = kX87StatusWordOff / 2;
+    const int Wd_sw = alloc_free_gpr(a1);
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=LDR=*/1, kX87SwImm12, Xbase, Wd_sw);
+    emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/1, /*N=*/0, /*immr=*/24, /*imms=*/2, GPR::XZR,
+                  Wd_sw);
+    emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/1, /*N=*/0, /*immr=*/18, /*imms=*/0, GPR::XZR,
+                  Wd_sw);
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=STR=*/0, kX87SwImm12, Xbase, Wd_sw);
+    free_gpr(a1, Wd_sw);
 }
 
 void emit_inline_fyl2xp1(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, int Wd_top,
