@@ -2,10 +2,14 @@
 
 #include <cassert>
 #include <cstddef>
+#include <cstdint>
 
 #include "TranslatorX87Internal.hpp"
+#include "rosetta_core/AssemblerBuffer.h"
 #include "rosetta_core/AssemblerHelpers.hpp"
 #include "rosetta_core/TranscendentalHelper.h"
+#include "rosetta_core/TranslationResult.h"
+#include "rosetta_core/TranslatorHelpers.hpp"
 #include "rosetta_core/TranslatorX87Helpers.hpp"
 
 namespace TranslatorX87 {

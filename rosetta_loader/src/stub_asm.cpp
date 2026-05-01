@@ -1,7 +1,9 @@
 #include "stub_asm.hpp"
 
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
+#include <vector>
 
 #include "rosetta_core/IRInstr.h"
 

@@ -1,0 +1,7 @@
+# Keep clangd-in-editor and `make tidy` aligned: misc-include-cleaner
+# (enabled in .clang-tidy) is the single source of truth for include
+# diagnostics, so disable clangd's native include-cleaner pass to avoid
+# emitting every finding twice in the editor.
+Diagnostics:
+  UnusedIncludes: None
+  MissingIncludes: None

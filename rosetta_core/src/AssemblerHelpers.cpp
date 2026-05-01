@@ -1,7 +1,9 @@
 #include "rosetta_core/AssemblerHelpers.hpp"
 
 #include <cassert>
+#include <cstdint>
 
+#include "rosetta_core/AssemblerBuffer.h"
 #include "rosetta_core/IROperand.h"
 #include "rosetta_core/Register.h"
 

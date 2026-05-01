@@ -17,7 +17,8 @@ Checks: >
   -readability-identifier-length,
   -readability-magic-numbers,
   -readability-function-cognitive-complexity,
-  -readability-implicit-bool-conversion
+  -readability-implicit-bool-conversion,
+  misc-include-cleaner
 
 WarningsAsErrors: ''
 
@@ -26,3 +27,16 @@ WarningsAsErrors: ''
 HeaderFilterRegex: '^(rosetta_core|rosetta_loader|rosetta_config|aotinvoke)/.*'
 
 FormatStyle: none
+
+# misc-include-cleaner picks the most-specific defining header by default.
+# On Darwin that means it suggests internal leaf headers (<_stdlib.h>,
+# <sys/_types/_pid_t.h>, <mach/arm/vm_param.h>, narrow <mach/*.h> shards)
+# over the umbrella headers the project uses. Worse: when sub-headers are
+# ignored, the umbrella that pulls them in looks "unused" and gets removed.
+# So the practical fix is to ignore *entire* Darwin/POSIX system domains —
+# the check then leaves them alone (neither added nor removed). C++ standard
+# headers (<cstdint>, <vector>, …) and project headers still get the usual
+# add/remove treatment.
+CheckOptions:
+  - key: misc-include-cleaner.IgnoreHeaders
+    value: '_[^/]+\.h;.*/sys/.*;.*/mach/.*;.*/mach-o/.*;.*/libkern/.*;.*/objc/.*;.*/dispatch/.*;.*/pthread.*\.h;.*/dyld.*\.h;.*/sched\.h;.*/unistd\.h;.*/fcntl\.h;.*/signal\.h;.*/dlfcn\.h;.*/spawn\.h;.*/poll\.h'

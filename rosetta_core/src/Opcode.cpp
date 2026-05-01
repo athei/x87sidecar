@@ -1,5 +1,7 @@
 #include "rosetta_core/Opcode.h"
 
+#include <array>
+
 std::array<const char*, 0x29c> kOpcodeNames = {
     "aaa",
     "aad",

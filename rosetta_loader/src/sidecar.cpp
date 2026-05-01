@@ -5,8 +5,8 @@
 #include <mach/mach_vm.h>
 #include <pthread.h>
 
-#include <atomic>
-#include <cmath>
+#include <algorithm>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -16,7 +16,7 @@
 #include "rosetta_core/IRInstr.h"
 #include "rosetta_core/Opcode.h"
 #include "rosetta_core/ThreadContextOffsets.h"
-#include "rosetta_core/TranscendentalHelper.h"
+#include "rosetta_core/TransactionalList.h"
 #include "rosetta_core/TranslationResult.h"
 #include "rosetta_core/Translator.h"
 #include "rosetta_core/X87Cache.h"

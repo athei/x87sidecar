@@ -1,5 +1,7 @@
 #include "rosetta_core/TranscendentalHelper.h"
 
+#include <cstdint>
+
 namespace rosetta_core {
 
 namespace {

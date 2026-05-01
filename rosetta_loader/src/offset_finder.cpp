@@ -1,7 +1,14 @@
 #include "offset_finder.hpp"
 
+#include <algorithm>
+#include <cstdint>
+#include <cstdio>
 #include <fstream>
 #include <functional>
+#include <ios>
+#include <iosfwd>
+#include <iterator>
+#include <vector>
 
 #include "macho_loader.hpp"
 #include "types.h"

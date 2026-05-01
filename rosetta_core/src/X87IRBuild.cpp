@@ -1,3 +1,5 @@
+#include <cstdint>
+
 #include "rosetta_core/IRInstr.h"
 #include "rosetta_core/IROperand.h"
 #include "rosetta_core/Opcode.h"

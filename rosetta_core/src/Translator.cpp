@@ -1,12 +1,13 @@
 #include "rosetta_core/Translator.h"
 
-#include <cstdio>
+#include <cstdint>
+#include <optional>
 
-#include "TranslatorX87Internal.hpp"
 #include "rosetta_core/Config.h"
 #include "rosetta_core/CoreConfig.h"
 #include "rosetta_core/IRInstr.h"
 #include "rosetta_core/Opcode.h"
+#include "rosetta_core/Register.h"
 #include "rosetta_core/TranslationResult.h"
 #include "rosetta_core/TranslatorX87.h"
 #include "rosetta_core/TranslatorX87Fusion.h"

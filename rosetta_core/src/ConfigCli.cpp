@@ -1,7 +1,12 @@
 #include "rosetta_core/ConfigCli.h"
 
+#include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <string>
+#include <string_view>
+
+#include "rosetta_core/Config.h"
 
 namespace {
 
@@ -82,28 +87,26 @@ bool apply_translator_flag(std::string_view flag, RosettaConfig& cfg, const char
     }
     if (flag.starts_with("--disable-fusions=")) {
         const auto csv = flag.substr(std::strlen("--disable-fusions="));
-        if (!apply_fusion_list(std::string(csv).c_str(), cfg.disabled_fusions_mask, bad_value)) {
-            return false;  // bad_value populated for caller's diagnostic
-        }
-        return true;
+        // On false return, apply_fusion_list populates bad_value for the
+        // caller's diagnostic.
+        return apply_fusion_list(std::string(csv).c_str(), cfg.disabled_fusions_mask, bad_value);
     }
     return false;
 }
 
 void print_translator_flag_help(std::FILE* out) {
-    std::fprintf(
-        out,
-        "Translator knobs (read by rosetta_core):\n"
-        "  --disable-cache              drop the cross-instruction GPR cache\n"
-        "  --fast-round                 skip RC dispatch; always emit FCVTNS/FRINTN\n"
-        "                               (round-to-nearest only — UNSAFE for code that\n"
-        "                                uses FLDCW to change rounding mode, e.g. Lua)\n"
-        "  --disable-deferred-fxch      disable OPT-G (deferred FXCH permutation)\n"
-        "  --disable-x87-ir             disable the IR optimisation pipeline\n"
-        "  --extended-fpr-scratch       expand FPR scratch pool from 8 (V24-V31)\n"
-        "                               to 16 (V16-V31)\n"
-        "  --disable-all-fusions        disable every peephole fusion\n"
-        "  --disable-fusions=name1,...  disable specific fusions; names:\n");
+    std::fprintf(out,
+                 "Translator knobs (read by rosetta_core):\n"
+                 "  --disable-cache              drop the cross-instruction GPR cache\n"
+                 "  --fast-round                 skip RC dispatch; always emit FCVTNS/FRINTN\n"
+                 "                               (round-to-nearest only — UNSAFE for code that\n"
+                 "                                uses FLDCW to change rounding mode, e.g. Lua)\n"
+                 "  --disable-deferred-fxch      disable OPT-G (deferred FXCH permutation)\n"
+                 "  --disable-x87-ir             disable the IR optimisation pipeline\n"
+                 "  --extended-fpr-scratch       expand FPR scratch pool from 8 (V24-V31)\n"
+                 "                               to 16 (V16-V31)\n"
+                 "  --disable-all-fusions        disable every peephole fusion\n"
+                 "  --disable-fusions=name1,...  disable specific fusions; names:\n");
     for (const auto& e : kFusionTable) {
         std::fprintf(out, "                                 %s\n", e.name);
     }

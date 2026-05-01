@@ -1,7 +1,6 @@
 #include <mach-o/dyld.h>
 #include <mach-o/dyld_images.h>
 #include <mach/mach_vm.h>
-#include "rosetta_core/Config.h"
 #include <sched.h>
 #include <sys/event.h>
 #include <sys/mman.h>
@@ -9,18 +8,21 @@
 #include <sys/wait.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cerrno>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
-#include <filesystem>
+#include <ctime>
+#include <exception>
 #include <map>
 #include <numbers>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "cli_args.hpp"
-#include "macho_loader.hpp"
 #include "offset_finder.hpp"
 #include "rosetta_core/Config.h"
 #include "rosetta_core/CoreConfig.h"

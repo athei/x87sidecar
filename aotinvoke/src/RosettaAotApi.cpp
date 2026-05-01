@@ -5,10 +5,15 @@
 #include <mach/vm_page_size.h>
 
 #include <array>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <exception>
 #include <print>
 #include <stdexcept>
-#include <string_view>
 #include <utility>
+
+#include "rosetta_core/ThreadContextOffsets.h"
 
 RosettaAotApi g_rosetta_aot;
 

@@ -1,13 +1,20 @@
 #include "rosetta_core/TranslatorX87Fusion.h"
 
+#include <cstdint>
+#include <optional>
+
 #include "TranslatorX87Internal.hpp"
+#include "rosetta_core/AssemblerBuffer.h"
+#include "rosetta_core/AssemblerHelpers.hpp"
 #include "rosetta_core/Config.h"
 #include "rosetta_core/IRInstr.h"
+#include "rosetta_core/IROperand.h"
 #include "rosetta_core/Opcode.h"
 #include "rosetta_core/Register.h"
 #include "rosetta_core/TranslationResult.h"
 #include "rosetta_core/TranslatorHelpers.hpp"
 #include "rosetta_core/TranslatorX87.h"
+#include "rosetta_core/TranslatorX87Helpers.hpp"
 
 namespace TranslatorX87 {
 

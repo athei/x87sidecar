@@ -1,5 +1,7 @@
 #include "rosetta_core/CustomTranslationHook.h"
 
+#include <cstdint>
+
 #include "rosetta_core/Translator.h"
 #include "rosetta_core/hook.h"
 

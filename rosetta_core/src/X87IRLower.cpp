@@ -1,11 +1,12 @@
 #include <algorithm>
+#include <cstdint>
 #include <cstring>
 #include <utility>
 
-#include "rosetta_core/Config.h"
+#include "rosetta_core/AssemblerBuffer.h"
 #include "rosetta_core/AssemblerHelpers.hpp"
+#include "rosetta_core/Config.h"
 #include "rosetta_core/CoreConfig.h"
-#include "rosetta_core/IROperand.h"
 #include "rosetta_core/Register.h"
 #include "rosetta_core/TranslationResult.h"
 #include "rosetta_core/TranslatorHelpers.hpp"

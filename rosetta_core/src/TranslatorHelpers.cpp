@@ -1,11 +1,16 @@
 #include "rosetta_core/TranslatorHelpers.hpp"
 
-#include "rosetta_core/Config.h"
+#include <cassert>
+#include <cstdint>
+
 #include "rosetta_core/AssemblerHelpers.hpp"
+#include "rosetta_core/Config.h"
 #include "rosetta_core/CoreConfig.h"
+#include "rosetta_core/Fixup.h"
 #include "rosetta_core/IROperand.h"
 #include "rosetta_core/Register.h"
 #include "rosetta_core/RuntimeRoutine.h"
+#include "rosetta_core/TranslationResult.h"
 
 int alloc_gpr(TranslationResult& translation, int pool_index) {
     const int reg = kGprScratchPool[pool_index];

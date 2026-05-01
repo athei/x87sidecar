@@ -6,6 +6,7 @@
 #include <sys/mman.h>
 
 #include <cerrno>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 

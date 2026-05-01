@@ -1,3 +1,5 @@
+#include <cstdint>
+
 #include "rosetta_core/X87IR.h"
 
 namespace X87IR {

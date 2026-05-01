@@ -4,8 +4,16 @@
 #include <mach/vm_page_size.h>
 
 #include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <filesystem>
 #include <fstream>
+#include <functional>
+#include <ios>
+#include <iterator>
 #include <utility>
+#include <vector>
 
 auto MachoLoader::open(std::filesystem::path const& path) -> bool {
     if (!std::filesystem::exists(path)) {

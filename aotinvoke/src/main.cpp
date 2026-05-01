@@ -1,31 +1,33 @@
-#include "rosetta_core/Config.h"
 #include <sys/mman.h>
 
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <exception>
 #include <filesystem>
 #include <fstream>
+#include <ios>
 #include <print>
 #include <string_view>
 #include <vector>
 
 #include "RosettaAotApi.h"
+#include "rosetta_core/Config.h"
 #include "rosetta_core/ConfigCli.h"
 #include "rosetta_core/CoreConfig.h"
 #include "rosetta_core/CustomTranslationHook.h"
-#include "rosetta_core/hook.h"
 
 namespace {
 
 void aotinvoke_usage(const char* prog) {
-    std::print("usage: {} [flags] <input.bin> <output.bin>\n"
-               "\n"
-               "Flags:\n"
-               "  --help       print this message and exit\n"
-               "  --verbose    dump the parsed IR module before translation\n"
-               "\n",
-               prog);
+    std::print(
+        "usage: {} [flags] <input.bin> <output.bin>\n"
+        "\n"
+        "Flags:\n"
+        "  --help       print this message and exit\n"
+        "  --verbose    dump the parsed IR module before translation\n"
+        "\n",
+        prog);
     print_translator_flag_help(stdout);
 }
 

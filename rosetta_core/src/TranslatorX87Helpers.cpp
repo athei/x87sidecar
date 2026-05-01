@@ -1,7 +1,12 @@
 #include "rosetta_core/TranslatorX87Helpers.hpp"
 
+#include <cstdint>
+
+#include "rosetta_core/AssemblerBuffer.h"
 #include "rosetta_core/AssemblerHelpers.hpp"
+#include "rosetta_core/Register.h"
 #include "rosetta_core/TranslationResult.h"
+#include "rosetta_core/TranslatorHelpers.hpp"
 
 // emit_ldr_str_imm with size=1 (LDRH/STRH) uses a halfword-scaled imm12:
 // byte_offset = imm12 * 2.  Pass byte_offset/2 for all LDRH/STRH calls.
