@@ -189,7 +189,7 @@ auto OffsetFinder::determineRuntimeOffsets() -> bool {
         return false;
     }
 
-    Exports* exports = (Exports*)(libRosettaRuntimeLoader.buffer_.data() + exports_section->offset);
+    auto* exports = (Exports*)(libRosettaRuntimeLoader.buffer_.data() + exports_section->offset);
 
     auto x87_exports_rva =
         exports->x87Exports &

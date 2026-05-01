@@ -13,9 +13,9 @@ static void pass_dse(Context& ctx) {
     int16_t use_count[kMaxNodes] = {};
 
     // Final stack values count as uses.
-    for (int d = 0; d < 8; d++) {
-        if (ctx.slot_val[d] >= 0 && ctx.slot_val[d] < ctx.num_nodes) {
-            use_count[ctx.slot_val[d]]++;
+    for (short d : ctx.slot_val) {
+        if (d >= 0 && d < ctx.num_nodes) {
+            use_count[d]++;
 }
     }
 
@@ -24,9 +24,9 @@ static void pass_dse(Context& ctx) {
         auto& n = ctx.nodes[i];
         if (n.flags & kDead) { continue;
 }
-        for (int j = 0; j < 3; j++) {
-            if (n.inputs[j] >= 0) {
-                use_count[n.inputs[j]]++;
+        for (short input : n.inputs) {
+            if (input >= 0) {
+                use_count[input]++;
 }
         }
     }
@@ -50,9 +50,9 @@ static void pass_dse(Context& ctx) {
         if (use_count[i] == 0) {
             n.flags |= kDead;
             // Decrement use counts for this node's inputs.
-            for (int j = 0; j < 3; j++) {
-                if (n.inputs[j] >= 0) {
-                    use_count[n.inputs[j]]--;
+            for (short input : n.inputs) {
+                if (input >= 0) {
+                    use_count[input]--;
 }
             }
         }
@@ -73,9 +73,9 @@ static void pass_dse(Context& ctx) {
         }
         if (use_count[i] == 0) {
             n.flags |= kDead;
-            for (int j = 0; j < 3; j++) {
-                if (n.inputs[j] >= 0) {
-                    use_count[n.inputs[j]]--;
+            for (short input : n.inputs) {
+                if (input >= 0) {
+                    use_count[input]--;
 }
             }
         }
@@ -95,17 +95,17 @@ static void pass_dse(Context& ctx) {
 static void pass_fma(Context& ctx) {
     // Count uses first to find single-use FMul nodes.
     int16_t use_count[kMaxNodes] = {};
-    for (int d = 0; d < 8; d++) {
-        if (ctx.slot_val[d] >= 0 && ctx.slot_val[d] < ctx.num_nodes) {
-            use_count[ctx.slot_val[d]]++;
+    for (short d : ctx.slot_val) {
+        if (d >= 0 && d < ctx.num_nodes) {
+            use_count[d]++;
 }
     }
     for (int i = 0; i < ctx.num_nodes; i++) {
         auto& n = ctx.nodes[i];
         if (n.flags & kDead) { continue;
 }
-        for (int j = 0; j < 3; j++) {
-            if (n.inputs[j] >= 0) { use_count[n.inputs[j]]++;
+        for (short input : n.inputs) {
+            if (input >= 0) { use_count[input]++;
 }
         }
     }

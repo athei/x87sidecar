@@ -56,14 +56,13 @@ struct FPRState {
             const auto& n = ctx.nodes[i];
             if (n.flags & kDead) { continue;
 }
-            for (int j = 0; j < 3; j++) {
-                if (n.inputs[j] >= 0) { last_use[n.inputs[j]] = static_cast<int16_t>(i);
+            for (short input : n.inputs) {
+                if (input >= 0) { last_use[input] = static_cast<int16_t>(i);
 }
             }
         }
         // Final stack values are live past all nodes.
-        for (int d = 0; d < 8; d++) {
-            int16_t val = ctx.slot_val[d];
+        for (short val : ctx.slot_val) {
             if (val >= 0 && val < ctx.num_nodes) {
                 last_use[val] = static_cast<int16_t>(ctx.num_nodes);
 }
@@ -72,8 +71,7 @@ struct FPRState {
 
     // Free FPRs whose last use was node `i`.
     void free_dead_inputs(TranslationResult& result, const Node& n, int i) {
-        for (int j = 0; j < 3; j++) {
-            int16_t in = n.inputs[j];
+        for (short in : n.inputs) {
             if (in >= 0 && last_use[in] == i && node_fpr[in] >= 0) {
                 free_fpr(result, node_fpr[in]);
                 node_fpr[in] = -1;
@@ -94,8 +92,7 @@ struct FPRState {
     int try_reuse_input(const Context& ctx, int i) {
         const auto& n = ctx.nodes[i];
         // Prefer inputs[0] (Dn, natural accumulator position)
-        for (int pref = 0; pref < 3; pref++) {
-            int16_t in = n.inputs[pref];
+        for (short in : n.inputs) {
             if (in >= 0 && last_use[in] == i && node_fpr[in] >= 0) {
                 int fpr = node_fpr[in];
                 node_fpr[in] = -1;  // claimed — free_dead_inputs will skip
@@ -976,13 +973,12 @@ int peak_live_fprs(const Context& ctx) {
         const auto& n = ctx.nodes[i];
         if (n.flags & kDead) { continue;
 }
-        for (int j = 0; j < 3; j++) {
-            if (n.inputs[j] >= 0) { last_use[n.inputs[j]] = static_cast<int16_t>(i);
+        for (short input : n.inputs) {
+            if (input >= 0) { last_use[input] = static_cast<int16_t>(i);
 }
         }
     }
-    for (int d = 0; d < 8; d++) {
-        int16_t val = ctx.slot_val[d];
+    for (short val : ctx.slot_val) {
         if (val >= 0 && val < ctx.num_nodes) {
             last_use[val] = static_cast<int16_t>(ctx.num_nodes);
 }
@@ -1034,8 +1030,7 @@ int peak_live_fprs(const Context& ctx) {
 }
 
         // Free inputs whose last use is this node.
-        for (int j = 0; j < 3; j++) {
-            int16_t in = n.inputs[j];
+        for (short in : n.inputs) {
             if (in >= 0 && last_use[in] == i && holding[in]) {
                 holding[in] = false;
                 live--;

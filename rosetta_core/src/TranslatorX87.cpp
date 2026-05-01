@@ -3704,7 +3704,7 @@ auto translate_fbstp(TranslationResult* a1, IRInstr* a2) -> void {
     const int Dd_thresh = alloc_free_fpr(*a1);
     const int Dd_abs    = alloc_free_fpr(*a1);
 
-    constexpr uint64_t k1e18_bits = std::bit_cast<uint64_t>(1e18);
+    constexpr auto k1e18_bits = std::bit_cast<uint64_t>(1e18);
     emit_ldr_literal_f64(buf, Dd_thresh, k1e18_bits);
     emit_fabs_f64(buf, Dd_abs, Dd_round);
     emit_fcmp_f64(buf, Dd_abs, Dd_thresh);

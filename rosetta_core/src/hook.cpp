@@ -15,7 +15,7 @@
 static void write_abs_jump(void* dst, const void* target) {
     uint32_t ldr_x9 = 0x58000049U;  // LDR X9, #8
     uint32_t br_x9 = 0xD61F0120U;   // BR  X9
-    uint8_t* p = (uint8_t*)dst;
+    auto* p = (uint8_t*)dst;
     memcpy(p + 0, &ldr_x9, 4);
     memcpy(p + 4, &br_x9, 4);
     memcpy(p + 8, &target, 8);

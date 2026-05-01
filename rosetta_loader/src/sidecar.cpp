@@ -217,9 +217,9 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask,
     tr.insn_buf.end      = origInsnEnd;
     tr.insn_buf.end_cap  = localInsnVec.size();
     tr.insn_buf.use_heap = 1;
-    for (size_t i = 0; i < kListCount; i++) {
-        lists[i]->begin = lists[i]->end = lists[i]->end_cap = nullptr;
-        lists[i]->_size = 0;
+    for (auto & list : lists) {
+        list->begin = list->end = list->end_cap = nullptr;
+        list->_size = 0;
     }
     tr.thread_context_offsets = &localTCO;
 
@@ -229,7 +229,7 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask,
 
     // Capture growth state. If insn_buf grew, Translator's grow() abandoned
     // localInsnVec for a calloc'd buffer (we own that and must free it).
-    uint8_t* const localInsnData = reinterpret_cast<uint8_t*>(tr.insn_buf.data);
+    auto* const localInsnData = reinterpret_cast<uint8_t*>(tr.insn_buf.data);
     bool     const insnGrew      = (localInsnData != localInsnVec.data());
     uint64_t const insnEmitted   = tr.insn_buf.end - origInsnEnd;
     Fixup*   localPushed[kListCount];
@@ -245,8 +245,8 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask,
         ~LocalCleanup() {
             if (insn_buf) { free(insn_buf);
 }
-            for (size_t i = 0; i < kListCount; i++) {
-                if (lists[i]) { ::operator delete(lists[i]);
+            for (auto & list : lists) {
+                if (list) { ::operator delete(list);
 }
             }
         }
@@ -386,7 +386,7 @@ void runReceiveLoop(mach_port_t servicePort, mach_port_t parentTaskPort) {
 
     uint64_t hits = 0;
     for (;;) {
-        mach_msg_header_t* hdr = reinterpret_cast<mach_msg_header_t*>(buf.bytes);
+        auto* hdr = reinterpret_cast<mach_msg_header_t*>(buf.bytes);
         hdr->msgh_local_port = servicePort;
         hdr->msgh_size = sizeof(buf);
 

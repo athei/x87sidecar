@@ -613,7 +613,7 @@ void emit_x87_tag_set_valid_batch(AssemblerBuffer& buf, int Xbase, int Wd_top,
                   /*immr*/ 31, /*imms*/ 30, Wd_top, Wd_tmp);
 
     // mask = (1 << (2 * count)) - 1  — covers count adjacent 2-bit pairs
-    const uint16_t mask = static_cast<uint16_t>((1U << (2 * count)) - 1);
+    const auto mask = static_cast<uint16_t>((1U << (2 * count)) - 1);
     emit_movn(buf, /*is_64=*/0, /*MOVZ opc*/ 2, /*hw*/ 0, mask, Wd_tmp2);
 
     // LSLV Wd_tmp2, Wd_tmp2, Wd_tmp  — shift mask into position

@@ -45,8 +45,8 @@ bool find_patterns(uintptr_t aot_base, uintptr_t& trans_insn_addr,
     static const std::array<uint8_t, 4> transaction_result_size_pattern = {0x00, 0x51, 0x80, 0x52};
     // look up __TEXT, __text section
 
-    mach_header_64* header = (mach_header_64*)aot_base;
-    load_command* cmd = (load_command*)(header + 1);
+    auto* header = (mach_header_64*)aot_base;
+    auto* cmd = (load_command*)(header + 1);
     section_64* text_section = nullptr;
 
     for (auto i = 0; i < header->ncmds; i++) {
@@ -54,7 +54,7 @@ bool find_patterns(uintptr_t aot_base, uintptr_t& trans_insn_addr,
             auto *seg = (segment_command_64*)cmd;
 
             if (strcmp(seg->segname, "__TEXT") == 0) {
-                section_64* sections = (section_64*)(uintptr_t(seg) + sizeof(segment_command_64));
+                auto* sections = (section_64*)(uintptr_t(seg) + sizeof(segment_command_64));
                 for (auto j = 0; j < seg->nsects; j++) {
                     auto& sect = sections[j];
                     if (strcmp(sect.sectname, "__text") == 0) {

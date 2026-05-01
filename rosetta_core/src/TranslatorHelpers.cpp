@@ -96,7 +96,7 @@ auto emit_load_immediate(TranslationResult& result, int is_64bit, uint64_t value
     int ones = 0;
     int chunks = is_64bit ? 4 : 2;
     for (int i = 0; i < chunks; i++) {
-        uint16_t chunk = (uint16_t)(v >> (16 * i));
+        auto chunk = (uint16_t)(v >> (16 * i));
         if (chunk == 0) {
             zeros++;
 }
@@ -112,14 +112,14 @@ auto emit_load_immediate(TranslationResult& result, int is_64bit, uint64_t value
     int hi_chunk = 0;
     int lo_chunk = 0;
     for (int i = chunks - 1; i >= 0; i--) {
-        uint16_t chunk = (uint16_t)(working >> (16 * i));
+        auto chunk = (uint16_t)(working >> (16 * i));
         if (chunk) {
             hi_chunk = i;
             break;
         }
     }
     for (int i = 0; i < chunks; i++) {
-        uint16_t chunk = (uint16_t)(working >> (16 * i));
+        auto chunk = (uint16_t)(working >> (16 * i));
         if (chunk) {
             lo_chunk = i;
             break;
@@ -127,13 +127,13 @@ auto emit_load_immediate(TranslationResult& result, int is_64bit, uint64_t value
     }
 
     // Emit MOVZ/MOVN for the starting chunk
-    uint16_t start_val = (uint16_t)(working >> (16 * hi_chunk));
+    auto start_val = (uint16_t)(working >> (16 * hi_chunk));
     uint16_t trivial = use_movz ? 0x0000 : 0xFFFF;
     emit_movn(result.insn_buf, is_64bit, use_movz ? 2 : 0, hi_chunk, start_val, reg);
 
     // Emit MOVK for remaining non-trivial chunks
     for (int i = hi_chunk - 1; i >= lo_chunk; i--) {
-        uint16_t chunk = (uint16_t)(v >> (16 * i));
+        auto chunk = (uint16_t)(v >> (16 * i));
         if (chunk != trivial) {
             emit_movn(result.insn_buf, is_64bit, /*MOVK=*/3, i, chunk, reg);
 }
@@ -197,7 +197,7 @@ auto compute_mem_operand_address(TranslationResult& result, bool is_64bit, IROpe
     // Load disp as unsigned — the binary uses unsigned __int64 for all
     // comparisons; a negative int64_t must NOT be treated as a small positive.
     // -------------------------------------------------------------------------
-    const uint64_t disp = static_cast<uint64_t>(operand->mem.disp);
+    const auto disp = static_cast<uint64_t>(operand->mem.disp);
 
     // -------------------------------------------------------------------------
     // Determine if the displacement can be encoded as ADD/SUB imm12 or imm12<<12.
@@ -221,7 +221,7 @@ auto compute_mem_operand_address(TranslationResult& result, bool is_64bit, IROpe
         disp_encodable = true;
     } else {
         // Try negated (SUB) forms
-        const uint64_t neg = static_cast<uint64_t>(-static_cast<int64_t>(disp));
+        const auto neg = static_cast<uint64_t>(-static_cast<int64_t>(disp));
         if (neg < 0x1000U) {
             imm_value = neg;
             imm_shift = 0;
@@ -667,8 +667,8 @@ auto translate_gpr(TranslationResult* result, int is_64bit, uint8_t reg, unsigne
         //   size_class 0 → immr=0, imms=7  → UBFX[7:0]  (full-width byte context)
         //   size_class 1 → immr=8, imms=15 → UBFX[15:8] (high byte: AH/BH/CH/DH)
         int dst = (hint_reg == GPR::XZR) ? alloc_free_gpr(*result) : hint_reg;
-        const int8_t immr = (int8_t)(size_class * 8);
-        const int8_t imms = (int8_t)(immr | 7);
+        const auto immr = (int8_t)(size_class * 8);
+        const auto imms = (int8_t)(immr | 7);
         // opc: extend_mode>1 → SBFX(0), else → UBFX(2)
         // is_64bit passed as N and as the is_64bit arg
         const int opc = (extend_mode > 1) ? 0 : 2;
@@ -778,7 +778,7 @@ auto read_operand_to_gpr(TranslationResult& result, bool is_64bit, IROperand* op
         const int addr_reg = compute_operand_address(result, (int)(addr_size == IROperandSize::S64),
                                                      operand, (int64_t)dst_reg);
 
-        const uint32_t mem_size = (uint32_t)operand->mem.size;
+        const auto mem_size = (uint32_t)operand->mem.size;
         assert(mem_size < (uint32_t)IROperandSize::S256 && "invalid OperandSize for memory load");
 
         const uint32_t natural_size =
@@ -800,7 +800,7 @@ auto read_operand_to_gpr(TranslationResult& result, bool is_64bit, IROperand* op
         const int addr_reg = compute_operand_address(result,
                                                      /*is_64bit=*/1, operand, (int64_t)out_reg);
 
-        const uint32_t mem_size = (uint32_t)operand->abs_mem.size;
+        const auto mem_size = (uint32_t)operand->abs_mem.size;
         assert(mem_size < (uint32_t)IROperandSize::S256 && "invalid OperandSize for AbsMem load");
 
         const uint32_t natural_size =

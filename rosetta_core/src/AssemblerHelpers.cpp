@@ -102,7 +102,7 @@ encode:
     assert(element_size >= rotation && "i should not exceed the element size");
 
     // Step 3: encode (N, immr, imms)
-    uint8_t imms_raw = (uint8_t)((run_len - 1) | (uint8_t)(0xFE * element_size));
+    auto imms_raw = (uint8_t)((run_len - 1) | (uint8_t)(0xFE * element_size));
     out.N = (imms_raw & 0x40) == 0;
     out.immr = (uint8_t)((element_size - rotation) & (element_size - 1));
     out.imms = imms_raw & 0x3F;

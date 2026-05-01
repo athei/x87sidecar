@@ -1003,8 +1003,8 @@ int main(int argc, char* argv[]) {
                     (uint64_t)(regAddr + regSize));
             return 1;
         }
-        const uint64_t codeRegStart = uint64_t(regAddr);
-        const uint64_t codeRegEnd = uint64_t(regAddr + regSize);
+        const auto codeRegStart = uint64_t(regAddr);
+        const auto codeRegEnd = uint64_t(regAddr + regSize);
         VERBOSE_LOG("M2: code region containing translate_insn: [0x%llx, 0x%llx) "
             "size=0x%llx prot=0x%x\n",
             codeRegStart, codeRegEnd, codeRegEnd - codeRegStart,
