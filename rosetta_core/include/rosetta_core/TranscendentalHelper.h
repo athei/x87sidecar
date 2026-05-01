@@ -94,6 +94,14 @@ struct alignas(8) TranscendentalConstants {
     // LSL #3] — no per-pair stride arithmetic.
     double   log2_invc[128];      // 1024 B
     double   log2_log2c[128];     // 1024 B
+
+    // ── fpatan (advsimd/atan2.c) ─────────────────────────────────────────
+    // Order-19 polynomial in z²: atan(z) ≈ z + z³·(c0 + z²·c1 + z⁴·c2 + ...
+    // + z³⁸·c19) for |z| ≤ 1.  Range reduction keeps |z| ≤ 1 by swapping
+    // numerator/denominator and adjusting via a quadrant shift.
+    double atan2_neg_two;          // -2.0   (shift = -2 if x < 0)
+    double atan2_pi_over_2;        // π/2
+    double atan2_c[20];            // c0..c19
 };
 
 void set_transcendental_constants_addr(uint64_t addr);

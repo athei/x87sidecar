@@ -1360,6 +1360,29 @@ int main(int argc, char* argv[]) {
         };
         memcpy(consts.log2_invc, kLog2Invc, sizeof(kLog2Invc));
         memcpy(consts.log2_log2c, kLog2Log2c, sizeof(kLog2Log2c));
+        // fpatan / atan2 polynomial (advsimd/atan2.c).
+        consts.atan2_neg_two   = -2.0;
+        consts.atan2_pi_over_2 = 0x1.921fb54442d18p+0;
+        consts.atan2_c[0]  = -0x1.555555555552ap-2;
+        consts.atan2_c[1]  =  0x1.9999999995aebp-3;
+        consts.atan2_c[2]  = -0x1.24924923923f6p-3;
+        consts.atan2_c[3]  =  0x1.c71c7184288a2p-4;
+        consts.atan2_c[4]  = -0x1.745d11fb3d32bp-4;
+        consts.atan2_c[5]  =  0x1.3b136a18051b9p-4;
+        consts.atan2_c[6]  = -0x1.110e6d985f496p-4;
+        consts.atan2_c[7]  =  0x1.e1bcf7f08801dp-5;
+        consts.atan2_c[8]  = -0x1.ae644e28058c3p-5;
+        consts.atan2_c[9]  =  0x1.82eeb1fed85c6p-5;
+        consts.atan2_c[10] = -0x1.59d7f901566cbp-5;
+        consts.atan2_c[11] =  0x1.2c982855ab069p-5;
+        consts.atan2_c[12] = -0x1.eb49592998177p-6;
+        consts.atan2_c[13] =  0x1.69d8b396e3d38p-6;
+        consts.atan2_c[14] = -0x1.ca980345c4204p-7;
+        consts.atan2_c[15] =  0x1.dc050eafde0b3p-8;
+        consts.atan2_c[16] = -0x1.7ea70755b8eccp-9;
+        consts.atan2_c[17] =  0x1.ba3da3de903e8p-11;
+        consts.atan2_c[18] = -0x1.44a4b059b6f67p-13;
+        consts.atan2_c[19] =  0x1.c4a45029e5a91p-17;
         const uint64_t constsEnd = constsAddr + sizeof(consts);
         if (constsEnd > padStartAddr + padBytes) {
             fprintf(stdout,

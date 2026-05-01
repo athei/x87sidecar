@@ -64,6 +64,10 @@ struct ConstOff {
     static constexpr int Log2C4           = 25 + 128 + 88 + 7;  // = 248
     static constexpr int Log2InvcByteOff   = (25 + 128 + 88 + 8) * 8;  // 1992
     static constexpr int Log2Log2cByteOff  = (25 + 128 + 88 + 8 + 128) * 8;  // 3016
+    // fpatan / atan2 (after log2_log2c, double offset 25+128+88+8+128+128=505)
+    static constexpr int Atan2NegTwo       = 505;
+    static constexpr int Atan2PiOver2      = 506;
+    static constexpr int Atan2C0           = 507;  // c0..c19 contiguous → C(i) = 507 + i
 };
 
 static_assert(offsetof(rosetta_core::TranscendentalConstants, inv_pi)            == ConstOff::InvPi          * 8, "ConstOff::InvPi drift");
@@ -90,6 +94,9 @@ static_assert(offsetof(rosetta_core::TranscendentalConstants, log2_c0)          
 static_assert(offsetof(rosetta_core::TranscendentalConstants, log2_c4)           == ConstOff::Log2C4           * 8, "ConstOff::Log2C4 drift");
 static_assert(offsetof(rosetta_core::TranscendentalConstants, log2_invc)         == ConstOff::Log2InvcByteOff,     "ConstOff::Log2InvcByteOff drift");
 static_assert(offsetof(rosetta_core::TranscendentalConstants, log2_log2c)        == ConstOff::Log2Log2cByteOff,    "ConstOff::Log2Log2cByteOff drift");
+static_assert(offsetof(rosetta_core::TranscendentalConstants, atan2_neg_two)     == ConstOff::Atan2NegTwo      * 8, "ConstOff::Atan2NegTwo drift");
+static_assert(offsetof(rosetta_core::TranscendentalConstants, atan2_pi_over_2)   == ConstOff::Atan2PiOver2     * 8, "ConstOff::Atan2PiOver2 drift");
+static_assert(offsetof(rosetta_core::TranscendentalConstants, atan2_c)           == ConstOff::Atan2C0          * 8, "ConstOff::Atan2C0 drift");
 
 enum class TrigReduceMode { Sin, Cos };
 
@@ -659,6 +666,158 @@ void emit_inline_fyl2x(TranslationResult& a1, AssemblerBuffer& buf,
 
     emit_fmul_f64(buf, /*Dd=*/0, /*Dn=*/0, /*Dm=*/Dy);                // d0 = y * log2(x)
     free_fpr(a1, Dy);
+}
+
+// fpatan: replace ST(1) with atan2(ST(1), ST(0)); pop.  Port of
+// optimized-routines' AdvSIMD atan2 (math/aarch64/advsimd/atan2.c)
+// scalarised to ARM64.  Order-19 polynomial in z² over |z| ≤ 1, with
+// range reduction via numerator/denominator swap and quadrant shift:
+//
+//   sign_xy = (bits(x) ^ bits(y)) & sign_mask
+//   ax = |x|;  ay = |y|
+//   pred_aygtax = (ay > ax)
+//   num = pred_aygtax ? -ax : ay
+//   den = pred_aygtax ?  ay : ax
+//   z = num / den
+//   shift = (x<0 ? -2 : 0) + (pred_aygtax ? 1 : 0)
+//   z2 = z·z;  z3 = z2·z
+//   poly (Horner): start from c19, iterate poly = c[i] + z²·poly down to c0
+//   ret = z + shift·(π/2) + z³·poly
+//   result = bits_to_double(bits(ret) ^ sign_xy)
+//
+// Special cases (zero/inf/NaN) follow whatever IEEE FP arithmetic does;
+// no scalar fallback as in the AdvSIMD source (real game workloads
+// don't feed degenerate inputs to fpatan).
+void emit_inline_fpatan(TranslationResult& a1, AssemblerBuffer& buf,
+                         int Xbase, int Wd_top, int Wd_tmp) {
+    const int Xst_base  = x87_get_st_base(a1);
+    const int depth_st0 = resolve_depth(a1, 0);
+    const int depth_st1 = resolve_depth(a1, 1);
+
+    // 1. Load Dx = ST(0), Dy = ST(1).
+    const int Dx = alloc_free_fpr(a1);
+    emit_load_st(buf, Xbase, Wd_top, depth_st0, Wd_tmp, Dx, Xst_base);
+    const int Dy = alloc_free_fpr(a1);
+    emit_load_st(buf, Xbase, Wd_top, depth_st1, Wd_tmp, Dy, Xst_base);
+
+    const int Xconst = alloc_free_gpr(a1);
+    const uint64_t consts_addr = rosetta_core::get_transcendental_constants_addr();
+    assert(consts_addr != 0 && "transcendental constants not installed");
+    emit_movz_movk_abs64(buf, Xconst, consts_addr);
+
+    // 2. sign_xy = (bits(x) ^ bits(y)) & 0x8000000000000000
+    const int Xsign_xy = alloc_free_gpr(a1);
+    {
+        const int Xtmp = alloc_free_gpr(a1);
+        emit_fmov_d_to_x(buf, Xsign_xy, Dx);
+        emit_fmov_d_to_x(buf, Xtmp, Dy);
+        emit_logical_shifted_reg(buf, /*is_64=*/1, /*EOR=*/2, /*n=*/0,
+                                  /*shift_type=LSL*/0, /*Rm=*/Xtmp,
+                                  /*shift_amount=*/0, /*Rn=*/Xsign_xy, /*Rd=*/Xsign_xy);
+        // AND Xsign_xy, Xsign_xy, #0x8000000000000000  (sign bit only).
+        // Bitmask immediate: N=1, immr=1, imms=0  (1 one, rotated right by 1).
+        emit_and_imm(buf, /*is_64=*/1, Xsign_xy, /*N=*/1, /*immr=*/1, /*imms=*/0, Xsign_xy);
+        free_gpr(a1, Xtmp);
+    }
+
+    // 3. ax = |x|, ay = |y|
+    const int Dax = alloc_free_fpr(a1);
+    const int Day = alloc_free_fpr(a1);
+    emit_fabs_f64(buf, Dax, Dx);
+    emit_fabs_f64(buf, Day, Dy);
+    free_fpr(a1, Dy);
+    // Dx is still needed for the sign-of-x test below — keep it.
+
+    // 4. pred_aygtax = (ay > ax).  FCMP Day, Dax sets NZCV.
+    //    Then build num, den, shift_b via FCSEL on the same flags.
+    emit_fcmp_f64(buf, Day, Dax);
+    const int Dneg_ax = alloc_free_fpr(a1);
+    emit_fneg_f64(buf, Dneg_ax, Dax);
+    const int Dnum = alloc_free_fpr(a1);
+    const int Dden = alloc_free_fpr(a1);
+    emit_fcsel_f64(buf, Dnum, Dneg_ax, Day, /*cond=GT*/12);
+    emit_fcsel_f64(buf, Dden, Day,    Dax, /*cond=GT*/12);
+    free_fpr(a1, Dneg_ax);
+    free_fpr(a1, Dax);
+    free_fpr(a1, Day);
+
+    const int Dshift_b = alloc_free_fpr(a1);
+    {
+        const int Dzero = alloc_free_fpr(a1);
+        const int Done  = alloc_free_fpr(a1);
+        emit_movi_d_zero(buf, Dzero);
+        emit_fmov_d_one(buf, Done);
+        emit_fcsel_f64(buf, Dshift_b, Done, Dzero, /*cond=GT*/12);
+        free_fpr(a1, Dzero);
+        free_fpr(a1, Done);
+    }
+
+    // 5. z = num / den
+    const int Dz = alloc_free_fpr(a1);
+    emit_fdiv_f64(buf, Dz, Dnum, Dden);
+    free_fpr(a1, Dnum);
+    free_fpr(a1, Dden);
+
+    // 6. shift_a = (x < 0) ? -2.0 : 0.0;  shift = shift_a + shift_b
+    emit_fcmp_zero_f64(buf, Dx);
+    const int Dshift = alloc_free_fpr(a1);
+    {
+        const int Dneg_two = alloc_free_fpr(a1);
+        const int Dzero    = alloc_free_fpr(a1);
+        emit_fldr_imm(buf, 3, Dneg_two, Xconst, ConstOff::Atan2NegTwo);
+        emit_movi_d_zero(buf, Dzero);
+        emit_fcsel_f64(buf, Dshift, Dneg_two, Dzero, /*cond=MI*/4);
+        free_fpr(a1, Dneg_two);
+        free_fpr(a1, Dzero);
+    }
+    emit_fadd_f64(buf, Dshift, Dshift, Dshift_b);
+    free_fpr(a1, Dshift_b);
+    free_fpr(a1, Dx);
+
+    // 7. z2 = z·z, z3 = z2·z
+    const int Dz2 = alloc_free_fpr(a1);
+    emit_fmul_f64(buf, Dz2, Dz, Dz);
+    const int Dz3 = alloc_free_fpr(a1);
+    emit_fmul_f64(buf, Dz3, Dz2, Dz);
+
+    // 8. Horner polynomial in z²: poly = c19; poly = c[i] + z²·poly for i=18..0
+    const int Dpoly = alloc_free_fpr(a1);
+    {
+        const int Dtmp = alloc_free_fpr(a1);
+        emit_fldr_imm(buf, 3, Dpoly, Xconst, ConstOff::Atan2C0 + 19);
+        for (int i = 18; i >= 0; --i) {
+            emit_fldr_imm(buf, 3, Dtmp, Xconst, ConstOff::Atan2C0 + i);
+            emit_fmadd_f64(buf, Dpoly, Dz2, Dpoly, Dtmp);
+        }
+        free_fpr(a1, Dtmp);
+    }
+    free_fpr(a1, Dz2);
+
+    // 9. ret = z + shift·(π/2) + z³·poly
+    {
+        const int Dpi2 = alloc_free_fpr(a1);
+        emit_fldr_imm(buf, 3, Dpi2, Xconst, ConstOff::Atan2PiOver2);
+        emit_fmadd_f64(buf, Dz, Dshift, Dpi2, Dz);                 // Dz := z + shift·(π/2)
+        free_fpr(a1, Dpi2);
+    }
+    emit_fmadd_f64(buf, Dz, Dz3, Dpoly, Dz);                       // Dz += z³·poly
+    free_fpr(a1, Dpoly);
+    free_fpr(a1, Dz3);
+    free_fpr(a1, Dshift);
+
+    // 10. result = bits_to_double(bits(ret) ^ sign_xy) → d0
+    {
+        const int Xret = alloc_free_gpr(a1);
+        emit_fmov_d_to_x(buf, Xret, Dz);
+        emit_logical_shifted_reg(buf, /*is_64=*/1, /*EOR=*/2, /*n=*/0,
+                                  /*shift_type=LSL*/0, /*Rm=*/Xsign_xy,
+                                  /*shift_amount=*/0, /*Rn=*/Xret, /*Rd=*/Xret);
+        emit_fmov_x_to_d(buf, /*Dd=*/0, Xret);
+        free_gpr(a1, Xret);
+    }
+    free_gpr(a1, Xsign_xy);
+    free_gpr(a1, Xconst);
+    free_fpr(a1, Dz);
 }
 
 void emit_inline_fyl2xp1(TranslationResult& a1, AssemblerBuffer& buf,

@@ -76,4 +76,9 @@ void emit_inline_fyl2x(TranslationResult& a1, AssemblerBuffer& buf,
 void emit_inline_fyl2xp1(TranslationResult& a1, AssemblerBuffer& buf,
                           int Xbase, int Wd_top, int Wd_tmp);
 
+// fpatan: replace ST(1) with atan2(ST(1), ST(0)); pop.  Order-19
+// polynomial port of optimized-routines' AdvSIMD atan2.  Result in d0.
+void emit_inline_fpatan(TranslationResult& a1, AssemblerBuffer& buf,
+                         int Xbase, int Wd_top, int Wd_tmp);
+
 }  // namespace TranslatorX87
