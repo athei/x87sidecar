@@ -55,4 +55,11 @@ void emit_inline_fcos(TranslationResult& a1, AssemblerBuffer& buf,
 void emit_inline_fsincos(TranslationResult& a1, AssemblerBuffer& buf,
                           int Xbase, int Wd_top, int Wd_tmp);
 
+// f2xm1: replace ST(0) with 2^ST(0) - 1.  Spec input |x| <= 1; the
+// inline impl follows optimized-routines' AdvSIMD exp2m1 (table-based,
+// 128-entry exp_table + 88-entry small-x scalem1 fixup table).  Result
+// in d0.
+void emit_inline_f2xm1(TranslationResult& a1, AssemblerBuffer& buf,
+                       int Xbase, int Wd_top, int Wd_tmp);
+
 }  // namespace TranslatorX87

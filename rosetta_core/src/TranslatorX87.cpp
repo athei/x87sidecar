@@ -4564,16 +4564,16 @@ auto translate_fprem1(TranslationResult* a1, IRInstr* /*a2*/) -> void {
 
 // =============================================================================
 // F2XM1 — replace ST(0) with 2^ST(0) - 1.  x87 spec says input must be
-// |ST(0)| <= 1; outside that range result is undefined.  We always
-// compute via std::exp2(in) - 1.0 in the sidecar regardless of input.
+// |ST(0)| <= 1; outside that range result is undefined.  Inline impl
+// (emit_inline_f2xm1) follows optimized-routines' AdvSIMD exp2m1 with
+// the 128-entry exp_table and 88-entry scalem1 fixup table for small x.
 // =============================================================================
 auto translate_f2xm1(TranslationResult* a1, IRInstr* /*a2*/) -> void {
     AssemblerBuffer& buf = a1->insn_buf;
     auto [Xbase, Wd_top] = x87_begin(*a1, buf);
     const int Wd_tmp = alloc_gpr(*a1, 2);
 
-    emit_transcendental_ipc(*a1, buf, Xbase, Wd_top, Wd_tmp,
-                            rosetta_core::kTransF2xm1, /*num_inputs=*/1);
+    emit_inline_f2xm1(*a1, buf, Xbase, Wd_top, Wd_tmp);
 
     const int Xst_base = x87_get_st_base(*a1);
     const int depth_st0 = resolve_depth(*a1, 0);

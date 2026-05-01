@@ -1158,6 +1158,103 @@ int main(int argc, char* argv[]) {
         consts.sin_c[6] = -0x1.9e9540300a1p-41;
         consts.range_val = 0x1p23;
         consts.half = 0.5;
+        // f2xm1 polynomial coefficients (advsimd/exp2m1.c).
+        consts.exp2m1_log2_hi    = 0x1.62e42fefa39efp-1;
+        consts.exp2m1_log2_lo    = 0x1.abc9e3b39803f3p-56;
+        consts.exp2m1_c1         = 0x1.ebfbdff82c58ep-3;
+        consts.exp2m1_c2         = 0x1.c6b08d71f5804p-5;
+        consts.exp2m1_c3         = 0x1.3b2ab6fee7509p-7;
+        consts.exp2m1_c4         = 0x1.5d1d37eb33b15p-10;
+        consts.exp2m1_c5         = 0x1.423f35f371d9ap-13;
+        consts.exp2m1_c6         = 0x1.e7d57ad9a5f93p-5;
+        consts.exp2m1_shift      = 0x1.8p45;
+        consts.exp2m1_rnd2zero   = -0x1p-8;
+        consts.exp2m1_tablebound = 0x1.5bfffffffffffp-2;
+        consts.one               = 1.0;
+        // 2^(j/128), j=0..127, biased-exponent form.  Source:
+        // optimized-routines v_exp_data.c.
+        static constexpr uint64_t kExpTable[128] = {
+            0x3ff0000000000000ull, 0x3feff63da9fb3335ull, 0x3fefec9a3e778061ull,
+            0x3fefe315e86e7f85ull, 0x3fefd9b0d3158574ull, 0x3fefd06b29ddf6deull,
+            0x3fefc74518759bc8ull, 0x3fefbe3ecac6f383ull, 0x3fefb5586cf9890full,
+            0x3fefac922b7247f7ull, 0x3fefa3ec32d3d1a2ull, 0x3fef9b66affed31bull,
+            0x3fef9301d0125b51ull, 0x3fef8abdc06c31ccull, 0x3fef829aaea92de0ull,
+            0x3fef7a98c8a58e51ull, 0x3fef72b83c7d517bull, 0x3fef6af9388c8deaull,
+            0x3fef635beb6fcb75ull, 0x3fef5be084045cd4ull, 0x3fef54873168b9aaull,
+            0x3fef4d5022fcd91dull, 0x3fef463b88628cd6ull, 0x3fef3f49917ddc96ull,
+            0x3fef387a6e756238ull, 0x3fef31ce4fb2a63full, 0x3fef2b4565e27cddull,
+            0x3fef24dfe1f56381ull, 0x3fef1e9df51fdee1ull, 0x3fef187fd0dad990ull,
+            0x3fef1285a6e4030bull, 0x3fef0cafa93e2f56ull, 0x3fef06fe0a31b715ull,
+            0x3fef0170fc4cd831ull, 0x3feefc08b26416ffull, 0x3feef6c55f929ff1ull,
+            0x3feef1a7373aa9cbull, 0x3feeecae6d05d866ull, 0x3feee7db34e59ff7ull,
+            0x3feee32dc313a8e5ull, 0x3feedea64c123422ull, 0x3feeda4504ac801cull,
+            0x3feed60a21f72e2aull, 0x3feed1f5d950a897ull, 0x3feece086061892dull,
+            0x3feeca41ed1d0057ull, 0x3feec6a2b5c13cd0ull, 0x3feec32af0d7d3deull,
+            0x3feebfdad5362a27ull, 0x3feebcb299fddd0dull, 0x3feeb9b2769d2ca7ull,
+            0x3feeb6daa2cf6642ull, 0x3feeb42b569d4f82ull, 0x3feeb1a4ca5d920full,
+            0x3feeaf4736b527daull, 0x3feead12d497c7fdull, 0x3feeab07dd485429ull,
+            0x3feea9268a5946b7ull, 0x3feea76f15ad2148ull, 0x3feea5e1b976dc09ull,
+            0x3feea47eb03a5585ull, 0x3feea34634ccc320ull, 0x3feea23882552225ull,
+            0x3feea155d44ca973ull, 0x3feea09e667f3bcdull, 0x3feea012750bdabfull,
+            0x3fee9fb23c651a2full, 0x3fee9f7df9519484ull, 0x3fee9f75e8ec5f74ull,
+            0x3fee9f9a48a58174ull, 0x3fee9feb564267c9ull, 0x3feea0694fde5d3full,
+            0x3feea11473eb0187ull, 0x3feea1ed0130c132ull, 0x3feea2f336cf4e62ull,
+            0x3feea427543e1a12ull, 0x3feea589994cce13ull, 0x3feea71a4623c7adull,
+            0x3feea8d99b4492edull, 0x3feeaac7d98a6699ull, 0x3feeace5422aa0dbull,
+            0x3feeaf3216b5448cull, 0x3feeb1ae99157736ull, 0x3feeb45b0b91ffc6ull,
+            0x3feeb737b0cdc5e5ull, 0x3feeba44cbc8520full, 0x3feebd829fde4e50ull,
+            0x3feec0f170ca07baull, 0x3feec49182a3f090ull, 0x3feec86319e32323ull,
+            0x3feecc667b5de565ull, 0x3feed09bec4a2d33ull, 0x3feed503b23e255dull,
+            0x3feed99e1330b358ull, 0x3feede6b5579fdbfull, 0x3feee36bbfd3f37aull,
+            0x3feee89f995ad3adull, 0x3feeee07298db666ull, 0x3feef3a2b84f15fbull,
+            0x3feef9728de5593aull, 0x3feeff76f2fb5e47ull, 0x3fef05b030a1064aull,
+            0x3fef0c1e904bc1d2ull, 0x3fef12c25bd71e09ull, 0x3fef199bdd85529cull,
+            0x3fef20ab5fffd07aull, 0x3fef27f12e57d14bull, 0x3fef2f6d9406e7b5ull,
+            0x3fef3720dcef9069ull, 0x3fef3f0b555dc3faull, 0x3fef472d4a07897cull,
+            0x3fef4f87080d89f2ull, 0x3fef5818dcfba487ull, 0x3fef60e316c98398ull,
+            0x3fef69e603db3285ull, 0x3fef7321f301b460ull, 0x3fef7c97337b9b5full,
+            0x3fef864614f5a129ull, 0x3fef902ee78b3ff6ull, 0x3fef9a51fbc74c83ull,
+            0x3fefa4afa2a490daull, 0x3fefaf482d8e67f1ull, 0x3fefba1bee615a27ull,
+            0x3fefc52b376bba97ull, 0x3fefd0765b6e4540ull, 0x3fefdbfdad9cbe14ull,
+            0x3fefe7c1819e90d8ull, 0x3feff3c22b8f71f1ull,
+        };
+        memcpy(consts.exp_table, kExpTable, sizeof(kExpTable));
+        // (2^(j/128) - 1) for j=0..43 (positive x), then j=-44..-1
+        // (negative x, accessed via index offset 24).  Source:
+        // optimized-routines exp2m1.c scalem1[].
+        static constexpr uint64_t kExpScalem1[88] = {
+            0x0000000000000000ull, 0x3f763da9fb33356eull, 0x3f864d1f3bc03077ull,
+            0x3f90c57a1b9fe12full, 0x3f966c34c5615d0full, 0x3f9c1aca777db772ull,
+            0x3fa0e8a30eb37901ull, 0x3fa3c7d958de7069ull, 0x3fa6ab0d9f3121ecull,
+            0x3fa992456e48fee8ull, 0x3fac7d865a7a3440ull, 0x3faf6cd5ffda635eull,
+            0x3fb1301d0125b50aull, 0x3fb2abdc06c31cc0ull, 0x3fb429aaea92ddfbull,
+            0x3fb5a98c8a58e512ull, 0x3fb72b83c7d517aeull, 0x3fb8af9388c8de9cull,
+            0x3fba35beb6fcb754ull, 0x3fbbbe084045cd3aull, 0x3fbd4873168b9aa8ull,
+            0x3fbed5022fcd91ccull, 0x3fc031dc431466b2ull, 0x3fc0fa4c8beee4b1ull,
+            0x3fc1c3d373ab11c3ull, 0x3fc28e727d9531faull, 0x3fc35a2b2f13e6e9ull,
+            0x3fc426ff0fab1c05ull, 0x3fc4f4efa8fef709ull, 0x3fc5c3fe86d6cc80ull,
+            0x3fc6942d3720185aull, 0x3fc7657d49f17ab1ull, 0x3fc837f0518db8a9ull,
+            0x3fc90b87e266c18aull, 0x3fc9e0459320b7faull, 0x3fcab62afc94ff86ull,
+            0x3fcb8d39b9d54e55ull, 0x3fcc6573682ec32cull, 0x3fcd3ed9a72cffb7ull,
+            0x3fce196e189d4724ull, 0x3fcef5326091a112ull, 0x3fcfd228256400ddull,
+            0x3fd0582887dcb8a8ull, 0x3fd0c7d76542a25bull, 0xbfcb23213cc8e86cull,
+            0xbfca96ecd0deb7c4ull, 0xbfca09f58086c6c2ull, 0xbfc97c3a3cd7e119ull,
+            0xbfc8edb9f5703dc0ull, 0xbfc85e7398737374ull, 0xbfc7ce6612886a6dull,
+            0xbfc73d904ed74b33ull, 0xbfc6abf137076a8eull, 0xbfc61987b33d329eull,
+            0xbfc58652aa180903ull, 0xbfc4f25100b03219ull, 0xbfc45d819a94b14bull,
+            0xbfc3c7e359c9266aull, 0xbfc331751ec3a814ull, 0xbfc29a35c86a9b1aull,
+            0xbfc20224341286e4ull, 0xbfc1693f3d7be6daull, 0xbfc0cf85bed0f8b7ull,
+            0xbfc034f690a387deull, 0xbfbf332113d56b1full, 0xbfbdfaa500017c2dull,
+            0xbfbcc0768d4175a6ull, 0xbfbb84935fc8c257ull, 0xbfba46f918837cb7ull,
+            0xbfb907a55511e032ull, 0xbfb7c695afc3b424ull, 0xbfb683c7bf93b074ull,
+            0xbfb53f391822dbc7ull, 0xbfb3f8e749b3e342ull, 0xbfb2b0cfe1266bd4ull,
+            0xbfb166f067f25cfeull, 0xbfb01b466423250aull, 0xbfad9b9eb0a5ed76ull,
+            0xbfaafd11874c009eull, 0xbfa85ae0438b37cbull, 0xbfa5b505d5b6f268ull,
+            0xbfa30b7d271980f7ull, 0xbfa05e4119ea5d89ull, 0xbf9b5a991288ad16ull,
+            0xbf95f134923757f3ull, 0xbf90804a4c683d8full, 0xbf860f9f985bc9f4ull,
+            0xbf761eea3847077bull,
+        };
+        memcpy(consts.exp_scalem1, kExpScalem1, sizeof(kExpScalem1));
         const uint64_t constsEnd = constsAddr + sizeof(consts);
         if (constsEnd > padStartAddr + padBytes) {
             fprintf(stdout,
