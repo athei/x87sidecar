@@ -4523,7 +4523,20 @@ auto translate_fyl2x(TranslationResult* a1, IRInstr* /*a2*/) -> void {
 }
 
 auto translate_fyl2xp1(TranslationResult* a1, IRInstr* /*a2*/) -> void {
-    emit_2in_pop_translate(*a1, a1->insn_buf, rosetta_core::kTransFyl2xp1);
+    AssemblerBuffer& buf = a1->insn_buf;
+    auto [Xbase, Wd_top] = x87_begin(*a1, buf);
+    const int Wd_tmp = alloc_gpr(*a1, 2);
+
+    emit_inline_fyl2xp1(*a1, buf, Xbase, Wd_top, Wd_tmp);
+
+    const int Xst_base = x87_get_st_base(*a1);
+    const int depth_st1 = resolve_depth(*a1, 1);
+    emit_store_st(buf, Xbase, Wd_top, depth_st1, Wd_tmp, /*Dd=*/0, Xst_base);
+
+    x87_pop(buf, *a1, Xbase, Wd_top, Wd_tmp);
+
+    x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp);
+    free_gpr(*a1, Wd_tmp);
 }
 
 // =============================================================================

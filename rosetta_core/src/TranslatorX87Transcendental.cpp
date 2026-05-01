@@ -661,6 +661,43 @@ void emit_inline_fyl2x(TranslationResult& a1, AssemblerBuffer& buf,
     free_fpr(a1, Dy);
 }
 
+void emit_inline_fyl2xp1(TranslationResult& a1, AssemblerBuffer& buf,
+                          int Xbase, int Wd_top, int Wd_tmp) {
+    // x86 fyl2xp1: ST(1) := ST(1) * log2(ST(0) + 1); pop.  x87 spec
+    // restricts the input to -1+ε ≤ ST(0) ≤ 1-√2/2 ≈ 0.293; in that
+    // range, simple add-then-log2 is accurate enough (no need for
+    // log1p's special-case for cancellation).
+    const int Xst_base  = x87_get_st_base(a1);
+    const int depth_st0 = resolve_depth(a1, 0);
+    const int depth_st1 = resolve_depth(a1, 1);
+
+    const int Dx = alloc_free_fpr(a1);
+    emit_load_st(buf, Xbase, Wd_top, depth_st0, Wd_tmp, Dx, Xst_base);
+
+    const int Dy = alloc_free_fpr(a1);
+    emit_load_st(buf, Xbase, Wd_top, depth_st1, Wd_tmp, Dy, Xst_base);
+
+    // Dx := Dx + 1.0   (in-place; the "+1" of fyl2xp1).
+    {
+        const int Done = alloc_free_fpr(a1);
+        emit_fmov_d_one(buf, Done);
+        emit_fadd_f64(buf, Dx, Dx, Done);
+        free_fpr(a1, Done);
+    }
+
+    const int Xconst = alloc_free_gpr(a1);
+    const uint64_t consts_addr = rosetta_core::get_transcendental_constants_addr();
+    assert(consts_addr != 0 && "transcendental constants not installed");
+    emit_movz_movk_abs64(buf, Xconst, consts_addr);
+
+    emit_inline_log2(a1, buf, Dx, Xconst, /*Dd_out=*/0);
+    free_fpr(a1, Dx);
+    free_gpr(a1, Xconst);
+
+    emit_fmul_f64(buf, /*Dd=*/0, /*Dn=*/0, /*Dm=*/Dy);
+    free_fpr(a1, Dy);
+}
+
 void emit_inline_fsincos(TranslationResult& a1, AssemblerBuffer& buf,
                           int Xbase, int Wd_top, int Wd_tmp) {
     // fsincos: replace ST(0) with sin(ST(0)) and push cos(ST(0)).

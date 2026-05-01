@@ -69,4 +69,11 @@ void emit_inline_f2xm1(TranslationResult& a1, AssemblerBuffer& buf,
 void emit_inline_fyl2x(TranslationResult& a1, AssemblerBuffer& buf,
                         int Xbase, int Wd_top, int Wd_tmp);
 
+// fyl2xp1: replace ST(1) with ST(1) * log2(ST(0) + 1); pop.  Reuses
+// the same inline log2 helper as fyl2x — for x87's spec input range
+// (-1+ε ≤ ST(0) ≤ 1-√2/2) the simple add-then-log2 form is accurate
+// enough; no log1p-style cancellation handling.  Result in d0.
+void emit_inline_fyl2xp1(TranslationResult& a1, AssemblerBuffer& buf,
+                          int Xbase, int Wd_top, int Wd_tmp);
+
 }  // namespace TranslatorX87
