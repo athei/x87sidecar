@@ -11,10 +11,12 @@ Checks: >
   modernize-*,
   -modernize-use-trailing-return-type,
   -modernize-avoid-c-arrays,
+  -modernize-use-std-print,
   readability-*,
   -readability-identifier-length,
   -readability-magic-numbers,
-  -readability-function-cognitive-complexity
+  -readability-function-cognitive-complexity,
+  -readability-implicit-bool-conversion
 
 WarningsAsErrors: ''
 
