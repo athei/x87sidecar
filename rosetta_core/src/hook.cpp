@@ -10,8 +10,8 @@
 #include <cstring>
 
 enum {
-PATCH_SIZE = 16u,
-AARCH64_PAGE_SIZE = 16384u
+PATCH_SIZE = 16U,
+AARCH64_PAGE_SIZE = 16384U
 };
 
 static void write_abs_jump(void* dst, const void* target) {

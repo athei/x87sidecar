@@ -56,7 +56,7 @@ private:
 
     // Wait for the traced process to stop. If expectedSignal is non-zero,
     // loop and suppress any other signals until the expected one arrives.
-    bool waitForStopped(int expectedSignal = 0) const {
+    [[nodiscard]] bool waitForStopped(int expectedSignal = 0) const {
         while (true) {
             int status;
             if (waitpid(childPid_, &status, 0) == -1) {
@@ -135,7 +135,7 @@ public:
         return waitForStopped(SIGTRAP);
     }
 
-    bool detach() const {
+    [[nodiscard]] bool detach() const {
         if (ptrace(PT_DETACH, childPid_, (caddr_t)1, 0) < 0) {
             fprintf(stdout, "ptrace(PT_DETACH): %s\n", strerror(errno));
             return false;
@@ -242,7 +242,7 @@ public:
         CPSR
     };
 
-    uint64_t readRegister(Register reg) const {
+    [[nodiscard]] uint64_t readRegister(Register reg) const {
         thread_act_port_array_t threadList;
         mach_msg_type_number_t threadCount;
 
@@ -298,7 +298,7 @@ public:
         return value;
     }
 
-    bool setRegister(Register reg, uint64_t value) const {
+    [[nodiscard]] bool setRegister(Register reg, uint64_t value) const {
         thread_act_port_array_t threadList;
         mach_msg_type_number_t threadCount;
 
@@ -361,7 +361,7 @@ public:
         return true;
     }
 
-    bool adjustMemoryProtection(uint64_t address, vm_prot_t protection, mach_vm_size_t size) const {
+    [[nodiscard]] bool adjustMemoryProtection(uint64_t address, vm_prot_t protection, mach_vm_size_t size) const {
         // 4KB page size in rosetta process
         vm_size_t pageSize = 0x1000;
         // align to page boundary
@@ -436,7 +436,7 @@ public:
         return true;
     }
 
-    bool restoreThreadState(const arm_thread_state64_t& state) const {
+    [[nodiscard]] bool restoreThreadState(const arm_thread_state64_t& state) const {
         thread_act_port_array_t threadList;
         mach_msg_type_number_t threadCount;
 
@@ -464,7 +464,7 @@ public:
         return true;
     }
 
-    auto findRuntime() -> uintptr_t {
+    auto findRuntime() const -> uintptr_t {
         mach_vm_address_t address = 0;
         mach_vm_size_t size;
         vm_region_basic_info_data_64_t info;
@@ -939,7 +939,7 @@ int main(int argc, char* argv[]) {
             }
             const uint32_t origImm = (origInsn >> 5) & 0xFFFFU;
             const uint32_t newInsn =
-                (origInsn & ~0x001FFFE0U) | ((kNewTrSize) << 5);
+                (origInsn & ~0x001FFFE0U) | (kNewTrSize << 5);
 
             if (!dbg.adjustMemoryProtection(
                     trSizeAddr, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY,
