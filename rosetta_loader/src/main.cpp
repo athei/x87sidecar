@@ -626,6 +626,11 @@ struct AttachDecision {
 // unnecessary). Anything else — Mach-O test/bench binaries, unknown
 // inputs — falls through and the loader attaches by default.
 static AttachDecision classifyAttachTarget(int argc, char* argv[]) {
+    // Capture the first .exe-looking argv so the always-on summary line
+    // can identify the actual program being launched, even when classifyPE
+    // can't read it (file resolved relative to a cwd we don't share).
+    // Without this, x86-PE invocations fall through to argv[1] (= wine).
+    std::string fallbackExe;
     for (int i = 2; i < argc; i++) {
         // Windows-style path (drive letter + colon)
         if (strlen(argv[i]) >= 3 && argv[i][1] == ':') {
@@ -647,6 +652,9 @@ static AttachDecision classifyAttachTarget(int argc, char* argv[]) {
         // Bare .exe filename — resolve relative to cwd
         size_t len = strlen(argv[i]);
         if (len >= 4 && strcasecmp(argv[i] + len - 4, ".exe") == 0) {
+            if (fallbackExe.empty()) {
+                fallbackExe = argv[i];
+            }
             PeArch arch = classifyPE(argv[i]);
             if (arch == PeArch::X64) {
                 VERBOSE_LOG("'%s' is x64 (64-bit), skipping\n", argv[i]);
@@ -655,7 +663,7 @@ static AttachDecision classifyAttachTarget(int argc, char* argv[]) {
             // x86 PE or non-PE: keep scanning (file may not exist in cwd).
         }
     }
-    return {.skip = false, .displayPath = {}, .reason = nullptr};
+    return {.skip = false, .displayPath = std::move(fallbackExe), .reason = nullptr};
 }
 
 int main(int argc, char* argv[]) try {
