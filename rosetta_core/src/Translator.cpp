@@ -173,10 +173,6 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                 TranslatorX87::translate_fxam(translation_result, cur_instr);
                 break;
 
-            case Opcode::kOpcodeName_fclex:
-                TranslatorX87::translate_fclex(translation_result, cur_instr);
-                break;
-
             case Opcode::kOpcodeName_fdecstp:
                 TranslatorX87::translate_fdecstp(translation_result, cur_instr);
                 break;
@@ -197,20 +193,8 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                 TranslatorX87::translate_fscale(translation_result, cur_instr);
                 break;
 
-            case Opcode::kOpcodeName_finit:
-                TranslatorX87::translate_finit(translation_result, cur_instr);
-                break;
-
             case Opcode::kOpcodeName_fbstp:
                 TranslatorX87::translate_fbstp(translation_result, cur_instr);
-                break;
-
-            case Opcode::kOpcodeName_fldenv:
-                TranslatorX87::translate_fldenv(translation_result, cur_instr);
-                break;
-
-            case Opcode::kOpcodeName_fstenv:
-                TranslatorX87::translate_fstenv(translation_result, cur_instr);
                 break;
 
             case Opcode::kOpcodeName_frstor:
@@ -317,12 +301,6 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                 TranslatorX87::translate_fnstcw(translation_result, cur_instr);
                 break;
 
-            case Opcode::kOpcodeName_fnop:
-            case Opcode::kOpcodeName_fdisi:  // 8087 FPU-int disable; NOP on 80287+
-            case Opcode::kOpcodeName_feni:   // 8087 FPU-int enable; NOP on 80287+
-                TranslatorX87::translate_fnop(translation_result, cur_instr);
-                break;
-
             case Opcode::kOpcodeName_fsin:
                 TranslatorX87::translate_fsin(translation_result, cur_instr);
                 break;
@@ -365,15 +343,23 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
 
             default:
                 // Returning nullopt means "I have no handler for this
-                // opcode." In the runtime/sidecar flow, the stub's FILTER
+                // opcode."  In the runtime/sidecar flow, the stub's FILTER
                 // prologue routes only x87 opcodes to us, so reaching here
-                // means an unhandled x87 op — the sidecar logs and the
-                // stub's NONE-reply path BRKs the parent (composition with
-                // stock's emit on partial deferred state produces invalid
-                // code). In the offline AOT flow (CustomTranslationHook),
-                // every non-x87 op also reaches here; that path falls
-                // back to stock translate_insn unchanged. We stay silent
-                // so the AOT path isn't spammed.
+                // means an x87 op we deliberately route to stock — the
+                // memory-block / NOP-class set (fnop, fdisi, feni, fclex,
+                // finit, fldenv, fstenv, fxsave, fxrstor).  Stock's
+                // emit for these is pure block memory I/O via the shared
+                // x22 = X87State*, so composition is safe as long as
+                // is_handled_x87 stops the run before them and x87_end
+                // flushes deferred state to memory.  The sidecar logs the
+                // first hit per opcode as a discoverability signal: if a
+                // future helper-using opcode (e.g. a new transcendental)
+                // ever falls through here, that log line catches it before
+                // the {x22, w23} ABI clash silently produces wrong code.
+                // In the offline AOT flow (CustomTranslationHook), every
+                // non-x87 op also reaches here; that path falls back to
+                // stock translate_insn unchanged.  We stay silent so the
+                // AOT path isn't spammed.
                 translation_result->free_gpr_mask = kGprScratchMask;
                 translation_result->free_fpr_mask =
                     translation_result->_unoccupied_temporary_fprs_for_xmm_scalars;

@@ -395,14 +395,16 @@ StubBlobs build(uint64_t handlerAddr, uint64_t translateInsnAddr,
     // x87 opcodes (transcendentals) lacked inline handlers — composition
     // of our emit with stock's helper-call emit broke on the
     // {x22, w23} f80 ABI mismatch. With every helper-using opcode now
-    // inlined, the only path that ever returns nullopt is unhandled
-    // memory-block opcodes (fxsave, fxrstor) where stock's emit reads
-    // the X87State struct from memory through x22 — the same x22 we
-    // share with stock. is_handled_x87 stops the run before them, so
-    // x87_end has already flushed deferred state to memory by the time
-    // stock takes over. NONE now restores caller registers and abs-
-    // jumps to STASH, the same fall-through path the FILTER prologue
-    // uses for non-x87 opcodes.
+    // inlined, the only path that ever returns nullopt is the deliberate
+    // memory-block / NOP-class fall-through set:
+    //   fxsave, fxrstor, fnop, fdisi, feni, fclex, finit, fldenv, fstenv.
+    // All share the same property: stock's emit is pure block memory
+    // I/O via x22 = X87State* (or zero instructions for the NOP family),
+    // no helper-call ABI to clash with our cache.  is_handled_x87 stops
+    // the run before each one, so x87_end has already flushed deferred
+    // state to memory by the time stock takes over.  NONE restores
+    // caller registers and abs-jumps to STASH, the same fall-through
+    // path the FILTER prologue uses for non-x87 opcodes.
     //
     // Read msgh_id into w9.
     emit(ipc, ldr_w_offset(9, SP, 84));         // w9 = msgh_id

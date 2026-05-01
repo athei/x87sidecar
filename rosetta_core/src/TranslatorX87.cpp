@@ -231,9 +231,7 @@ auto translate_fld(TranslationResult* a1, IRInstr* a2) -> void {
         // FLD m80fp — DB /5
         //
         // Inline f80 → f64 conversion via the shared emit_f80_to_f64 helper
-        // in TranslatorX87F80.cpp.  The helper emits the same bit-math
-        // sequence that previously lived inline here and is also used by
-        // translate_frstor.
+        // in TranslatorX87F80.cpp.
 
         // x87 push first — frees Wd_tmp2 so we have 4 free-pool regs available
         // for the conversion sequence.
@@ -3172,24 +3170,6 @@ auto translate_fnstcw(TranslationResult* a1, IRInstr* a2) -> void {
 }
 
 // =============================================================================
-// FNOP — x87 no-operation.
-//
-// x87 semantics:
-//   (none — no state change)
-//
-// The per-instruction handler simply maintains cache continuity so that
-// surrounding instructions in the same run keep their deferred state.
-// =============================================================================
-auto translate_fnop(TranslationResult* a1, IRInstr* /*a2*/) -> void {
-    AssemblerBuffer& buf = a1->insn_buf;
-    auto [Xbase, Wd_top] = x87_begin(*a1, buf);
-
-    const int Wd_tmp = alloc_gpr(*a1, 2);
-    x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp);
-    free_gpr(*a1, Wd_tmp);
-}
-
-// =============================================================================
 // FSCALE — ST(0) ← ST(0) · 2^trunc(ST(1)).  ST(1) NOT popped.
 //
 // Strategy (pure f64 — no f80 unpacking like stock):
@@ -3596,136 +3576,6 @@ auto translate_ffree(TranslationResult* a1, IRInstr* a2) -> void {
 }
 
 // =============================================================================
-// FCLEX / FNCLEX — clear x87 exception flags.
-//
-// x87 semantics:
-//   status_word &= 0x7F00
-//
-// Clears bits 0..7 (PE,UE,OE,ZE,DE,IE,SF,ES) and bit 15 (B).
-// Preserves C0,C1,C2 (bits 8..10), TOP (bits 11..13), C3 (bit 14).
-//
-// The AND-mask 0x7F00 happens to preserve TOP — so we don't need to flush
-// top_dirty before the RMW (stale memory TOP survives the AND unchanged),
-// and we don't need to load TOP into a register (x87_end's emit_store_top
-// handles flushing if top_dirty was set by a prior op in the run).
-//
-// Three emitted instructions (steady state, in a run): LDRH + AND-imm + STRH.
-// =============================================================================
-auto translate_fclex(TranslationResult* a1, IRInstr* /*a2*/) -> void {
-    AssemblerBuffer& buf = a1->insn_buf;
-    static constexpr int16_t kX87StatusWordImm12 = kX87StatusWordOff / 2;  // = 1
-
-    // Custom prologue when fclex is alone (run_remaining == 0): allocate
-    // only Xbase, skip emit_load_top.  When in a run, fall through to
-    // x87_begin so subsequent ops see a pinned Wd_top.
-    int Xbase, Wd_top;
-    bool wd_top_unused = false;
-    if (a1->x87_cache.run_remaining == 0) {
-        Xbase = alloc_gpr(*a1, 0);
-        emit_x87_base(buf, *a1, Xbase);
-        Wd_top = GPR::XZR;          // unused: gprs_valid==0 → no deferred
-                                    // flags set → x87_end won't write through it.
-        wd_top_unused = true;
-    } else {
-        auto pair = x87_begin(*a1, buf);
-        Xbase = pair.first;
-        Wd_top = pair.second;
-    }
-    const int Wd_tmp = alloc_gpr(*a1, 2);
-
-    // LDRH Wd_tmp, [Xbase, #status_word]
-    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*LDR=*/1,
-                     kX87StatusWordImm12, Xbase, Wd_tmp);
-
-    // AND  Wd_tmp, Wd_tmp, #0x7F00  — keep bits 8..14
-    LogicalImmEncoding enc_keep;
-    is_bitmask_immediate(/*is_64bit=*/false, 0x00007F00ULL, enc_keep);
-    emit_and_imm(buf, /*is_64bit=*/0, /*Rd=*/Wd_tmp,
-                 enc_keep.N, enc_keep.immr, enc_keep.imms, /*Rn=*/Wd_tmp);
-
-    // STRH Wd_tmp, [Xbase, #status_word]
-    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*STR=*/0,
-                     kX87StatusWordImm12, Xbase, Wd_tmp);
-
-    if (wd_top_unused) {
-        free_gpr(*a1, Wd_tmp);
-        free_gpr(*a1, Xbase);
-        // No x87_end needed: gprs_valid==0 means no deferred flags can
-        // be set, and run_remaining==0 means there is no run to tick.
-    } else {
-        x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp);
-        free_gpr(*a1, Wd_tmp);
-    }
-}
-
-// =============================================================================
-// FINIT / FNINIT — reset FPU state.
-//
-// x87 semantics:
-//   control_word ← 0x037F   (mask all exceptions, round-nearest, 64-bit prec)
-//   status_word  ← 0x0000   (TOP=0, all condition codes / exception flags clear)
-//   tag_word     ← 0xFFFF   (all 8 slots tagged kEmpty)
-//   The 8 ST register slots themselves are not cleared — tagged-empty suffices.
-//
-// Three stores; no read of existing state.  If finit is the only x87 op in
-// its window we use the same mini-prologue trick as fclex (alloc only Xbase,
-// skip emit_load_top); when in a run we go through x87_begin so the cache
-// stays pinned for subsequent ops, then emit MOV Wd_top, #0 to match the
-// new SW.TOP and discard any deferred flags rather than flushing them
-// (their target memory is gone).
-// =============================================================================
-auto translate_finit(TranslationResult* a1, IRInstr* /*a2*/) -> void {
-    AssemblerBuffer& buf = a1->insn_buf;
-    static constexpr int16_t kX87CtrlWordImm12   = kX87ControlWordOff / 2;  // = 0
-    static constexpr int16_t kX87StatusWordImm12 = kX87StatusWordOff / 2;   // = 1
-    static constexpr int16_t kX87TagWordImm12    = kX87TagWordOff / 2;      // = 2
-
-    int Xbase, Wd_top;
-    const bool standalone = (a1->x87_cache.run_remaining == 0);
-    if (standalone) {
-        Xbase = alloc_gpr(*a1, 0);
-        emit_x87_base(buf, *a1, Xbase);
-        Wd_top = GPR::XZR;          // unused: gprs_valid stays 0
-    } else {
-        auto pair = x87_begin(*a1, buf);
-        Xbase = pair.first;
-        Wd_top = pair.second;
-    }
-
-    const int Wd_tmp = alloc_gpr(*a1, 2);
-
-    // CW <- 0x037F
-    emit_movn(buf, /*is_64=*/0, /*MOVZ opc=*/2, /*hw=*/0, /*imm=*/0x037F, Wd_tmp);
-    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*STR=*/0,
-                     kX87CtrlWordImm12, Xbase, Wd_tmp);
-
-    // SW <- 0  (also resets SW.TOP to 0)
-    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*STR=*/0,
-                     kX87StatusWordImm12, Xbase, GPR::XZR);
-
-    // TW <- 0xFFFF
-    emit_movn(buf, /*is_64=*/0, /*MOVZ opc=*/2, /*hw=*/0, /*imm=*/0xFFFF, Wd_tmp);
-    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*STR=*/0,
-                     kX87TagWordImm12, Xbase, Wd_tmp);
-
-    if (standalone) {
-        free_gpr(*a1, Wd_tmp);
-        free_gpr(*a1, Xbase);
-    } else {
-        // Deferred flags now point at memory we just overwrote — discard.
-        a1->x87_cache.top_dirty = 0;
-        a1->x87_cache.tag_push_pending = 0;
-        a1->x87_cache.deferred_pop_count = 0;
-        a1->x87_cache.reset_perm();
-        // MOVZ Wd_top, #0  — match the new SW.TOP for the rest of the run.
-        emit_movn(buf, /*is_64=*/0, /*MOVZ opc=*/2, /*hw=*/0, /*imm=*/0, Wd_top);
-
-        x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp);
-        free_gpr(*a1, Wd_tmp);
-    }
-}
-
-// =============================================================================
 // FBSTP — pop ST(0) and store as 18-digit packed BCD into m80bcd.
 //
 // Memory format (10 bytes, low-to-high):
@@ -3976,143 +3826,21 @@ auto translate_fbstp(TranslationResult* a1, IRInstr* a2) -> void {
 }
 
 // =============================================================================
-// FLDENV — load 28-byte FPU env from memory.
+// FNOP / FDISI / FENI / FCLEX / FINIT / FLDENV / FSTENV — these used to
+// have inline handlers but were measured to lose against stock's
+// native-speed emit on bench (and never appeared on a fusion-run hot
+// path).  They now fall through to stock translate_insn — the
+// dispatcher `default:` branch returns nullopt, the stub abs-jumps to
+// STASH, and stock translates them via the shared x22 = X87State*.
 //
-// Layout (32-bit protected mode):
-//   +0  control_word (16b, padded to 32)
-//   +4  status_word  (16b)  ← TOP at bits [13:11]
-//   +8  tag_word     (16b)
-//   +12 FIP/FCS/FOP/FDP/FDS — historical pointers; we ignore them
-//
-// Cache state: any deferred top/tag/pop/perm bits target memory we're
-// about to overwrite, so discard them (don't flush).  Re-derive Wd_top
-// from the new SW.TOP for the rest of the run.
+// FRSTOR is NOT in this set even though native frstor is faster — stock's
+// m108 frstor implementation does not handle x86-spec f80 ST slots
+// correctly when fed an externally-built buffer (the round-trip in
+// test_frstor.c fails).  We keep frstor inline because we own the
+// x86-f80 → Apple-internal conversion and stock's path doesn't.
+// See feedback_no_per_opcode_fallback.md and
+// project_bench_regressions_x87_prologue.md for rationale.
 // =============================================================================
-auto translate_fldenv(TranslationResult* a1, IRInstr* a2) -> void {
-    AssemblerBuffer& buf = a1->insn_buf;
-    static constexpr int16_t kX87CtrlWordImm12   = kX87ControlWordOff / 2;  // = 0
-    static constexpr int16_t kX87StatusWordImm12 = kX87StatusWordOff / 2;   // = 1
-    static constexpr int16_t kX87TagWordImm12    = kX87TagWordOff / 2;      // = 2
-    static constexpr int16_t kSrcSwImm12 = 2;  // byte 4 → halfword imm12=2
-    static constexpr int16_t kSrcTwImm12 = 4;  // byte 8 → halfword imm12=4
-
-    int Xbase, Wd_top;
-    const bool standalone = (a1->x87_cache.run_remaining == 0);
-    if (standalone) {
-        // Mini-prologue: skip emit_load_top — the existing SW.TOP is about
-        // to be overwritten.  Wd_top register isn't needed in standalone.
-        Xbase = alloc_gpr(*a1, 0);
-        emit_x87_base(buf, *a1, Xbase);
-        Wd_top = GPR::XZR;
-    } else {
-        auto pair = x87_begin(*a1, buf);
-        Xbase = pair.first;
-        Wd_top = pair.second;
-        // Discard deferred flags — they target SW/TW we're replacing.
-        a1->x87_cache.top_dirty = 0;
-        a1->x87_cache.tag_push_pending = 0;
-        a1->x87_cache.deferred_pop_count = 0;
-        a1->x87_cache.reset_perm();
-    }
-
-    const int Wd_tmp = alloc_gpr(*a1, 2);
-
-    // Source address.
-    const bool addr_is_64 = (a2->operands[0].mem.addr_size == IROperandSize::S64);
-    const int Xaddr = compute_operand_address(*a1, addr_is_64, &a2->operands[0], GPR::XZR);
-
-    // CW: [Xaddr, #0] → [Xbase, #0]
-    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*LDR=*/1, /*imm12=*/0, Xaddr, Wd_tmp);
-    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*STR=*/0, kX87CtrlWordImm12, Xbase, Wd_tmp);
-
-    // SW: [Xaddr, #4] → [Xbase, #2].  Re-derive Wd_top from new SW.TOP.
-    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*LDR=*/1, kSrcSwImm12, Xaddr, Wd_tmp);
-    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*STR=*/0, kX87StatusWordImm12, Xbase, Wd_tmp);
-    if (!standalone) {
-        // UBFX Wd_top, Wd_tmp, #11, #3
-        emit_bitfield(buf, /*is_64=*/0, /*UBFM=*/2, /*N=*/0, /*immr=*/11, /*imms=*/13,
-                      Wd_tmp, Wd_top);
-    }
-
-    // TW: [Xaddr, #8] → [Xbase, #4]
-    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*LDR=*/1, kSrcTwImm12, Xaddr, Wd_tmp);
-    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*STR=*/0, kX87TagWordImm12, Xbase, Wd_tmp);
-
-    free_gpr(*a1, Xaddr);
-
-    if (standalone) {
-        free_gpr(*a1, Wd_tmp);
-        free_gpr(*a1, Xbase);
-    } else {
-        x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp);
-        free_gpr(*a1, Wd_tmp);
-    }
-}
-
-// =============================================================================
-// FSTENV / FNSTENV — store 28-byte FPU env to memory.
-//
-// Layout matches translate_fldenv (CW at +0, SW at +4, TW at +8, the rest
-// are FIP/FCS/FOP/FDP/FDS pointer fields that we don't track — they're
-// written as zero).
-//
-// Cache state: deferred top/tag/pop bits must be flushed to memory before
-// reading CW/SW/TW from Xbase, otherwise the stored env reflects stale
-// metadata.  perm_dirty doesn't affect SW/TW (it only permutes the f64
-// register file), so we skip it.
-//
-// Codegen:
-//   - x87_flush_top + x87_flush_tags (the latter also flushes deferred pops).
-//   - 3 × {LDRH 16-bit, STR 32-bit} for CW/SW/TW (LDRH zero-extends so the
-//     32-bit STR writes the field plus the 2-byte reserved padding in one go).
-//   - 3 × STR XZR for the 16-byte FIP/FCS/FOP/FDP/FDS tail (4 + 8 + 4 bytes
-//     at offsets 12 / 16 / 24 — exploits 16's 8-byte alignment for one
-//     X-sized store).
-// =============================================================================
-auto translate_fstenv(TranslationResult* a1, IRInstr* a2) -> void {
-    AssemblerBuffer& buf = a1->insn_buf;
-    static constexpr int16_t kX87CtrlWordImm12   = kX87ControlWordOff / 2;  // = 0
-    static constexpr int16_t kX87StatusWordImm12 = kX87StatusWordOff / 2;   // = 1
-    static constexpr int16_t kX87TagWordImm12    = kX87TagWordOff / 2;      // = 2
-
-    auto [Xbase, Wd_top] = x87_begin(*a1, buf);
-    const int Wd_tmp  = alloc_gpr(*a1, 2);
-    const int Wd_tmp2 = alloc_gpr(*a1, 3);
-
-    // Make in-memory SW/TW coherent.  perm_dirty doesn't touch SW/TW.
-    x87_flush_top(buf, *a1, Xbase, Wd_top, Wd_tmp);
-    x87_flush_tags(buf, *a1, Xbase, Wd_top, Wd_tmp, Wd_tmp2);
-
-    // Release Wd_tmp2 — body uses Wd_tmp only.
-    free_gpr(*a1, Wd_tmp2);
-
-    // Destination address.
-    const bool addr_is_64 = (a2->operands[0].mem.addr_size == IROperandSize::S64);
-    const int Xaddr = compute_operand_address(*a1, addr_is_64, &a2->operands[0], GPR::XZR);
-
-    // CW: [Xbase, #0] → [Xaddr, #0..3]   (LDRH zero-extends; 32-bit STR
-    // writes the field + 2 reserved zero bytes in one shot.)
-    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*LDR=*/1, kX87CtrlWordImm12, Xbase, Wd_tmp);
-    emit_ldr_str_imm(buf, /*size=*/2, /*is_fp=*/0, /*STR=*/0, /*imm12=*/0, Xaddr, Wd_tmp);
-
-    // SW: [Xbase, #2] → [Xaddr, #4..7]
-    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*LDR=*/1, kX87StatusWordImm12, Xbase, Wd_tmp);
-    emit_ldr_str_imm(buf, /*size=*/2, /*is_fp=*/0, /*STR=*/0, /*imm12=*/1, Xaddr, Wd_tmp);
-
-    // TW: [Xbase, #4] → [Xaddr, #8..11]
-    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*LDR=*/1, kX87TagWordImm12, Xbase, Wd_tmp);
-    emit_ldr_str_imm(buf, /*size=*/2, /*is_fp=*/0, /*STR=*/0, /*imm12=*/2, Xaddr, Wd_tmp);
-
-    // 16 zero bytes at offsets 12..27 — 3 stores: 4B at 12, 8B at 16, 4B at 24.
-    emit_ldr_str_imm(buf, /*size=*/2, /*is_fp=*/0, /*STR=*/0, /*imm12=*/3, Xaddr, GPR::XZR);
-    emit_ldr_str_imm(buf, /*size=*/3, /*is_fp=*/0, /*STR=*/0, /*imm12=*/2, Xaddr, GPR::XZR);
-    emit_ldr_str_imm(buf, /*size=*/2, /*is_fp=*/0, /*STR=*/0, /*imm12=*/6, Xaddr, GPR::XZR);
-
-    free_gpr(*a1, Xaddr);
-
-    x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp);
-    free_gpr(*a1, Wd_tmp);
-}
 
 // =============================================================================
 // FRSTOR — load 108-byte FPU state from memory.
@@ -4164,7 +3892,7 @@ auto translate_frstor(TranslationResult* a1, IRInstr* a2) -> void {
     const bool addr_is_64 = (a2->operands[0].mem.addr_size == IROperandSize::S64);
     const int Xaddr = compute_operand_address(*a1, addr_is_64, &a2->operands[0], GPR::XZR);
 
-    // ── Env header (identical to translate_fldenv body) ──
+    // ── Env header ──
     // CW: [Xaddr, #0] -> [Xbase, #0]
     emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*LDR=*/1, /*imm12=*/0, Xaddr, Wd_tmp);
     emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*STR=*/0, kX87CtrlWordImm12, Xbase, Wd_tmp);
@@ -4291,7 +4019,7 @@ auto translate_fsave(TranslationResult* a1, IRInstr* a2) -> void {
     const bool addr_is_64 = (a2->operands[0].mem.addr_size == IROperandSize::S64);
     const int Xaddr = compute_operand_address(*a1, addr_is_64, &a2->operands[0], GPR::XZR);
 
-    // ── Env header (identical to translate_fstenv body) ──
+    // ── Env header: CW/SW/TW + 16 zero bytes for FIP/FCS/FOP/FDP/FDS ──
     emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*LDR=*/1, kX87CtrlWordImm12, Xbase, Wd_tmp);
     emit_ldr_str_imm(buf, /*size=*/2, /*is_fp=*/0, /*STR=*/0, /*imm12=*/0, Xaddr, Wd_tmp);
     emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*LDR=*/1, kX87StatusWordImm12, Xbase, Wd_tmp);

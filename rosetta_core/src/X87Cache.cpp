@@ -7,6 +7,20 @@
 // =============================================================================
 // is_handled_x87 — returns true for opcodes that have a translate_* handler.
 // Used by lookahead to determine consecutive x87 run lengths.
+//
+// A few memory-block / NOP-class x87 opcodes are deliberately *excluded*
+// (fnop/fdisi/feni/fclex/finit/fldenv/fstenv, plus fxsave/fxrstor) even
+// though they're "x87" in the broad sense.  Stock's emit for them is
+// pure block memory I/O via the shared x22 = X87State*; native does it
+// at hardware speed (zero ARM instructions for the NOP family,
+// tightly-tuned blocks for the env family).  frstor stays inline
+// because stock's m108 frstor doesn't handle x86-spec f80 ST slots
+// (test_frstor regresses if it's composed against stock).  We let the
+// run break before each one, x87_end flushes deferred state, the stub
+// abs-jumps to STASH, and stock translates them in isolation.  See
+// feedback_no_per_opcode_fallback.md for why this is safe only for
+// memory-block opcodes (transcendentals would clash on stock's
+// {x22, w23} helper-call ABI).
 // =============================================================================
 
 static bool is_handled_x87(uint16_t op) {
@@ -74,21 +88,14 @@ static bool is_handled_x87(uint16_t op) {
         case kOpcodeName_ficomp:
         case kOpcodeName_fldcw:
         case kOpcodeName_fnstcw:
-        case kOpcodeName_fnop:
         case kOpcodeName_fxam:
         case kOpcodeName_fbld:
-        case kOpcodeName_fclex:
         case kOpcodeName_fdecstp:
         case kOpcodeName_fincstp:
         case kOpcodeName_ffree:
-        case kOpcodeName_fdisi:
-        case kOpcodeName_feni:
         case kOpcodeName_fxtract:
         case kOpcodeName_fscale:
-        case kOpcodeName_finit:
         case kOpcodeName_fbstp:
-        case kOpcodeName_fldenv:
-        case kOpcodeName_fstenv:
         case kOpcodeName_frstor:
         case kOpcodeName_fsave:
         case kOpcodeName_fsin:
