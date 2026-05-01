@@ -644,7 +644,7 @@ auto translate_gpr(TranslationResult* result, int is_64bit, uint8_t reg, unsigne
     assert((reg & 0xFF) < 0x50 && "translate_gpr: called on non-GPR register");
 
     const int index = (int)(reg & 0xF);
-    const int size_class = (int)((reg >> 4) & 0xF);
+    const int size_class = ((reg >> 4) & 0xF);
 
     // -------------------------------------------------------------------------
     // Branch to BFX block (loc_20E9C) when:

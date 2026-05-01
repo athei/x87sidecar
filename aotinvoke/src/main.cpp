@@ -68,7 +68,7 @@ int main(int argc, char** argv) {
     const size_t code_len = code.size();
 
     // 2. Map it readable (the disassembler reads directly through the pointer)
-    void* blob = mmap(NULL, 0x1000, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+    void* blob = mmap(nullptr, 0x1000, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
     std::memcpy(blob, code.data(), code_len);
 
     int64_t insts_fileoff_range = ((int64_t)code_len << 32) | 0;

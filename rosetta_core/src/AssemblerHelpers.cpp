@@ -294,7 +294,7 @@ auto emit_ldr_str_imm_ext(AssemblerBuffer& buf, int data_size, int write_back, i
     uint32_t insn = 0x38000000;
     insn |= (uint32_t)(data_size & 0x3) << 30;
     insn |= (uint32_t)(effective_opc & 0x3) << 22;
-    insn |= (uint32_t)((offset & 0x1FF)) << 12;
+    insn |= (uint32_t)(offset & 0x1FF) << 12;
     insn |= (uint32_t)(write_back & 0x1) << 11;  // 1=pre, 0=post at [11:10]=01/11
     insn |= (uint32_t)(Rn & 0x1F) << 5;
     insn |= (uint32_t)(Rt & 0x1F);
@@ -622,7 +622,7 @@ auto emit_cbz(AssemblerBuffer& buf, int is_64bit, int is_nz, int Rt, int imm19) 
     uint32_t insn = 0x34000000U;
     insn |= (uint32_t)(is_64bit != 0) << 31;
     insn |= (uint32_t)(is_nz != 0) << 24;
-    insn |= ((uint32_t)(imm19) & 0x7FFFFU) << 5;
+    insn |= ((uint32_t)imm19 & 0x7FFFFU) << 5;
     insn |= (uint32_t)(Rt & 0x1F);
     buf.emit(insn);
 }
@@ -630,14 +630,14 @@ auto emit_cbz(AssemblerBuffer& buf, int is_64bit, int is_nz, int Rt, int imm19) 
 auto emit_b(AssemblerBuffer& buf, int imm26) -> void {
     // B #imm26
     // Encoding: 0 00101 | imm26
-    buf.emit(0x14000000U | ((uint32_t)(imm26) & 0x3FFFFFFU));
+    buf.emit(0x14000000U | ((uint32_t)imm26 & 0x3FFFFFFU));
 }
 
 auto emit_b_cond(AssemblerBuffer& buf, int cond, int imm19) -> void {
     // B.cond #imm19
     // Encoding: 0101 0100 | imm19 | 0 | cond[3:0]
     uint32_t insn = 0x54000000U;
-    insn |= ((uint32_t)(imm19) & 0x7FFFFU) << 5;
+    insn |= ((uint32_t)imm19 & 0x7FFFFU) << 5;
     insn |= (uint32_t)(cond & 0xF);
     buf.emit(insn);
 }

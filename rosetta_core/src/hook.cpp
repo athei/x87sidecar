@@ -1,6 +1,6 @@
 #include "rosetta_core/hook.h"
 
-#include <errno.h>
+#include <cerrno>
 #include <libkern/OSCacheControl.h>
 #include <mach/mach.h>
 #include <pthread.h>
@@ -50,7 +50,7 @@ int hook_install(void* target, void* hook_fn, void** trampoline) {
     // so we use Apple's standard JIT mapping. The libRuntimeRosettax87
     // build that needed MAP_TRANSLATED_ALLOW_EXECUTE is gone.
     // ------------------------------------------------------------------
-    void* tramp = mmap(NULL, AARCH64_PAGE_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC,
+    void* tramp = mmap(nullptr, AARCH64_PAGE_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC,
                        MAP_PRIVATE | MAP_ANONYMOUS | MAP_JIT, -1, 0);
     if (tramp == MAP_FAILED) {
         printf("hook_install: mmap failed\n");

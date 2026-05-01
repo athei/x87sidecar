@@ -287,8 +287,7 @@ auto translate_fld(TranslationResult* a1, IRInstr* a2) -> void {
     free_fpr(*a1, Dd_val);
     x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp);
     free_gpr(*a1, Wd_tmp);
-    return;
-}
+    }
 
 // =============================================================================
 // FBLD — DF /4 (m80bcd)

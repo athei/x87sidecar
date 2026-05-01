@@ -80,7 +80,7 @@ struct FPRState {
         }
     }
 
-    int get(int16_t node_id) const {
+    [[nodiscard]] int get(int16_t node_id) const {
         if (node_id < 0 || node_id >= kMaxNodes) { return -1;
 }
         return node_fpr[node_id];

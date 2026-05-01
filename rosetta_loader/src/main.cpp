@@ -2,7 +2,7 @@
 #include <mach-o/dyld_images.h>
 #include <mach/mach_vm.h>
 #include <rosetta_config/Config.h>
-#include <stdint.h>
+#include <cstdint>
 #include <sys/mman.h>
 #include <sys/event.h>
 #include <sys/ptrace.h>
@@ -34,7 +34,7 @@ const char* logsEnabled = nullptr;
         }                               \
     } while (0)
 
-typedef const struct dyld_process_info_base* DyldProcessInfo;
+using DyldProcessInfo = struct dyld_process_info_base*;
 
 extern "C" DyldProcessInfo _dyld_process_info_create(task_t task, uint64_t timestamp,
                                                      kern_return_t* kernelError);
@@ -85,7 +85,7 @@ public:
         }
     }
 
-    task_t taskPort() const { return taskPort_; }
+    [[nodiscard]] task_t taskPort() const { return taskPort_; }
 
     bool attach(pid_t pid) {
         childPid_ = pid;
@@ -865,13 +865,13 @@ int main(int argc, char* argv[]) {
         // libRosettaRuntime's x87Exports[] array (X19 points at the
         // Exports struct; first export is init_library).
         Export initLibraryExport{};
-        if (!dbg.readMemory(uint64_t(exports.x87Exports), &initLibraryExport,
+        if (!dbg.readMemory(exports.x87Exports, &initLibraryExport,
                             sizeof(initLibraryExport))) {
             fprintf(stdout, "M2: failed to read init_library export entry\n");
             return 1;
         }
         uint64_t initLibraryAddr =
-            uint64_t(initLibraryExport.address) & 0xFFFFFFFFFFFFULL;
+            initLibraryExport.address & 0xFFFFFFFFFFFFULL;
         if (initLibraryAddr == 0) {
             fprintf(stdout, "M2: init_library export address is null\n");
             return 1;
