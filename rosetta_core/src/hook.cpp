@@ -9,8 +9,10 @@
 #include <cstdio>
 #include <cstring>
 
-#define PATCH_SIZE 16u
-#define AARCH64_PAGE_SIZE 16384u
+enum {
+PATCH_SIZE = 16u,
+AARCH64_PAGE_SIZE = 16384u
+};
 
 static void write_abs_jump(void* dst, const void* target) {
     uint32_t ldr_x9 = 0x58000049U;  // LDR X9, #8

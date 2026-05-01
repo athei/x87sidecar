@@ -8,6 +8,7 @@
 #include <print>
 #include <stdexcept>
 #include <string_view>
+#include <utility>
 
 RosettaAotApi g_rosetta_aot;
 
@@ -49,13 +50,13 @@ bool find_patterns(uintptr_t aot_base, uintptr_t& trans_insn_addr,
     auto* cmd = (load_command*)(header + 1);
     section_64* text_section = nullptr;
 
-    for (auto i = 0; i < header->ncmds; i++) {
+    for (auto i = 0; std::cmp_less(i , header->ncmds); i++) {
         if (cmd->cmd == LC_SEGMENT_64) {
             auto *seg = (segment_command_64*)cmd;
 
             if (strcmp(seg->segname, "__TEXT") == 0) {
                 auto* sections = (section_64*)(uintptr_t(seg) + sizeof(segment_command_64));
-                for (auto j = 0; j < seg->nsects; j++) {
+                for (auto j = 0; std::cmp_less(j , seg->nsects); j++) {
                     auto& sect = sections[j];
                     if (strcmp(sect.sectname, "__text") == 0) {
                         text_section = &sect;

@@ -2,6 +2,7 @@
 #include <mach-o/dyld_images.h>
 #include <mach/mach_vm.h>
 #include <rosetta_config/Config.h>
+#include <algorithm>
 #include <cstdint>
 #include <sys/mman.h>
 #include <sys/event.h>
@@ -14,6 +15,7 @@
 #include <cstring>
 #include <filesystem>
 #include <map>
+#include <numbers>
 #include <string>
 #include <vector>
 
@@ -491,7 +493,7 @@ public:
             }
 
             if (info.protection & (VM_PROT_EXECUTE | VM_PROT_READ)) {
-                if (std::find_if(moduleList.begin(), moduleList.end(),
+                if (std::ranges::find_if(moduleList,
                                  [address](const uintptr_t& moduleAddress) {
                                      return address == moduleAddress;
                                  }) == moduleList.end()) {
@@ -1108,8 +1110,8 @@ int main(int argc, char* argv[]) {
         // binary, gets `mach_vm_write`d into the parent in one call.  No
         // stack frame, no per-field assignment, no intermediate memcpy.
         static constexpr rosetta_core::TranscendentalConstants kTransConstants = {
-            .inv_pi = 0x1.45f306dc9c883p-2,
-            .pi_1   = 0x1.921fb54442d18p+1,
+            .inv_pi = std::numbers::inv_pi,
+            .pi_1   = std::numbers::pi,
             .pi_2   = 0x1.1a62633145c06p-53,
             .pi_3   = 0x1.c1cd129024e09p-106,
             .sin_c = {
@@ -1124,7 +1126,7 @@ int main(int argc, char* argv[]) {
             .range_val = 0x1p23,
             .half      = 0.5,
             // f2xm1 polynomial coefficients (advsimd/exp2m1.c).
-            .exp2m1_log2_hi    = 0x1.62e42fefa39efp-1,
+            .exp2m1_log2_hi    = std::numbers::ln2,
             .exp2m1_log2_lo    = 0x1.abc9e3b39803f3p-56,
             .exp2m1_c1         = 0x1.ebfbdff82c58ep-3,
             .exp2m1_c2         = 0x1.c6b08d71f5804p-5,
@@ -1221,7 +1223,7 @@ int main(int argc, char* argv[]) {
             // log2 / fyl2x / fyl2xp1 polynomial + tables (advsimd/log2.c).
             .log2_off          = 0x3fe6900900000000ULL,
             .log2_sign_exp_mask = 0xfff0000000000000ULL,
-            .log2_invln2       =  0x1.71547652b82fep0,
+            .log2_invln2       =  std::numbers::log2e,
             .log2_c0           = -0x1.71547652b83p-1,
             .log2_c1           =  0x1.ec709dc340953p-2,
             .log2_c2           = -0x1.71547651c8f35p-2,
@@ -1230,7 +1232,7 @@ int main(int argc, char* argv[]) {
             // {invc, log2c} pairs at j=0..127, split into two parallel
             // arrays.  Source: optimized-routines v_log2_data.c.
             .log2_invc = {
-                0x1.6a133d0dec120p+0, 0x1.6815f2f3e42edp+0, 0x1.661e39be1ac9ep+0,
+                std::numbers::sqrt2, 0x1.6815f2f3e42edp+0, 0x1.661e39be1ac9ep+0,
                 0x1.642bfa30ac371p+0, 0x1.623f1d916f323p+0, 0x1.60578da220f65p+0,
                 0x1.5e75349dea571p+0, 0x1.5c97fd387a75ap+0, 0x1.5abfd2981f200p+0,
                 0x1.58eca051dc99cp+0, 0x1.571e526d9df12p+0, 0x1.5554d555b3fcbp+0,
@@ -1316,7 +1318,7 @@ int main(int argc, char* argv[]) {
                  0x1.5c0434336b343p-2,  0x1.651b8ad6c90d1p-2,  0x1.6e24a56ab5831p-2,
                  0x1.771fb04ec29b1p-2,  0x1.800cd6f19c25ep-2,  0x1.88ec441df11dfp-2,
                  0x1.91be21b7c93f5p-2,  0x1.9a8298f8c7454p-2,  0x1.a339d255c04ddp-2,
-                 0x1.abe3f59f43db7p-2,  0x1.b48129deca9efp-2,  0x1.bd119575364c1p-2,
+                 0x1.abe3f59f43db7p-2,  0x1.b48129deca9efp-2,  std::numbers::log10e,
                  0x1.c5955e23ebcbcp-2,  0x1.ce0ca8f4e1557p-2,  0x1.d6779a5a75774p-2,
                  0x1.ded6563550d27p-2,  0x1.e728ffafd840ep-2,  0x1.ef6fb96c8d739p-2,
                  0x1.f7aaa57907219p-2,

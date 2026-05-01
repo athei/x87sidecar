@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <fstream>
+#include <utility>
 
 auto MachoLoader::open(std::filesystem::path const& path) -> bool {
     if (!std::filesystem::exists(path)) {
@@ -34,7 +35,7 @@ auto MachoLoader::imageSize() const -> size_t {
 
     auto* cmd = (load_command*)(header + 1);
 
-    for (auto i = 0; i < header->ncmds; i++) {
+    for (auto i = 0; std::cmp_less(i , header->ncmds); i++) {
         if (cmd->cmd == LC_SEGMENT_64) {
             auto *seg = (segment_command_64*)cmd;
 
@@ -54,14 +55,14 @@ auto MachoLoader::getSection(const char* segment, const char* section) -> sectio
 
     auto* cmd = (load_command*)(header + 1);
 
-    for (auto i = 0; i < header->ncmds; i++) {
+    for (auto i = 0; std::cmp_less(i , header->ncmds); i++) {
         if (cmd->cmd == LC_SEGMENT_64) {
             auto *seg = (segment_command_64*)cmd;
 
             if (strcmp(seg->segname, segment) == 0) {
                 auto* sect = (section_64*)(seg + 1);
 
-                for (auto j = 0; j < seg->nsects; j++) {
+                for (auto j = 0; std::cmp_less(j , seg->nsects); j++) {
                     if (strcmp(sect->sectname, section) == 0) {
                         return sect;
                     }
@@ -82,7 +83,7 @@ auto MachoLoader::getSegment(const char* segment) -> segment_command_64* {
 
     auto* cmd = (load_command*)(header + 1);
 
-    for (auto i = 0; i < header->ncmds; i++) {
+    for (auto i = 0; std::cmp_less(i , header->ncmds); i++) {
         if (cmd->cmd == LC_SEGMENT_64) {
             auto *seg = (segment_command_64*)cmd;
 
@@ -102,7 +103,7 @@ auto MachoLoader::forEachSegment(std::function<void(segment_command_64* segm)> c
 
     auto* cmd = (load_command*)(header + 1);
 
-    for (auto i = 0; i < header->ncmds; i++) {
+    for (auto i = 0; std::cmp_less(i , header->ncmds); i++) {
         if (cmd->cmd == LC_SEGMENT_64) {
             auto *seg = (segment_command_64*)cmd;
 
