@@ -83,6 +83,33 @@ static double do_fadd_then_cos(double a, double b) {
     return r;
 }
 
+/* Status-word post-condition: fcos must clear C2.  See test_fsin.c. */
+static uint16_t do_fcos_sw_after(double v) {
+    uint16_t sw;
+    double r;
+    __asm__ volatile(
+        "fldl  %2\n\t"
+        "fxam\n\t"
+        "fcos\n\t"
+        "fnstsw %%ax\n\t"
+        "movw  %%ax, %0\n\t"
+        "fstpl %1\n\t"
+        : "=m"(sw), "=m"(r)
+        : "m"(v)
+        : "ax", "st");
+    (void)r;
+    return sw;
+}
+
+static void check_c2_clear(const char* name, uint16_t sw) {
+    if ((sw & 0x0400U) == 0U) {
+        printf("PASS  %-40s  sw=0x%04x  C2=0\n", name, (unsigned)sw);
+    } else {
+        printf("FAIL  %-40s  sw=0x%04x  C2=1 (fcos must clear C2)\n", name, (unsigned)sw);
+        failures++;
+    }
+}
+
 int main(void) {
     /* Minimal shape — fcos after just fld. */
     check_ulp("fcos(0.0)", do_fcos(0.0), cos(0.0));
@@ -101,6 +128,10 @@ int main(void) {
     check_ulp("fcos(0.5+0.5)", do_fadd_then_cos(0.5, 0.5), cos(1.0));
     check_ulp("fcos(0.0+0.0)", do_fadd_then_cos(0.0, 0.0), cos(0.0));
     check_ulp("fcos(0.3+0.4)", do_fadd_then_cos(0.3, 0.4), cos(0.3 + 0.4));
+
+    check_c2_clear("fcos(1.0) clears C2", do_fcos_sw_after(1.0));
+    check_c2_clear("fcos(0.5) clears C2", do_fcos_sw_after(0.5));
+    check_c2_clear("fcos(-1.0) clears C2", do_fcos_sw_after(-1.0));
 
     printf("\n%d failure(s)\n", failures);
     return failures ? 1 : 0;

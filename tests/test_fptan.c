@@ -61,6 +61,35 @@ static void do_fptan(double v, double* out_tan, double* out_one) {
         : "st");
 }
 
+/* fptan must clear C2.  See test_fsin.c. */
+static uint16_t do_fptan_sw_after(double v) {
+    uint16_t sw;
+    double t, one;
+    __asm__ volatile(
+        "fldl  %3\n\t"
+        "fxam\n\t"
+        "fptan\n\t"
+        "fnstsw %%ax\n\t"
+        "movw  %%ax, %0\n\t"
+        "fstpl %2\n\t"
+        "fstpl %1\n\t"
+        : "=m"(sw), "=m"(t), "=m"(one)
+        : "m"(v)
+        : "ax", "st");
+    (void)t;
+    (void)one;
+    return sw;
+}
+
+static void check_c2_clear(const char* name, uint16_t sw) {
+    if ((sw & 0x0400U) == 0U) {
+        printf("PASS  %-40s  sw=0x%04x  C2=0\n", name, (unsigned)sw);
+    } else {
+        printf("FAIL  %-40s  sw=0x%04x  C2=1 (fptan must clear C2)\n", name, (unsigned)sw);
+        failures++;
+    }
+}
+
 int main(void) {
     double t, one;
 
@@ -86,6 +115,10 @@ int main(void) {
 
     do_fptan(0.785, &t, &one); /* close to π/4 */
     check_ulp("fptan(0.785).tan", t, tan(0.785));
+
+    check_c2_clear("fptan(1.0) clears C2", do_fptan_sw_after(1.0));
+    check_c2_clear("fptan(0.5) clears C2", do_fptan_sw_after(0.5));
+    check_c2_clear("fptan(-1.0) clears C2", do_fptan_sw_after(-1.0));
 
     printf("\n%d failure(s)\n", failures);
     return failures ? 1 : 0;

@@ -66,6 +66,35 @@ static void do_fsincos(double v, double* out_sin, double* out_cos) {
         : "st");
 }
 
+/* fsincos must clear C2.  See test_fsin.c. */
+static uint16_t do_fsincos_sw_after(double v) {
+    uint16_t sw;
+    double s, c;
+    __asm__ volatile(
+        "fldl  %3\n\t"
+        "fxam\n\t"
+        "fsincos\n\t"
+        "fnstsw %%ax\n\t"
+        "movw  %%ax, %0\n\t"
+        "fstpl %2\n\t"
+        "fstpl %1\n\t"
+        : "=m"(sw), "=m"(s), "=m"(c)
+        : "m"(v)
+        : "ax", "st");
+    (void)s;
+    (void)c;
+    return sw;
+}
+
+static void check_c2_clear(const char* name, uint16_t sw) {
+    if ((sw & 0x0400U) == 0U) {
+        printf("PASS  %-40s  sw=0x%04x  C2=0\n", name, (unsigned)sw);
+    } else {
+        printf("FAIL  %-40s  sw=0x%04x  C2=1 (fsincos must clear C2)\n", name, (unsigned)sw);
+        failures++;
+    }
+}
+
 int main(void) {
     double s, c;
 
@@ -87,6 +116,10 @@ int main(void) {
 
     /* Avoid M_PI/2 — cos near zero hits the same catastrophic
        cancellation regime as test_fcos. */
+
+    check_c2_clear("fsincos(1.0) clears C2", do_fsincos_sw_after(1.0));
+    check_c2_clear("fsincos(0.5) clears C2", do_fsincos_sw_after(0.5));
+    check_c2_clear("fsincos(-1.0) clears C2", do_fsincos_sw_after(-1.0));
 
     printf("\n%d failure(s)\n", failures);
     return failures ? 1 : 0;

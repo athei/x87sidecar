@@ -333,16 +333,47 @@ void emit_inline_sin_or_cos(TranslationResult& a1, AssemblerBuffer& buf, int Xba
     free_fpr(a1, Dx);
 }
 
+// Clear C0/C1/C2/C3 (status_word bits 8/9/10/14) in the X87State.
+//
+// Several x87 ops have an iterative-completion or out-of-range
+// contract on C2: callers loop on `op; fstsw ax; test ah, 0x04; jnz
+// loop` until C2=0 (e.g. wine's argument reduction).  Our inlined
+// emits always complete in one shot and don't compute condition
+// codes, so we MUST overwrite C0..C3 with zero — leaving stale bits
+// from a prior op (typically FXAM, which sets C2=1 for normal floats)
+// causes infinite spins.  The WoW world-load freeze was exactly this
+// for FPREM; FSIN/FCOS/FSINCOS/FPTAN share the same hazard.
+//
+// Pattern is from the FCOM+FSTSW fusion's OPT-F1
+// (TranslatorX87Fusion.cpp:597-598): BFI from XZR.  4 instructions
+// + 1 GPR slot — measured negligible (≤2%) on the hot transcendental
+// benches.  See `feedback_apple_silicon_ilp_absorbs_prologue.md`.
+void emit_clear_x87_cc_bits(TranslationResult& a1, AssemblerBuffer& buf, int Xbase) {
+    static constexpr int16_t kX87SwImm12 = kX87StatusWordOff / 2;
+    const int Wd_sw = alloc_free_gpr(a1);
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/1, kX87SwImm12, Xbase, Wd_sw);
+    // BFI sw[10:8] := 0 (clears C0/C1/C2): immr=24 (=32-lsb), imms=2 (=width-1)
+    emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/1, /*N=*/0, /*immr=*/24, /*imms=*/2, GPR::XZR,
+                  Wd_sw);
+    // BFI sw[14] := 0 (clears C3): immr=18 (=32-14), imms=0 (width=1)
+    emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/1, /*N=*/0, /*immr=*/18, /*imms=*/0, GPR::XZR,
+                  Wd_sw);
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/0, kX87SwImm12, Xbase, Wd_sw);
+    free_gpr(a1, Wd_sw);
+}
+
 }  // namespace
 
 void emit_inline_fsin(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, int Wd_top,
                       int Wd_tmp) {
     emit_inline_sin_or_cos(a1, buf, Xbase, Wd_top, Wd_tmp, TrigReduceMode::Sin);
+    emit_clear_x87_cc_bits(a1, buf, Xbase);
 }
 
 void emit_inline_fcos(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, int Wd_top,
                       int Wd_tmp) {
     emit_inline_sin_or_cos(a1, buf, Xbase, Wd_top, Wd_tmp, TrigReduceMode::Cos);
+    emit_clear_x87_cc_bits(a1, buf, Xbase);
 }
 
 // f2xm1 — replace ST(0) with 2^ST(0) - 1.  Port of optimized-routines'
@@ -1041,6 +1072,8 @@ void emit_inline_fptan(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, i
     free_fpr(a1, Dnum_final);
     free_fpr(a1, Dden_final);
     free_gpr(a1, Xconst);
+
+    emit_clear_x87_cc_bits(a1, buf, Xbase);
 }
 
 // fprem: ST(0) := fmod(ST(0), ST(1)).  No pop.  Single-shot impl
@@ -1080,19 +1113,7 @@ void emit_inline_fprem(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, i
     free_fpr(a1, Db);
     free_fpr(a1, Da);
 
-    // Clear C0/C1/C2/C3 in status_word (mask 0x4700).  Same BFI-from-XZR
-    // pattern as the FCOM+FSTSW fusion's OPT-F1 (TranslatorX87Fusion.cpp).
-    static constexpr int16_t kX87SwImm12 = kX87StatusWordOff / 2;
-    const int Wd_sw = alloc_free_gpr(a1);
-    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=LDR=*/1, kX87SwImm12, Xbase, Wd_sw);
-    // BFI sw[10:8] := 0 (clears C0/C1/C2): immr=24 (=32-lsb), imms=2 (=width-1)
-    emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/1, /*N=*/0, /*immr=*/24, /*imms=*/2, GPR::XZR,
-                  Wd_sw);
-    // BFI sw[14] := 0 (clears C3): immr=18 (=32-14), imms=0 (width=1)
-    emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/1, /*N=*/0, /*immr=*/18, /*imms=*/0, GPR::XZR,
-                  Wd_sw);
-    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=STR=*/0, kX87SwImm12, Xbase, Wd_sw);
-    free_gpr(a1, Wd_sw);
+    emit_clear_x87_cc_bits(a1, buf, Xbase);
 }
 
 // fprem1: ST(0) := IEEE-remainder(ST(0), ST(1)).  Same emit shape as
@@ -1122,15 +1143,7 @@ void emit_inline_fprem1(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, 
     free_fpr(a1, Db);
     free_fpr(a1, Da);
 
-    static constexpr int16_t kX87SwImm12 = kX87StatusWordOff / 2;
-    const int Wd_sw = alloc_free_gpr(a1);
-    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=LDR=*/1, kX87SwImm12, Xbase, Wd_sw);
-    emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/1, /*N=*/0, /*immr=*/24, /*imms=*/2, GPR::XZR,
-                  Wd_sw);
-    emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/1, /*N=*/0, /*immr=*/18, /*imms=*/0, GPR::XZR,
-                  Wd_sw);
-    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=STR=*/0, kX87SwImm12, Xbase, Wd_sw);
-    free_gpr(a1, Wd_sw);
+    emit_clear_x87_cc_bits(a1, buf, Xbase);
 }
 
 void emit_inline_fyl2xp1(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, int Wd_top,
@@ -1195,6 +1208,8 @@ void emit_inline_fsincos(TranslationResult& a1, AssemblerBuffer& buf, int Xbase,
 
     free_gpr(a1, Xconst);
     free_fpr(a1, Dx);
+
+    emit_clear_x87_cc_bits(a1, buf, Xbase);
 }
 
 }  // namespace TranslatorX87
