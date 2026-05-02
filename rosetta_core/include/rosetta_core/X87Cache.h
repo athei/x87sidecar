@@ -49,6 +49,10 @@ struct X87Cache {
     uint16_t tally_ir_build_fail = 0;
     uint16_t tally_ir_fpr_fail = 0;
     uint16_t tally_ir_gpr_fail = 0;
+    // Max peak_live_gprs(ctx) observed across compile_run attempts in this
+    // block.  Saturating at its u16 upper bound is a sufficient signal — we
+    // only care about "was peak high enough to refuse?".
+    uint16_t tally_max_gpr_peak = 0;
     uint32_t profile_bid = 0xFFFFFFFFU;  // = profile::kOverflowId
 
     bool active() const;

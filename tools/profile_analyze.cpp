@@ -52,6 +52,7 @@ struct Tally {
     uint16_t ir_build_fail = 0;
     uint16_t ir_fpr_fail = 0;
     uint16_t ir_gpr_fail = 0;
+    uint16_t max_gpr_peak = 0;
     [[nodiscard]] uint64_t total() const {
         return static_cast<uint64_t>(ir) + peep + single + ft + ir_build_fail + ir_fpr_fail +
                ir_gpr_fail;
@@ -160,6 +161,7 @@ bool readFile(const std::string& path, std::vector<Block>& out, std::vector<uint
                     .ir_build_fail = e.ir_build_fail_ops,
                     .ir_fpr_fail = e.ir_fpr_fail_ops,
                     .ir_gpr_fail = e.ir_gpr_fail_ops,
+                    .max_gpr_peak = e.max_gpr_peak,
                 };
             }
         }
@@ -597,6 +599,7 @@ int main(int argc, char** argv) try {
         long double build_fail_w = 0.0L;
         long double fpr_fail_w = 0.0L;
         long double gpr_fail_w = 0.0L;
+        uint16_t max_gpr_peak = 0;  // max across contributing blocks
     };
     std::unordered_map<std::string, Stats> patterns;
     patterns.reserve(blocks.size() * 4);
@@ -659,6 +662,9 @@ int main(int argc, char** argv) try {
                 s.build_fail_w += execL * build_fail_frac;
                 s.fpr_fail_w += execL * fpr_fail_frac;
                 s.gpr_fail_w += execL * gpr_fail_frac;
+                if (b.id < tallies.size() && tallies[b.id].max_gpr_peak > s.max_gpr_peak) {
+                    s.max_gpr_peak = tallies[b.id].max_gpr_peak;
+                }
             }
         }
     }
@@ -687,7 +693,7 @@ int main(int argc, char** argv) try {
     if (have_tallies) {
         std::printf(
             "exec_count,window_size,fusion,consumed,"
-            "ir%%,peep%%,single%%,ft%%,build_fail%%,fpr_fail%%,gpr_fail%%,"
+            "ir%%,peep%%,single%%,ft%%,build_fail%%,fpr_fail%%,gpr_fail%%,max_gpr_peak,"
             "sequence\n");
     } else {
         std::printf("exec_count,window_size,fusion,consumed,sequence\n");
@@ -700,11 +706,11 @@ int main(int argc, char** argv) try {
             const auto pct = [&](long double w) -> double {
                 return exec > 0 ? static_cast<double>(100.0L * w / exec) : 0.0;
             };
-            std::printf("%llu,%zu,%s,%d,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%s\n",
+            std::printf("%llu,%zu,%s,%d,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%u,%s\n",
                         static_cast<unsigned long long>(s.exec_count), s.window_size,
                         s.fusion ? s.fusion : "-", s.fusion_consumed, pct(s.ir_w), pct(s.peep_w),
                         pct(s.single_w), pct(s.ft_w), pct(s.build_fail_w), pct(s.fpr_fail_w),
-                        pct(s.gpr_fail_w), key.c_str());
+                        pct(s.gpr_fail_w), static_cast<unsigned>(s.max_gpr_peak), key.c_str());
         } else {
             std::printf("%llu,%zu,%s,%d,%s\n", static_cast<unsigned long long>(s.exec_count),
                         s.window_size, s.fusion ? s.fusion : "-", s.fusion_consumed, key.c_str());

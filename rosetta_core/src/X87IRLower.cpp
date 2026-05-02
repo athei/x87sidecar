@@ -1245,12 +1245,15 @@ int peak_live_fprs(const Context& ctx) {
 // ── Entry point ─────────────────────────────────────────────────────────────
 
 int compile_run(TranslationResult* result, IRInstr* instr_array, int64_t num_instrs,
-                int64_t start_idx, int run_length, IRFailReason* out_reason) {
+                int64_t start_idx, int run_length, IRFailReason* out_reason, int* out_peak_gprs) {
     Context ctx;
 
     if (!build(ctx, instr_array, num_instrs, start_idx, run_length)) {
         if (out_reason) {
             *out_reason = IRFailReason::kBuildFail;
+        }
+        if (out_peak_gprs) {
+            *out_peak_gprs = 0;
         }
         return 0;
     }
@@ -1268,10 +1271,17 @@ int compile_run(TranslationResult* result, IRInstr* instr_array, int64_t num_ins
         if (out_reason) {
             *out_reason = IRFailReason::kFprPressure;
         }
+        if (out_peak_gprs) {
+            *out_peak_gprs = peak_live_gprs(ctx);
+        }
         return 0;
     }
 
     // Gate lowering on GPR pressure vs. available pool.
+    const int peak_gprs = peak_live_gprs(ctx);
+    if (out_peak_gprs) {
+        *out_peak_gprs = peak_gprs;
+    }
     {
         uint32_t gpr_pool = result->free_gpr_mask;
         int gpr_available = 0;
@@ -1279,7 +1289,7 @@ int compile_run(TranslationResult* result, IRInstr* instr_array, int64_t num_ins
             gpr_available++;
             gpr_pool &= gpr_pool - 1;
         }
-        if (peak_live_gprs(ctx) > gpr_available) {
+        if (peak_gprs > gpr_available) {
             if (out_reason) {
                 *out_reason = IRFailReason::kGprPressure;
             }

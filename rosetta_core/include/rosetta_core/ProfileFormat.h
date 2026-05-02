@@ -100,7 +100,7 @@ struct BlockTallyEntry {
     uint16_t ir_build_fail_ops;  // compile_run failed at build (kMaxNodes / unhandled op)
     uint16_t ir_fpr_fail_ops;    // peak_live_fprs > available
     uint16_t ir_gpr_fail_ops;    // peak_live_gprs > available
-    uint16_t _reserved_pad;      // pad to 16 B (must be 0)
+    uint16_t max_gpr_peak;       // max peak_live_gprs(ctx) observed (diagnostic)
 };
 static_assert(sizeof(BlockTallyEntry) == 16);
 

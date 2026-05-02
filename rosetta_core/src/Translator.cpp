@@ -57,6 +57,7 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
             cache.tally_ir_build_fail = 0;
             cache.tally_ir_fpr_fail = 0;
             cache.tally_ir_gpr_fail = 0;
+            cache.tally_max_gpr_peak = 0;
             cache.profile_bid = profile::kOverflowId;
             if (profile::counter_array_addr() != 0) {
                 const uint32_t bid = profile::register_block(block);
@@ -89,7 +90,7 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                                          .ir_build_fail_ops = cache.tally_ir_build_fail,
                                          .ir_fpr_fail_ops = cache.tally_ir_fpr_fail,
                                          .ir_gpr_fail_ops = cache.tally_ir_gpr_fail,
-                                         ._reserved_pad = 0,
+                                         .max_gpr_peak = cache.tally_max_gpr_peak,
                                      });
         }
     };
@@ -103,8 +104,16 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
         if (!ir_disabled && cache.active() && cache.run_remaining >= 3 && cache.top_dirty == 0 &&
             cache.tag_push_pending == 0 && cache.deferred_pop_count == 0 && !cache.perm_dirty) {
             X87IR::IRFailReason ir_reason = X87IR::IRFailReason::kNone;
-            const int ir_consumed = X87IR::compile_run(translation_result, instr_array, num_instrs,
-                                                       insn_idx, cache.run_remaining, &ir_reason);
+            int ir_peak_gprs = 0;
+            const int ir_consumed =
+                X87IR::compile_run(translation_result, instr_array, num_instrs, insn_idx,
+                                   cache.run_remaining, &ir_reason, &ir_peak_gprs);
+            if (ir_peak_gprs > 0) {
+                const auto peak_unsigned = static_cast<uint32_t>(ir_peak_gprs);
+                if (peak_unsigned > cache.tally_max_gpr_peak) {
+                    cache.tally_max_gpr_peak = static_cast<uint16_t>(peak_unsigned);
+                }
+            }
             if (ir_consumed == 0) {
                 switch (ir_reason) {
                     case X87IR::IRFailReason::kBuildFail:

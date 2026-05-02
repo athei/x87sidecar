@@ -833,7 +833,7 @@ void dumpCountersIfEnabled(mach_port_t /*parentTaskPort*/) {
             .ir_build_fail_ops = t.ir_build_fail_ops,
             .ir_fpr_fail_ops = t.ir_fpr_fail_ops,
             .ir_gpr_fail_ops = t.ir_gpr_fail_ops,
-            ._reserved_pad = 0,
+            .max_gpr_peak = t.max_gpr_peak,
         };
         std::fwrite(&entry, sizeof(entry), 1, g_profile.file);
     }

@@ -229,7 +229,13 @@ enum class IRFailReason : uint8_t {
 // Returns the number of x87 instructions consumed (0 = IR couldn't handle any).
 // out_reason (optional): set to a non-kNone value when the return is 0,
 // indicating which gate refused.  Untouched on success.
+// out_peak_gprs (optional): set to peak_live_gprs(ctx) whenever build()
+// succeeded.  Set to 0 when build() failed (no ctx to query).  Useful for
+// diagnosing why compile_run keeps refusing on hot blocks — saturating
+// against the available pool tells us we need to either reduce IR pressure
+// or accept the fall-through.
 int compile_run(TranslationResult* result, IRInstr* instr_array, int64_t num_instrs,
-                int64_t start_idx, int run_length, IRFailReason* out_reason = nullptr);
+                int64_t start_idx, int run_length, IRFailReason* out_reason = nullptr,
+                int* out_peak_gprs = nullptr);
 
 }  // namespace X87IR

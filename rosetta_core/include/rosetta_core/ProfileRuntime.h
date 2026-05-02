@@ -59,7 +59,10 @@ struct BlockTally {
     uint16_t ir_build_fail_ops;
     uint16_t ir_fpr_fail_ops;
     uint16_t ir_gpr_fail_ops;
-    uint16_t _reserved_pad;  // pad to 16 B
+    // Max peak_live_gprs observed for this block across all compile_run
+    // attempts.  Diagnostic only — not a bumped op counter, so it doesn't
+    // contribute to the per-pattern path-mix percentages.
+    uint16_t max_gpr_peak;
 };
 static_assert(sizeof(BlockTally) == 16);
 
