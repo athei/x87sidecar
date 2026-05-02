@@ -25,7 +25,8 @@ TIDY_FILES := $(shell git ls-files \
     'rosetta_core/*.cpp' \
     'rosetta_loader/*.cpp' \
     'rosetta_config/*.cpp' \
-    'aotinvoke/*.cpp')
+    'aotinvoke/*.cpp' \
+    'tools/*.cpp')
 
 .PHONY: help build configure format format-check tidy tidy-fix \
         test bench fusion-sweep clean

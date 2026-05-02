@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 
 // ── x87 peephole-fusion identifiers ─────────────────────────────────────────
 // Bit positions in `RosettaConfig::disabled_fusions_mask`.  See
@@ -33,12 +34,11 @@ enum class FusionId : int {
 // `loader_*` fields are loader-only — `aotinvoke` ignores them.
 struct RosettaConfig {
     // Translator knobs (read by rosetta_core's Translator / X87IRLower / etc.)
-    uint8_t disable_x87_cache;      // --disable-cache         drop the cross-instr GPR cache
-    uint8_t fast_round;             // --fast-round            skip RC dispatch (round-to-nearest)
-    uint8_t disable_deferred_fxch;  // --disable-deferred-fxch disable OPT-G
-    uint8_t disable_x87_ir;         // --disable-x87-ir        disable IR optimisation pipeline
-    uint8_t extended_fpr_scratch;   // --extended-fpr-scratch  V16-V31 scratch pool (16, not 8)
-    uint8_t _pad_a[3];
+    uint8_t disable_x87_cache;       // --disable-cache         drop the cross-instr GPR cache
+    uint8_t fast_round;              // --fast-round            skip RC dispatch (round-to-nearest)
+    uint8_t disable_deferred_fxch;   // --disable-deferred-fxch disable OPT-G
+    uint8_t disable_x87_ir;          // --disable-x87-ir        disable IR optimisation pipeline
+    uint8_t extended_fpr_scratch;    // --extended-fpr-scratch  V16-V31 scratch pool (16, not 8)
     uint64_t disabled_fusions_mask;  // --disable-fusions=fld_arithp,...
 
     // Loader-only knobs (read by rosettax87 main; aotinvoke leaves them 0)
@@ -66,9 +66,12 @@ struct RosettaConfig {
                                   //                  with a deterministic freeze repro to
                                   //                  see which op is the last one before
                                   //                  the hang.
-    uint8_t _pad_b[3];
+
+    // X87_PROFILE=<path>  When non-empty, sidecar appends a binary
+    // record per first-seen IRBlock to this file (full IR stream).
+    // Drives offline fusion-candidate analysis via tools/profile_analyze.
+    std::string profile_path;
 };
-static_assert(sizeof(RosettaConfig) == 0x18);
 
 inline bool fusion_is_disabled(const RosettaConfig& cfg, FusionId id) {
     return (cfg.disabled_fusions_mask >> static_cast<int>(id)) & 1U;

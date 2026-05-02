@@ -13,13 +13,17 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <mutex>
+#include <unordered_map>
 #include <vector>
 
 #include "rosetta_core/Config.h"
 #include "rosetta_core/CoreConfig.h"
 #include "rosetta_core/Fixup.h"
 #include "rosetta_core/IRInstr.h"
+#include "rosetta_core/IROperand.h"
 #include "rosetta_core/Opcode.h"
+#include "rosetta_core/ProfileFormat.h"
 #include "rosetta_core/ThreadContextOffsets.h"
 #include "rosetta_core/TransactionalList.h"
 #include "rosetta_core/TranslationResult.h"
@@ -43,6 +47,91 @@ struct ThreadArgs {
 // thread to log throughput so we can tell "stuck" from "just slow" while
 // big workloads (e.g. WoW world-load) churn through cold translation.
 std::atomic<uint64_t> g_hits{0};
+
+// X87_PROFILE state.  Opened once at sidecar startup; closed when the
+// receive thread exits (i.e. parent process death).  The dedup map
+// keys on parent-side IRBlock* — first time we see a block, dump its
+// full IR stream; subsequent calls for the same block are no-ops.
+struct ProfileState {
+    std::FILE* file = nullptr;
+    std::mutex mu;
+    std::unordered_map<uint64_t, uint32_t> block_ids;
+    uint32_t next_id = 0;
+};
+ProfileState g_profile;
+
+void dumpBlockIfNew(uint64_t block_ptr, const IRInstr* ir, uint64_t num_instrs) {
+    if (g_profile.file == nullptr) {
+        return;
+    }
+    std::scoped_lock lock(g_profile.mu);
+    auto [it, inserted] = g_profile.block_ids.try_emplace(block_ptr, g_profile.next_id);
+    if (!inserted) {
+        return;
+    }
+    ++g_profile.next_id;
+
+    profile::BlockHeader hdr{
+        .magic = profile::kProfileBlockMagic,
+        .block_id = it->second,
+        .num_instrs = static_cast<uint32_t>(num_instrs),
+        .start_pc = ir[0].pc,
+    };
+    std::fwrite(&hdr, sizeof(hdr), 1, g_profile.file);
+
+    for (uint64_t i = 0; i < num_instrs; ++i) {
+        profile::InstrRecord rec{};
+        rec.opcode = ir[i].opcode;
+        rec.num_operands = ir[i].num_operands;
+        rec.ir_kind = ir[i].ir_kind;
+        const uint8_t n = std::min<uint8_t>(ir[i].num_operands, 4);
+        for (uint8_t k = 0; k < n; ++k) {
+            const auto& op = ir[i].operands[k];
+            const auto kind = static_cast<uint8_t>(op.kind);
+            rec.operands[k].kind = kind;
+            switch (op.kind) {
+                case IROperandKind::Register:
+                    rec.operands[k].size = static_cast<uint8_t>(op.reg.size);
+                    rec.operands[k].reg = op.reg.reg.value;
+                    rec.operands[k].flags = 0;
+                    break;
+                case IROperandKind::MemRef:
+                    rec.operands[k].size = static_cast<uint8_t>(op.mem.size);
+                    rec.operands[k].reg = op.mem.base_reg;
+                    rec.operands[k].flags = op.mem.mem_flags;
+                    break;
+                case IROperandKind::AbsMem:
+                    rec.operands[k].size = static_cast<uint8_t>(op.abs_mem.size);
+                    rec.operands[k].reg = 0;
+                    rec.operands[k].flags = 0;
+                    break;
+                case IROperandKind::Immediate:
+                    rec.operands[k].size = static_cast<uint8_t>(op.imm.size);
+                    rec.operands[k].reg = 0;
+                    rec.operands[k].flags = op.imm.mem_flags;
+                    break;
+                case IROperandKind::ConditionCode:
+                    rec.operands[k].size = 0;
+                    rec.operands[k].reg = op.cc.cc;
+                    rec.operands[k].flags = 0;
+                    break;
+                case IROperandKind::SegmentRegister:
+                    rec.operands[k].size = 0;
+                    rec.operands[k].reg = op.seg.seg_idx;
+                    rec.operands[k].flags = 0;
+                    break;
+                case IROperandKind::BranchOffset:
+                default:
+                    rec.operands[k].size = 0;
+                    rec.operands[k].reg = 0;
+                    rec.operands[k].flags = 0;
+                    break;
+            }
+        }
+        std::fwrite(&rec, sizeof(rec), 1, g_profile.file);
+    }
+    std::fflush(g_profile.file);
+}
 
 // ── Cross-process marshalling helpers ───────────────────────────────────────
 // Translator + its helpers grow `insn_buf` (mmap/calloc) and append to six
@@ -257,6 +346,8 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask, const Translate
                 static_cast<long long>(req.num_instrs));
         fflush(stdout);
     }
+
+    dumpBlockIfNew(req.block, localIR.data(), req.num_instrs);
 
     auto result = Translator::translate_instruction(
         &tr, reinterpret_cast<IRBlock*>(req.block), localIR.data(),
@@ -634,6 +725,17 @@ bool installPortInParent(mach_port_t parentTaskPort, mach_port_t* outServicePort
 }
 
 bool spawnReceiveThread(mach_port_t servicePort, mach_port_t parentTaskPort) {
+    if (g_rosetta_config != nullptr && !g_rosetta_config->profile_path.empty()) {
+        const char* path = g_rosetta_config->profile_path.c_str();
+        g_profile.file = std::fopen(path, "wb");
+        if (g_profile.file == nullptr) {
+            fprintf(stdout, "[rosettax87] X87_PROFILE: failed to open '%s' for writing\n", path);
+        } else {
+            fprintf(stdout, "[rosettax87] X87_PROFILE: dumping IR streams to '%s'\n", path);
+        }
+        fflush(stdout);
+    }
+
     pthread_t thr;
     pthread_attr_t attr;
     pthread_attr_init(&attr);
