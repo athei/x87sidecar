@@ -784,64 +784,6 @@ void emit_x87_perm_flush(AssemblerBuffer& buf, int Xbase, int Wd_top, int Wd_tmp
 }
 
 // =============================================================================
-// emit_x87_cache_flush — eager pre-IR flush of deferred cache state.
-//
-// Mirrors x87_end's late-flush block (TranslatorX87Internal.hpp) but emits
-// unconditionally on each dirty flag, with no run_remaining gate.  Lets the
-// X87IR pipeline run on what would otherwise be a dirty-cache run that today
-// gets gated out and falls through to the slower peephole/single-op path.
-// Flag resets keep subsequent x87_end calls from re-emitting the writebacks.
-// =============================================================================
-void emit_x87_cache_flush(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, int Wd_top) {
-    // Fast exit when nothing is dirty — emits no insns and allocates no scratch.
-    if (a1.x87_cache.top_dirty == 0 && a1.x87_cache.tag_push_pending == 0 &&
-        a1.x87_cache.deferred_pop_count == 0 && !a1.x87_cache.perm_dirty) {
-        return;
-    }
-
-    const int Wd_tmp = alloc_free_gpr(a1);
-
-    // OPT-G: flush deferred permutation map.
-    if (a1.x87_cache.perm_dirty) {
-        const int Xst_base = a1.x87_cache.gprs_valid ? a1.x87_cache.st_base_gpr : -1;
-        const int Dd_save = alloc_free_fpr(a1);
-        const int Dd_chain = alloc_free_fpr(a1);
-        emit_x87_perm_flush(buf, Xbase, Wd_top, Wd_tmp, a1.x87_cache.perm, Xst_base, Dd_save,
-                            Dd_chain);
-        free_fpr(a1, Dd_chain);
-        free_fpr(a1, Dd_save);
-        a1.x87_cache.reset_perm();
-    }
-
-    // OPT-D2: flush deferred pop tag-set-empty updates.
-    if (a1.x87_cache.deferred_pop_count > 0) {
-        const int Wd_t2 = alloc_free_gpr(a1);
-        const int Wd_tw = alloc_free_gpr(a1);
-        emit_x87_tag_set_empty_batch(buf, Xbase, Wd_top, Wd_tmp, Wd_t2, Wd_tw,
-                                     a1.x87_cache.deferred_pop_count);
-        free_gpr(a1, Wd_tw);
-        free_gpr(a1, Wd_t2);
-        a1.x87_cache.deferred_pop_count = 0;
-    }
-
-    // OPT-D: flush deferred tag-valid update from a pending push.
-    if (a1.x87_cache.tag_push_pending) {
-        const int Wd_tmp2 = alloc_free_gpr(a1);
-        emit_x87_tag_clear(buf, Xbase, Wd_top, Wd_tmp, Wd_tmp2);
-        free_gpr(a1, Wd_tmp2);
-        a1.x87_cache.tag_push_pending = 0;
-    }
-
-    // OPT-C: flush deferred TOP store.
-    if (a1.x87_cache.top_dirty) {
-        emit_store_top(buf, Xbase, Wd_top, Wd_tmp);
-        a1.x87_cache.top_dirty = 0;
-    }
-
-    free_gpr(a1, Wd_tmp);
-}
-
-// =============================================================================
 // OPT-L: Branchless FCMP NZCV → packed x87 CC bits.
 //
 // AArch64 FCMP sets NZCV:

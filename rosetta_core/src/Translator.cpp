@@ -3,9 +3,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <optional>
-#include <utility>
 
-#include "rosetta_core/AssemblerBuffer.h"
 #include "rosetta_core/AssemblerHelpers.hpp"
 #include "rosetta_core/Config.h"
 #include "rosetta_core/CoreConfig.h"
@@ -14,36 +12,10 @@
 #include "rosetta_core/ProfileRuntime.h"
 #include "rosetta_core/Register.h"
 #include "rosetta_core/TranslationResult.h"
-#include "rosetta_core/TranslatorHelpers.hpp"
 #include "rosetta_core/TranslatorX87.h"
 #include "rosetta_core/TranslatorX87Fusion.h"
-#include "rosetta_core/TranslatorX87Helpers.hpp"
 #include "rosetta_core/X87Cache.h"
 #include "rosetta_core/X87IR.h"
-
-// Internal helper for x87_begin — same inline copy as in X87IRLower.cpp.
-// TODO: promote to a public header alongside emit_x87_cache_flush so
-// translator dispatch can call it without re-inlining the body.
-namespace TranslatorX87 {
-inline auto x87_begin(TranslationResult& a1, AssemblerBuffer& buf) -> std::pair<int, int> {
-    if (a1.x87_cache.run_remaining > 0 && a1.x87_cache.gprs_valid) {
-        return {a1.x87_cache.base_gpr, a1.x87_cache.top_gpr};
-    }
-    const int Xbase = alloc_gpr(a1, 0);
-    const int Wd_top = alloc_gpr(a1, 1);
-    emit_x87_base(buf, a1, Xbase);
-    emit_load_top(buf, a1, Xbase, Wd_top);
-    if (a1.x87_cache.run_remaining > 0) {
-        a1.x87_cache.base_gpr = static_cast<int8_t>(Xbase);
-        a1.x87_cache.top_gpr = static_cast<int8_t>(Wd_top);
-        const int Xst_base = alloc_gpr(a1, 6);
-        emit_add_imm(buf, 1, 0, 0, 0, kX87RegFileOff, Xbase, Xst_base);
-        a1.x87_cache.st_base_gpr = static_cast<int8_t>(Xst_base);
-        a1.x87_cache.gprs_valid = 1;
-    }
-    return {Xbase, Wd_top};
-}
-}  // namespace TranslatorX87
 
 // True for opcode IDs in the two x87 ranges that Rosetta assigns to x87
 // instructions.  Mirrors the JIT stub's FILTER prologue range check at
@@ -115,20 +87,13 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
     };
 
     // ── IR pipeline: try whole-run optimization for runs of 3+ ─────────────
-    // Originally gated on `top_dirty == 0 && tag_push_pending == 0 &&
-    // deferred_pop_count == 0 && !perm_dirty` because IR rebuilds the x87
-    // stack model from canonical memory state.  The dirty-flag gate dropped
-    // ~25% of fst-chain executions and 50–57% of fstsw|test|br executions
-    // onto the slower peephole/single-op path (per the 2026-05-02 TLY0
-    // capture).  emit_x87_cache_flush now eagerly writes back the deferred
-    // state and resets the flags so IR can fire over what would have been a
-    // dirty run.  Flush-when-clean is a no-op (allocates no scratch).
+    // The IR fires once at the start of a fresh run (no deferred cache state).
+    // It builds an SSA-like IR, runs optimization passes (DSE, FMA, FCOM+FSTSW
+    // fusion), and lowers directly to AArch64.
     {
         const bool ir_disabled = g_rosetta_config && g_rosetta_config->disable_x87_ir;
-        if (!ir_disabled && cache.active() && cache.run_remaining >= 3) {
-            auto& buf = translation_result->insn_buf;
-            const auto [Xbase, Wd_top] = TranslatorX87::x87_begin(*translation_result, buf);
-            emit_x87_cache_flush(*translation_result, buf, Xbase, Wd_top);
+        if (!ir_disabled && cache.active() && cache.run_remaining >= 3 && cache.top_dirty == 0 &&
+            cache.tag_push_pending == 0 && cache.deferred_pop_count == 0 && !cache.perm_dirty) {
             const int ir_consumed = X87IR::compile_run(translation_result, instr_array, num_instrs,
                                                        insn_idx, cache.run_remaining);
             if (ir_consumed > 0) {
