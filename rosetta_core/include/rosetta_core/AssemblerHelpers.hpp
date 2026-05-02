@@ -222,6 +222,31 @@ auto emit_fmov_d_one(AssemblerBuffer& buf, int Dd) -> void;
 // No GPR intermediate needed.
 auto emit_ldr_literal_f64(AssemblerBuffer& buf, int Dd, uint64_t constant) -> void;
 
+// -----------------------------------------------------------------------------
+// 1e — NEON broadcast helpers (StoreF32-run coalescing)
+//
+// Used by X87IRLower's StoreF32-run path to collapse N consecutive scalar
+// f32 stores into one DUP + (STR Q | STP S, S) pairs/quads.  See
+// project_peephole_fusion.md and ~/.claude/plans/recall-memory-analyze-the-
+// snappy-scott.md for the rationale.
+//
+// Encodings are decoded inline in the .cpp following emit_movi_d_zero's style.
+// -----------------------------------------------------------------------------
+
+// DUP Vd.4S, Vn.S[0] — broadcast the low 32-bit lane of Vn into all four
+// lanes of Vd (128-bit Q-form).  Used to materialise a vector of identical
+// f32 values from a scalar narrowed by FCVT.
+auto emit_dup_v4s_from_s(AssemblerBuffer& buf, int Vd, int Vn) -> void;
+
+// STR Qt, [Rn, #imm12] — store a 128-bit Q register (4×f32 or 16×u8) using
+// the unsigned-immediate addressing mode.  imm12 is scaled by 16; the byte
+// offset must be a multiple of 16 in [0, 65520].
+auto emit_str_q_imm(AssemblerBuffer& buf, int Qt, int Rn, int16_t imm12) -> void;
+
+// STP St1, St2, [Rn, #simm7] — pair-store two 32-bit S registers.  simm7 is
+// the byte offset divided by 4; valid range is [-256, +252] step 4.
+auto emit_stp_s_imm(AssemblerBuffer& buf, int St1, int St2, int Rn, int16_t simm7) -> void;
+
 // CSET Wd, cond — set Wd to 1 if condition holds, else 0
 // Encodes as CSINC Rd, XZR, XZR, invert(cond)
 // AArch64 cond codes: EQ=0 NE=1 CS=2 CC=3 MI=4 PL=5 VS=6 VC=7

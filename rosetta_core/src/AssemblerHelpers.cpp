@@ -586,6 +586,88 @@ auto emit_fmov_d_one(AssemblerBuffer& buf, int Dd) -> void {
     buf.emit(0x1E6E1000U | static_cast<uint32_t>(Dd & 0x1F));
 }
 
+// ---------------------------------------------------------------------------
+// NEON broadcast helpers — used by X87IRLower's StoreF32-run coalescer to
+// collapse N consecutive scalar f32 stores into one DUP + (STR Q | STP S, S)
+// groups.  See AssemblerHelpers.hpp section 1e.
+// ---------------------------------------------------------------------------
+
+auto emit_dup_v4s_from_s(AssemblerBuffer& buf, int Vd, int Vn) -> void {
+    // DUP Vd.4S, Vn.S[0] — broadcast the low 32-bit lane of Vn into all four
+    // lanes of Vd (Q-form, 128-bit).
+    //
+    // Advanced SIMD copy, "DUP (element)" variant:
+    //   bit[31] 0
+    //   bit[30] Q=1            // 4S form
+    //   bit[29] op=0
+    //   bits[28:21]=01110000
+    //   bits[20:16] imm5=00100  // size=S (bits[19:18]=01) + index=0 (bits[20]=0,
+    //                           //   bit[17:16]=lane index lower bits = 0)
+    //   bits[15:11]=00000
+    //   bit[10] 1
+    //   bits[9:5]=Rn
+    //   bits[4:0]=Rd
+    //
+    // Concatenated: 0_1_0_01110000_00100_00000_1_Rn_Rd
+    //             = 0x4E040400 | (Rn<<5) | Rd
+    uint32_t insn = 0x4E040400U;
+    insn |= static_cast<uint32_t>(Vn & 0x1F) << 5;
+    insn |= static_cast<uint32_t>(Vd & 0x1F);
+    buf.emit(insn);
+}
+
+auto emit_str_q_imm(AssemblerBuffer& buf, int Qt, int Rn, int16_t imm12) -> void {
+    // STR Qt, [Rn, #imm] — store 128-bit Q register, unsigned-immediate form.
+    //
+    // Load/store register (unsigned immediate), SIMD&FP variant:
+    //   bits[31:30] size=00      // for Q-form, opc=10 selects 128-bit
+    //   bits[29:27]=111
+    //   bit[26]    V=1
+    //   bits[25:24]=01
+    //   bits[23:22] opc=10       // store, Q-form
+    //   bits[21:10] imm12        // byte offset / 16
+    //   bits[9:5]   Rn
+    //   bits[4:0]   Rt
+    //
+    // Concatenated: 00_111_1_01_10_imm12_Rn_Rt
+    //             = 0x3D800000 | (imm12<<10) | (Rn<<5) | Qt
+    //
+    // imm12 must fit in 12 unsigned bits; byte offset = imm12 * 16.
+    uint32_t insn = 0x3D800000U;
+    insn |= (static_cast<uint32_t>(imm12) & 0xFFFU) << 10;
+    insn |= static_cast<uint32_t>(Rn & 0x1F) << 5;
+    insn |= static_cast<uint32_t>(Qt & 0x1F);
+    buf.emit(insn);
+}
+
+auto emit_stp_s_imm(AssemblerBuffer& buf, int St1, int St2, int Rn, int16_t simm7) -> void {
+    // STP St1, St2, [Rn, #simm] — pair-store two 32-bit S registers, signed
+    // offset addressing mode.
+    //
+    // Load/store pair (signed offset), SIMD&FP variant:
+    //   bits[31:30] opc=00       // 32-bit S form
+    //   bits[29:27]=101
+    //   bit[26]    V=1
+    //   bits[25:23]=010          // signed offset
+    //   bit[22]    L=0           // store
+    //   bits[21:15] imm7         // byte offset / 4 (signed, 7-bit)
+    //   bits[14:10] Rt2
+    //   bits[9:5]   Rn
+    //   bits[4:0]   Rt
+    //
+    // Concatenated: 00_101_1_010_0_imm7_Rt2_Rn_Rt
+    //             = 0x2D000000 | ((imm7&0x7F)<<15) | (Rt2<<10) | (Rn<<5) | Rt
+    //
+    // simm7 must be in [-64, +63] (encoded), giving byte offsets [-256, +252]
+    // step 4.
+    uint32_t insn = 0x2D000000U;
+    insn |= (static_cast<uint32_t>(simm7) & 0x7FU) << 15;
+    insn |= static_cast<uint32_t>(St2 & 0x1F) << 10;
+    insn |= static_cast<uint32_t>(Rn & 0x1F) << 5;
+    insn |= static_cast<uint32_t>(St1 & 0x1F);
+    buf.emit(insn);
+}
+
 auto emit_ldr_literal_f64(AssemblerBuffer& buf, int Dd, uint64_t constant) -> void {
     // OPT-H: LDR Dd, [PC, #8] — load from 2 instructions ahead (the .quad)
     // Encoding (LDR literal, SIMD&FP):
