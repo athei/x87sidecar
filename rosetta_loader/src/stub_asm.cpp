@@ -225,10 +225,20 @@ constexpr uint32_t b_cond(uint32_t cond, int32_t imm19_words) {
     uint32_t imm19 = static_cast<uint32_t>(imm19_words) & 0x7FFFF;
     return 0x54000000U | (imm19 << 5) | (cond & 0xF);
 }
+constexpr uint32_t COND_EQ = 0x0;  // equal
 constexpr uint32_t COND_NE = 0x1;  // not equal
 constexpr uint32_t COND_LS = 0x9;  // unsigned ≤
 constexpr uint32_t COND_LT = 0xB;  // signed <
 constexpr uint32_t COND_LE = 0xD;  // signed ≤
+
+// B +imm26*4   (unconditional PC-relative branch, 26-bit signed scaled by 4
+// — ±128 MB range).  Used by the IPC body's interrupt-retry blocks to jump
+// back to the kr-dispatch checkpoint.
+//   0001_0100_imm26
+constexpr uint32_t b_uncond(int32_t imm26_words) {
+    uint32_t imm26 = static_cast<uint32_t>(imm26_words) & 0x03FFFFFF;
+    return 0x14000000U | imm26;
+}
 
 // LDRH Wt, [Xn|SP, #imm]   (16-bit load-zero-extend, unsigned offset, scaled by 2)
 //   01_111_0_01_01_imm12_Rn_Rt
@@ -631,12 +641,8 @@ IpcPatches emit_ipc_postlude(std::vector<uint8_t>& ipc) {
     return p;
 }
 
-// Build the IPC body around `mach_msg2_trap` (svc -47) with
-// `MACH64_SEND_MQ_CALL` set in the high half of options.  This is the
-// XPC-style "MIG call" fast path: the kernel knows we'll immediately RCV
-// on `parentReplyName` after our SEND lands at the sidecar, and can do
-// a direct hand-off to the sidecar thread (already blocked in
-// mach_msg(MACH_RCV_MSG)) without going through the scheduler.
+// mach_msg2_trap argument packing + svc.  Used both for the initial
+// SEND+RCV+MQ_CALL and for the interrupt-retry paths below.
 //
 // Argument packing is `(low32_field) | (high32_field << 32)` per
 // mach_msg2_trap — verified by disassembling _mach_msg_overwrite in
@@ -644,9 +650,102 @@ IpcPatches emit_ipc_postlude(std::vector<uint8_t>& ipc) {
 // don't expose the trap or MACH64_* constants, so the values are baked
 // here.
 //
+//   x0  = data pointer            (sp + 64)
+//   x1  = options64               (caller-supplied)
+//   x2  = (msgh_bits)             | (send_size      << 32)
+//   x3  = (sidecarReqName)        | (parentReplyName<< 32)
+//   x4  = (voucher = 0)           | (msgh_id        << 32)
+//   x5  = (desc_count = 0)        | (rcv_name = parentReplyName << 32)
+//   x6  = (rcv_size = 64)         | (priority = 0   << 32)
+//   x7  = timeout = 0
+//   x16 = -47  (mach_msg2_trap)
+//
+// The xnu MACH64_* bit assignments (from osfmk/mach/message.h):
+//   MACH64_SEND_USER_CALL    = 0x0000'0002'0000'0000   (bit 33)
+//   MACH64_SEND_MQ_CALL      = 0x0000'0004'0000'0000   (bit 34)
+//   MACH64_SEND_KOBJECT_CALL = 0x0000'0008'0000'0000   (bit 35)
+//   MACH64_SEND_DK_CALL      = 0x0000'0010'0000'0000   (bit 36)
+// These aren't exposed in the public SDK headers; verified by
+// breakpointing libsystem_kernel's `mach_msg2_internal` and reading the
+// x1 register on a working SEND|RCV call.
+//
+// `send_args`: when false (RCV-only retry), x2/x3/x4 are zeroed — the
+// kernel ignores them when MACH_SEND_MSG isn't set.  When true and
+// `msgh_id_in_x9` is true, x9 is assumed to still hold msgh_id from a
+// preceding emit_build_msgh_id; otherwise we reload from the sp+128
+// stash (x9 is clobbered across the trap, so retries must reload).
+constexpr uint64_t kMach64SendMqCall = 0x0000'0004'0000'0000ULL;
+constexpr uint64_t kSendRcvOpt = 0x0000'0000'0000'0003ULL;
+constexpr uint64_t kRcvOnlyOpt = 0x0000'0000'0000'0002ULL;
+
+void emit_mach_msg2_call(std::vector<uint8_t>& ipc, uint32_t sidecarReqName,
+                         uint32_t parentReplyName, uint64_t options64, bool send_args,
+                         bool msgh_id_in_x9) {
+    emit(ipc, add_imm(0, SP, 64));  // x0 = sp + 64
+    emit_load_imm64(ipc, 1, options64);
+
+    if (send_args) {
+        emit_load_imm64(
+            ipc, 2, static_cast<uint64_t>(kMsgBits) | (static_cast<uint64_t>(kMsgSendSize) << 32));
+        emit_load_imm64(
+            ipc, 3,
+            static_cast<uint64_t>(sidecarReqName) | (static_cast<uint64_t>(parentReplyName) << 32));
+        if (!msgh_id_in_x9) {
+            emit(ipc, ldr_w_offset(9, SP, 128));  // reload msgh_id from stash
+        }
+        emit(ipc, lsl_imm_x(4, 9, 32));  // x4 = msgh_id << 32 (voucher = 0)
+    } else {
+        // RCV-only: send-side args ignored by the kernel; zero for hygiene.
+        emit(ipc, movz(2, 0, 0));
+        emit(ipc, movz(3, 0, 0));
+        emit(ipc, movz(4, 0, 0));
+    }
+
+    // x5 = parentReplyName << 32 (rcv_name in high half, desc_count = 0 in low).
+    emit_load_imm64(ipc, 10, static_cast<uint64_t>(parentReplyName) << 32);
+    emit(ipc, mov_reg_x(5, 10));
+
+    emit(ipc, movz(6, kMsgRcvSize, 0));  // x6 = rcv_size (priority = 0)
+    emit(ipc, movz(7, 0, 0));            // x7 = timeout = 0
+    emit(ipc, movn(16, 46, 0));          // x16 = ~46 = -47 (mach_msg2_trap)
+    emit(ipc, svc(0x80));
+}
+
+// Build the IPC body around `mach_msg2_trap` (svc -47) with
+// `MACH64_SEND_MQ_CALL` set in the high half of options.  This is the
+// XPC-style "MIG call" fast path: the kernel knows we'll immediately RCV
+// on `parentReplyName` after our SEND lands at the sidecar, and can do
+// a direct hand-off to the sidecar thread (already blocked in
+// mach_msg(MACH_RCV_MSG)) without going through the scheduler.
+//
+// libsystem's `mach_msg()` / `mach_msg2()` wrappers contain a retry loop
+// on MACH_SEND_INTERRUPTED / MACH_RCV_INTERRUPTED — a trap interrupted
+// by a signal (timer, BSD signal, exception port).  Our direct svc -47
+// has no such loop, so without the dispatch block below an interrupted
+// receive bubbled up to a kind=0 abort and killed the wine'd process.
+// TurtleWoW launches were occasionally hitting this with `kr=0x10004005`
+// (MACH_RCV_INTERRUPTED).  We mirror the libsystem behavior here:
+//
+//   kr == 0                    → fall through to validation.
+//   kr == MACH_RCV_INTERRUPTED → SEND completed, RCV interrupted; reply
+//                                is queued, drain it with an RCV-only
+//                                trap.  A blind full-retry would
+//                                duplicate the request and leave a stale
+//                                reply on the port that would trip the
+//                                kind=2 cross-talk check on the next call.
+//   kr == MACH_SEND_INTERRUPTED → SEND didn't land; full re-trap is
+//                                idempotent.  Rare with MQ_CALL but cheap.
+//   anything else              → fall through; postlude's cbnz_w(0)
+//                                catches it and routes to kind=0 abort.
+//
 // We don't pre-populate the header in the on-stack buffer — the kernel
 // synthesizes it from the register-packed args.  Body bytes still live
-// at sp+88..128 (kernel reads from `data + 24`).
+// at sp+88..128 (kernel reads from `data + 24`).  An interrupted RCV
+// leaves the receive buffer untouched, so the request body and the
+// msgh_id stash at sp+128 are still valid for retry.
+constexpr uint32_t kMachRcvInterrupted = 0x10004005U;
+constexpr uint32_t kMachSendInterrupted = 0x10000007U;
+
 IpcPatches emit_mach_msg2_ipc(std::vector<uint8_t>& ipc, uint32_t sidecarReqName,
                               uint32_t parentReplyName) {
     emit_ipc_prologue(ipc);
@@ -655,61 +754,69 @@ IpcPatches emit_mach_msg2_ipc(std::vector<uint8_t>& ipc, uint32_t sidecarReqName
     emit_body_stores(ipc);
 
     // Build msgh_id in x9 and stash at sp+128 for the post-svc check.
-    // We need it again to pack into x4's high half below.
+    // We use x9 directly for the initial trap's x4-pack below; retries
+    // reload from sp+128 because x9 doesn't survive the trap.
     emit_build_msgh_id(ipc);
 
-    // ── mach_msg2_trap arguments (8 args, all packed into x0..x7) ───────
-    //   x0  = data pointer            (sp + 64)
-    //   x1  = options64
-    //         low32  = MACH_SEND_MSG | MACH_RCV_MSG = 0x3
-    //                  (mach_msg2_internal masks off bit 0 / 6 / 10 before the
-    //                   trap, so MACH_SEND_MSG ends up cleared regardless;
-    //                   we leave it set to mirror what libc passes pre-mask.)
-    //         high32 = MACH64_SEND_MQ_CALL = 0x4 (bit 34)
-    //                  MQ_CALL is the MIG paired-send-then-RCV hint that lets
-    //                  the kernel direct-hand-off to the sidecar thread
-    //                  already blocked in mach_msg(MACH_RCV_MSG).
-    //   x2  = (msgh_bits)             | (send_size      << 32)
-    //   x3  = (sidecarReqName)        | (parentReplyName<< 32)
-    //   x4  = (voucher = 0)           | (msgh_id        << 32)
-    //   x5  = (desc_count = 0)        | (rcv_name = parentReplyName << 32)
-    //   x6  = (rcv_size = 64)         | (priority = 0   << 32)
-    //   x7  = timeout = 0
-    //   x16 = -47  (mach_msg2_trap)
-    //
-    // The xnu MACH64_* bit assignments (from osfmk/mach/message.h):
-    //   MACH64_SEND_USER_CALL    = 0x0000'0002'0000'0000   (bit 33)
-    //   MACH64_SEND_MQ_CALL      = 0x0000'0004'0000'0000   (bit 34)
-    //   MACH64_SEND_KOBJECT_CALL = 0x0000'0008'0000'0000   (bit 35)
-    //   MACH64_SEND_DK_CALL      = 0x0000'0010'0000'0000   (bit 36)
-    // These aren't exposed in the public SDK headers; verified by
-    // breakpointing libsystem_kernel's `mach_msg2_internal` and reading the
-    // x1 register on a working SEND|RCV call.
-    constexpr uint64_t kMach64SendMqCall = 0x0000'0004'0000'0000ULL;
-    constexpr uint64_t kSendRcvOpt = 0x0000'0000'0000'0003ULL;
+    // Initial call: full SEND+RCV with MIG fast-path hand-off.
+    emit_mach_msg2_call(ipc, sidecarReqName, parentReplyName, kSendRcvOpt | kMach64SendMqCall,
+                        /*send_args=*/true,
+                        /*msgh_id_in_x9=*/true);
 
-    emit(ipc, add_imm(0, SP, 64));  // x0 = sp + 64
+    // ── Retry-on-interrupt dispatch ─────────────────────────────────────
+    // Both b.eq forward branches and the cbz_w skip-to-validate are
+    // patched once we know the postlude/retry-block offsets.
+    const size_t dispatchPos = ipc.size();
 
-    emit_load_imm64(ipc, 1, kMach64SendMqCall | kSendRcvOpt);
-    emit_load_imm64(ipc, 2,
-                    static_cast<uint64_t>(kMsgBits) | (static_cast<uint64_t>(kMsgSendSize) << 32));
-    emit_load_imm64(
-        ipc, 3,
-        static_cast<uint64_t>(sidecarReqName) | (static_cast<uint64_t>(parentReplyName) << 32));
+    const size_t cbzZeroPos = ipc.size();
+    emit(ipc, cbz_w(0, 0));  // patched to validatePos
 
-    // x4 = msgh_id << 32  (voucher = 0 in low half).  msgh_id sits in x9.
-    emit(ipc, lsl_imm_x(4, 9, 32));
+    emit(ipc, movz(13, static_cast<uint16_t>(kMachRcvInterrupted & 0xFFFF), 0));
+    emit(ipc, movk(13, static_cast<uint16_t>(kMachRcvInterrupted >> 16), 16));
+    emit(ipc, cmp_reg_w(0, 13));
+    const size_t bRetryRcvPos = ipc.size();
+    emit(ipc, b_cond(COND_EQ, 0));  // patched to retryRcvPos
 
-    // x5 = parentReplyName << 32  (desc_count = 0 in low half).
-    emit_load_imm64(ipc, 10, static_cast<uint64_t>(parentReplyName) << 32);
-    emit(ipc, mov_reg_x(5, 10));
+    emit(ipc, movz(13, static_cast<uint16_t>(kMachSendInterrupted & 0xFFFF), 0));
+    emit(ipc, movk(13, static_cast<uint16_t>(kMachSendInterrupted >> 16), 16));
+    emit(ipc, cmp_reg_w(0, 13));
+    const size_t bRetryFullPos = ipc.size();
+    emit(ipc, b_cond(COND_EQ, 0));  // patched to retryFullPos
 
-    emit(ipc, movz(6, kMsgRcvSize, 0));  // x6 = rcv_size (priority = 0)
-    emit(ipc, movz(7, 0, 0));            // x7 = timeout = 0
-    emit(ipc, movn(16, 46, 0));          // x16 = ~46 = -47 (mach_msg2_trap)
-    emit(ipc, svc(0x80));
+    // Anything else falls through to postlude; its first instruction
+    // (cbnz_w(0)) catches non-zero kr and routes to the kind=0 abort.
+    const size_t validatePos = ipc.size();
+    patch_word(ipc, cbzZeroPos, cbz_w(0, static_cast<int32_t>((validatePos - cbzZeroPos) / 4)));
 
-    return emit_ipc_postlude(ipc);
+    IpcPatches p = emit_ipc_postlude(ipc);
+
+    // ── Retry blocks ────────────────────────────────────────────────────
+    // Past the postlude, reachable only via the patched b.eq forwards
+    // above.  Each re-traps and branches back to dispatchPos to re-check
+    // the new kr (in case the retry was itself interrupted).
+    const size_t retryRcvPos = ipc.size();
+    emit_mach_msg2_call(ipc, sidecarReqName, parentReplyName, kRcvOnlyOpt,
+                        /*send_args=*/false, /*msgh_id_in_x9=*/false);
+    {
+        const auto back = static_cast<int32_t>((dispatchPos - ipc.size()) / 4);
+        emit(ipc, b_uncond(back));
+    }
+
+    const size_t retryFullPos = ipc.size();
+    emit_mach_msg2_call(ipc, sidecarReqName, parentReplyName, kSendRcvOpt | kMach64SendMqCall,
+                        /*send_args=*/true,
+                        /*msgh_id_in_x9=*/false);
+    {
+        const auto back = static_cast<int32_t>((dispatchPos - ipc.size()) / 4);
+        emit(ipc, b_uncond(back));
+    }
+
+    patch_word(ipc, bRetryRcvPos,
+               b_cond(COND_EQ, static_cast<int32_t>((retryRcvPos - bRetryRcvPos) / 4)));
+    patch_word(ipc, bRetryFullPos,
+               b_cond(COND_EQ, static_cast<int32_t>((retryFullPos - bRetryFullPos) / 4)));
+
+    return p;
 }
 
 }  // namespace
