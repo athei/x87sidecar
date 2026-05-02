@@ -7,6 +7,7 @@
 #include "rosetta_core/AssemblerHelpers.hpp"
 #include "rosetta_core/Config.h"
 #include "rosetta_core/CoreConfig.h"
+#include "rosetta_core/IROperand.h"
 #include "rosetta_core/Register.h"
 #include "rosetta_core/TranslationResult.h"
 #include "rosetta_core/TranslatorHelpers.hpp"
@@ -105,6 +106,77 @@ struct FPRState {
         return -1;
     }
 };
+
+// ── StoreF32-run coalescing helpers ─────────────────────────────────────────
+//
+// Inspect a Node's mem_operand to decide whether two consecutive StoreF32s
+// can be merged into a single STR Q (4 floats) or STP S, S (2 floats).  We
+// only merge MemRefs that have a base register but no index register and no
+// segment override — anything more complex is left to the scalar fallback
+// where compute_operand_address handles the full addressing mode.
+//
+// See ~/.claude/plans/recall-memory-analyze-the-snappy-scott.md and
+// feedback_ir_pipeline_storef32_baseline.md for the motivation.
+
+struct SimpleMemRef {
+    bool ok;           // true → operand is a "simple" base+disp MemRef
+    uint8_t base_reg;  // x86 base register index
+    int64_t disp;      // signed displacement
+};
+
+static SimpleMemRef get_simple_mem(const Node& n) {
+    if (n.mem_operand == nullptr) {
+        return {.ok = false, .base_reg = 0, .disp = 0};
+    }
+    const IROperand& op = *n.mem_operand;
+    if (op.kind != IROperandKind::MemRef) {
+        return {.ok = false, .base_reg = 0, .disp = 0};
+    }
+    if ((op.mem.mem_flags & 1U) == 0) {  // no base register
+        return {.ok = false, .base_reg = 0, .disp = 0};
+    }
+    if ((op.mem.mem_flags & 2U) != 0) {  // index register present
+        return {.ok = false, .base_reg = 0, .disp = 0};
+    }
+    if (op.mem.seg_override != 0) {
+        return {.ok = false, .base_reg = 0, .disp = 0};
+    }
+    return {.ok = true, .base_reg = op.mem.base_reg, .disp = op.mem.disp};
+}
+
+// True iff four consecutive StoreF32 nodes target a 16-byte-aligned region of
+// 16 contiguous bytes off the same x86 base register — the precondition for
+// emitting a single `STR Q` after the broadcast DUP.
+static bool can_emit_str_q(const Node& a, const Node& b, const Node& c, const Node& d) {
+    auto sa = get_simple_mem(a);
+    auto sb = get_simple_mem(b);
+    auto sc = get_simple_mem(c);
+    auto sd = get_simple_mem(d);
+    if (!sa.ok || !sb.ok || !sc.ok || !sd.ok) {
+        return false;
+    }
+    if (sa.base_reg != sb.base_reg || sa.base_reg != sc.base_reg || sa.base_reg != sd.base_reg) {
+        return false;
+    }
+    if (sb.disp != sa.disp + 4 || sc.disp != sa.disp + 8 || sd.disp != sa.disp + 12) {
+        return false;
+    }
+    return (sa.disp & 0xF) == 0;  // 16-byte alignment required by STR Q
+}
+
+// True iff two consecutive StoreF32 nodes target adjacent f32 slots off the
+// same x86 base register — the precondition for `STP S, S`.
+static bool can_emit_stp_s(const Node& a, const Node& b) {
+    auto sa = get_simple_mem(a);
+    auto sb = get_simple_mem(b);
+    if (!sa.ok || !sb.ok) {
+        return false;
+    }
+    if (sa.base_reg != sb.base_reg) {
+        return false;
+    }
+    return sb.disp == sa.disp + 4;
+}
 
 // ── RC preamble: load control_word and extract rounding-control bits ────────
 
@@ -538,13 +610,79 @@ void lower(Context& ctx, TranslationResult* result) {
                 break;
             }
             case Op::StoreF32: {
-                // Narrow f64 → f32, then store.
-                int Ds_tmp = alloc_free_fpr(*result);
-                emit_fcvt_d_to_s(buf, Ds_tmp, fprs.get(n.inputs[0]));
-                int addr = compute_operand_address(*result, true, n.mem_operand, GPR::XZR);
-                emit_fstr_imm(buf, 2, Ds_tmp, addr, 0);
-                free_gpr(*result, addr);
-                free_fpr(*result, Ds_tmp);
+                // Forward-scan: coalesce consecutive StoreF32 nodes that share
+                // the same SSA input into one fcvt + a ladder of STR Q / STP S /
+                // STR S groups.  This is the WoW L=12 fst-broadcast hot path —
+                // see feedback_ir_pipeline_storef32_baseline.md.
+                const int16_t src_node = n.inputs[0];
+                int j = i;
+                while (j + 1 < ctx.num_nodes) {
+                    const auto& nx = ctx.nodes[j + 1];
+                    if ((nx.flags & kDead) != 0) {
+                        break;
+                    }
+                    if (nx.op != Op::StoreF32 || nx.inputs[0] != src_node) {
+                        break;
+                    }
+                    ++j;
+                }
+
+                // One narrowing for the whole run; reused as the scalar source
+                // for STP S / STR S, and as the source lane for the broadcast
+                // DUP that feeds STR Q.
+                const int Ds_narrow = alloc_free_fpr(*result);
+                emit_fcvt_d_to_s(buf, Ds_narrow, fprs.get(src_node));
+
+                // Allocate the broadcast Q register lazily — only if at least
+                // one STR Q group fires.  Most benches that take the STP S or
+                // scalar STR S path skip the DUP entirely.
+                int Vq_broadcast = -1;
+                auto ensure_broadcast = [&] {
+                    if (Vq_broadcast < 0) {
+                        Vq_broadcast = alloc_free_fpr(*result);
+                        emit_dup_v4s_from_s(buf, Vq_broadcast, Ds_narrow);
+                    }
+                };
+
+                int k = i;
+                while (k <= j) {
+                    // STR Q: 4-float aligned-contiguous group.
+                    if (k + 3 <= j && can_emit_str_q(ctx.nodes[k], ctx.nodes[k + 1],
+                                                     ctx.nodes[k + 2], ctx.nodes[k + 3])) {
+                        ensure_broadcast();
+                        const int Xaddr = compute_operand_address(
+                            *result, /*is_64bit=*/true, ctx.nodes[k].mem_operand, GPR::XZR);
+                        emit_str_q_imm(buf, Vq_broadcast, Xaddr, /*imm12=*/0);
+                        free_gpr(*result, Xaddr);
+                        k += 4;
+                        continue;
+                    }
+                    // STP S, S: 2-float contiguous group.
+                    if (k + 1 <= j && can_emit_stp_s(ctx.nodes[k], ctx.nodes[k + 1])) {
+                        const int Xaddr = compute_operand_address(
+                            *result, /*is_64bit=*/true, ctx.nodes[k].mem_operand, GPR::XZR);
+                        emit_stp_s_imm(buf, Ds_narrow, Ds_narrow, Xaddr, /*simm7=*/0);
+                        free_gpr(*result, Xaddr);
+                        k += 2;
+                        continue;
+                    }
+                    // STR S: scalar fallback (today's per-store shape).
+                    const int Xaddr = compute_operand_address(*result, /*is_64bit=*/true,
+                                                              ctx.nodes[k].mem_operand, GPR::XZR);
+                    emit_fstr_imm(buf, /*size=*/2, Ds_narrow, Xaddr, /*imm12=*/0);
+                    free_gpr(*result, Xaddr);
+                    k += 1;
+                }
+
+                if (Vq_broadcast >= 0) {
+                    free_fpr(*result, Vq_broadcast);
+                }
+                free_fpr(*result, Ds_narrow);
+
+                // Skip the rest of the run; the outer loop's ++i lands on j+1.
+                // free_dead_inputs runs on ctx.nodes[j], whose inputs[0] is
+                // src_node — its FPR is freed there if last_use == j.
+                i = j;
                 break;
             }
 

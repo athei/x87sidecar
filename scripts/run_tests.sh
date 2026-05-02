@@ -37,6 +37,7 @@ ALL_TESTS=(
     test_arith
     test_compare_unary
     test_fld_fst
+    test_fst_chain_compose
     test_peephole3
     test_peephole4
     test_peephole5
