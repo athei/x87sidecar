@@ -9,7 +9,13 @@ union IROperand;
 
 namespace X87IR {
 
-static constexpr int kMaxNodes = 64;
+// Per-Context cap on IR nodes.  Bumped 64 → 128 on 2026-05-03 after the
+// fail-reason instrumentation showed the L=12 fst chain block overflowing
+// at the old cap (chain + FXCH + repeated segments routinely exceed 64).
+// Cost: 64 × sizeof(Node)=16 B = 1 KB extra per Context allocation; plus
+// X87IRLower's per-Context arrays (node_fpr, last_use, holding) grow by
+// the same ratio.  All Context lives on the stack and is short-lived.
+static constexpr int kMaxNodes = 128;
 
 // ── IR opcodes ──────────────────────────────────────────────────────────────
 
