@@ -100,7 +100,20 @@ public:
         VERBOSE_LOG("Attempting to attach to %d\n", childPid_);
 
         // Attach to the target via PT_ATTACH (sends SIGSTOP).
+        //
+        // Apple deprecated PT_ATTACH in favour of PT_ATTACHEXC, which
+        // delivers stop notifications via a Mach exception port instead
+        // of as a signal.  Switching means rewriting waitForStopped() to
+        // pull from the exception port (waitpid + WIFSTOPPED won't see the
+        // stop), and getting that right across our entire attach flow is
+        // a bigger surgical change than is justified for an interface
+        // Apple has been threatening to remove for years without doing so.
+        // Suppress the warning locally and revisit if the symbol actually
+        // disappears.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
         if (ptrace(PT_ATTACH, childPid_, nullptr, 0) == -1) {
+#pragma clang diagnostic pop
             fprintf(stdout, "ptrace(PT_ATTACH): %s\n", strerror(errno));
             return false;
         }
@@ -841,7 +854,9 @@ int main(int argc, char* argv[]) try {
     // compares against.
     if (g_cfg.loader_disable_hook) {
         VERBOSE_LOG("--disable-hook: passthrough mode; detaching after disable_aot write\n");
-        dbg.detach();
+        if (!dbg.detach()) {
+            return 1;
+        }
         // Block until parent exits (mirror the post-stub-install path below).
         int kq = kqueue();
         if (kq != -1) {
@@ -1504,7 +1519,9 @@ int main(int argc, char* argv[]) try {
         // (only ~MuhDebugger releases it). The receive thread will use it
         // for mach_vm_read on TranslationResult / IRInstr structs.
         mach_port_t parentTaskPort = dbg.taskPort();
-        dbg.detach();
+        if (!dbg.detach()) {
+            return 1;
+        }
 
         // Spawn the Mach receive thread BEFORE the kqueue wait below so
         // any in-flight tickle messages from the parent get drained while
