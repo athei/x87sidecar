@@ -20,8 +20,8 @@ struct IRBlock;
 
 namespace profile {
 
-constexpr uint32_t kMaxBlocks = 1U << 20;     // 1 M ids
-constexpr uint32_t kOverflowId = 0xFFFFFFFFU;  // returned past kMaxBlocks
+constexpr uint32_t kMaxBlocks = 1U << 20;                             // 1 M ids
+constexpr uint32_t kOverflowId = 0xFFFFFFFFU;                         // returned past kMaxBlocks
 constexpr std::size_t kCounterBytes = sizeof(uint64_t) * kMaxBlocks;  // 8 MiB
 
 // Register the counter array.  The same backing pages are mapped into

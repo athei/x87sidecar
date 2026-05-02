@@ -759,21 +759,25 @@ bool spawnReceiveThread(mach_port_t servicePort, mach_port_t parentTaskPort) {
         return false;
     }
 
-    // Spawn the throughput reporter too — same detached lifetime as the
-    // receive thread; both die with the loader process when the parent
-    // exits.  Failure to spawn the reporter is non-fatal: we still want
-    // the receive loop running, just without diagnostics.
-    pthread_t rthr;
-    pthread_attr_t rattr;
-    pthread_attr_init(&rattr);
-    pthread_attr_setdetachstate(&rattr, PTHREAD_CREATE_DETACHED);
-    int rrc = pthread_create(&rthr, &rattr, reporterEntry, nullptr);
-    pthread_attr_destroy(&rattr);
-    if (rrc != 0) {
-        fprintf(stdout,
-                "sidecar: reporter pthread_create failed (%d) — "
-                "throughput logging disabled\n",
-                rrc);
+    // Throughput reporter is opt-in via X87_LOG_THROUGHPUT=1 — useful for
+    // bisecting hangs (tells "stuck" apart from "just slow" on big
+    // workloads), but noisy enough that we don't want it on by default.
+    // Same detached lifetime as the receive thread; both die with the
+    // loader process when the parent exits.  Failure to spawn the
+    // reporter is non-fatal.
+    if (g_rosetta_config != nullptr && g_rosetta_config->loader_log_throughput != 0U) {
+        pthread_t rthr;
+        pthread_attr_t rattr;
+        pthread_attr_init(&rattr);
+        pthread_attr_setdetachstate(&rattr, PTHREAD_CREATE_DETACHED);
+        int rrc = pthread_create(&rthr, &rattr, reporterEntry, nullptr);
+        pthread_attr_destroy(&rattr);
+        if (rrc != 0) {
+            fprintf(stdout,
+                    "sidecar: reporter pthread_create failed (%d) — "
+                    "throughput logging disabled\n",
+                    rrc);
+        }
     }
     return true;
 }

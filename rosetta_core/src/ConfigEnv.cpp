@@ -91,6 +91,7 @@ RosettaConfig load_config_from_env() {
     cfg.loader_disable_hook = env_truthy("X87_DISABLE_HOOK") ? 1 : 0;
     cfg.loader_always_none = env_truthy("X87_ALWAYS_NONE") ? 1 : 0;
     cfg.loader_log_ops = env_truthy("X87_LOG_OPS") ? 1 : 0;
+    cfg.loader_log_throughput = env_truthy("X87_LOG_THROUGHPUT") ? 1 : 0;
 
     if (const char* p = std::getenv("X87_PROFILE"); p != nullptr && p[0] != '\0') {
         cfg.profile_path = p;
@@ -123,6 +124,10 @@ void print_env_help(std::FILE* out) {
                  "                                deterministic freeze repro, the last few\n"
                  "                                lines name the suspect.  HIGH-VOLUME — only\n"
                  "                                enable when bisecting.\n"
+                 "  X87_LOG_THROUGHPUT=1          diagnostic: sidecar reporter thread prints\n"
+                 "                                req/s every 2 s + an idle-transition line.\n"
+                 "                                Off by default; enable when telling 'stuck'\n"
+                 "                                apart from 'just slow' on long workloads.\n"
                  "  X87_DISABLE_CACHE=1           drop the cross-instruction GPR cache\n"
                  "  X87_FAST_ROUND=1              skip RC dispatch; always emit FCVTNS/FRINTN\n"
                  "                                (round-to-nearest only — UNSAFE for code that\n"

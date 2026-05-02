@@ -42,30 +42,35 @@ struct RosettaConfig {
     uint64_t disabled_fusions_mask;  // --disable-fusions=fld_arithp,...
 
     // Loader-only knobs (read by rosettax87 main; aotinvoke leaves them 0)
-    uint8_t loader_logs;          // --logs           verbose loader logging
-    uint8_t loader_force_attach;  // --force-attach   attach even for x64 PE binaries
-    uint8_t loader_disable_hook;  // --disable-hook   passthrough mode for benchmark
-                                  //                  baselines.  Still attaches and writes
-                                  //                  g_disable_aot=1, but skips the
-                                  //                  translate_insn entry patch.  Apple's
-                                  //                  runtime then JIT-translates everything
-                                  //                  with stock codegen, providing an
-                                  //                  apples-to-apples comparison against
-                                  //                  the optimised path (both have AOT
-                                  //                  cache + interpreter disabled).
-    uint8_t loader_always_none;   // X87_ALWAYS_NONE  diagnostic: sidecar replies None for
-                                  //                  every translate_insn request, so the
-                                  //                  stub falls through to stock for all
-                                  //                  ops.  Hook + IPC mechanics still run;
-                                  //                  only our JIT output is bypassed.
-                                  //                  Used to A/B "is the freeze in our
-                                  //                  emitted code or in the marshalling?"
-    uint8_t loader_log_ops;       // X87_LOG_OPS      diagnostic: sidecar prints one line
-                                  //                  per processTranslateRequest call with
-                                  //                  the opcode name and insn_idx.  Use
-                                  //                  with a deterministic freeze repro to
-                                  //                  see which op is the last one before
-                                  //                  the hang.
+    uint8_t loader_logs;            // --logs           verbose loader logging
+    uint8_t loader_force_attach;    // --force-attach   attach even for x64 PE binaries
+    uint8_t loader_disable_hook;    // --disable-hook   passthrough mode for benchmark
+                                    //                  baselines.  Still attaches and writes
+                                    //                  g_disable_aot=1, but skips the
+                                    //                  translate_insn entry patch.  Apple's
+                                    //                  runtime then JIT-translates everything
+                                    //                  with stock codegen, providing an
+                                    //                  apples-to-apples comparison against
+                                    //                  the optimised path (both have AOT
+                                    //                  cache + interpreter disabled).
+    uint8_t loader_always_none;     // X87_ALWAYS_NONE  diagnostic: sidecar replies None for
+                                    //                  every translate_insn request, so the
+                                    //                  stub falls through to stock for all
+                                    //                  ops.  Hook + IPC mechanics still run;
+                                    //                  only our JIT output is bypassed.
+                                    //                  Used to A/B "is the freeze in our
+                                    //                  emitted code or in the marshalling?"
+    uint8_t loader_log_ops;         // X87_LOG_OPS      diagnostic: sidecar prints one line
+                                    //                  per processTranslateRequest call with
+                                    //                  the opcode name and insn_idx.  Use
+                                    //                  with a deterministic freeze repro to
+                                    //                  see which op is the last one before
+                                    //                  the hang.
+    uint8_t loader_log_throughput;  // X87_LOG_THROUGHPUT  diagnostic: sidecar starts a
+                                    //                     reporter thread that prints requests/sec
+                                    //                     every 2 s and an idle-transition line.
+                                    //                     Useful to tell "stuck" from "just slow"
+                                    //                     during long workloads (WoW world-load).
 
     // X87_PROFILE=<path>  When non-empty, sidecar appends a binary
     // record per first-seen IRBlock to this file (full IR stream).
