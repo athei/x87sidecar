@@ -214,12 +214,16 @@ bool isX87(uint16_t op) {
     return (op >= 0x25 && op <= 0x30) || (op >= 0xBD && op <= 0x10C);
 }
 
-// First-opcode prefix maps to a fusion family per try_peephole's
-// dispatcher (rosetta_core/src/TranslatorX87Fusion.cpp:2317-2364).  This
-// is a shallow heuristic — the analyzer flags whether *some* fusion
-// path looks at this prefix; whether the operand kinds also pass each
-// try_fuse_X's filter is a finer check we leave to the user.
-bool firstOpcodeHasFusionFamily(uint16_t op) {
+// ── Fusion-coverage classifier ────────────────────────────────────────
+// Faithfully replicates each try_fuse_X predicate in
+// rosetta_core/src/TranslatorX87Fusion.cpp so we can tell whether a
+// pattern's prefix is ALREADY fused (no opportunity) versus actually
+// uncovered (real fusion candidate).  The shallow heuristic this
+// replaces ("first opcode appears in the dispatcher") was misleading —
+// e.g. fld_m32|fstp_m32 gets prefix_in_fusion_family=1 but is in fact
+// already handled by try_fuse_fld_fstp.
+
+bool is_fld_class(uint16_t op) {
     switch (op) {
         case kOpcodeName_fld:
         case kOpcodeName_fild:
@@ -230,31 +234,222 @@ bool firstOpcodeHasFusionFamily(uint16_t op) {
         case kOpcodeName_fldl2t:
         case kOpcodeName_fldlg2:
         case kOpcodeName_fldln2:
-        case kOpcodeName_fxch:
-        case kOpcodeName_fcom:
-        case kOpcodeName_fcomp:
-        case kOpcodeName_fucom:
-        case kOpcodeName_fucomp:
-        case kOpcodeName_fcompp:
-        case kOpcodeName_fucompp:
-        case kOpcodeName_faddp:
-        case kOpcodeName_fsubp:
-        case kOpcodeName_fsubrp:
-        case kOpcodeName_fmulp:
-        case kOpcodeName_fdivp:
-        case kOpcodeName_fdivrp:
-        case kOpcodeName_fadd:
-        case kOpcodeName_fsub:
-        case kOpcodeName_fsubr:
-        case kOpcodeName_fmul:
-        case kOpcodeName_fdiv:
-        case kOpcodeName_fdivr:
-        case kOpcodeName_fstp:
-        case kOpcodeName_fst:
             return true;
         default:
             return false;
     }
+}
+
+// classify_fld_source rejects m80 FLDs.
+bool fld_source_valid(const Instr& ins) {
+    if (!is_fld_class(ins.opcode)) {
+        return false;
+    }
+    if (ins.opcode == kOpcodeName_fld || ins.opcode == kOpcodeName_fild) {
+        // fld/fild from a memory operand — m80 is rejected by the
+        // fusions, register-form FLD ST(i) is accepted.
+        if (ins.num_operands >= 1 && ins.operands[0].kind == 1 /*MemRef*/ &&
+            ins.operands[0].size == 0xFF /*S80*/) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool is_fcomp_reg_or_mem_class(uint16_t op) {
+    return op == kOpcodeName_fcomp || op == kOpcodeName_fucomp || op == kOpcodeName_fcom ||
+           op == kOpcodeName_fucom;
+}
+
+bool is_fcompp_class(uint16_t op) {
+    return op == kOpcodeName_fcompp || op == kOpcodeName_fucompp;
+}
+
+bool is_arith_nonpopping(uint16_t op) {
+    return op == kOpcodeName_fadd || op == kOpcodeName_fsub || op == kOpcodeName_fsubr ||
+           op == kOpcodeName_fmul || op == kOpcodeName_fdiv || op == kOpcodeName_fdivr;
+}
+
+bool is_arithp(uint16_t op) {
+    return op == kOpcodeName_faddp || op == kOpcodeName_fsubp || op == kOpcodeName_fsubrp ||
+           op == kOpcodeName_fmulp || op == kOpcodeName_fdivp || op == kOpcodeName_fdivrp;
+}
+
+bool is_fstp(uint16_t op) {
+    return op == kOpcodeName_fstp || op == kOpcodeName_fstp_stack;
+}
+
+bool first_op_is_st1(const Instr& ins) {
+    return ins.num_operands >= 1 && ins.operands[0].kind == 0 /*Register*/ &&
+           ins.operands[0].reg == 0x71;  // ST(1)
+}
+
+bool first_op_is_st0(const Instr& ins) {
+    return ins.num_operands >= 1 && ins.operands[0].kind == 0 /*Register*/ &&
+           ins.operands[0].reg == 0x70;  // ST(0)
+}
+
+bool first_op_mem_not_m80(const Instr& ins) {
+    return ins.num_operands >= 1 && ins.operands[0].kind == 1 /*MemRef*/ &&
+           ins.operands[0].size != 0xFF;
+}
+
+// FSTP destination predicate matching try_fuse_fld_fstp / try_fuse_fld_arith_fstp:
+// reg form ST(1) OR mem form non-m80.
+bool fstp_dest_valid(const Instr& ins) {
+    if (!is_fstp(ins.opcode)) {
+        return false;
+    }
+    if (ins.num_operands < 1) {
+        return false;
+    }
+    if (ins.operands[0].kind == 0 /*Register*/) {
+        return ins.operands[0].reg == 0x71;  // ST(1) only
+    }
+    return ins.operands[0].size != 0xFF;  // non-m80 mem
+}
+
+// ARITH operand-kind predicate for fld_arith_fstp / arith_fstp / fld_arith_arithp:
+// either register-register with ST(0)/ST(1) OR mem source.
+bool arith_operands_for_fld_arith_fstp(const Instr& ins) {
+    if (ins.num_operands < 1) {
+        return false;
+    }
+    if (ins.operands[0].kind != 0 /*Register*/) {
+        return true;  // memory source — accepted
+    }
+    // reg-reg: dst must be ST(0), src must be ST(1)
+    if (ins.num_operands < 2) {
+        return false;
+    }
+    return ins.operands[0].reg == 0x70 && ins.operands[1].reg == 0x71;
+}
+
+// Returns the name of the fusion that would fire on the prefix of
+// instrs[start..end), or nullptr if none.  When non-null, *consumed_out
+// is set to how many instructions the fusion absorbs (2..4).  Match
+// order mirrors try_fuse_*_group + try_peephole exactly.
+const char* classifyFusion(const std::vector<Instr>& w, size_t start, size_t end,
+                           int* consumed_out) {
+    const auto have = [&](size_t k) { return start + k <= end; };
+
+    if (!have(2)) {
+        return nullptr;
+    }
+    const Instr& a = w[start];
+    const Instr& b = w[start + 1];
+
+    // ── FLD-class first opcode: try_fuse_fld_group ────────────────────
+    if (is_fld_class(a.opcode) && fld_source_valid(a)) {
+        // 4-op: fld_fld_fucompp [+ fstsw]
+        if (have(4)) {
+            const Instr& c = w[start + 2];
+            const Instr& d = w[start + 3];
+            if (is_fld_class(b.opcode) && fld_source_valid(b) && is_fcompp_class(c.opcode) &&
+                d.opcode == kOpcodeName_fstsw) {
+                *consumed_out = 4;
+                return "fld_fld_fucompp_fstsw";
+            }
+        }
+        // 3-op fusions
+        if (have(3)) {
+            const Instr& c = w[start + 2];
+            // fld_arith_fstp: FLD + arith(reg/mem) + FSTP
+            if (is_arith_nonpopping(b.opcode) && arith_operands_for_fld_arith_fstp(b) &&
+                fstp_dest_valid(c)) {
+                *consumed_out = 3;
+                return "fld_arith_fstp";
+            }
+            // fld_arith_arithp: FLD + arith + arithp ST(1)
+            if (is_arith_nonpopping(b.opcode) && arith_operands_for_fld_arith_fstp(b) &&
+                is_arithp(c.opcode) && first_op_is_st1(c)) {
+                *consumed_out = 3;
+                return "fld_arith_arithp";
+            }
+            // fld_fcomp_fstsw
+            if (is_fcomp_reg_or_mem_class(b.opcode) && c.opcode == kOpcodeName_fstsw) {
+                *consumed_out = 3;
+                return "fld_fcomp_fstsw";
+            }
+            // fld_fcompp_fstsw
+            if (is_fcompp_class(b.opcode) && c.opcode == kOpcodeName_fstsw) {
+                *consumed_out = 3;
+                return "fld_fcompp_fstsw";
+            }
+            // fld_fld_fucompp without trailing fstsw
+            if (is_fld_class(b.opcode) && fld_source_valid(b) && is_fcompp_class(c.opcode)) {
+                *consumed_out = 3;
+                return "fld_fld_fucompp";
+            }
+        }
+        // 2-op fusions
+        if (is_arithp(b.opcode) && first_op_is_st1(b)) {
+            *consumed_out = 2;
+            return "fld_arithp";
+        }
+        if (fstp_dest_valid(b)) {
+            *consumed_out = 2;
+            return "fld_fstp";
+        }
+        if (is_fcomp_reg_or_mem_class(b.opcode)) {
+            *consumed_out = 2;
+            return "fld_fcomp";
+        }
+    }
+
+    // ── FXCH-group ────────────────────────────────────────────────────
+    if (a.opcode == kOpcodeName_fxch) {
+        // fxch_arithp: fxch ST(1), arithp ST(1) — operand index check.
+        if (a.num_operands >= 2 && a.operands[1].kind == 0 && a.operands[1].reg == 0x71) {
+            if (is_arithp(b.opcode) && first_op_is_st1(b)) {
+                *consumed_out = 2;
+                return "fxch_arithp";
+            }
+            if (is_fstp(b.opcode) && first_op_is_st1(b)) {
+                *consumed_out = 2;
+                return "fxch_fstp";
+            }
+        }
+    }
+
+    // ── FCOM-group ────────────────────────────────────────────────────
+    if ((is_fcomp_reg_or_mem_class(a.opcode) || is_fcompp_class(a.opcode)) &&
+        b.opcode == kOpcodeName_fstsw) {
+        *consumed_out = 2;
+        return "fcom_fstsw";
+    }
+
+    // ── ARITHp-group ──────────────────────────────────────────────────
+    if (is_arithp(a.opcode) && first_op_is_st1(a) && is_fstp(b.opcode) && first_op_mem_not_m80(b)) {
+        *consumed_out = 2;
+        return "arithp_fstp";
+    }
+
+    // ── ARITH-group ───────────────────────────────────────────────────
+    if (is_arith_nonpopping(a.opcode)) {
+        // arith_faddp: FMUL + FADDP/FSUBP/FSUBRP (FMA fusion)
+        if (a.opcode == kOpcodeName_fmul &&
+            (b.opcode == kOpcodeName_faddp || b.opcode == kOpcodeName_fsubp ||
+             b.opcode == kOpcodeName_fsubrp) &&
+            first_op_is_st1(b)) {
+            *consumed_out = 2;
+            return "arith_faddp";
+        }
+        // arith_fstp: arith mem + fstp mem
+        if (a.num_operands >= 1 && a.operands[0].kind == 1 /*MemRef*/ && is_fstp(b.opcode) &&
+            first_op_mem_not_m80(b)) {
+            *consumed_out = 2;
+            return "arith_fstp";
+        }
+    }
+
+    // ── FSTP-group ────────────────────────────────────────────────────
+    if (is_fstp(a.opcode) && is_fld_class(b.opcode) && fld_source_valid(b)) {
+        *consumed_out = 2;
+        return "fstp_fld";
+    }
+
+    return nullptr;
 }
 
 }  // namespace
@@ -262,6 +457,7 @@ bool firstOpcodeHasFusionFamily(uint16_t op) {
 int main(int argc, char** argv) try {
     uint64_t min_exec = 1000;
     size_t max_rows = 200;
+    bool show_covered = false;
     std::vector<std::string> files;
 
     for (int i = 1; i < argc; ++i) {
@@ -270,14 +466,24 @@ int main(int argc, char** argv) try {
             min_exec = std::strtoull(argv[++i], nullptr, 10);
         } else if (a == "--max-rows" && i + 1 < argc) {
             max_rows = std::strtoull(argv[++i], nullptr, 10);
+        } else if (a == "--show-covered") {
+            show_covered = true;
         } else if (a == "--help" || a == "-h") {
             std::printf(
-                "Usage: profile_analyze [--min-exec N] [--max-rows N] file1.prof [file2.prof ...]\n"
+                "Usage: profile_analyze [--min-exec N] [--max-rows N] [--show-covered] "
+                "file1.prof [file2.prof ...]\n"
                 "\n"
-                "Profiles must include a counter section (clean parent exit).  Patterns are\n"
-                "ranked by exec_count = sum over blocks of (counter[block_id] * occurrences\n"
-                "of the pattern within that block).  --min-exec drops patterns that never\n"
-                "accumulate that many executions.\n");
+                "Each window is classified by classifyFusion() — a faithful re-encoding of\n"
+                "every try_fuse_X predicate in TranslatorX87Fusion.cpp.  The 'fusion' column\n"
+                "is the name of the fusion that fires on the window's prefix (or '-' if no\n"
+                "existing fusion matches).  When fusion!='-' AND consumed >= window_size, the\n"
+                "ENTIRE pattern is already fused in production — those rows are hidden by\n"
+                "default to keep the output focused on uncovered targets.  --show-covered\n"
+                "includes them.\n"
+                "\n"
+                "Patterns are ranked by exec_count = sum over blocks of (counter[block_id] *\n"
+                "occurrences of the pattern within that block).  --min-exec drops patterns\n"
+                "that never accumulate that many executions.\n");
             return 0;
         } else if (!a.empty() && a[0] == '-') {
             std::fprintf(stderr, "unknown flag: %s\n", a.c_str());
@@ -316,7 +522,8 @@ int main(int argc, char** argv) try {
     struct Stats {
         uint64_t exec_count = 0;
         size_t window_size = 0;
-        bool prefix_in_fusion_family = false;
+        const char* fusion = nullptr;  // existing fusion firing on prefix, or null
+        int fusion_consumed = 0;       // how many leading instrs the fusion absorbs
     };
     std::unordered_map<std::string, Stats> patterns;
     patterns.reserve(blocks.size() * 4);
@@ -344,7 +551,9 @@ int main(int argc, char** argv) try {
                 auto& s = patterns[key];
                 if (s.exec_count == 0) {
                     s.window_size = len;
-                    s.prefix_in_fusion_family = firstOpcodeHasFusionFamily(b.instrs[start].opcode);
+                    int consumed = 0;
+                    s.fusion = classifyFusion(b.instrs, start, start + len, &consumed);
+                    s.fusion_consumed = consumed;
                 }
                 s.exec_count += exec;
             }
@@ -354,23 +563,35 @@ int main(int argc, char** argv) try {
     std::vector<std::pair<std::string, Stats>> rows;
     rows.reserve(patterns.size());
     for (auto& kv : patterns) {
-        if (kv.second.exec_count >= min_exec) {
-            rows.emplace_back(kv.first, kv.second);
+        if (kv.second.exec_count < min_exec) {
+            continue;
         }
+        // A pattern is "fully covered" iff a fusion fires on its prefix
+        // AND consumes at least the entire window.  These are not new
+        // fusion targets — hide unless --show-covered.
+        const bool fully_covered =
+            kv.second.fusion != nullptr && kv.second.fusion_consumed > 0 &&
+            std::cmp_greater_equal(kv.second.fusion_consumed, kv.second.window_size);
+        if (!show_covered && fully_covered) {
+            continue;
+        }
+        rows.emplace_back(kv.first, kv.second);
     }
     std::ranges::sort(rows, [](const auto& a, const auto& b) {
         return a.second.exec_count > b.second.exec_count;
     });
 
-    std::printf("exec_count,window_size,prefix_in_fusion_family,sequence\n");
+    std::printf("exec_count,window_size,fusion,consumed,sequence\n");
     const size_t n = std::min(max_rows, rows.size());
     for (size_t i = 0; i < n; ++i) {
         const auto& [key, s] = rows[i];
-        std::printf("%llu,%zu,%d,%s\n", static_cast<unsigned long long>(s.exec_count),
-                    s.window_size, s.prefix_in_fusion_family ? 1 : 0, key.c_str());
+        std::printf("%llu,%zu,%s,%d,%s\n", static_cast<unsigned long long>(s.exec_count),
+                    s.window_size, s.fusion ? s.fusion : "-", s.fusion_consumed, key.c_str());
     }
-    std::fprintf(stderr, "%zu unique patterns >= min_exec=%llu (showing %zu)\n", rows.size(),
-                 static_cast<unsigned long long>(min_exec), n);
+    std::fprintf(stderr,
+                 "%zu unique patterns >= min_exec=%llu (showing %zu; %s fully-covered patterns)\n",
+                 rows.size(), static_cast<unsigned long long>(min_exec), n,
+                 show_covered ? "including" : "hiding");
     return 0;
 } catch (const std::exception& e) {
     std::fprintf(stderr, "profile_analyze: %s\n", e.what());
