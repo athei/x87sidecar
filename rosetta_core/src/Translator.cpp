@@ -4,10 +4,12 @@
 #include <cstdio>
 #include <optional>
 
+#include "rosetta_core/AssemblerHelpers.hpp"
 #include "rosetta_core/Config.h"
 #include "rosetta_core/CoreConfig.h"
 #include "rosetta_core/IRInstr.h"
 #include "rosetta_core/Opcode.h"
+#include "rosetta_core/ProfileRuntime.h"
 #include "rosetta_core/Register.h"
 #include "rosetta_core/TranslationResult.h"
 #include "rosetta_core/TranslatorX87.h"
@@ -48,6 +50,12 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
         if (block != cache.prev_block) {
             cache.invalidate(translation_result->free_gpr_mask, kGprScratchMask);
             cache.prev_block = block;
+            if (profile::counter_array_addr() != 0) {
+                const uint32_t bid = profile::register_block(block);
+                if (bid != profile::kOverflowId) {
+                    emit_block_counter_bump(*translation_result, bid);
+                }
+            }
         }
         if (!cache.active()) {
             const bool cache_disabled = g_rosetta_config && g_rosetta_config->disable_x87_cache;

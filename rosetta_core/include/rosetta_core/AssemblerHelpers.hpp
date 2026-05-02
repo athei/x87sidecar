@@ -57,6 +57,22 @@ auto emit_movn(AssemblerBuffer& buf, int is_64bit, int opc, int hw, uint16_t imm
 // a process-absolute address — trampoline targets, constants tables, etc.
 auto emit_movz_movk_abs64(AssemblerBuffer& buf, int Rd, uint64_t addr) -> void;
 
+// LDADDAL Xs, Xt, [Xn] — ARMv8.1 LSE atomic load-and-add, 64-bit, with
+// acquire+release semantics ("AL" suffix).  Atomically computes
+//   tmp = *Xn;  *Xn = tmp + Xs;  Xt = tmp
+// Apple Silicon supports LSE; no fallback path needed.
+auto emit_ldaddal_x(AssemblerBuffer& buf, int Xs, int Xt, int Xn) -> void;
+
+struct TranslationResult;
+
+// Emit the 6-instruction X87_PROFILE block-entry counter bump.
+// Materialises (counter_array_addr() + bid*8) into a scratch GPR and
+// runs LDADDAL #1 onto it, atomically incrementing parent-side
+// counters[bid].  Allocates and frees two scratch GPRs internally.
+// Caller must have verified profile::counter_array_addr() != 0 and
+// bid != profile::kOverflowId.
+auto emit_block_counter_bump(TranslationResult& tr, uint32_t bid) -> void;
+
 // MOV register — emits ADD (SP case) or ORR shifted-reg (general case)
 auto emit_mov_reg(AssemblerBuffer& buf, int is_64bit, int Rd, int Rn) -> void;
 

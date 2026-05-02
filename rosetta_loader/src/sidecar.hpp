@@ -37,4 +37,12 @@ bool installPortInParent(mach_port_t parentTaskPort, mach_port_t* outServicePort
 // exit.
 bool spawnReceiveThread(mach_port_t servicePort, mach_port_t parentTaskPort);
 
+// X87_PROFILE: read the parent-side counter array via mach_vm_read and
+// append the counter section to the .prof file, then close the file.
+// Called from main.cpp once kqueue NOTE_EXIT fires for the parent
+// process — parentTaskPort is still valid at that point (parent task
+// struct outlives NOTE_EXIT for a brief grace window).  No-op when
+// X87_PROFILE was not set or counter allocation failed.
+void dumpCountersIfEnabled(mach_port_t parentTaskPort);
+
 }  // namespace sidecar

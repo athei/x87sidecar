@@ -44,27 +44,32 @@ struct Block {
     std::vector<Instr> instrs;
 };
 
-bool readFile(const std::string& path, std::vector<Block>& out) {
+bool readFile(const std::string& path, std::vector<Block>& out, std::vector<uint64_t>& counters) {
     std::ifstream f(path, std::ios::binary);
     if (!f) {
         std::fprintf(stderr, "error: cannot open %s\n", path.c_str());
         return false;
     }
     std::vector<uint8_t> buf((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+
     size_t off = 0;
-    while (off + sizeof(profile::BlockHeader) <= buf.size()) {
+    while (off + sizeof(uint32_t) <= buf.size()) {
+        uint32_t lead;
+        std::memcpy(&lead, buf.data() + off, sizeof(lead));
+        if (lead == profile::kCounterSectionMagic) {
+            break;  // start of counter section
+        }
+        if (off + sizeof(profile::BlockHeader) > buf.size()) {
+            break;
+        }
         profile::BlockHeader hdr;
         std::memcpy(&hdr, buf.data() + off, sizeof(hdr));
-        if (hdr.magic != profile::kProfileBlockMagic) {
-            std::fprintf(stderr, "error: bad magic in %s at offset %zu\n", path.c_str(), off);
-            return false;
-        }
         off += sizeof(hdr);
         const size_t need = static_cast<size_t>(hdr.num_instrs) * sizeof(profile::InstrRecord);
         if (off + need > buf.size()) {
-            std::fprintf(stderr, "warning: truncated record in %s at offset %zu\n", path.c_str(),
-                         off);
-            return true;
+            std::fprintf(stderr, "error: truncated InstrRecord array in %s at offset %zu\n",
+                         path.c_str(), off);
+            return false;
         }
         Block b{.id = hdr.block_id, .start_pc = hdr.start_pc, .instrs = {}};
         b.instrs.reserve(hdr.num_instrs);
@@ -82,6 +87,33 @@ bool readFile(const std::string& path, std::vector<Block>& out) {
         }
         out.push_back(std::move(b));
     }
+
+    if (off + sizeof(profile::CounterSectionHeader) > buf.size()) {
+        std::fprintf(stderr,
+                     "error: %s is incomplete — no counter section found.  Profile runs must "
+                     "exit cleanly (don't kill -9 the rosettax87 process); rerun and exit "
+                     "the parent normally.\n",
+                     path.c_str());
+        return false;
+    }
+    profile::CounterSectionHeader chdr;
+    std::memcpy(&chdr, buf.data() + off, sizeof(chdr));
+    if (chdr.magic != profile::kCounterSectionMagic) {
+        std::fprintf(stderr,
+                     "error: %s has stray bytes between block records and counter "
+                     "section (offset %zu)\n",
+                     path.c_str(), off);
+        return false;
+    }
+    off += sizeof(chdr);
+    const size_t cbytes = static_cast<size_t>(chdr.count) * sizeof(uint64_t);
+    if (off + cbytes > buf.size()) {
+        std::fprintf(stderr, "error: %s counter section truncated (declared %u entries)\n",
+                     path.c_str(), chdr.count);
+        return false;
+    }
+    counters.resize(chdr.count);
+    std::memcpy(counters.data(), buf.data() + off, cbytes);
     return true;
 }
 
@@ -226,20 +258,24 @@ bool firstOpcodeHasFusionFamily(uint16_t op) {
 }  // namespace
 
 int main(int argc, char** argv) try {
-    uint64_t min_count = 50;
+    uint64_t min_exec = 1000;
     size_t max_rows = 200;
     std::vector<std::string> files;
 
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
-        if (a == "--min-count" && i + 1 < argc) {
-            min_count = std::strtoull(argv[++i], nullptr, 10);
+        if (a == "--min-exec" && i + 1 < argc) {
+            min_exec = std::strtoull(argv[++i], nullptr, 10);
         } else if (a == "--max-rows" && i + 1 < argc) {
             max_rows = std::strtoull(argv[++i], nullptr, 10);
         } else if (a == "--help" || a == "-h") {
             std::printf(
-                "Usage: profile_analyze [--min-count N] [--max-rows N] file1.prof [file2.prof "
-                "...]\n");
+                "Usage: profile_analyze [--min-exec N] [--max-rows N] file1.prof [file2.prof ...]\n"
+                "\n"
+                "Profiles must include a counter section (clean parent exit).  Patterns are\n"
+                "ranked by exec_count = sum over blocks of (counter[block_id] * occurrences\n"
+                "of the pattern within that block).  --min-exec drops patterns that never\n"
+                "accumulate that many executions.\n");
             return 0;
         } else if (!a.empty() && a[0] == '-') {
             std::fprintf(stderr, "unknown flag: %s\n", a.c_str());
@@ -255,24 +291,39 @@ int main(int argc, char** argv) try {
     }
 
     std::vector<Block> blocks;
+    std::vector<uint64_t> counters;
     for (const auto& f : files) {
-        if (!readFile(f, blocks)) {
+        std::vector<uint64_t> file_counters;
+        if (!readFile(f, blocks, file_counters)) {
             return 1;
         }
+        // Multi-file aggregation: union counters by block_id (each file's
+        // block_ids are independent, so we offset on append). For now the
+        // common case is one file per run; the simple path is fine.
+        if (counters.empty()) {
+            counters = std::move(file_counters);
+        } else {
+            counters.insert(counters.end(), file_counters.begin(), file_counters.end());
+        }
     }
-    std::fprintf(stderr, "loaded %zu blocks from %zu file(s)\n", blocks.size(), files.size());
+    std::fprintf(stderr, "loaded %zu blocks, %zu counter entries from %zu file(s)\n", blocks.size(),
+                 counters.size(), files.size());
 
-    // Slide all window lengths over each block.  Aggregate by pattern key.
+    // Slide all window lengths over each block.  Aggregate by pattern key,
+    // weighting each occurrence by counter[block_id].
     struct Stats {
-        uint64_t count = 0;
+        uint64_t exec_count = 0;
         size_t window_size = 0;
-        bool has_x87 = false;
         bool prefix_in_fusion_family = false;
     };
     std::unordered_map<std::string, Stats> patterns;
     patterns.reserve(blocks.size() * 4);
 
     for (const auto& b : blocks) {
+        const uint64_t exec = (b.id < counters.size()) ? counters[b.id] : 0;
+        if (exec == 0) {
+            continue;  // dead-code block contributes nothing — skip work
+        }
         const size_t L = b.instrs.size();
         for (size_t start = 0; start < L; ++start) {
             const size_t maxLen = L - start;
@@ -289,12 +340,11 @@ int main(int argc, char** argv) try {
                 }
                 std::string key = patternKey(b.instrs, start, len);
                 auto& s = patterns[key];
-                if (s.count == 0) {
+                if (s.exec_count == 0) {
                     s.window_size = len;
-                    s.has_x87 = true;
                     s.prefix_in_fusion_family = firstOpcodeHasFusionFamily(b.instrs[start].opcode);
                 }
-                ++s.count;
+                s.exec_count += exec;
             }
         }
     }
@@ -302,22 +352,23 @@ int main(int argc, char** argv) try {
     std::vector<std::pair<std::string, Stats>> rows;
     rows.reserve(patterns.size());
     for (auto& kv : patterns) {
-        if (kv.second.count >= min_count) {
+        if (kv.second.exec_count >= min_exec) {
             rows.emplace_back(kv.first, kv.second);
         }
     }
-    std::ranges::sort(rows,
-                      [](const auto& a, const auto& b) { return a.second.count > b.second.count; });
+    std::ranges::sort(rows, [](const auto& a, const auto& b) {
+        return a.second.exec_count > b.second.exec_count;
+    });
 
-    std::printf("count,window_size,prefix_in_fusion_family,sequence\n");
+    std::printf("exec_count,window_size,prefix_in_fusion_family,sequence\n");
     const size_t n = std::min(max_rows, rows.size());
     for (size_t i = 0; i < n; ++i) {
         const auto& [key, s] = rows[i];
-        std::printf("%llu,%zu,%d,%s\n", static_cast<unsigned long long>(s.count), s.window_size,
-                    s.prefix_in_fusion_family ? 1 : 0, key.c_str());
+        std::printf("%llu,%zu,%d,%s\n", static_cast<unsigned long long>(s.exec_count),
+                    s.window_size, s.prefix_in_fusion_family ? 1 : 0, key.c_str());
     }
-    std::fprintf(stderr, "%zu unique patterns >= min_count=%llu (showing %zu)\n", rows.size(),
-                 static_cast<unsigned long long>(min_count), n);
+    std::fprintf(stderr, "%zu unique patterns >= min_exec=%llu (showing %zu)\n", rows.size(),
+                 static_cast<unsigned long long>(min_exec), n);
     return 0;
 } catch (const std::exception& e) {
     std::fprintf(stderr, "profile_analyze: %s\n", e.what());

@@ -5,7 +5,10 @@
 
 #include "rosetta_core/AssemblerBuffer.h"
 #include "rosetta_core/IROperand.h"
+#include "rosetta_core/ProfileRuntime.h"
 #include "rosetta_core/Register.h"
+#include "rosetta_core/TranslationResult.h"
+#include "rosetta_core/TranslatorHelpers.hpp"
 
 // AArch64 logical immediates encode a value as a replicated bitmask:
 //   - Pick an element size S ∈ {2,4,8,16,32,64} bits
@@ -190,6 +193,33 @@ auto emit_movz_movk_abs64(AssemblerBuffer& buf, int Rd, uint64_t addr) -> void {
               static_cast<uint16_t>((addr >> 32) & 0xFFFF), Rd);
     emit_movn(buf, /*is_64bit=*/1, /*opc=MOVK*/ 3, /*hw=*/3,
               static_cast<uint16_t>((addr >> 48) & 0xFFFF), Rd);
+}
+
+auto emit_ldaddal_x(AssemblerBuffer& buf, int Xs, int Xt, int Xn) -> void {
+    // 64-bit LDADDAL encoding:
+    //   size=11 op=111000 A=1 R=1 1 Rs:5 0 000 00 Rn:5 Rt:5
+    //   = 0xF8E00000 | (Xs<<16) | (Xn<<5) | Xt
+    uint32_t insn = 0xF8E00000U;
+    insn |= static_cast<uint32_t>(Xs & 0x1F) << 16;
+    insn |= static_cast<uint32_t>(Xn & 0x1F) << 5;
+    insn |= static_cast<uint32_t>(Xt & 0x1F);
+    buf.emit(insn);
+}
+
+auto emit_block_counter_bump(TranslationResult& tr, uint32_t bid) -> void {
+    // 6 ARM64 instructions = 24 bytes, fired once per block entry.
+    //   MOVZ/MOVK *4   Xtmp = counter_addr + bid*8
+    //   MOVZ Xv, #1
+    //   LDADDAL Xv, XZR, [Xtmp]
+    AssemblerBuffer& buf = tr.insn_buf;
+    const int Xtmp = alloc_free_gpr(tr);
+    const int Xv = alloc_free_gpr(tr);
+    const uint64_t addr = profile::counter_array_addr() + (static_cast<uint64_t>(bid) * 8U);
+    emit_movz_movk_abs64(buf, Xtmp, addr);
+    emit_movn(buf, /*is_64bit=*/1, /*opc=MOVZ*/ 2, /*hw=*/0, /*imm16=*/1, Xv);
+    emit_ldaddal_x(buf, /*Xs=*/Xv, /*Xt=*/GPR::XZR, /*Xn=*/Xtmp);
+    free_gpr(tr, Xv);
+    free_gpr(tr, Xtmp);
 }
 
 auto emit_mov_reg(AssemblerBuffer& buf, int is_64bit, int Rd, int Rn) -> void {

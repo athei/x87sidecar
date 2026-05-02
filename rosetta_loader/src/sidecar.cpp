@@ -14,7 +14,7 @@
 #include <cstring>
 #include <ctime>
 #include <mutex>
-#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "rosetta_core/Config.h"
@@ -24,6 +24,7 @@
 #include "rosetta_core/IROperand.h"
 #include "rosetta_core/Opcode.h"
 #include "rosetta_core/ProfileFormat.h"
+#include "rosetta_core/ProfileRuntime.h"
 #include "rosetta_core/ThreadContextOffsets.h"
 #include "rosetta_core/TransactionalList.h"
 #include "rosetta_core/TranslationResult.h"
@@ -49,14 +50,19 @@ struct ThreadArgs {
 std::atomic<uint64_t> g_hits{0};
 
 // X87_PROFILE state.  Opened once at sidecar startup; closed when the
-// receive thread exits (i.e. parent process death).  The dedup map
-// keys on parent-side IRBlock* — first time we see a block, dump its
-// full IR stream; subsequent calls for the same block are no-ops.
+// receive thread exits (i.e. parent process death).  Block-id assignment
+// and de-dup live in profile::register_block (rosetta_core) so the JIT
+// counter-bump emit and this dumper agree on ids by construction.
+//
+// The counter array is allocated in our address space and mach_vm_remapped
+// (copy=FALSE) into the parent at a parent VA — so JIT-emitted LDADDAL on
+// the parent VA writes the SAME backing pages we read at exit through
+// our local VA.  No mach_vm_read needed at any point; no race with
+// parent's death.
 struct ProfileState {
     std::FILE* file = nullptr;
-    std::mutex mu;
-    std::unordered_map<uint64_t, uint32_t> block_ids;
-    uint32_t next_id = 0;
+    std::mutex io_mu;
+    std::unordered_set<uint32_t> dumped;  // block_ids whose IR we've written
 };
 ProfileState g_profile;
 
@@ -64,18 +70,21 @@ void dumpBlockIfNew(uint64_t block_ptr, const IRInstr* ir, uint64_t num_instrs) 
     if (g_profile.file == nullptr) {
         return;
     }
-    std::scoped_lock lock(g_profile.mu);
-    auto [it, inserted] = g_profile.block_ids.try_emplace(block_ptr, g_profile.next_id);
-    if (!inserted) {
+    const uint32_t bid = profile::register_block(reinterpret_cast<const IRBlock*>(block_ptr));
+    if (bid == profile::kOverflowId) {
         return;
     }
-    ++g_profile.next_id;
+
+    std::scoped_lock lock(g_profile.io_mu);
+    if (!g_profile.dumped.insert(bid).second) {
+        return;  // already wrote this block's IR stream
+    }
 
     profile::BlockHeader hdr{
-        .magic = profile::kProfileBlockMagic,
-        .block_id = it->second,
+        .block_id = bid,
         .num_instrs = static_cast<uint32_t>(num_instrs),
         .start_pc = ir[0].pc,
+        ._reserved = 0,
     };
     std::fwrite(&hdr, sizeof(hdr), 1, g_profile.file);
 
@@ -767,6 +776,45 @@ bool spawnReceiveThread(mach_port_t servicePort, mach_port_t parentTaskPort) {
                 rrc);
     }
     return true;
+}
+
+void dumpCountersIfEnabled(mach_port_t /*parentTaskPort*/) {
+    if (g_profile.file == nullptr) {
+        return;
+    }
+    const uint64_t local_addr = profile::counter_array_local_addr();
+    const uint32_t count = profile::block_count();
+    if (local_addr == 0 || count == 0) {
+        fprintf(stdout,
+                "[rosettax87] X87_PROFILE: no counters to dump (count=%u local_addr=0x%llx); "
+                "closing without a counter section; analyzer will reject it\n",
+                count, local_addr);
+        std::fclose(g_profile.file);
+        g_profile.file = nullptr;
+        return;
+    }
+
+    // The counter array's backing pages are shared with parent via
+    // mach_vm_remap; reading from local_addr observes whatever parent's
+    // LDADDAL has written, with no IPC and no race against parent's
+    // death.
+    const auto* counts = reinterpret_cast<const uint64_t*>(local_addr);
+
+    std::scoped_lock lock(g_profile.io_mu);
+    profile::CounterSectionHeader chdr{
+        .magic = profile::kCounterSectionMagic,
+        .count = count,
+    };
+    std::fwrite(&chdr, sizeof(chdr), 1, g_profile.file);
+    std::fwrite(counts, sizeof(uint64_t), count, g_profile.file);
+    std::fflush(g_profile.file);
+    std::fclose(g_profile.file);
+    g_profile.file = nullptr;
+
+    const uint64_t mx = *std::max_element(counts, counts + count);
+    fprintf(stdout, "[rosettax87] X87_PROFILE: wrote %u block counters; max=%llu\n", count,
+            static_cast<unsigned long long>(mx));
+    fflush(stdout);
 }
 
 }  // namespace sidecar

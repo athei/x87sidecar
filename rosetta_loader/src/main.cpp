@@ -27,6 +27,7 @@
 #include "rosetta_core/Config.h"
 #include "rosetta_core/ConfigEnv.h"
 #include "rosetta_core/CoreConfig.h"
+#include "rosetta_core/ProfileRuntime.h"
 #include "rosetta_core/TranscendentalHelper.h"
 #include "rosetta_core/TranslationResult.h"
 #include "sidecar.hpp"
@@ -1496,6 +1497,54 @@ int main(int argc, char* argv[]) try {
         VERBOSE_LOG("M2: transcendental constants installed at 0x%llx (%zu B)\n", constsAddr,
                     sizeof(kTransConstants));
 
+        // ── X87_PROFILE: per-block counter array, shared with parent ──────
+        // Allocate 8 MiB in OUR (loader/sidecar) address space, then
+        // mach_vm_remap(copy=FALSE) to map the SAME backing pages into
+        // parent's address space at a parent VA.  JIT-emitted code
+        // atomically increments via the parent VA; the sidecar reads via
+        // its local VA at exit.  This eliminates the post-NOTE_EXIT race
+        // where mach_vm_read fails because parent's task port has gone
+        // dead — our local mapping survives parent's death because the
+        // pages are also referenced by our own task.  Skipped when
+        // X87_PROFILE is unset.
+        if (!g_rosetta_config->profile_path.empty()) {
+            mach_vm_address_t local_addr = 0;
+            kern_return_t kr = mach_vm_allocate(mach_task_self(), &local_addr,
+                                                profile::kCounterBytes, VM_FLAGS_ANYWHERE);
+            if (kr != KERN_SUCCESS) {
+                fprintf(stdout,
+                        "[rosettax87] X87_PROFILE: mach_vm_allocate(self, %zu B) failed "
+                        "0x%x %s; Stage A IR dump still active, exec_count will be 0\n",
+                        profile::kCounterBytes, kr, mach_error_string(kr));
+            } else {
+                mach_vm_address_t parent_addr = 0;
+                vm_prot_t cur_prot = VM_PROT_NONE;
+                vm_prot_t max_prot = VM_PROT_NONE;
+                kr = mach_vm_remap(dbg.taskPort(), &parent_addr, profile::kCounterBytes, 0,
+                                   VM_FLAGS_ANYWHERE, mach_task_self(), local_addr,
+                                   /*copy=*/FALSE, &cur_prot, &max_prot, VM_INHERIT_NONE);
+                if (kr != KERN_SUCCESS) {
+                    fprintf(stdout,
+                            "[rosettax87] X87_PROFILE: mach_vm_remap(parent) failed 0x%x %s; "
+                            "exec_count will be 0\n",
+                            kr, mach_error_string(kr));
+                    mach_vm_deallocate(mach_task_self(), local_addr, profile::kCounterBytes);
+                } else {
+                    // Ensure parent-side mapping is RW so LDADDAL works.
+                    if (mach_vm_protect(dbg.taskPort(), parent_addr, profile::kCounterBytes, FALSE,
+                                        VM_PROT_READ | VM_PROT_WRITE) != KERN_SUCCESS) {
+                        fprintf(stdout,
+                                "[rosettax87] X87_PROFILE: mach_vm_protect(parent RW) "
+                                "failed; counters may not increment\n");
+                    }
+                    profile::set_counter_array(parent_addr, local_addr);
+                    VERBOSE_LOG(
+                        "M2: X87_PROFILE counter array parent=0x%llx local=0x%llx (%zu B)\n",
+                        parent_addr, local_addr, profile::kCounterBytes);
+                }
+            }
+        }
+
         // ── Patch translate_insn[0..16] with the abs-jump ENTRY ────────────
         if (!dbg.adjustMemoryProtection(translateInsnAddr,
                                         VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY,
@@ -1557,6 +1606,10 @@ int main(int argc, char* argv[]) try {
         kevent(kq, &ev, 1, nullptr, 0, nullptr);
         // Block until parent exits
         kevent(kq, nullptr, 0, &ev, 1, nullptr);
+        // Window after NOTE_EXIT but before kernel reaps the parent task:
+        // mach_vm_read still works against the held task-port send-right.
+        // Use it to pull X87_PROFILE counters back into the .prof file.
+        sidecar::dumpCountersIfEnabled(dbg.taskPort());
         close(kq);
     }
 
