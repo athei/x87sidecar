@@ -1245,10 +1245,13 @@ int peak_live_fprs(const Context& ctx) {
 // ── Entry point ─────────────────────────────────────────────────────────────
 
 int compile_run(TranslationResult* result, IRInstr* instr_array, int64_t num_instrs,
-                int64_t start_idx, int run_length) {
+                int64_t start_idx, int run_length, IRFailReason* out_reason) {
     Context ctx;
 
     if (!build(ctx, instr_array, num_instrs, start_idx, run_length)) {
+        if (out_reason) {
+            *out_reason = IRFailReason::kBuildFail;
+        }
         return 0;
     }
 
@@ -1262,6 +1265,9 @@ int compile_run(TranslationResult* result, IRInstr* instr_array, int64_t num_ins
         fpr_pool &= fpr_pool - 1;
     }
     if (peak_live_fprs(ctx) > available) {
+        if (out_reason) {
+            *out_reason = IRFailReason::kFprPressure;
+        }
         return 0;
     }
 
@@ -1274,6 +1280,9 @@ int compile_run(TranslationResult* result, IRInstr* instr_array, int64_t num_ins
             gpr_pool &= gpr_pool - 1;
         }
         if (peak_live_gprs(ctx) > gpr_available) {
+            if (out_reason) {
+                *out_reason = IRFailReason::kGprPressure;
+            }
             return 0;
         }
     }

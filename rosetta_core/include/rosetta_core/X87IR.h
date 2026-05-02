@@ -208,9 +208,22 @@ int peak_live_fprs(const Context& ctx);
 // Lower IR to AArch64 instructions, writing into result->insn_buf.
 void lower(Context& ctx, TranslationResult* result);
 
+// Reason compile_run returned 0 (i.e. IR couldn't lower the run).  Reported
+// via the optional out_reason parameter so the X87_PROFILE path-tally can
+// classify "single-op fall-through because IR failed for reason X" — useful
+// for diagnosing why hot patterns sometimes stay on the slow path.
+enum class IRFailReason : uint8_t {
+    kNone = 0,         // success, or compile_run wasn't called
+    kBuildFail = 1,    // build() returned false (kMaxNodes overflow, unhandled op, …)
+    kFprPressure = 2,  // peak_live_fprs > available
+    kGprPressure = 3,  // peak_live_gprs > available
+};
+
 // Main entry point: build + optimize + lower.
 // Returns the number of x87 instructions consumed (0 = IR couldn't handle any).
+// out_reason (optional): set to a non-kNone value when the return is 0,
+// indicating which gate refused.  Untouched on success.
 int compile_run(TranslationResult* result, IRInstr* instr_array, int64_t num_instrs,
-                int64_t start_idx, int run_length);
+                int64_t start_idx, int run_length, IRFailReason* out_reason = nullptr);
 
 }  // namespace X87IR

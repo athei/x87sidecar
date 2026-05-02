@@ -54,6 +54,9 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
             cache.tally_peep = 0;
             cache.tally_single = 0;
             cache.tally_ft = 0;
+            cache.tally_ir_build_fail = 0;
+            cache.tally_ir_fpr_fail = 0;
+            cache.tally_ir_gpr_fail = 0;
             cache.profile_bid = profile::kOverflowId;
             if (profile::counter_array_addr() != 0) {
                 const uint32_t bid = profile::register_block(block);
@@ -77,12 +80,17 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
     // disabled or this block hit kMaxBlocks.
     const auto mirror_tally = [&] {
         if (cache.profile_bid != profile::kOverflowId) {
-            profile::set_block_tally(cache.profile_bid, profile::BlockTally{
-                                                            .ir_ops = cache.tally_ir,
-                                                            .peephole_ops = cache.tally_peep,
-                                                            .single_ops = cache.tally_single,
-                                                            .fallthrough_ops = cache.tally_ft,
-                                                        });
+            profile::set_block_tally(cache.profile_bid,
+                                     profile::BlockTally{
+                                         .ir_ops = cache.tally_ir,
+                                         .peephole_ops = cache.tally_peep,
+                                         .single_ops = cache.tally_single,
+                                         .fallthrough_ops = cache.tally_ft,
+                                         .ir_build_fail_ops = cache.tally_ir_build_fail,
+                                         .ir_fpr_fail_ops = cache.tally_ir_fpr_fail,
+                                         .ir_gpr_fail_ops = cache.tally_ir_gpr_fail,
+                                         ._reserved_pad = 0,
+                                     });
         }
     };
 
@@ -94,8 +102,28 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
         const bool ir_disabled = g_rosetta_config && g_rosetta_config->disable_x87_ir;
         if (!ir_disabled && cache.active() && cache.run_remaining >= 3 && cache.top_dirty == 0 &&
             cache.tag_push_pending == 0 && cache.deferred_pop_count == 0 && !cache.perm_dirty) {
+            X87IR::IRFailReason ir_reason = X87IR::IRFailReason::kNone;
             const int ir_consumed = X87IR::compile_run(translation_result, instr_array, num_instrs,
-                                                       insn_idx, cache.run_remaining);
+                                                       insn_idx, cache.run_remaining, &ir_reason);
+            if (ir_consumed == 0) {
+                switch (ir_reason) {
+                    case X87IR::IRFailReason::kBuildFail:
+                        cache.tally_ir_build_fail =
+                            static_cast<uint16_t>(cache.tally_ir_build_fail + 1);
+                        break;
+                    case X87IR::IRFailReason::kFprPressure:
+                        cache.tally_ir_fpr_fail =
+                            static_cast<uint16_t>(cache.tally_ir_fpr_fail + 1);
+                        break;
+                    case X87IR::IRFailReason::kGprPressure:
+                        cache.tally_ir_gpr_fail =
+                            static_cast<uint16_t>(cache.tally_ir_gpr_fail + 1);
+                        break;
+                    case X87IR::IRFailReason::kNone:
+                        break;
+                }
+                mirror_tally();
+            }
             if (ir_consumed > 0) {
                 cache.tally_ir = static_cast<uint16_t>(cache.tally_ir + ir_consumed);
                 mirror_tally();

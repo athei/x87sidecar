@@ -43,6 +43,12 @@ struct X87Cache {
     uint16_t tally_peep = 0;
     uint16_t tally_single = 0;
     uint16_t tally_ft = 0;
+    // IR-failure reason classifiers.  Bumped per translate_instruction call
+    // when the IR gate would have fired but compile_run returned 0.  Disjoint
+    // from tally_single (a fall-through from IR failure also bumps single).
+    uint16_t tally_ir_build_fail = 0;
+    uint16_t tally_ir_fpr_fail = 0;
+    uint16_t tally_ir_gpr_fail = 0;
     uint32_t profile_bid = 0xFFFFFFFFU;  // = profile::kOverflowId
 
     bool active() const;

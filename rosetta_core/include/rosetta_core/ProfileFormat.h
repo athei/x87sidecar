@@ -73,16 +73,18 @@ struct CounterSectionHeader {
 };
 static_assert(sizeof(CounterSectionHeader) == 8);
 
-// Tally section magic ('TLY0').  Optional section written immediately
-// after the counter section at exit time.  Per block_id (0..count-1),
-// records which translation-dispatch path consumed each x87 op.  The
-// dump happens at exit because the path is only known after all of the
-// block's translate_instruction calls have completed; dumpBlockIfNew is
-// called *before* translate_instruction (see sidecar.cpp:364), so inline
-// per-block tally would race with the bumps.  Older .prof files lack
-// this section — the analyzer treats absence as "all-zero tallies" and
-// still reads the counter section + block records normally.
-constexpr uint32_t kTallySectionMagic = 0x30594C54U;  // 'TLY0'
+// Tally section magic ('TLY1', bumped from 'TLY0' when the entry grew to
+// include IR-failure-reason classifiers in 2026-05-03).  Optional section
+// written immediately after the counter section at exit time.  Per
+// block_id (0..count-1), records which translation-dispatch path consumed
+// each x87 op AND which gate refused on IR failures.  Dump happens at
+// exit because path is only known after all of the block's
+// translate_instruction calls have completed; dumpBlockIfNew is called
+// *before* translate_instruction (see sidecar.cpp:~370), so inline per-
+// block tally would race the bumps.  Older .prof files (no tally section
+// or 'TLY0' magic with the smaller 8-byte entry) parse only the counter
+// section in current builds — the failure-reason columns are absent.
+constexpr uint32_t kTallySectionMagic = 0x31594C54U;  // 'TLY1'
 
 struct TallySectionHeader {
     uint32_t magic;  // = kTallySectionMagic
@@ -91,11 +93,15 @@ struct TallySectionHeader {
 static_assert(sizeof(TallySectionHeader) == 8);
 
 struct BlockTallyEntry {
-    uint16_t ir_ops;           // X87IR::compile_run consumed N ops
-    uint16_t peephole_ops;     // try_peephole consumed N ops
-    uint16_t single_ops;       // single-op translate_*
-    uint16_t fallthrough_ops;  // returned nullopt → forwarded to stock
+    uint16_t ir_ops;             // X87IR::compile_run consumed N ops
+    uint16_t peephole_ops;       // try_peephole consumed N ops
+    uint16_t single_ops;         // single-op translate_*
+    uint16_t fallthrough_ops;    // returned nullopt → forwarded to stock
+    uint16_t ir_build_fail_ops;  // compile_run failed at build (kMaxNodes / unhandled op)
+    uint16_t ir_fpr_fail_ops;    // peak_live_fprs > available
+    uint16_t ir_gpr_fail_ops;    // peak_live_gprs > available
+    uint16_t _reserved_pad;      // pad to 16 B (must be 0)
 };
-static_assert(sizeof(BlockTallyEntry) == 8);
+static_assert(sizeof(BlockTallyEntry) == 16);
 
 }  // namespace profile

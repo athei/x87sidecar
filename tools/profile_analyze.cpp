@@ -49,7 +49,13 @@ struct Tally {
     uint16_t peep = 0;
     uint16_t single = 0;
     uint16_t ft = 0;
-    [[nodiscard]] uint64_t total() const { return static_cast<uint64_t>(ir) + peep + single + ft; }
+    uint16_t ir_build_fail = 0;
+    uint16_t ir_fpr_fail = 0;
+    uint16_t ir_gpr_fail = 0;
+    [[nodiscard]] uint64_t total() const {
+        return static_cast<uint64_t>(ir) + peep + single + ft + ir_build_fail + ir_fpr_fail +
+               ir_gpr_fail;
+    }
 };
 
 bool readFile(const std::string& path, std::vector<Block>& out, std::vector<uint64_t>& counters,
@@ -151,6 +157,9 @@ bool readFile(const std::string& path, std::vector<Block>& out, std::vector<uint
                     .peep = e.peephole_ops,
                     .single = e.single_ops,
                     .ft = e.fallthrough_ops,
+                    .ir_build_fail = e.ir_build_fail_ops,
+                    .ir_fpr_fail = e.ir_fpr_fail_ops,
+                    .ir_gpr_fail = e.ir_gpr_fail_ops,
                 };
             }
         }
@@ -585,6 +594,9 @@ int main(int argc, char** argv) try {
         long double peep_w = 0.0L;
         long double single_w = 0.0L;
         long double ft_w = 0.0L;
+        long double build_fail_w = 0.0L;
+        long double fpr_fail_w = 0.0L;
+        long double gpr_fail_w = 0.0L;
     };
     std::unordered_map<std::string, Stats> patterns;
     patterns.reserve(blocks.size() * 4);
@@ -600,6 +612,9 @@ int main(int argc, char** argv) try {
         long double peep_frac = 0.0L;
         long double single_frac = 0.0L;
         long double ft_frac = 0.0L;
+        long double build_fail_frac = 0.0L;
+        long double fpr_fail_frac = 0.0L;
+        long double gpr_fail_frac = 0.0L;
         if (b.id < tallies.size()) {
             const auto& t = tallies[b.id];
             const uint64_t tot = t.total();
@@ -608,6 +623,9 @@ int main(int argc, char** argv) try {
                 peep_frac = static_cast<long double>(t.peep) / tot;
                 single_frac = static_cast<long double>(t.single) / tot;
                 ft_frac = static_cast<long double>(t.ft) / tot;
+                build_fail_frac = static_cast<long double>(t.ir_build_fail) / tot;
+                fpr_fail_frac = static_cast<long double>(t.ir_fpr_fail) / tot;
+                gpr_fail_frac = static_cast<long double>(t.ir_gpr_fail) / tot;
             }
         }
         const size_t L = b.instrs.size();
@@ -638,6 +656,9 @@ int main(int argc, char** argv) try {
                 s.peep_w += execL * peep_frac;
                 s.single_w += execL * single_frac;
                 s.ft_w += execL * ft_frac;
+                s.build_fail_w += execL * build_fail_frac;
+                s.fpr_fail_w += execL * fpr_fail_frac;
+                s.gpr_fail_w += execL * gpr_fail_frac;
             }
         }
     }
@@ -664,7 +685,10 @@ int main(int argc, char** argv) try {
     });
 
     if (have_tallies) {
-        std::printf("exec_count,window_size,fusion,consumed,ir%%,peep%%,single%%,ft%%,sequence\n");
+        std::printf(
+            "exec_count,window_size,fusion,consumed,"
+            "ir%%,peep%%,single%%,ft%%,build_fail%%,fpr_fail%%,gpr_fail%%,"
+            "sequence\n");
     } else {
         std::printf("exec_count,window_size,fusion,consumed,sequence\n");
     }
@@ -676,10 +700,11 @@ int main(int argc, char** argv) try {
             const auto pct = [&](long double w) -> double {
                 return exec > 0 ? static_cast<double>(100.0L * w / exec) : 0.0;
             };
-            std::printf("%llu,%zu,%s,%d,%.1f,%.1f,%.1f,%.1f,%s\n",
+            std::printf("%llu,%zu,%s,%d,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%s\n",
                         static_cast<unsigned long long>(s.exec_count), s.window_size,
                         s.fusion ? s.fusion : "-", s.fusion_consumed, pct(s.ir_w), pct(s.peep_w),
-                        pct(s.single_w), pct(s.ft_w), key.c_str());
+                        pct(s.single_w), pct(s.ft_w), pct(s.build_fail_w), pct(s.fpr_fail_w),
+                        pct(s.gpr_fail_w), key.c_str());
         } else {
             std::printf("%llu,%zu,%s,%d,%s\n", static_cast<unsigned long long>(s.exec_count),
                         s.window_size, s.fusion ? s.fusion : "-", s.fusion_consumed, key.c_str());

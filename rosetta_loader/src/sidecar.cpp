@@ -830,6 +830,10 @@ void dumpCountersIfEnabled(mach_port_t /*parentTaskPort*/) {
             .peephole_ops = t.peephole_ops,
             .single_ops = t.single_ops,
             .fallthrough_ops = t.fallthrough_ops,
+            .ir_build_fail_ops = t.ir_build_fail_ops,
+            .ir_fpr_fail_ops = t.ir_fpr_fail_ops,
+            .ir_gpr_fail_ops = t.ir_gpr_fail_ops,
+            ._reserved_pad = 0,
         };
         std::fwrite(&entry, sizeof(entry), 1, g_profile.file);
     }

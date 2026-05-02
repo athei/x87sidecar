@@ -54,8 +54,14 @@ struct BlockTally {
     uint16_t peephole_ops;
     uint16_t single_ops;
     uint16_t fallthrough_ops;
+    // IR-failure classifiers (disjoint from above): when the IR gate
+    // attempted compile_run but it returned 0, which gate refused?
+    uint16_t ir_build_fail_ops;
+    uint16_t ir_fpr_fail_ops;
+    uint16_t ir_gpr_fail_ops;
+    uint16_t _reserved_pad;  // pad to 16 B
 };
-static_assert(sizeof(BlockTally) == 8);
+static_assert(sizeof(BlockTally) == 16);
 
 void set_block_tally(uint32_t bid, BlockTally tally);
 BlockTally get_block_tally(uint32_t bid);
