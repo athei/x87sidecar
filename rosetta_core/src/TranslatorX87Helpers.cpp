@@ -792,14 +792,13 @@ void emit_x87_perm_flush(AssemblerBuffer& buf, int Xbase, int Wd_top, int Wd_tmp
 // gets gated out and falls through to the slower peephole/single-op path.
 // Flag resets keep subsequent x87_end calls from re-emitting the writebacks.
 // =============================================================================
-void emit_x87_cache_flush(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, int Wd_top) {
+void emit_x87_cache_flush(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, int Wd_top,
+                          int Wd_tmp) {
     // Fast exit when nothing is dirty — emits no insns and allocates no scratch.
     if (a1.x87_cache.top_dirty == 0 && a1.x87_cache.tag_push_pending == 0 &&
         a1.x87_cache.deferred_pop_count == 0 && !a1.x87_cache.perm_dirty) {
         return;
     }
-
-    const int Wd_tmp = alloc_free_gpr(a1);
 
     // OPT-G: flush deferred permutation map.
     if (a1.x87_cache.perm_dirty) {
@@ -837,8 +836,6 @@ void emit_x87_cache_flush(TranslationResult& a1, AssemblerBuffer& buf, int Xbase
         emit_store_top(buf, Xbase, Wd_top, Wd_tmp);
         a1.x87_cache.top_dirty = 0;
     }
-
-    free_gpr(a1, Wd_tmp);
 }
 
 // =============================================================================

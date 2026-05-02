@@ -299,12 +299,13 @@ void emit_x87_perm_flush(AssemblerBuffer& buf, int Xbase, int Wd_top, int Wd_tmp
 // deferred_pop_count / perm_dirty + reset_perm()) so subsequent x87_end
 // calls don't re-emit the writebacks.
 //
-// Caller must already have base_gpr / top_gpr / st_base_gpr cached and
-// gprs_valid set (i.e. the run has been entered via x87_begin).  No Wd_tmp
-// parameter — the helper allocates/frees its own scratch only when at least
-// one flag is actually dirty, so flush-when-clean costs nothing.
+// Caller passes its own Wd_tmp (must be allocated and live across the call).
+// The helper takes Wd_tmp because the call site (X87IR::lower) already has
+// one allocated for the run prologue — saving a redundant alloc/free.
+// Flush-when-clean is a fast no-op (no helpers called).
 // =============================================================================
-void emit_x87_cache_flush(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, int Wd_top);
+void emit_x87_cache_flush(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, int Wd_top,
+                          int Wd_tmp);
 
 // =============================================================================
 // OPT-L: Branchless FCMP NZCV → packed x87 CC bits.

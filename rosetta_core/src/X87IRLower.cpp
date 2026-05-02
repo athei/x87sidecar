@@ -303,6 +303,16 @@ void lower(Context& ctx, TranslationResult* result) {
     int Xst_base = TranslatorX87::x87_get_st_base(*result);
     int Wd_tmp = alloc_gpr(*result, 2);
 
+    // Eagerly write back any deferred cache state (top_dirty / tag_push_pending
+    // / deferred_pop_count / perm_dirty) so IR runs on canonical memory.  This
+    // replaces the dirty-flag exclusion that used to gate compile_run from
+    // Translator.cpp.  Lives here (post Wd_tmp alloc, pre IR-node emit) so the
+    // flush's transient GPR pressure stays inside lower's pool budget — calling
+    // it earlier (from the Translator dispatch) would consume free-pool slots
+    // before compile_run's peak_live_gprs pre-flight check, causing the IR to
+    // bail out on patterns that should fit.  Flush-when-clean is a no-op.
+    emit_x87_cache_flush(*result, buf, Xbase, Wd_top, Wd_tmp);
+
     // ── FPR assignment ──────────────────────────────────────────────────────
     FPRState fprs;
     fprs.compute_last_uses(ctx);
