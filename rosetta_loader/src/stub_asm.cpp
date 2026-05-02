@@ -180,6 +180,17 @@ constexpr uint32_t lsr_imm_x(uint32_t rd, uint32_t rn, uint32_t shift) {
     return 0xD340FC00U | ((shift & 0x3F) << 16) | ((rn & 0x1F) << 5) | (rd & 0x1F);
 }
 
+// LSL Xd, Xn, #shift   (= UBFM Xd, Xn, #(-shift mod 64), #(63-shift)).
+// Logical shift left by an immediate amount, 64-bit register.  Used by the
+// mach_msg2 IPC body to place msgh_id into the high half of x4
+// (mach_msg2_trap packs (voucher_port) | (msgh_id << 32)).
+//   sf=1, opc=10, 100110, N=1, immr=(-shift)%64, imms=63-shift, Rn, Rd
+constexpr uint32_t lsl_imm_x(uint32_t rd, uint32_t rn, uint32_t shift) {
+    uint32_t immr = (64U - shift) & 0x3FU;
+    uint32_t imms = (63U - shift) & 0x3FU;
+    return 0xD3400000U | (immr << 16) | (imms << 10) | ((rn & 0x1F) << 5) | (rd & 0x1F);
+}
+
 // AND Wd, Wn, #0xF   — 32-bit AND with bitmask immediate hardcoded for #0xF
 // (4 LSBs).  Bitmask-imm encoding (N=0, immr=0, imms=0b000011) per the
 // `feedback_is_bitmask_immediate_ub.md` rule about hardcoding known
@@ -405,16 +416,19 @@ void emit_abort_routine(std::vector<uint8_t>& out, uint64_t templateAddr) {
     // Hex-render idx (x2) into [sp, #kAbortMsgIdxHexOff..+8].
     emit_abort_hex_loop(out, /*valReg=*/2, kAbortMsgIdxHexOff);
 
-    // write(2, sp, kAbortMsgWriteLen)
-    emit(out, movz(0, 2, 0));                  // x0 = 2 (stderr)
-    emit(out, add_imm(1, SP, 0));              // x1 = sp (mov xd, sp)
-    emit(out, movz(2, kAbortMsgWriteLen, 0));  // x2 = 59
-    emit(out, movz(16, 4, 0));                 // x16 = 4 (sys_write)
+    // write(1, sp, kAbortMsgWriteLen) — fd 1 (stdout) rather than fd 2
+    // (stderr): stock translate_insn ends up routing parent stderr through
+    // an internal channel we don't see from the launcher, so abort messages
+    // emitted to fd 2 vanish.  fd 1 lands on the launcher's stdout.
+    emit(out, movz(0, 1, 0));
+    emit(out, add_imm(1, SP, 0));
+    emit(out, movz(2, kAbortMsgWriteLen, 0));
+    emit(out, movz(16, 4, 0));
     emit(out, svc(0x80));
 
     // exit(137)
-    emit(out, movz(0, 137, 0));  // x0 = 137
-    emit(out, movz(16, 1, 0));   // x16 = 1 (sys_exit)
+    emit(out, movz(0, 137, 0));
+    emit(out, movz(16, 1, 0));
     emit(out, svc(0x80));
 
     if (out.size() - start != kAbortRoutineCodeSize) {
@@ -440,6 +454,264 @@ void append_abort_msg_template(std::vector<uint8_t>& out) {
     }
 }
 
+// ──── Stack frame & message-buffer layout for both IPC paths ─────────────
+// FRAME_SIZE = 192 bytes:
+//   sp[  0..  8] : x0   (caller's translate_insn arg0 = TR*)
+//   sp[  8.. 16] : x1   (block*)
+//   sp[ 16.. 24] : x2   (instr_array*)
+//   sp[ 24.. 32] : x3   (num_instrs)
+//   sp[ 32.. 40] : x4   (insn_idx)
+//   sp[ 40.. 48] : x5   (caller scratch)
+//   sp[ 48.. 56] : x16  (caller scratch / kept for sym with stp)
+//   sp[ 56.. 64] : LR   (return address)
+//   sp[ 64..128] : 64-byte mach_msg buffer.  Send: header (24 B at +64..
+//                  +88) + 5×8 args body (40 B at +88..+128).  RCV is
+//                  capped at 64 B (kernel never writes past sp+128).
+//                  Reply layout: header (24 B) + result (8 B at +88) +
+//                  some_flag (8 B at +96).
+//   sp[128..132] : expected msgh_id stash (Step 1b transaction-id check).
+//   sp[132..192] : currently unused.
+//
+// After the trap returns:
+//   x0 = KERN_RETURN.  Reply at sp+64.. is validated then dispatched on
+//   some_flag (sp+96): 0 = None (fall through to STASH), 1 = Some
+//   (return result at sp+88 in x0).
+constexpr int kFrameSize = 192;
+constexpr uint32_t kMsgBits = 0x13U | (0x15U << 8);  // = 0x1513
+constexpr uint32_t kMsgSendSize = 24 + 40;           // header + 5×8 args
+constexpr uint32_t kMsgRcvSize = 64;                 // reply cap
+constexpr uint32_t kMsgIdSentinel = 0x10000000;
+constexpr uint32_t kReplySizeMin = 24 + 8 + 8;  // 40 — see sidecar.cpp ReplyMsg
+
+// ──── Patch positions returned by every IPC-body emitter ─────────────────
+// Only abs-jump placeholders that depend on addresses outside the IPC body
+// (stash, abort_routine).  Conditional-branch patches are entirely internal
+// to the postlude — handled there directly.
+struct IpcPatches {
+    size_t none_jump;        // NONE path → STASH
+    size_t kr_thunk_jump;    // kr abort thunk → abort_routine
+    size_t size_thunk_jump;  // size abort thunk → abort_routine
+    size_t id_thunk_jump;    // id abort thunk → abort_routine
+};
+
+// Common prologue used by both IPC bodies: stash caller-saved x0..x5,
+// x16, and LR into the bottom 64 B of the new frame.
+void emit_ipc_prologue(std::vector<uint8_t>& ipc) {
+    emit(ipc, stp_preindex(0, 1, SP, -kFrameSize));  // stp x0, x1, [sp, #-192]!
+    emit(ipc, stp_offset(2, 3, SP, 16));             // stp x2, x3, [sp, #16]
+    emit(ipc, stp_offset(4, 5, SP, 32));             // stp x4, x5, [sp, #32]
+    emit(ipc, stp_offset(16, LR, SP, 48));           // stp x16, lr, [sp, #48]
+}
+
+// Stash the per-call msgh_id at sp+128 for the post-svc cross-talk check.
+// msgh_id = (kMsgIdSentinel byte 0x10) << 24 | (SP >> 20) & 0x00FFFFFF
+// — top byte distinguishes our requests from any other Mach traffic on
+// the reply port; low 24 bits derived from SP give a thread-distinguishing
+// tag (different parent threads have stacks at different VAs).  Returns
+// the scratch register that holds msgh_id (always x9) so callers can
+// reuse it for further packing without recomputing.
+void emit_build_msgh_id(std::vector<uint8_t>& ipc) {
+    emit(ipc, add_imm(9, SP, 0));    // x9 = sp
+    emit(ipc, lsr_imm_x(9, 9, 20));  // x9 = sp >> 20
+    emit(ipc, movk(9, static_cast<uint16_t>(kMsgIdSentinel >> 16), 16));
+    emit(ipc, str_w_offset(9, SP, 128));  // stash expected msgh_id
+}
+
+// Store the five caller-arg registers (x0..x4) into the message body at
+// sp+88..sp+128.  Order matches the sidecar's TranslateRequest layout.
+void emit_body_stores(std::vector<uint8_t>& ipc) {
+    emit(ipc, str_x_offset(0, SP, 88));   // body[+0]  = TR*
+    emit(ipc, str_x_offset(1, SP, 96));   // body[+8]  = block*
+    emit(ipc, str_x_offset(2, SP, 104));  // body[+16] = instr_array*
+    emit(ipc, str_x_offset(3, SP, 112));  // body[+24] = num_instrs
+    emit(ipc, str_x_offset(4, SP, 120));  // body[+32] = insn_idx
+}
+
+// Emit the post-trap sequence shared by both IPC bodies: three reply
+// validation checkpoints, the SOME-path return, the NONE-path abs-jump
+// placeholder, and the three abort thunks.  Returns the patch positions
+// for build() to fill in once stashAddr / abortRoutineAddr are known.
+//
+// Pre-conditions (set by the trap-specific code preceding this):
+//   x0 = kr (kern_return_t — zero-extended into x0 by mach_msg{,2}_trap)
+// Reply lives at sp+64..sp+128.  msgh_size at sp+68, msgh_id at sp+84,
+// result at sp+88, some_flag at sp+96.  Expected msgh_id stashed at
+// sp+128 by emit_build_msgh_id() pre-svc.
+//
+// Every non-success path ends in a loud abort + write to fd 2 — we do
+// NOT silently fall through on a bad reply: doing so previously masked
+// the multi-threaded reply-port cross-talk that froze WoW on world-load.
+IpcPatches emit_ipc_postlude(std::vector<uint8_t>& ipc) {
+    IpcPatches p{};
+
+    // ── Reply validation (Step 1a) ──────────────────────────────────────
+    //
+    // Three checkpoints, in order:
+    //   1. kr != KERN_SUCCESS         (mach_msg failed)
+    //   2. msgh_size < kReplySizeMin  (reply too small for Some/None)
+    //   3. msgh_id  != expected       (cross-talk — Step 1b transaction id)
+
+    // Checkpoint 1: kr != 0 → abort kind=0.  Uses cbnz_w (32-bit) since
+    // kern_return_t is 32-bit and the trap zero-extends into x0.
+    const size_t krCbnzPos = ipc.size();
+    emit(ipc, cbnz_w(0, 0));  // patched after thunks emitted
+
+    // Checkpoint 2: msgh_size < kReplySizeMin (40) → abort kind=1.
+    emit(ipc, ldr_w_offset(10, SP, 68));  // w10 = msgh_size
+    emit(ipc, cmp_imm_w(10, kReplySizeMin));
+    const size_t sizeBltPos = ipc.size();
+    emit(ipc, b_cond(COND_LT, 0));  // patched after thunks emitted
+
+    // Checkpoint 3: msgh_id != expected → abort kind=2 (cross-talk).
+    emit(ipc, ldr_w_offset(11, SP, 84));   // w11 = reply msgh_id
+    emit(ipc, ldr_w_offset(12, SP, 128));  // w12 = expected (stashed pre-svc)
+    emit(ipc, cmp_reg_w(11, 12));
+    const size_t idBnePos = ipc.size();
+    emit(ipc, b_cond(COND_NE, 0));  // patched after thunks emitted
+
+    // Dispatch on some_flag at sp+96.  0 = None (fall through to STASH),
+    // 1 = Some.  CBZ skips 7 SOME-path instructions to land on NONE.
+    emit(ipc, ldr_w_offset(9, SP, 96));
+    emit(ipc, cbz_w(9, 8));
+
+    // ── SOME PATH ───────────────────────────────────────────────────────
+    emit(ipc, ldr_x_offset(0, SP, 88));      // x0 = result
+    emit(ipc, ldr_x_offset(1, SP, 8));       // restore x1
+    emit(ipc, ldp_offset(2, 3, SP, 16));     // restore x2, x3
+    emit(ipc, ldp_offset(4, 5, SP, 32));     // restore x4, x5
+    emit(ipc, ldp_offset(16, LR, SP, 48));   // restore x16, lr
+    emit(ipc, add_imm(SP, SP, kFrameSize));  // sp += FRAME_SIZE
+    emit(ipc, RET_INSN);                     // ret
+
+    // ── NONE PATH ───────────────────────────────────────────────────────
+    // Restore caller regs and abs-jump to STASH.  x0 comes from sp+0 —
+    // the SOME path read from sp+88 (reply body), but for NONE we hand
+    // stock the caller's untouched args.
+    emit(ipc, ldr_x_offset(0, SP, 0));
+    emit(ipc, ldr_x_offset(1, SP, 8));
+    emit(ipc, ldp_offset(2, 3, SP, 16));
+    emit(ipc, ldp_offset(4, 5, SP, 32));
+    emit(ipc, ldp_offset(16, LR, SP, 48));
+    emit(ipc, add_imm(SP, SP, kFrameSize));
+    p.none_jump = emit_abs_jump_placeholder(ipc);
+
+    // ── Abort thunks ────────────────────────────────────────────────────
+    // Each runs only when its checkpoint above branched here.  Sets up
+    // x0 = diagnostic value, x1 = kind, x2 = insn_idx (loaded from sp+32
+    // where the prologue stashed caller's x4), then abs-jumps to
+    // abort_routine.  Abs-jump targets patched by the caller.
+
+    // Thunk 0: bad-kr.  x0 already holds kr; kind = 0.
+    const size_t krThunkPos = ipc.size();
+    emit(ipc, movz(1, 0, 0));
+    emit(ipc, ldr_x_offset(2, SP, 32));
+    p.kr_thunk_jump = emit_abs_jump_placeholder(ipc);
+
+    // Thunk 1: bad-size.  msgh_size sits in w10; kind = 1.
+    const size_t sizeThunkPos = ipc.size();
+    emit(ipc, mov_reg_x(0, 10));
+    emit(ipc, movz(1, 1, 0));
+    emit(ipc, ldr_x_offset(2, SP, 32));
+    p.size_thunk_jump = emit_abs_jump_placeholder(ipc);
+
+    // Thunk 2: id-mismatch.  Actual msgh_id is in w11; kind = 2.
+    const size_t idThunkPos = ipc.size();
+    emit(ipc, mov_reg_x(0, 11));
+    emit(ipc, movz(1, 2, 0));
+    emit(ipc, ldr_x_offset(2, SP, 32));
+    p.id_thunk_jump = emit_abs_jump_placeholder(ipc);
+
+    // Patch the three checkpoint forward branches to land on their
+    // thunks now that we know each thunk's offset.
+    patch_word(ipc, krCbnzPos, cbnz_w(0, static_cast<int32_t>((krThunkPos - krCbnzPos) / 4)));
+    patch_word(ipc, sizeBltPos,
+               b_cond(COND_LT, static_cast<int32_t>((sizeThunkPos - sizeBltPos) / 4)));
+    patch_word(ipc, idBnePos, b_cond(COND_NE, static_cast<int32_t>((idThunkPos - idBnePos) / 4)));
+
+    return p;
+}
+
+// Build the IPC body around `mach_msg2_trap` (svc -47) with
+// `MACH64_SEND_MQ_CALL` set in the high half of options.  This is the
+// XPC-style "MIG call" fast path: the kernel knows we'll immediately RCV
+// on `parentReplyName` after our SEND lands at the sidecar, and can do
+// a direct hand-off to the sidecar thread (already blocked in
+// mach_msg(MACH_RCV_MSG)) without going through the scheduler.
+//
+// Argument packing is `(low32_field) | (high32_field << 32)` per
+// mach_msg2_trap — verified by disassembling _mach_msg_overwrite in
+// /usr/lib/system/libsystem_kernel.dylib (macOS 26).  Public SDK headers
+// don't expose the trap or MACH64_* constants, so the values are baked
+// here.
+//
+// We don't pre-populate the header in the on-stack buffer — the kernel
+// synthesizes it from the register-packed args.  Body bytes still live
+// at sp+88..128 (kernel reads from `data + 24`).
+IpcPatches emit_mach_msg2_ipc(std::vector<uint8_t>& ipc, uint32_t sidecarReqName,
+                              uint32_t parentReplyName) {
+    emit_ipc_prologue(ipc);
+
+    // Body: five translate_insn args (still in x0..x4).
+    emit_body_stores(ipc);
+
+    // Build msgh_id in x9 and stash at sp+128 for the post-svc check.
+    // We need it again to pack into x4's high half below.
+    emit_build_msgh_id(ipc);
+
+    // ── mach_msg2_trap arguments (8 args, all packed into x0..x7) ───────
+    //   x0  = data pointer            (sp + 64)
+    //   x1  = options64
+    //         low32  = MACH_SEND_MSG | MACH_RCV_MSG = 0x3
+    //                  (mach_msg2_internal masks off bit 0 / 6 / 10 before the
+    //                   trap, so MACH_SEND_MSG ends up cleared regardless;
+    //                   we leave it set to mirror what libc passes pre-mask.)
+    //         high32 = MACH64_SEND_MQ_CALL = 0x4 (bit 34)
+    //                  MQ_CALL is the MIG paired-send-then-RCV hint that lets
+    //                  the kernel direct-hand-off to the sidecar thread
+    //                  already blocked in mach_msg(MACH_RCV_MSG).
+    //   x2  = (msgh_bits)             | (send_size      << 32)
+    //   x3  = (sidecarReqName)        | (parentReplyName<< 32)
+    //   x4  = (voucher = 0)           | (msgh_id        << 32)
+    //   x5  = (desc_count = 0)        | (rcv_name = parentReplyName << 32)
+    //   x6  = (rcv_size = 64)         | (priority = 0   << 32)
+    //   x7  = timeout = 0
+    //   x16 = -47  (mach_msg2_trap)
+    //
+    // The xnu MACH64_* bit assignments (from osfmk/mach/message.h):
+    //   MACH64_SEND_USER_CALL    = 0x0000'0002'0000'0000   (bit 33)
+    //   MACH64_SEND_MQ_CALL      = 0x0000'0004'0000'0000   (bit 34)
+    //   MACH64_SEND_KOBJECT_CALL = 0x0000'0008'0000'0000   (bit 35)
+    //   MACH64_SEND_DK_CALL      = 0x0000'0010'0000'0000   (bit 36)
+    // These aren't exposed in the public SDK headers; verified by
+    // breakpointing libsystem_kernel's `mach_msg2_internal` and reading the
+    // x1 register on a working SEND|RCV call.
+    constexpr uint64_t kMach64SendMqCall = 0x0000'0004'0000'0000ULL;
+    constexpr uint64_t kSendRcvOpt = 0x0000'0000'0000'0003ULL;
+
+    emit(ipc, add_imm(0, SP, 64));  // x0 = sp + 64
+
+    emit_load_imm64(ipc, 1, kMach64SendMqCall | kSendRcvOpt);
+    emit_load_imm64(ipc, 2,
+                    static_cast<uint64_t>(kMsgBits) | (static_cast<uint64_t>(kMsgSendSize) << 32));
+    emit_load_imm64(
+        ipc, 3,
+        static_cast<uint64_t>(sidecarReqName) | (static_cast<uint64_t>(parentReplyName) << 32));
+
+    // x4 = msgh_id << 32  (voucher = 0 in low half).  msgh_id sits in x9.
+    emit(ipc, lsl_imm_x(4, 9, 32));
+
+    // x5 = parentReplyName << 32  (desc_count = 0 in low half).
+    emit_load_imm64(ipc, 10, static_cast<uint64_t>(parentReplyName) << 32);
+    emit(ipc, mov_reg_x(5, 10));
+
+    emit(ipc, movz(6, kMsgRcvSize, 0));  // x6 = rcv_size (priority = 0)
+    emit(ipc, movz(7, 0, 0));            // x7 = timeout = 0
+    emit(ipc, movn(16, 46, 0));          // x16 = ~46 = -47 (mach_msg2_trap)
+    emit(ipc, svc(0x80));
+
+    return emit_ipc_postlude(ipc);
+}
+
 }  // namespace
 
 // ──── public ────────────────────────────────────────────────────────────────
@@ -453,343 +725,56 @@ StubBlobs build(uint64_t handlerAddr, uint64_t translateInsnAddr, const uint8_t 
     emit_abs_jump_3movs(blobs.entry, handlerAddr);
 
     // Sanity: the 3-mov+br encoding only works if the target's top 16 bits
-    // are zero. macOS userland addresses are always sub-256TB, so this
-    // holds.  Assert at runtime if the assumption breaks.
+    // are zero.  macOS userland addresses are always sub-256TB, so this
+    // holds.  Caller sees entry shorter than 16 → failure signal.
     if (handlerAddr & 0xFFFF000000000000ULL) {
-        // Caller will see entry shorter than 16 — use as failure signal.
         blobs.entry.clear();
         return blobs;
     }
 
     // We build in three stages so the filter prologue can absolute-jump
-    // straight to STASH for non-x87 opcodes (skipping the IPC entirely).
-    //   1. Build the IPC body (`ipc`) — its size determines STASH's offset.
-    //   2. Build the filter prologue (`filter`) — fixed size, computes
-    //      &instr_array[insn_idx], loads opcode, and abs-jumps to STASH if
-    //      the opcode is outside both x87 ranges.
-    //   3. Concatenate filter + ipc + STASH + STASH_JUMP into the handler.
+    // straight to STASH for non-x87 opcodes (skipping the IPC entirely):
+    //   1. Build the IPC body — its size determines STASH's offset.
+    //   2. Build the filter prologue (fixed size).
+    //   3. Concatenate filter + ipc + STASH + STASH_JUMP + abort_routine + msg.
 
-    // Filter size is fixed; declared up here so the IPC body's NONE
-    // path can compute the same stashAddr the filter prologue uses
-    // below at line ~471.
     constexpr size_t kFilterInstrs = 13;
     constexpr size_t kFilterBytes = kFilterInstrs * 4;
 
     std::vector<uint8_t> ipc;
-
-    // ──── OUR_HANDLER (RPC version: send + receive) ─────────────────────────
-    // Stack frame layout (FRAME_SIZE = 192 bytes):
-    //   sp[  0..  8] : x0   (caller's translate_insn arg0 = TR*)
-    //   sp[  8.. 16] : x1   (block*)
-    //   sp[ 16.. 24] : x2   (instr_array*)
-    //   sp[ 24.. 32] : x3   (num_instrs)
-    //   sp[ 32.. 40] : x4   (insn_idx)
-    //   sp[ 40.. 48] : x5   (caller scratch)
-    //   sp[ 48.. 56] : x16  (caller scratch / kept for sym with stp)
-    //   sp[ 56.. 64] : LR   (return address)
-    //   sp[ 64..128] : 64-byte mach_msg buffer.  Send: header (24 B at +64..
-    //                  +88) + 5×8 args body (40 B at +88..+128).  RCV is
-    //                  capped at 64 B too (RCV_SIZE), so the kernel never
-    //                  writes past sp+128 — leaving sp+128.. clear.
-    //                  Reply lands at sp+64..sp+(64+RCV_SIZE).
-    //                  Reply layout: header (24 B) + result (8 B at +88) +
-    //                  some_flag (8 B at +96).
-    //   sp[128..132] : expected msgh_id stash (Step 1b transaction-id check).
-    //   sp[132..192] : currently unused.
-    //
-    // After mach_msg(SEND|RCV) returns:
-    //   x0 = KERN_RETURN.
-    //   Reply buffer at sp+64..  Validation order (Step 1a/1b):
-    //     1. kr (x0) == KERN_SUCCESS — abort kind=0 if not
-    //     2. msgh_size (sp+68) >= 40 — abort kind=1 if not
-    //     3. msgh_id (sp+84) == expected (sp+128) — abort kind=2 if not
-    //   Then dispatch on some_flag (sp+96): 0 = None (fall through to STASH),
-    //   1 = Some, return result at sp+88 in x0.
-
-    constexpr int FRAME_SIZE = 192;
-
-    // stp x0, x1, [sp, #-128]!
-    emit(ipc, stp_preindex(0, 1, SP, -FRAME_SIZE));
-    // stp x2, x3, [sp, #16]
-    emit(ipc, stp_offset(2, 3, SP, 16));
-    // stp x4, x5, [sp, #32]
-    emit(ipc, stp_offset(4, 5, SP, 32));
-    // stp x16, lr, [sp, #48]
-    emit(ipc, stp_offset(16, LR, SP, 48));
-
-    // ── Build mach_msg_header_t at sp+64 ────────────────────────────────────
-    // mach_msg_header_t layout (24 bytes):
-    //   uint32_t  msgh_bits           [+ 0]
-    //   uint32_t  msgh_size           [+ 4]
-    //   uint32_t  msgh_remote_port    [+ 8]
-    //   uint32_t  msgh_local_port     [+12]
-    //   uint32_t  msgh_voucher_port   [+16]
-    //   uint32_t  msgh_id             [+20]
-    //
-    // We send a "tickle" message with no body. msgh_bits selects the
-    // disposition for the remote port. We use COPY_SEND so the right at
-    // parent's name (planted via mach_port_insert_right) is preserved
-    // across the many calls translate_insn fires.
-    //
-    // MACH_MSGH_BITS_REMOTE(MACH_MSG_TYPE_COPY_SEND) = 19 = 0x13.
-    // (NOT 0x11 — that's MOVE_SEND which consumes the right after one use.)
-    // After the 24-byte header we lay down a 40-byte body holding the five
-    // translate_insn arguments in their natural register order:
-    //   body[+ 0..+ 8] : x0  (TranslationResult* — parent-side pointer)
-    //   body[+ 8..+16] : x1  (IRBlock*          — parent-side pointer)
-    //   body[+16..+24] : x2  (IRInstr*          — parent-side pointer to array)
-    //   body[+24..+32] : x3  (num_instrs)
-    //   body[+32..+40] : x4  (insn_idx)
-    //
-    // MACH_MSGH_BITS encoding: remote in low byte, local in next byte.
-    //   remote = MACH_MSG_TYPE_COPY_SEND      = 19 = 0x13  (preserves the
-    //            send right at parent's namespaced sidecarReqName)
-    //   local  = MACH_MSG_TYPE_MAKE_SEND_ONCE = 21 = 0x15  (kernel hands
-    //            the sidecar a fresh send-once for the reply)
-    constexpr uint32_t MSG_BITS = 0x13U | (0x15U << 8);  // = 0x1513
-    constexpr uint32_t MSG_SIZE = 24 + 40;               // header + 5×8 args
-    constexpr uint32_t RCV_SIZE = 64;                    // reply cap (header
-                                                         // 24 + result 8 +
-                                                         // some_flag 8 +
-                                                         // trailer slack);
-                                                         // capped low so
-                                                         // the kernel never
-                                                         // writes past
-                                                         // sp+128 — keeps
-                                                         // sp+128.. free
-                                                         // for the stashed
-                                                         // expected msgh_id.
-    constexpr uint32_t REPLY_SIZE_MIN = 24 + 8 + 8;      // 40 — see sidecar.cpp ReplyMsg
-
-    // Per-call transaction id sentinel byte.  Sidecar dispatches on
-    // (msgh_id & 0xFF000000) == kMsgIdSentinel.  Bottom 24 bits carry a
-    // thread-distinguishing tag derived from SP — different parent threads
-    // have stacks at different VAs, so SP>>20 (megabyte-aligned) gives an
-    // identifier that's stable per-thread within a single call.
-    constexpr uint32_t MSG_ID_SENTINEL = 0x10000000;
-
-    // Use x9 as scratch for header field values.
-
-    // msgh_bits — 0x1513 fits in 16 bits (single movz)
-    emit(ipc, movz(9, MSG_BITS, 0));
-    emit(ipc, str_w_offset(9, SP, 64));  // [sp+64]
-
-    // msgh_size
-    emit(ipc, movz(9, MSG_SIZE, 0));
-    emit(ipc, str_w_offset(9, SP, 68));  // [sp+68]
-
-    // msgh_remote_port = sidecarReqName (32-bit)
-    emit_load_imm64(ipc, 9, sidecarReqName);  // 4 instructions
-    emit(ipc, str_w_offset(9, SP, 72));       // [sp+72]
-
-    // msgh_local_port = parentReplyName (32-bit) — kernel auto-derives
-    // a SEND_ONCE right via MAKE_SEND_ONCE in MSG_BITS.local.
-    emit_load_imm64(ipc, 9, parentReplyName);  // 4 instructions
-    emit(ipc, str_w_offset(9, SP, 76));        // [sp+76]
-
-    // msgh_voucher_port = 0
-    emit(ipc, movz(9, 0, 0));
-    emit(ipc, str_w_offset(9, SP, 80));  // [sp+80]
-
-    // msgh_id — per-call transaction id (Step 1b).  Built as
-    //   (sentinel byte 0x10) << 24  |  (SP >> 20) & 0x00FFFFFF
-    // and stashed at sp+128 for post-svc match check.  We replicate the
-    // sentinel byte into bits 16..27 via movk's lsl-16 chunk, so the top
-    // half of msgh_id is always 0x1000_xxxx (where xxxx = SP[35:20]).
-    emit(ipc, add_imm(9, SP, 0));                                    // x9 = sp
-    emit(ipc, lsr_imm_x(9, 9, 20));                                  // x9 = sp >> 20
-    emit(ipc, movk(9, static_cast<uint16_t>(MSG_ID_SENTINEL >> 16),  // top 16 = 0x1000
-                   16));
-    emit(ipc, str_w_offset(9, SP, 84));   // request msgh_id
-    emit(ipc, str_w_offset(9, SP, 128));  // stash expected
-
-    // ── Body: five translate_insn args (still in x0..x4 at this point) ──────
-    // Header lives at sp+64 .. sp+88. Body lives at sp+88 .. sp+128.
-    emit(ipc, str_x_offset(0, SP, 88));   // body[+0]  = x0 = TR*
-    emit(ipc, str_x_offset(1, SP, 96));   // body[+8]  = x1 = block*
-    emit(ipc, str_x_offset(2, SP, 104));  // body[+16] = x2 = instr_array*
-    emit(ipc, str_x_offset(3, SP, 112));  // body[+24] = x3 = num_instrs
-    emit(ipc, str_x_offset(4, SP, 120));  // body[+32] = x4 = insn_idx
-
-    // ── mach_msg_trap arguments ──────────────────────────────────────────────
-    //   x0  = msg pointer (sp + 64)
-    //   x1  = options = MACH_SEND_MSG | MACH_RCV_MSG = 0x3
-    //   x2  = send_size = 64
-    //   x3  = rcv_size  = 128
-    //   x4  = rcv_name  = parentReplyName  (low 32 bits)
-    //   x5  = timeout   = 0  (block forever)
-    //   x6  = notify    = 0
-    //   x16 = -31  (mach_msg_trap)
-    emit(ipc, add_imm(0, SP, 64));             // x0 = sp + 64
-    emit(ipc, movz(1, 0x0003, 0));             // x1 = SEND | RCV
-    emit(ipc, movz(2, MSG_SIZE, 0));           // x2 = send_size
-    emit(ipc, movz(3, RCV_SIZE, 0));           // x3 = rcv_size
-    emit_load_imm64(ipc, 4, parentReplyName);  // x4 = rcv_name
-    emit(ipc, movz(5, 0, 0));                  // x5 = timeout
-    emit(ipc, movz(6, 0, 0));                  // x6 = notify
-    emit(ipc, movn(16, 30, 0));                // x16 = -31 (mach_msg_trap)
-    emit(ipc, svc(0x80));
-
-    // ── Reply validation (Step 1a) ──────────────────────────────────────────
-    // Every non-success path from here ends in a loud abort + write to
-    // stderr.  We do NOT silently fall through on a bad reply: doing so
-    // hides regressions and previously masked the multi-threaded
-    // reply-port cross-talk that froze WoW on world-load.
-    //
-    // Three checkpoints, in order:
-    //   1. kr != KERN_SUCCESS         (mach_msg failed)
-    //   2. msgh_size < 32             (reply too small to be a well-formed Some/None)
-    //   3. msgh_id  != expected       (cross-talk — Step 1b adds per-call ids)
-    // Each fails into an in-IPC thunk that sets up
-    //   x0 = diagnostic value, x1 = kind, x2 = insn_idx
-    // and abs-jumps to abort_routine (appended to the handler blob after
-    // STASH_JUMP).  abort_routine writes a fixed 59-byte line to fd 2 and
-    // exit(137)s.
-    //
-    // The conditional branches below are forward-only and use placeholder
-    // imm19 = 0; we patch them after the thunks are emitted (we don't yet
-    // know how far ahead the thunks land).  Same trick for the thunks'
-    // abs-jumps to abort_routine — patched after we know its address.
-
-    // Checkpoint 1: kr != 0 → abort kind=0.  Uses cbnz_w (32-bit) since
-    // kern_return_t is 32-bit and mach_msg_trap zero-extends into x0.
-    const size_t krCbnzPos = ipc.size();
-    emit(ipc, cbnz_w(0, 0));  // patched below
-
-    // Checkpoint 2: msgh_size < REPLY_SIZE_MIN (40) → abort kind=1.
-    // ReplyMsg = mach_msg_header_t (24) + uint64_t result (8) +
-    //            uint64_t some_flag (8).
-    emit(ipc, ldr_w_offset(10, SP, 68));  // w10 = msgh_size
-    emit(ipc, cmp_imm_w(10, REPLY_SIZE_MIN));
-    const size_t sizeBltPos = ipc.size();
-    emit(ipc, b_cond(COND_LT, 0));  // patched below
-
-    // Checkpoint 3: msgh_id != expected → abort kind=2 (cross-talk).
-    // Sidecar echoes the request msgh_id we sent into the reply; if a
-    // different reply got delivered to our parentReplyName receive port
-    // first (multi-threaded parent), the values differ.
-    emit(ipc, ldr_w_offset(11, SP, 84));   // w11 = reply msgh_id
-    emit(ipc, ldr_w_offset(12, SP, 128));  // w12 = expected (stashed pre-svc)
-    emit(ipc, cmp_reg_w(11, 12));
-    const size_t idBnePos = ipc.size();
-    emit(ipc, b_cond(COND_NE, 0));  // patched below
-
-    // Read some_flag into w9 — Step 1b moves the Some/None signal out of
-    // msgh_id (which is now a transaction tag) into a dedicated body word
-    // at sp+96.  0 = None (fall through to STASH), 1 = Some.
-    emit(ipc, ldr_w_offset(9, SP, 96));  // w9 = some_flag
-    // CBZ branch is `target = CBZ_addr + imm19*4`. We want to land at the
-    // FIRST instruction of NONE path, which is one past the SOME path's
-    // last (7th) instruction, i.e., 8 instructions ahead of CBZ.
-    emit(ipc, cbz_w(9, 8));  // skip 7 some-path → none_label
-
-    // ── SOME PATH ───────────────────────────────────────────────────────────
-    emit(ipc, ldr_x_offset(0, SP, 88));      // x0 = result (replaces saved x0)
-    emit(ipc, ldr_x_offset(1, SP, 8));       // restore x1
-    emit(ipc, ldp_offset(2, 3, SP, 16));     // restore x2, x3
-    emit(ipc, ldp_offset(4, 5, SP, 32));     // restore x4, x5
-    emit(ipc, ldp_offset(16, LR, SP, 48));   // restore x16, lr
-    emit(ipc, add_imm(SP, SP, FRAME_SIZE));  // sp += FRAME_SIZE
-    emit(ipc, 0xD65F03C0U);                  // ret  (= BR x30)
-
-    // ── NONE PATH ───────────────────────────────────────────────────────────
-    // Sidecar declined the opcode. Restore caller registers and abs-jump
-    // to STASH (stock's original 16-byte translate_insn prologue, which
-    // tail-jumps to translate_insn+16). x0 comes from sp+0 — the SOME
-    // path read from sp+88 (reply body), but for NONE we hand stock the
-    // caller's untouched arguments.
-    emit(ipc, ldr_x_offset(0, SP, 0));       // x0 = caller's TR*
-    emit(ipc, ldr_x_offset(1, SP, 8));       // restore x1
-    emit(ipc, ldp_offset(2, 3, SP, 16));     // restore x2, x3
-    emit(ipc, ldp_offset(4, 5, SP, 32));     // restore x4, x5
-    emit(ipc, ldp_offset(16, LR, SP, 48));   // restore x16, lr
-    emit(ipc, add_imm(SP, SP, FRAME_SIZE));  // sp += FRAME_SIZE
-    // Abs-jump to STASH (patched once we know the final ipc.size, after
-    // the abort thunks below have been emitted).  STASH lives at the end
-    // of the concatenated handler blob: filter | ipc | STASH | STASH_JUMP
-    // | abort_routine | template.  Its address is
-    //   handlerAddr + kFilterBytes + ipc.size_final.
-    const size_t noneJumpPos = emit_abs_jump_placeholder(ipc);
-
-    // ── Abort thunks ────────────────────────────────────────────────────────
-    // Each thunk runs only when its checkpoint above branched here.  Sets
-    // up x0 = diagnostic value, x1 = kind, x2 = insn_idx (loaded from
-    // sp+32, where the prologue stashed caller's x4), then abs-jumps to
-    // abort_routine.  Targets are patched after we know its address.
-    //
-    // Thunk 0: bad-kr.  x0 already holds kr (the value that triggered
-    // cbnz_w); kind = 0.
-    const size_t krThunkPos = ipc.size();
-    emit(ipc, movz(1, 0, 0));            // x1 = 0 (kind)
-    emit(ipc, ldr_x_offset(2, SP, 32));  // x2 = insn_idx
-    const size_t krJumpPos = emit_abs_jump_placeholder(ipc);
-
-    // Thunk 1: bad-size.  msgh_size sits in w10 (zero-extended into x10
-    // by the ldr_w above); kind = 1.
-    const size_t sizeThunkPos = ipc.size();
-    emit(ipc, mov_reg_x(0, 10));         // x0 = x10 (diag = msgh_size)
-    emit(ipc, movz(1, 1, 0));            // x1 = 1 (kind)
-    emit(ipc, ldr_x_offset(2, SP, 32));  // x2 = insn_idx
-    const size_t sizeJumpPos = emit_abs_jump_placeholder(ipc);
-
-    // Thunk 2: id-mismatch.  Actual reply msgh_id is in w11; kind = 2.
-    const size_t idThunkPos = ipc.size();
-    emit(ipc, mov_reg_x(0, 11));         // x0 = x11 (diag = actual id)
-    emit(ipc, movz(1, 2, 0));            // x1 = 2 (kind)
-    emit(ipc, ldr_x_offset(2, SP, 32));  // x2 = insn_idx
-    const size_t idJumpPos = emit_abs_jump_placeholder(ipc);
+    const IpcPatches patches = emit_mach_msg2_ipc(ipc, sidecarReqName, parentReplyName);
 
     // ── Resolve final addresses and patch placeholders ──────────────────────
-    // ipc.size() is now final.  STASH starts at handlerAddr + kFilterBytes +
-    // ipc.size_final; abort_routine starts at STASH_JUMP_END = STASH + 32.
+    // STASH starts at handlerAddr + kFilterBytes + ipc.size_final;
+    // abort_routine starts at STASH_JUMP_END = STASH + 32.
     const uint64_t stashAddrFinal = handlerAddr + kFilterBytes + ipc.size();
     const uint64_t abortRoutineAddr = stashAddrFinal + 32;
     if ((stashAddrFinal | abortRoutineAddr) & 0xFFFF000000000000ULL) {
         blobs.entry.clear();
         return blobs;
     }
-
-    // Patch NONE's abs-jump → STASH.
-    patch_abs_jump_3movs(ipc, noneJumpPos, stashAddrFinal);
-
-    // Patch checkpoint forward branches → their thunks.
-    {
-        const auto imm = static_cast<int32_t>((krThunkPos - krCbnzPos) / 4);
-        patch_word(ipc, krCbnzPos, cbnz_w(0, imm));
-    }
-    {
-        const auto imm = static_cast<int32_t>((sizeThunkPos - sizeBltPos) / 4);
-        patch_word(ipc, sizeBltPos, b_cond(COND_LT, imm));
-    }
-    {
-        const auto imm = static_cast<int32_t>((idThunkPos - idBnePos) / 4);
-        patch_word(ipc, idBnePos, b_cond(COND_NE, imm));
-    }
-
-    // Patch each thunk's abs-jump → abort_routine.
-    patch_abs_jump_3movs(ipc, krJumpPos, abortRoutineAddr);
-    patch_abs_jump_3movs(ipc, sizeJumpPos, abortRoutineAddr);
-    patch_abs_jump_3movs(ipc, idJumpPos, abortRoutineAddr);
+    patch_abs_jump_3movs(ipc, patches.none_jump, stashAddrFinal);
+    patch_abs_jump_3movs(ipc, patches.kr_thunk_jump, abortRoutineAddr);
+    patch_abs_jump_3movs(ipc, patches.size_thunk_jump, abortRoutineAddr);
+    patch_abs_jump_3movs(ipc, patches.id_thunk_jump, abortRoutineAddr);
 
     // ──── FILTER prologue ───────────────────────────────────────────────────
     // Bypass the IPC entirely for non-x87 opcodes — translate_insn fires for
     // EVERY x86 instruction Rosetta translates (~85k/test) but only ~14% of
-    // them are x87. Without this filter every non-x87 call paid a Mach
+    // them are x87.  Without this filter every non-x87 call paid an IPC
     // round-trip just to be told "fall through to stock".
     //
     // The filter dereferences the IRInstr at &instr_array[insn_idx] (parent
     // memory; we run inside parent's address space) and reads its 16-bit
-    // opcode field. If the opcode is outside both x87 ranges
+    // opcode field.  If the opcode is outside both x87 ranges
     //   low:  0x25..0x30 = FCMOVcc + FCOMI variants
     //   high: 0xBD..0x10C = most x87 ops
     // it abs-jumps straight to STASH so the original translate_insn prologue
     // runs and stock handles the instruction itself — same outcome as an IPC
-    // reply of None, but without the ~25 µs round-trip.
+    // reply of None, but without the round-trip.
     //
     // Uses x9, x10, x11 — caller-saved scratch in AAPCS, so we don't need to
     // preserve them across the filter.
-    // (kFilterInstrs / kFilterBytes are declared at the top of build() so
-    // the IPC body's NONE path can compute the same stashAddr.)
     constexpr uint32_t kX87LoLo = 0x25;
     constexpr uint32_t kX87LoHi = 0x30;
     constexpr uint32_t kX87HiLo = 0xBD;
@@ -797,10 +782,6 @@ StubBlobs build(uint64_t handlerAddr, uint64_t translateInsnAddr, const uint8_t 
 
     static_assert(sizeof(IRInstr) == 0x50, "stub filter assumes IRInstr stride 0x50");
     static_assert(offsetof(IRInstr, opcode) == 0x4, "stub filter assumes IRInstr.opcode at +4");
-
-    // STASH lives right after the IPC body in the final blob — same address
-    // we just computed above for the NONE path.
-    const uint64_t stashAddr = stashAddrFinal;
 
     std::vector<uint8_t> filter;
     filter.reserve(kFilterBytes);
@@ -823,7 +804,7 @@ StubBlobs build(uint64_t handlerAddr, uint64_t translateInsnAddr, const uint8_t 
     //  8: b.ls do_ipc                 ; +5 instr → land at do_ipc (instr 13)
     emit(filter, b_cond(COND_LS, 5));
     //  9..12: abs-jump to STASH (movz/movk/movk x16, $stashAddr; br x16)
-    emit_abs_jump_3movs(filter, stashAddr);
+    emit_abs_jump_3movs(filter, stashAddrFinal);
     // 13: do_ipc — IPC body starts here when filter falls through.
 
     if (filter.size() != kFilterBytes) {
