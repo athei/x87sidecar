@@ -90,9 +90,11 @@ bool readFile(const std::string& path, std::vector<Block>& out, std::vector<uint
 
     if (off + sizeof(profile::CounterSectionHeader) > buf.size()) {
         std::fprintf(stderr,
-                     "error: %s is incomplete — no counter section found.  Profile runs must "
-                     "exit cleanly (don't kill -9 the rosettax87 process); rerun and exit "
-                     "the parent normally.\n",
+                     "error: %s is incomplete — no counter section found.  The rosettax87 "
+                     "(sidecar) process must finish writing the file at parent-exit time; if "
+                     "rosettax87 itself was killed (e.g. SIGKILL'd via Activity Monitor) the "
+                     "dump never happened.  Parent crashes / SIGKILL are fine — kqueue "
+                     "NOTE_EXIT still fires.  Rerun.\n",
                      path.c_str());
         return false;
     }
