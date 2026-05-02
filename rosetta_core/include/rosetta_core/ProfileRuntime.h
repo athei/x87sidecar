@@ -45,4 +45,19 @@ uint32_t register_block(const IRBlock* block);
 // Used by the exit-readback path to size the counter mach_vm_read.
 uint32_t block_count();
 
+// Per-block translation-path tally.  Set during translate_instruction (one
+// idempotent atomic store per partial accumulation; the value at dump time
+// is the final count of x87 ops consumed by each path).  Read once by the
+// sidecar at dumpBlockIfNew time and emitted into the BlockHeader.
+struct BlockTally {
+    uint16_t ir_ops;
+    uint16_t peephole_ops;
+    uint16_t single_ops;
+    uint16_t fallthrough_ops;
+};
+static_assert(sizeof(BlockTally) == 8);
+
+void set_block_tally(uint32_t bid, BlockTally tally);
+BlockTally get_block_tally(uint32_t bid);
+
 }  // namespace profile

@@ -73,4 +73,29 @@ struct CounterSectionHeader {
 };
 static_assert(sizeof(CounterSectionHeader) == 8);
 
+// Tally section magic ('TLY0').  Optional section written immediately
+// after the counter section at exit time.  Per block_id (0..count-1),
+// records which translation-dispatch path consumed each x87 op.  The
+// dump happens at exit because the path is only known after all of the
+// block's translate_instruction calls have completed; dumpBlockIfNew is
+// called *before* translate_instruction (see sidecar.cpp:364), so inline
+// per-block tally would race with the bumps.  Older .prof files lack
+// this section — the analyzer treats absence as "all-zero tallies" and
+// still reads the counter section + block records normally.
+constexpr uint32_t kTallySectionMagic = 0x30594C54U;  // 'TLY0'
+
+struct TallySectionHeader {
+    uint32_t magic;  // = kTallySectionMagic
+    uint32_t count;  // number of BlockTallyEntry rows that follow
+};
+static_assert(sizeof(TallySectionHeader) == 8);
+
+struct BlockTallyEntry {
+    uint16_t ir_ops;           // X87IR::compile_run consumed N ops
+    uint16_t peephole_ops;     // try_peephole consumed N ops
+    uint16_t single_ops;       // single-op translate_*
+    uint16_t fallthrough_ops;  // returned nullopt → forwarded to stock
+};
+static_assert(sizeof(BlockTallyEntry) == 8);
+
 }  // namespace profile

@@ -33,6 +33,18 @@ struct X87Cache {
 
     IRBlock* prev_block = nullptr;
 
+    // X87_PROFILE — per-block translation-path tally.  Reset on block
+    // transition.  Each increment is mirrored to profile::set_block_tally
+    // so the dumped value at exit reflects the final count, even though
+    // the block's translate_instruction calls happen one at a time.
+    // profile_bid is kOverflowId when profiling is disabled or the block
+    // exceeded kMaxBlocks; in either case the bump-and-mirror is skipped.
+    uint16_t tally_ir = 0;
+    uint16_t tally_peep = 0;
+    uint16_t tally_single = 0;
+    uint16_t tally_ft = 0;
+    uint32_t profile_bid = 0xFFFFFFFFU;  // = profile::kOverflowId
+
     bool active() const;
     void invalidate();
     void invalidate(uint32_t& free_gpr_mask, uint32_t scratch_mask);

@@ -50,10 +50,16 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
         if (block != cache.prev_block) {
             cache.invalidate(translation_result->free_gpr_mask, kGprScratchMask);
             cache.prev_block = block;
+            cache.tally_ir = 0;
+            cache.tally_peep = 0;
+            cache.tally_single = 0;
+            cache.tally_ft = 0;
+            cache.profile_bid = profile::kOverflowId;
             if (profile::counter_array_addr() != 0) {
                 const uint32_t bid = profile::register_block(block);
                 if (bid != profile::kOverflowId) {
                     emit_block_counter_bump(*translation_result, bid);
+                    cache.profile_bid = bid;
                 }
             }
         }
@@ -66,6 +72,20 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
         }
     }
 
+    // X87_PROFILE — mirror the in-cache tally to ProfileRuntime so the sidecar
+    // dump (kqueue NOTE_EXIT) reads the final count.  No-op when profiling is
+    // disabled or this block hit kMaxBlocks.
+    const auto mirror_tally = [&] {
+        if (cache.profile_bid != profile::kOverflowId) {
+            profile::set_block_tally(cache.profile_bid, profile::BlockTally{
+                                                            .ir_ops = cache.tally_ir,
+                                                            .peephole_ops = cache.tally_peep,
+                                                            .single_ops = cache.tally_single,
+                                                            .fallthrough_ops = cache.tally_ft,
+                                                        });
+        }
+    };
+
     // ── IR pipeline: try whole-run optimization for runs of 3+ ─────────────
     // The IR fires once at the start of a fresh run (no deferred cache state).
     // It builds an SSA-like IR, runs optimization passes (DSE, FMA, FCOM+FSTSW
@@ -77,6 +97,8 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
             const int ir_consumed = X87IR::compile_run(translation_result, instr_array, num_instrs,
                                                        insn_idx, cache.run_remaining);
             if (ir_consumed > 0) {
+                cache.tally_ir = static_cast<uint16_t>(cache.tally_ir + ir_consumed);
+                mirror_tally();
                 for (int i = 0; i < ir_consumed; i++) {
                     cache.tick();
                 }
@@ -394,6 +416,8 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
             case Opcode::kOpcodeName_fstenv:
             case Opcode::kOpcodeName_fxsave:
             case Opcode::kOpcodeName_fxrstor:
+                cache.tally_ft = static_cast<uint16_t>(cache.tally_ft + 1);
+                mirror_tally();
                 return std::nullopt;
 
             default:
@@ -428,6 +452,8 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                             name, static_cast<unsigned>(opcode));
                     fflush(stdout);
                 }
+                cache.tally_ft = static_cast<uint16_t>(cache.tally_ft + 1);
+                mirror_tally();
                 return std::nullopt;
         }
     }
@@ -436,6 +462,12 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
     // Then reset the mask, excluding any GPRs still pinned by the cache.
     // Fused pairs consumed 2 instructions — tick twice.
     const int consumed = fused.value_or(1);
+    if (fused.has_value()) {
+        cache.tally_peep = static_cast<uint16_t>(cache.tally_peep + consumed);
+    } else {
+        cache.tally_single = static_cast<uint16_t>(cache.tally_single + 1);
+    }
+    mirror_tally();
     for (int i = 0; i < consumed; i++) {
         cache.tick();
     }

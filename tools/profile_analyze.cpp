@@ -44,7 +44,16 @@ struct Block {
     std::vector<Instr> instrs;
 };
 
-bool readFile(const std::string& path, std::vector<Block>& out, std::vector<uint64_t>& counters) {
+struct Tally {
+    uint16_t ir = 0;
+    uint16_t peep = 0;
+    uint16_t single = 0;
+    uint16_t ft = 0;
+    [[nodiscard]] uint64_t total() const { return static_cast<uint64_t>(ir) + peep + single + ft; }
+};
+
+bool readFile(const std::string& path, std::vector<Block>& out, std::vector<uint64_t>& counters,
+              std::vector<Tally>& tallies) {
     std::ifstream f(path, std::ios::binary);
     if (!f) {
         std::fprintf(stderr, "error: cannot open %s\n", path.c_str());
@@ -116,6 +125,36 @@ bool readFile(const std::string& path, std::vector<Block>& out, std::vector<uint
     }
     counters.resize(chdr.count);
     std::memcpy(counters.data(), buf.data() + off, cbytes);
+    off += cbytes;
+
+    // Optional tally section.  Older .prof files (before path-tally
+    // instrumentation landed) have nothing past the counter array; treat
+    // that as "all-zero tallies" so the analyzer still works.
+    if (off + sizeof(profile::TallySectionHeader) <= buf.size()) {
+        profile::TallySectionHeader thdr;
+        std::memcpy(&thdr, buf.data() + off, sizeof(thdr));
+        if (thdr.magic == profile::kTallySectionMagic) {
+            off += sizeof(thdr);
+            const size_t tbytes =
+                static_cast<size_t>(thdr.count) * sizeof(profile::BlockTallyEntry);
+            if (off + tbytes > buf.size()) {
+                std::fprintf(stderr, "error: %s tally section truncated (declared %u entries)\n",
+                             path.c_str(), thdr.count);
+                return false;
+            }
+            tallies.resize(thdr.count);
+            for (uint32_t i = 0; i < thdr.count; ++i) {
+                profile::BlockTallyEntry e;
+                std::memcpy(&e, buf.data() + off + (i * sizeof(e)), sizeof(e));
+                tallies[i] = Tally{
+                    .ir = e.ir_ops,
+                    .peep = e.peephole_ops,
+                    .single = e.single_ops,
+                    .ft = e.fallthrough_ops,
+                };
+            }
+        }
+    }
     return true;
 }
 
@@ -483,7 +522,15 @@ int main(int argc, char** argv) try {
                 "\n"
                 "Patterns are ranked by exec_count = sum over blocks of (counter[block_id] *\n"
                 "occurrences of the pattern within that block).  --min-exec drops patterns\n"
-                "that never accumulate that many executions.\n");
+                "that never accumulate that many executions.\n"
+                "\n"
+                "When the input contains a tally section (TLY0), four extra columns are\n"
+                "printed: ir%%/peep%%/single%%/ft%% — the exec-weighted share of the\n"
+                "pattern's executions whose containing block had its x87 ops dispatched via\n"
+                "the X87IR pipeline, the peephole fusion family, the single-op fallthrough,\n"
+                "or the stock-forward fallthrough.  Per-block path mix is propagated into\n"
+                "per-pattern shares as the average over contributing blocks.  Older .prof\n"
+                "files without TLY0 just omit the four columns.\n");
             return 0;
         } else if (!a.empty() && a[0] == '-') {
             std::fprintf(stderr, "unknown flag: %s\n", a.c_str());
@@ -500,9 +547,11 @@ int main(int argc, char** argv) try {
 
     std::vector<Block> blocks;
     std::vector<uint64_t> counters;
+    std::vector<Tally> tallies;
     for (const auto& f : files) {
         std::vector<uint64_t> file_counters;
-        if (!readFile(f, blocks, file_counters)) {
+        std::vector<Tally> file_tallies;
+        if (!readFile(f, blocks, file_counters, file_tallies)) {
             return 1;
         }
         // Multi-file aggregation: union counters by block_id (each file's
@@ -510,20 +559,32 @@ int main(int argc, char** argv) try {
         // common case is one file per run; the simple path is fine.
         if (counters.empty()) {
             counters = std::move(file_counters);
+            tallies = std::move(file_tallies);
         } else {
             counters.insert(counters.end(), file_counters.begin(), file_counters.end());
+            tallies.insert(tallies.end(), file_tallies.begin(), file_tallies.end());
         }
     }
-    std::fprintf(stderr, "loaded %zu blocks, %zu counter entries from %zu file(s)\n", blocks.size(),
-                 counters.size(), files.size());
+    const bool have_tallies = !tallies.empty();
+    std::fprintf(stderr,
+                 "loaded %zu blocks, %zu counter entries, %zu tally entries from %zu file(s)\n",
+                 blocks.size(), counters.size(), tallies.size(), files.size());
 
     // Slide all window lengths over each block.  Aggregate by pattern key,
-    // weighting each occurrence by counter[block_id].
+    // weighting each occurrence by counter[block_id].  Per-block path mix
+    // (ir_ops/peephole_ops/single_ops/fallthrough_ops over all the block's
+    // x87 ops) is propagated into a per-pattern share by accumulating
+    // exec * (path_ops / total_x87_ops) for each path.
     struct Stats {
         uint64_t exec_count = 0;
         size_t window_size = 0;
         const char* fusion = nullptr;  // existing fusion firing on prefix, or null
         int fusion_consumed = 0;       // how many leading instrs the fusion absorbs
+        // Path-weighted exec contributions; ratios at print time.
+        long double ir_w = 0.0L;
+        long double peep_w = 0.0L;
+        long double single_w = 0.0L;
+        long double ft_w = 0.0L;
     };
     std::unordered_map<std::string, Stats> patterns;
     patterns.reserve(blocks.size() * 4);
@@ -532,6 +593,22 @@ int main(int argc, char** argv) try {
         const uint64_t exec = (b.id < counters.size()) ? counters[b.id] : 0;
         if (exec == 0) {
             continue;  // dead-code block contributes nothing — skip work
+        }
+        // Per-block path fractions; default to all-zero when no tally
+        // section was present in the input.
+        long double ir_frac = 0.0L;
+        long double peep_frac = 0.0L;
+        long double single_frac = 0.0L;
+        long double ft_frac = 0.0L;
+        if (b.id < tallies.size()) {
+            const auto& t = tallies[b.id];
+            const uint64_t tot = t.total();
+            if (tot > 0) {
+                ir_frac = static_cast<long double>(t.ir) / tot;
+                peep_frac = static_cast<long double>(t.peep) / tot;
+                single_frac = static_cast<long double>(t.single) / tot;
+                ft_frac = static_cast<long double>(t.ft) / tot;
+            }
         }
         const size_t L = b.instrs.size();
         for (size_t start = 0; start < L; ++start) {
@@ -556,6 +633,11 @@ int main(int argc, char** argv) try {
                     s.fusion_consumed = consumed;
                 }
                 s.exec_count += exec;
+                const auto execL = static_cast<long double>(exec);
+                s.ir_w += execL * ir_frac;
+                s.peep_w += execL * peep_frac;
+                s.single_w += execL * single_frac;
+                s.ft_w += execL * ft_frac;
             }
         }
     }
@@ -581,17 +663,34 @@ int main(int argc, char** argv) try {
         return a.second.exec_count > b.second.exec_count;
     });
 
-    std::printf("exec_count,window_size,fusion,consumed,sequence\n");
+    if (have_tallies) {
+        std::printf("exec_count,window_size,fusion,consumed,ir%%,peep%%,single%%,ft%%,sequence\n");
+    } else {
+        std::printf("exec_count,window_size,fusion,consumed,sequence\n");
+    }
     const size_t n = std::min(max_rows, rows.size());
     for (size_t i = 0; i < n; ++i) {
         const auto& [key, s] = rows[i];
-        std::printf("%llu,%zu,%s,%d,%s\n", static_cast<unsigned long long>(s.exec_count),
-                    s.window_size, s.fusion ? s.fusion : "-", s.fusion_consumed, key.c_str());
+        if (have_tallies) {
+            const auto exec = static_cast<long double>(s.exec_count);
+            const auto pct = [&](long double w) -> double {
+                return exec > 0 ? static_cast<double>(100.0L * w / exec) : 0.0;
+            };
+            std::printf("%llu,%zu,%s,%d,%.1f,%.1f,%.1f,%.1f,%s\n",
+                        static_cast<unsigned long long>(s.exec_count), s.window_size,
+                        s.fusion ? s.fusion : "-", s.fusion_consumed, pct(s.ir_w), pct(s.peep_w),
+                        pct(s.single_w), pct(s.ft_w), key.c_str());
+        } else {
+            std::printf("%llu,%zu,%s,%d,%s\n", static_cast<unsigned long long>(s.exec_count),
+                        s.window_size, s.fusion ? s.fusion : "-", s.fusion_consumed, key.c_str());
+        }
     }
-    std::fprintf(stderr,
-                 "%zu unique patterns >= min_exec=%llu (showing %zu; %s fully-covered patterns)\n",
-                 rows.size(), static_cast<unsigned long long>(min_exec), n,
-                 show_covered ? "including" : "hiding");
+    std::fprintf(
+        stderr, "%zu unique patterns >= min_exec=%llu (showing %zu; %s fully-covered patterns%s)\n",
+        rows.size(), static_cast<unsigned long long>(min_exec), n,
+        show_covered ? "including" : "hiding",
+        have_tallies ? "; columns ir%/peep%/single%/ft% give exec-weighted path mix"
+                     : "; no tally section in input — path columns omitted");
     return 0;
 } catch (const std::exception& e) {
     std::fprintf(stderr, "profile_analyze: %s\n", e.what());

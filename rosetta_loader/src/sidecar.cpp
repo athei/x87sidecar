@@ -811,6 +811,29 @@ void dumpCountersIfEnabled(mach_port_t /*parentTaskPort*/) {
     };
     std::fwrite(&chdr, sizeof(chdr), 1, g_profile.file);
     std::fwrite(counts, sizeof(uint64_t), count, g_profile.file);
+
+    // Translation-path tally section: per block_id 0..count-1, snapshot the
+    // accumulated (ir, peephole, single, fallthrough) op counts.  Written
+    // here at exit time because translate_instruction's bumps can keep
+    // landing right up until parent exit; dumping inline with BlockHeader
+    // would race the bumps (dumpBlockIfNew runs *before* the first
+    // translate_instruction call — see sidecar.cpp:~360).
+    profile::TallySectionHeader thdr{
+        .magic = profile::kTallySectionMagic,
+        .count = count,
+    };
+    std::fwrite(&thdr, sizeof(thdr), 1, g_profile.file);
+    for (uint32_t bid = 0; bid < count; ++bid) {
+        const profile::BlockTally t = profile::get_block_tally(bid);
+        profile::BlockTallyEntry entry{
+            .ir_ops = t.ir_ops,
+            .peephole_ops = t.peephole_ops,
+            .single_ops = t.single_ops,
+            .fallthrough_ops = t.fallthrough_ops,
+        };
+        std::fwrite(&entry, sizeof(entry), 1, g_profile.file);
+    }
+
     std::fflush(g_profile.file);
     std::fclose(g_profile.file);
     g_profile.file = nullptr;
