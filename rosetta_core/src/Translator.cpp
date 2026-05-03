@@ -39,12 +39,6 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
     const auto opcode = cur_instr->opcode;
     auto& cache = translation_result->x87_cache;
 
-    // If extended FPR scratch is enabled, upgrade the mask from 8-reg to 16-reg form on first use.
-    if (g_rosetta_config && g_rosetta_config->extended_fpr_scratch &&
-        translation_result->free_fpr_mask == kFprScratchMask) {
-        translation_result->free_fpr_mask = kFprScratchMaskExt;
-    }
-
     // ── OPT-1: x87 cross-instruction cache management ───────────────────────
     // Invalidate the cache if we've moved to a different block (between blocks,
     // branches may have executed non-x87 code that clobbers scratch GPRs).

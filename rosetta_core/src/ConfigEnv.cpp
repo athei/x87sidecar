@@ -75,7 +75,6 @@ RosettaConfig load_config_from_env() {
     cfg.fast_round = env_truthy("X87_FAST_ROUND") ? 1 : 0;
     cfg.disable_deferred_fxch = env_truthy("X87_DISABLE_DEFERRED_FXCH") ? 1 : 0;
     cfg.disable_x87_ir = env_truthy("X87_DISABLE_X87_IR") ? 1 : 0;
-    cfg.extended_fpr_scratch = env_truthy("X87_EXTENDED_FPR_SCRATCH") ? 1 : 0;
 
     if (env_truthy("X87_DISABLE_ALL_FUSIONS")) {
         cfg.disabled_fusions_mask = ~0ULL;

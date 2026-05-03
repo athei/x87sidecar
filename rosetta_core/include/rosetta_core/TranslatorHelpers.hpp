@@ -57,15 +57,17 @@ auto free_gpr(TranslationResult& translation, int reg) -> void;
 // =============================================================================
 // FPR allocation
 //
-// Allocates the next available scratch FPR from the pool at pool_index.
-// Marks the register as occupied in translation.free_fpr_mask.
+// alloc_free_fpr picks the lowest-numbered free FPR from
+// translation.free_fpr_mask.  Stock seeds the mask each translate from
+// _unoccupied_temporary_fprs_for_xmm_scalars, so the available pool
+// expands and contracts dynamically with whatever V16-V31 slots are
+// not currently holding XMM scalars.
 //
-// pool_index: position in kFprScratchPool (0-based).
+// (There is no specific-pool-index FPR allocator; everything goes
+// through alloc_free_fpr.)
 //
 // Returns: AArch64 FPR number (0..31), used as D register index
 // =============================================================================
-
-auto alloc_fpr(TranslationResult& translation, int pool_index) -> int;
 
 auto alloc_free_fpr(TranslationResult& translation) -> int;
 

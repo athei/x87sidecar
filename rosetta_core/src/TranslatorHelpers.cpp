@@ -4,8 +4,6 @@
 #include <cstdint>
 
 #include "rosetta_core/AssemblerHelpers.hpp"
-#include "rosetta_core/Config.h"
-#include "rosetta_core/CoreConfig.h"
 #include "rosetta_core/Fixup.h"
 #include "rosetta_core/IROperand.h"
 #include "rosetta_core/Register.h"
@@ -42,16 +40,6 @@ void free_gpr(TranslationResult& translation, int reg) {
     }
 }
 
-int alloc_fpr(TranslationResult& translation, int pool_index) {
-    const bool extended = g_rosetta_config && g_rosetta_config->extended_fpr_scratch;
-    const uint8_t* pool = extended ? kFprScratchPoolExtended : kFprScratchPool;
-    const int reg = pool[pool_index];
-    const uint32_t mask = 1U << reg;
-    assert((translation.free_fpr_mask & mask) != 0 && "alloc_fpr: pool slot already occupied");
-    translation.free_fpr_mask &= ~mask;
-    return reg;
-}
-
 auto alloc_free_fpr(TranslationResult& translation) -> int {
     uint32_t mask = translation.free_fpr_mask;
     assert(mask != 0 && "no temporary FPR available to allocate");
@@ -61,9 +49,12 @@ auto alloc_free_fpr(TranslationResult& translation) -> int {
 }
 
 void free_fpr(TranslationResult& translation, int reg) {
-    const bool extended = g_rosetta_config && g_rosetta_config->extended_fpr_scratch;
-    const uint32_t active_mask = extended ? kFprScratchMaskExt : kFprScratchMask;
-    if ((1U << reg) & active_mask) {
+    // Re-flag any V16-V31 register as free.  Stock seeds free_fpr_mask
+    // each translate from _unoccupied_temporary_fprs_for_xmm_scalars
+    // (Translator.cpp:707), which can include any of V16-V31; using
+    // kFprScratchMaskExt here matches the maximum scope so an FPR we
+    // allocated from stock's hint can be returned to the pool.
+    if ((1U << reg) & kFprScratchMaskExt) {
         translation.free_fpr_mask |= 1U << reg;
     }
 }
