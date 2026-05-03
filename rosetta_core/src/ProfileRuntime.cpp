@@ -41,6 +41,11 @@ std::unique_ptr<std::atomic<uint16_t>[]> g_block_ir_gate_counts[kIRGateReasonCou
 // set_block_top_dirty_predecessor call.
 std::unique_ptr<std::atomic<uint16_t>[]> g_block_top_dirty_pred;
 
+// Per-block max-run-at-refuse side-table: 5 parallel atomic<u16>[] arrays
+// indexed by kIRGateReason*.  Lazy-allocated on first
+// set_block_max_run_at_refuse call.
+std::unique_ptr<std::atomic<uint16_t>[]> g_block_max_run_at_refuse[kIRGateReasonCount];
+
 void pack_tally(BlockTally t, uint64_t& lo, uint64_t& hi) {
     static_assert(sizeof(BlockTally) == 16);
     std::memcpy(&lo, reinterpret_cast<const std::byte*>(&t) + 0, 8);
@@ -211,6 +216,45 @@ uint16_t get_block_top_dirty_predecessor(uint32_t bid) {
         arr = g_block_top_dirty_pred.get();
     }
     return arr[bid].load(std::memory_order_relaxed);
+}
+
+void set_block_max_run_at_refuse(uint32_t bid, BlockMaxRunAtRefuse counters) {
+    if (bid >= kMaxBlocks) {
+        return;
+    }
+    {
+        std::scoped_lock lock(g_mu);
+        if (!g_block_max_run_at_refuse[0]) {
+            for (uint32_t r = 0; r < kIRGateReasonCount; ++r) {
+                g_block_max_run_at_refuse[r] =
+                    std::make_unique<std::atomic<uint16_t>[]>(kMaxBlocks);
+            }
+        }
+    }
+    for (uint32_t r = 0; r < kIRGateReasonCount; ++r) {
+        g_block_max_run_at_refuse[r][bid].store(counters.max_run[r], std::memory_order_relaxed);
+    }
+}
+
+BlockMaxRunAtRefuse get_block_max_run_at_refuse(uint32_t bid) {
+    BlockMaxRunAtRefuse out{};
+    if (bid >= kMaxBlocks) {
+        return out;
+    }
+    std::atomic<uint16_t>* arrs[kIRGateReasonCount];
+    {
+        std::scoped_lock lock(g_mu);
+        if (!g_block_max_run_at_refuse[0]) {
+            return out;
+        }
+        for (uint32_t r = 0; r < kIRGateReasonCount; ++r) {
+            arrs[r] = g_block_max_run_at_refuse[r].get();
+        }
+    }
+    for (uint32_t r = 0; r < kIRGateReasonCount; ++r) {
+        out.max_run[r] = arrs[r][bid].load(std::memory_order_relaxed);
+    }
+    return out;
 }
 
 BlockIRGateCounters get_block_ir_gate_counters(uint32_t bid) {

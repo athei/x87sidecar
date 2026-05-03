@@ -842,6 +842,17 @@ void dumpCountersIfEnabled(mach_port_t /*parentTaskPort*/) {
         std::fwrite(&op, sizeof(op), 1, g_profile.file);
     }
 
+    // Per-reason max cache.run_remaining at refusal (RRR0).
+    profile::MaxRunAtRefuseSectionHeader mrhdr{
+        .magic = profile::kMaxRunAtRefuseSectionMagic,
+        .count = count,
+    };
+    std::fwrite(&mrhdr, sizeof(mrhdr), 1, g_profile.file);
+    for (uint32_t bid = 0; bid < count; ++bid) {
+        const profile::BlockMaxRunAtRefuse mr = profile::get_block_max_run_at_refuse(bid);
+        std::fwrite(&mr, sizeof(mr), 1, g_profile.file);
+    }
+
     std::fflush(g_profile.file);
     std::fclose(g_profile.file);
     g_profile.file = nullptr;

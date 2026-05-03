@@ -163,4 +163,26 @@ static_assert(sizeof(TopDirtyPredSectionHeader) == 8);
 
 constexpr uint16_t kNoTopDirtyPredecessor = 0xFFFFU;
 
+// Per-reason max-run-at-refusal side-table magic ('RRR0' for "Run-Remaining
+// at Refusal").  Optional section written after TDP0 at exit time.  Per
+// block_id (0..count-1), records the MAX cache.run_remaining observed at
+// any gate refusal of each reason.  Distinguishes real long-run refusals
+// (e.g. max_run=14: a chain genuinely couldn't pass the gate) from
+// trailing-tail refusals (max_run=2: the gate fired only on the dispatcher
+// peeling ops one at a time after an earlier IR failure).  Same shape as
+// IRG1.  Older .prof files lacking this section parse with the rest of
+// the file intact; analyzer treats absence as "no data".
+constexpr uint32_t kMaxRunAtRefuseSectionMagic = 0x30525252U;  // 'RRR0'
+
+struct MaxRunAtRefuseSectionHeader {
+    uint32_t magic;  // = kMaxRunAtRefuseSectionMagic
+    uint32_t count;  // number of BlockMaxRunAtRefuse rows that follow
+};
+static_assert(sizeof(MaxRunAtRefuseSectionHeader) == 8);
+
+struct BlockMaxRunAtRefuse {
+    uint16_t max_run[kIRGateReasonCount];  // indexed by kIRGateReason*
+};
+static_assert(sizeof(BlockMaxRunAtRefuse) == 10);
+
 }  // namespace profile

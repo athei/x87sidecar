@@ -94,4 +94,11 @@ BlockIRGateCounters get_block_ir_gate_counters(uint32_t bid);
 void set_block_top_dirty_predecessor(uint32_t bid, uint16_t opcode);
 uint16_t get_block_top_dirty_predecessor(uint32_t bid);
 
+// Per-block max cache.run_remaining at any gate refusal, indexed by
+// kIRGateReason*.  Same lazy-allocation shape as the gate counters.
+// Idempotent set; the translator accumulates non-atomically and mirrors
+// the running max here.
+void set_block_max_run_at_refuse(uint32_t bid, BlockMaxRunAtRefuse counters);
+BlockMaxRunAtRefuse get_block_max_run_at_refuse(uint32_t bid);
+
 }  // namespace profile

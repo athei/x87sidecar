@@ -64,6 +64,13 @@ struct X87Cache {
     uint16_t tally_ir_gate_tag_push = 0;
     uint16_t tally_ir_gate_deferred_pop = 0;
     uint16_t tally_ir_gate_perm_dirty = 0;
+    // Per-reason MAX of cache.run_remaining observed at any gate refusal in
+    // this block.  Distinguishes "real long-run refusal" (max_run large,
+    // e.g. 14) from "trailing-tail refusal" (max_run small, e.g. 2 — the
+    // dispatcher peeling one op at a time after an earlier IR failure).
+    // Indexed by kIRGateReason*; surfaces as the max_run column of the
+    // IR-gate-refusal histogram.
+    uint16_t max_run_at_gate[5] = {0, 0, 0, 0, 0};
     // Last x87 opcode (kOpcodeName_*) translated in this block, or 0xFFFF
     // if none yet.  Used by the IR-gate top_dirty diagnostic to attribute
     // which preceding op left top_dirty=1 — surfaces in the analyzer's

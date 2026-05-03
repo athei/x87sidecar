@@ -66,7 +66,8 @@ struct Tally {
 bool readFile(const std::string& path, std::vector<Block>& out, std::vector<uint64_t>& counters,
               std::vector<Tally>& tallies, std::vector<uint16_t>& build_fail_ops,
               std::vector<profile::BlockIRGateCounters>& ir_gate_counters,
-              std::vector<uint16_t>& top_dirty_preds) {
+              std::vector<uint16_t>& top_dirty_preds,
+              std::vector<profile::BlockMaxRunAtRefuse>& max_run_at_refuse) {
     std::ifstream f(path, std::ios::binary);
     if (!f) {
         std::fprintf(stderr, "error: cannot open %s\n", path.c_str());
@@ -226,6 +227,27 @@ bool readFile(const std::string& path, std::vector<Block>& out, std::vector<uint
             top_dirty_preds.resize(thdr.count);
             std::memcpy(top_dirty_preds.data(), buf.data() + off, tbytes);
             off += tbytes;
+        }
+    }
+
+    // Optional max-run-at-refusal side-table (RRR0).  Older .prof files
+    // lack it; treat absence as "no data".
+    if (off + sizeof(profile::MaxRunAtRefuseSectionHeader) <= buf.size()) {
+        profile::MaxRunAtRefuseSectionHeader mhdr;
+        std::memcpy(&mhdr, buf.data() + off, sizeof(mhdr));
+        if (mhdr.magic == profile::kMaxRunAtRefuseSectionMagic) {
+            off += sizeof(mhdr);
+            const size_t mbytes =
+                static_cast<size_t>(mhdr.count) * sizeof(profile::BlockMaxRunAtRefuse);
+            if (off + mbytes > buf.size()) {
+                std::fprintf(
+                    stderr, "error: %s max-run-at-refuse section truncated (declared %u entries)\n",
+                    path.c_str(), mhdr.count);
+                return false;
+            }
+            max_run_at_refuse.resize(mhdr.count);
+            std::memcpy(max_run_at_refuse.data(), buf.data() + off, mbytes);
+            off += mbytes;
         }
     }
     return true;
@@ -480,13 +502,16 @@ int main(int argc, char** argv) try {
     std::vector<uint16_t> build_fail_ops;
     std::vector<profile::BlockIRGateCounters> ir_gate_counters;
     std::vector<uint16_t> top_dirty_preds;
+    std::vector<profile::BlockMaxRunAtRefuse> max_run_at_refuse;
     for (const auto& f : files) {
         std::vector<uint64_t> file_counters;
         std::vector<Tally> file_tallies;
         std::vector<uint16_t> file_bfo;
         std::vector<profile::BlockIRGateCounters> file_irg;
         std::vector<uint16_t> file_tdp;
-        if (!readFile(f, blocks, file_counters, file_tallies, file_bfo, file_irg, file_tdp)) {
+        std::vector<profile::BlockMaxRunAtRefuse> file_mrr;
+        if (!readFile(f, blocks, file_counters, file_tallies, file_bfo, file_irg, file_tdp,
+                      file_mrr)) {
             return 1;
         }
         if (counters.empty()) {
@@ -495,23 +520,27 @@ int main(int argc, char** argv) try {
             build_fail_ops = std::move(file_bfo);
             ir_gate_counters = std::move(file_irg);
             top_dirty_preds = std::move(file_tdp);
+            max_run_at_refuse = std::move(file_mrr);
         } else {
             counters.insert(counters.end(), file_counters.begin(), file_counters.end());
             tallies.insert(tallies.end(), file_tallies.begin(), file_tallies.end());
             build_fail_ops.insert(build_fail_ops.end(), file_bfo.begin(), file_bfo.end());
             ir_gate_counters.insert(ir_gate_counters.end(), file_irg.begin(), file_irg.end());
             top_dirty_preds.insert(top_dirty_preds.end(), file_tdp.begin(), file_tdp.end());
+            max_run_at_refuse.insert(max_run_at_refuse.end(), file_mrr.begin(), file_mrr.end());
         }
     }
     const bool have_tallies = !tallies.empty();
     const bool have_bfo = !build_fail_ops.empty();
     const bool have_irg = !ir_gate_counters.empty();
     const bool have_tdp = !top_dirty_preds.empty();
+    const bool have_mrr = !max_run_at_refuse.empty();
     std::fprintf(stderr,
                  "loaded %zu blocks, %zu counter entries, %zu tally entries, %zu bfo entries, "
-                 "%zu irg entries, %zu tdp entries from %zu file(s)\n",
+                 "%zu irg entries, %zu tdp entries, %zu mrr entries from %zu file(s)\n",
                  blocks.size(), counters.size(), tallies.size(), build_fail_ops.size(),
-                 ir_gate_counters.size(), top_dirty_preds.size(), files.size());
+                 ir_gate_counters.size(), top_dirty_preds.size(), max_run_at_refuse.size(),
+                 files.size());
 
     // Slice patterns within natural x87 runs.  X87Cache::lookahead is the
     // JIT's own run-detection function (Translator.cpp:74 calls the same).
@@ -781,8 +810,9 @@ int main(int argc, char** argv) try {
     // bucket and contributes to the histogram independently.
     if (have_irg) {
         struct Bucket {
-            uint64_t exec_w = 0;  // exec_count × per-block refusal count
-            uint32_t blocks = 0;  // distinct blocks recording this reason
+            uint64_t exec_w = 0;   // exec_count × per-block refusal count
+            uint32_t blocks = 0;   // distinct blocks recording this reason
+            uint16_t max_run = 0;  // max cache.run_remaining at refusal
         };
         Bucket per_reason[profile::kIRGateReasonCount]{};
         uint64_t total_exec_w = 0;
@@ -802,31 +832,41 @@ int main(int argc, char** argv) try {
                 per_reason[r].exec_w += exec * static_cast<uint64_t>(gc.counts[r]);
                 per_reason[r].blocks += 1;
                 total_exec_w += exec * static_cast<uint64_t>(gc.counts[r]);
+                if (have_mrr && b.id < max_run_at_refuse.size()) {
+                    const uint16_t mr = max_run_at_refuse[b.id].max_run[r];
+                    if (mr > per_reason[r].max_run) {
+                        per_reason[r].max_run = mr;
+                    }
+                }
             }
         }
         struct Row {
             uint16_t reason;
             uint64_t exec_w;
             uint32_t blocks;
+            uint16_t max_run;
         };
         std::vector<Row> rows_h;
         for (uint16_t r = 0; r < profile::kIRGateReasonCount; ++r) {
             if (per_reason[r].blocks > 0) {
-                rows_h.push_back(
-                    {.reason = r, .exec_w = per_reason[r].exec_w, .blocks = per_reason[r].blocks});
+                rows_h.push_back({.reason = r,
+                                  .exec_w = per_reason[r].exec_w,
+                                  .blocks = per_reason[r].blocks,
+                                  .max_run = per_reason[r].max_run});
             }
         }
         std::ranges::sort(rows_h, [](const Row& a, const Row& b) { return a.exec_w > b.exec_w; });
         std::printf("\n");
         std::printf("# Top reasons IR-gate refused (exec-weighted)\n");
-        std::printf("rank,reason,exec_count,share%%,blocks\n");
+        std::printf("rank,reason,exec_count,share%%,blocks,max_run\n");
         for (size_t i = 0; i < rows_h.size(); ++i) {
             const auto& row = rows_h[i];
             const double share = total_exec_w > 0 ? 100.0 * static_cast<double>(row.exec_w) /
                                                         static_cast<double>(total_exec_w)
                                                   : 0.0;
-            std::printf("%zu,%s,%llu,%.1f,%u\n", i + 1, profile::kIRGateReasonNames[row.reason],
-                        static_cast<unsigned long long>(row.exec_w), share, row.blocks);
+            std::printf("%zu,%s,%llu,%.1f,%u,%u\n", i + 1, profile::kIRGateReasonNames[row.reason],
+                        static_cast<unsigned long long>(row.exec_w), share, row.blocks,
+                        static_cast<unsigned>(row.max_run));
         }
         std::fprintf(
             stderr,

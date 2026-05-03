@@ -64,6 +64,9 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
             cache.tally_ir_gate_tag_push = 0;
             cache.tally_ir_gate_deferred_pop = 0;
             cache.tally_ir_gate_perm_dirty = 0;
+            for (auto& v : cache.max_run_at_gate) {
+                v = 0;
+            }
             cache.prev_x87_opcode = 0xFFFFU;
             cache.profile_bid = profile::kOverflowId;
             if (profile::counter_array_addr() != 0) {
@@ -104,7 +107,8 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
 
     // Mirror the per-reason gate-refusal counters (separate side-table from
     // BlockTally; see ProfileFormat.h IRG1 section).  Called whenever any of
-    // the 5 gate counters increments.
+    // the 5 gate counters increments.  Also mirrors the max-run-at-refusal
+    // side-table (RRR0) — same trigger.
     const auto mirror_gate_counters = [&] {
         if (cache.profile_bid != profile::kOverflowId) {
             profile::BlockIRGateCounters c{};
@@ -114,6 +118,22 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
             c.counts[profile::kIRGateReasonDeferredPop] = cache.tally_ir_gate_deferred_pop;
             c.counts[profile::kIRGateReasonPermDirty] = cache.tally_ir_gate_perm_dirty;
             profile::set_block_ir_gate_counters(cache.profile_bid, c);
+
+            profile::BlockMaxRunAtRefuse mr{};
+            for (uint32_t r = 0; r < profile::kIRGateReasonCount; ++r) {
+                mr.max_run[r] = cache.max_run_at_gate[r];
+            }
+            profile::set_block_max_run_at_refuse(cache.profile_bid, mr);
+        }
+    };
+
+    // Update max_run_at_gate[reason] = max(prev, current run_remaining).
+    // Called inline at each gate refusal branch — captures the run length
+    // at the moment of refusal (before any tick() decrement).
+    const auto bump_max_run = [&](uint16_t reason) {
+        const auto run = static_cast<uint16_t>(cache.run_remaining);
+        if (run > cache.max_run_at_gate[reason]) {
+            cache.max_run_at_gate[reason] = run;
         }
     };
 
@@ -143,10 +163,12 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                 if (cache.run_remaining < 3) {
                     cache.tally_ir_gate_short_run =
                         static_cast<uint16_t>(cache.tally_ir_gate_short_run + 1);
+                    bump_max_run(profile::kIRGateReasonShortRun);
                     gate_refused = true;
                 } else if (cache.top_dirty != 0) {
                     cache.tally_ir_gate_top_dirty =
                         static_cast<uint16_t>(cache.tally_ir_gate_top_dirty + 1);
+                    bump_max_run(profile::kIRGateReasonTopDirty);
                     if (cache.profile_bid != profile::kOverflowId &&
                         cache.prev_x87_opcode != 0xFFFFU) {
                         profile::set_block_top_dirty_predecessor(cache.profile_bid,
@@ -156,14 +178,17 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                 } else if (cache.tag_push_pending != 0) {
                     cache.tally_ir_gate_tag_push =
                         static_cast<uint16_t>(cache.tally_ir_gate_tag_push + 1);
+                    bump_max_run(profile::kIRGateReasonTagPush);
                     gate_refused = true;
                 } else if (cache.deferred_pop_count != 0) {
                     cache.tally_ir_gate_deferred_pop =
                         static_cast<uint16_t>(cache.tally_ir_gate_deferred_pop + 1);
+                    bump_max_run(profile::kIRGateReasonDeferredPop);
                     gate_refused = true;
                 } else if (cache.perm_dirty) {
                     cache.tally_ir_gate_perm_dirty =
                         static_cast<uint16_t>(cache.tally_ir_gate_perm_dirty + 1);
+                    bump_max_run(profile::kIRGateReasonPermDirty);
                     gate_refused = true;
                 }
             }
