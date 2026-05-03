@@ -69,7 +69,9 @@ void dumpBlockIfNew(uint64_t block_ptr, const IRInstr* ir, uint64_t num_instrs) 
     if (g_profile.file == nullptr) {
         return;
     }
-    const uint32_t bid = profile::register_block(reinterpret_cast<const IRBlock*>(block_ptr));
+    const uint64_t ir_hash = profile::hash_ir_stream(ir, static_cast<size_t>(num_instrs));
+    const uint32_t bid =
+        profile::register_block(reinterpret_cast<const IRBlock*>(block_ptr), ir_hash);
     if (bid == profile::kOverflowId) {
         return;
     }

@@ -4,10 +4,12 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
 
+#include "rosetta_core/IRInstr.h"
 #include "rosetta_core/ProfileFormat.h"
 
 namespace profile {
@@ -15,7 +17,19 @@ namespace profile {
 namespace {
 
 std::mutex g_mu;
-std::unordered_map<const IRBlock*, uint32_t> g_block_ids;
+struct BlockKey {
+    const IRBlock* ptr;
+    uint64_t hash;
+    bool operator==(const BlockKey& o) const noexcept { return ptr == o.ptr && hash == o.hash; }
+};
+struct BlockKeyHash {
+    size_t operator()(const BlockKey& k) const noexcept {
+        const auto p = std::hash<const void*>{}(k.ptr);
+        // 64-bit boost-style hash_combine.
+        return p ^ (k.hash + 0x9E3779B97F4A7C15ULL + (p << 6) + (p >> 2));
+    }
+};
+std::unordered_map<BlockKey, uint32_t, BlockKeyHash> g_block_ids;
 uint32_t g_next_id = 0;
 uint64_t g_counter_parent_addr = 0;
 uint64_t g_counter_local_addr = 0;
@@ -79,9 +93,10 @@ uint64_t counter_array_local_addr() {
     return g_counter_local_addr;
 }
 
-uint32_t register_block(const IRBlock* block) {
+uint32_t register_block(const IRBlock* block, uint64_t ir_hash) {
     std::scoped_lock lock(g_mu);
-    auto [it, inserted] = g_block_ids.try_emplace(block, g_next_id);
+    const BlockKey key{.ptr = block, .hash = ir_hash};
+    auto [it, inserted] = g_block_ids.try_emplace(key, g_next_id);
     if (!inserted) {
         return it->second;
     }
@@ -93,6 +108,25 @@ uint32_t register_block(const IRBlock* block) {
     }
     ++g_next_id;
     return it->second;
+}
+
+uint64_t hash_ir_stream(const IRInstr* instrs, size_t num_instrs) {
+    // 64-bit FNV-1a, with each IRInstr's `pc` field zeroed before hashing
+    // so the same logical IR produces the same hash across runs (codegen
+    // may place the block at different PCs each run).
+    constexpr uint64_t kFnvOffset = 14695981039346656037ULL;
+    constexpr uint64_t kFnvPrime = 1099511628211ULL;
+    uint64_t h = kFnvOffset;
+    for (size_t i = 0; i < num_instrs; ++i) {
+        IRInstr tmp = instrs[i];
+        tmp.pc = 0;
+        const auto* bytes = reinterpret_cast<const uint8_t*>(&tmp);
+        for (size_t b = 0; b < sizeof(IRInstr); ++b) {
+            h ^= bytes[b];
+            h *= kFnvPrime;
+        }
+    }
+    return h;
 }
 
 uint32_t block_count() {

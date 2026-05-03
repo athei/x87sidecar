@@ -73,7 +73,9 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
             cache.prev_x87_opcode = 0xFFFFU;
             cache.profile_bid = profile::kOverflowId;
             if (profile::counter_array_addr() != 0) {
-                const uint32_t bid = profile::register_block(block);
+                const uint64_t ir_hash =
+                    profile::hash_ir_stream(instr_array, static_cast<size_t>(num_instrs));
+                const uint32_t bid = profile::register_block(block, ir_hash);
                 if (bid != profile::kOverflowId) {
                     emit_block_counter_bump(*translation_result, bid);
                     cache.profile_bid = bid;

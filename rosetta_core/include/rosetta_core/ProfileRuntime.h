@@ -6,6 +6,7 @@
 #include "rosetta_core/ProfileFormat.h"
 
 struct IRBlock;
+struct IRInstr;
 
 // Cross-component runtime state for X87_PROFILE.
 //
@@ -37,11 +38,25 @@ void set_counter_array(uint64_t parent_addr, uint64_t local_addr);
 uint64_t counter_array_addr();        // parent VA, used by JIT emit
 uint64_t counter_array_local_addr();  // sidecar VA, used by exit-readback
 
-// First-see assigns a fresh id; subsequent calls for the same block
-// pointer return the same id (idempotent).  Returns kOverflowId once
-// the registry has handed out kMaxBlocks ids — caller must skip the
-// counter bump for that block.
-uint32_t register_block(const IRBlock* block);
+// First-see assigns a fresh id for a (block pointer, IR-content hash)
+// pair; subsequent calls with the same pair return the same id
+// (idempotent).  Returns kOverflowId once the registry has handed out
+// kMaxBlocks ids — caller must skip the counter bump for that block.
+//
+// The hash key is essential.  Stock can re-emit the same `block_ptr`
+// with different IR over the lifetime of the program (re-optimisation,
+// inlining changes, deopt re-emit).  Without the hash, all of those
+// IR variants would share a bid, and the per-block tally / IRG1
+// counters would aggregate across mismatched IRs while the dumped IR
+// (first-seen) would be stale.  Computing the hash with `pc` zeroed
+// keeps it stable across runs even when codegen places blocks at
+// different addresses.
+uint32_t register_block(const IRBlock* block, uint64_t ir_hash);
+
+// 64-bit FNV-1a hash over an IRInstr stream, with the per-instruction
+// `pc` field zeroed for stable equivalence across runs.  Used as the
+// content half of register_block's composite key.
+uint64_t hash_ir_stream(const IRInstr* instrs, size_t num_instrs);
 
 // Number of registered blocks (== next id that would be assigned).
 // Used by the exit-readback path to size the counter mach_vm_read.
