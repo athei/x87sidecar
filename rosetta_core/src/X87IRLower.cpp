@@ -1408,9 +1408,7 @@ int peak_live_fprs(const Context& ctx) {
             // during the spike — it's not yet in the scratch pool, so don't
             // count it.  Subtract 1 from `live` to compensate.
             const int spike = (live - 1) - dying_inputs + trans_spike;
-            if (spike > peak) {
-                peak = spike;
-            }
+            peak = std::max(spike, peak);
         }
 
         // Free inputs whose last use is this node.
