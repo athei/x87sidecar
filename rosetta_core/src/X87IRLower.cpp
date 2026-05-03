@@ -35,11 +35,12 @@ inline auto x87_begin(TranslationResult& a1, AssemblerBuffer& buf) -> std::pair<
         emit_add_imm(buf, 1, 0, 0, 0, kX87RegFileOff, Xbase, Xst_base);
         a1.x87_cache.st_base_gpr = static_cast<int8_t>(Xst_base);
         a1.x87_cache.gprs_valid = 1;
+        a1.x87_cache.st_base_valid = 1;
     }
     return {Xbase, Wd_top};
 }
 inline int x87_get_st_base(TranslationResult& a1) {
-    return a1.x87_cache.gprs_valid ? a1.x87_cache.st_base_gpr : -1;
+    return (a1.x87_cache.gprs_valid && a1.x87_cache.st_base_valid) ? a1.x87_cache.st_base_gpr : -1;
 }
 }  // namespace TranslatorX87
 
@@ -1024,6 +1025,18 @@ void lower(Context& ctx, TranslationResult* result) {
 
     // 4. Update tag word for net pushes/pops.
     if (ctx.top_delta != 0) {
+        // Free Xst_base before allocating Wd_tmp2/Wd_tagw — the tag-batch
+        // helpers don't use Xst_base, and freeing here drops peak GPR by 1
+        // (so the cohort `fld|fmul|...|faddp` that previously hit
+        // peak=6 > 5-slot pool fits at peak=5).  If the run is a partial
+        // consume, subsequent peep+single ops fall back to the uncached
+        // emit_load_st/emit_store_st branch (~+1-3 ARM per ST access).
+        // peak_live_gprs mirrors this slim in its epilogue model.
+        if (Xst_base >= 0 && result->x87_cache.st_base_valid) {
+            free_gpr(*result, Xst_base);
+            result->x87_cache.st_base_valid = 0;
+            Xst_base = -1;
+        }
         int Wd_tmp2 = alloc_free_gpr(*result);
         if (ctx.top_delta > 0) {
             // Net pops: use the batch helper.
@@ -1243,9 +1256,13 @@ int peak_live_gprs(const Context& ctx) {
         peak = std::max(node_total, peak);
     }
 
-    // Epilogue: if top_delta != 0, needs 2 more transient GPRs (Wd_tmp2 + Wd_tagw)
+    // Epilogue: if top_delta != 0, needs 2 more transient GPRs (Wd_tmp2 + Wd_tagw).
+    // lower() releases Xst_base before allocating those two — the tag-batch
+    // helpers don't use it — so the actual peak at the epilogue is
+    // (pinned - 1) + held + 2.  Mirror that here so the gate predicts peak
+    // accurately and runs that previously hit peak=6 fit at peak=5.
     if (ctx.top_delta != 0) {
-        int epilogue_total = pinned + held + 2;
+        int epilogue_total = (pinned - 1) + held + 2;
         peak = std::max(epilogue_total, peak);
     }
 

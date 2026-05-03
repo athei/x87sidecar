@@ -18,7 +18,12 @@ struct X87Cache {
     int16_t run_remaining = 0;  // Countdown; 0 = inactive
     int8_t st_base_gpr = 0;     // GPR holding &st[0] = Xbase + kX87RegFileOff
     int8_t top_dirty = 0;       // OPT-C: 1 = push skipped store_top, TOP in memory stale
-    int8_t gprs_valid = 0;      // 1 = base/top/st_base GPR numbers are meaningful
+    int8_t gprs_valid = 0;      // 1 = base/top GPR numbers are meaningful
+    int8_t st_base_valid = 0;   // 1 = st_base_gpr is currently pinned & meaningful.
+                                // Independent of gprs_valid so that X87IRLower's
+                                // epilogue can free Xst_base before the tag-batch
+                                // alloc (drops peak GPR by 1) while keeping
+                                // base_gpr/top_gpr pinned for the run's tail.
     int8_t tag_push_pending =
         0;  // OPT-D: 1 = push's tag-valid update deferred (cancel on next pop)
     int8_t deferred_pop_count =

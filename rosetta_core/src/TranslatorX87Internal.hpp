@@ -45,13 +45,14 @@ inline auto x87_begin(TranslationResult& a1, AssemblerBuffer& buf) -> std::pair<
                      /*shift=*/0, kX87RegFileOff, Xbase, Xst_base);
         a1.x87_cache.st_base_gpr = static_cast<int8_t>(Xst_base);
         a1.x87_cache.gprs_valid = 1;
+        a1.x87_cache.st_base_valid = 1;
     }
 
     return {Xbase, Wd_top};
 }
 
 inline int x87_get_st_base(TranslationResult& a1) {
-    return a1.x87_cache.gprs_valid ? a1.x87_cache.st_base_gpr : -1;
+    return (a1.x87_cache.gprs_valid && a1.x87_cache.st_base_valid) ? a1.x87_cache.st_base_gpr : -1;
 }
 
 // OPT-G: Flush deferred permutation before push/pop.

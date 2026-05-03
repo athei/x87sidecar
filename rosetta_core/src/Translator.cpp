@@ -263,7 +263,8 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                         const int Wd_tmp = alloc_free_gpr(*translation_result);
                         const int Dd_save = alloc_free_fpr(*translation_result);
                         const int Dd_chain = alloc_free_fpr(*translation_result);
-                        const int Xst_base = cache.gprs_valid ? cache.st_base_gpr : -1;
+                        const int Xst_base =
+                            (cache.gprs_valid && cache.st_base_valid) ? cache.st_base_gpr : -1;
                         emit_x87_perm_flush(buf, cache.base_gpr, cache.top_gpr, Wd_tmp, cache.perm,
                                             Xst_base, Dd_save, Dd_chain);
                         free_fpr(*translation_result, Dd_chain);

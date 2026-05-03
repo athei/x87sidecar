@@ -140,6 +140,7 @@ bool X87Cache::active() const {
 
 void X87Cache::invalidate() {
     gprs_valid = 0;
+    st_base_valid = 0;
     top_dirty = 0;
     tag_push_pending = 0;
     deferred_pop_count = 0;
@@ -163,6 +164,7 @@ void X87Cache::tick() {
         run_remaining--;
         if (run_remaining == 0) {
             gprs_valid = 0;
+            st_base_valid = 0;
             top_dirty = 0;
             tag_push_pending = 0;
             deferred_pop_count = 0;
@@ -191,7 +193,9 @@ uint32_t X87Cache::pinned_mask() const {
     if (gprs_valid) {
         mask |= (1U << base_gpr);
         mask |= (1U << top_gpr);
-        mask |= (1U << st_base_gpr);
+        if (st_base_valid) {
+            mask |= (1U << st_base_gpr);
+        }
     }
     return mask;
 }
