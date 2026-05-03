@@ -1360,27 +1360,36 @@ int peak_live_fprs(const Context& ctx) {
         // peak as (live - dying_inputs + transient_spike), where dying
         // inputs have already been released by the time the spike happens.
         // Output is allocated AFTER the core, so it's not part of the spike.
-        // Peak transient FPRs inside each *_core (verified by inspection):
-        //   trig_body (sin/cos): Dn + Xqn(GPR) + Dr + Dtmp + Dy = 4 FPRs
-        //   fptan:   Dq + Dr + Dr2 + Dr4 + Dr8 + Dp_acc + Dtmp + Dp_b + Dp_c
-        //            peak ~7 FPRs simultaneously
-        //   fpatan:  Dax + Day + Dnum + Dden + Dshift_b + ... peak ~6
-        //   fyl2x:   log2 internal ~5 + 0 caller scratch = 5
+        //
+        // Peak transient FPRs inside each *_core (re-verified by inspection,
+        // 2026-05-03 — earlier estimates were too low and the gate let real
+        // WoW blocks through that overflowed the 8-slot pool):
+        //   trig_body (sin/cos): range_reduce holds Dn + Dr + Dtmp = 3,
+        //     then frees Dn/Dtmp; sin_poly_estrin then allocs Dr2 + Dr4 +
+        //     Dp2 + Dp3 + Dtmp = 5 internal while Dr + Dy_out (held by
+        //     trig_body) are still live → peak 7
+        //   fptan:   step 6 inner peaks at Dr + Dr2 + Dr4 + Dr8 + Dp_acc +
+        //     Dtmp + Dp_b + Dp_c = 8 simultaneously
+        //   fpatan:  step 7 peaks at Dz + Dshift + Dz2 + Dz3 + Dpoly +
+        //     Dtmp = 6
+        //   fyl2x:   log2 step 8 polynomial holds Dr + Dr2 + Dhi + Dy + Dp +
+        //     Dtmp + Dlog2c (still live) = 7 simultaneous; the +Dy_in fmul
+        //     at end is after log2's scratch is freed
         //   fscale:  Dd_m + Dd_norm = 2
         int trans_spike = 0;
         switch (n.op) {
             case Op::FSin:
             case Op::FCos:
-                trans_spike = 4;
+                trans_spike = 7;
                 break;
             case Op::FPtan:
-                trans_spike = 7;
+                trans_spike = 8;
                 break;
             case Op::FPatan:
                 trans_spike = 6;
                 break;
             case Op::FYl2x:
-                trans_spike = 5;
+                trans_spike = 7;
                 break;
             case Op::FScale:
                 trans_spike = 2;
