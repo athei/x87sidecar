@@ -8,6 +8,8 @@
 #include <mutex>
 #include <unordered_map>
 
+#include "rosetta_core/ProfileFormat.h"
+
 namespace profile {
 
 namespace {
@@ -177,8 +179,8 @@ void set_block_ir_gate_counters(uint32_t bid, BlockIRGateCounters counters) {
     {
         std::scoped_lock lock(g_mu);
         if (!g_block_ir_gate_counts[0]) {
-            for (uint32_t r = 0; r < kIRGateReasonCount; ++r) {
-                g_block_ir_gate_counts[r] = std::make_unique<std::atomic<uint16_t>[]>(kMaxBlocks);
+            for (auto& slot : g_block_ir_gate_counts) {
+                slot = std::make_unique<std::atomic<uint16_t>[]>(kMaxBlocks);
             }
         }
     }
@@ -225,9 +227,8 @@ void set_block_max_run_at_refuse(uint32_t bid, BlockMaxRunAtRefuse counters) {
     {
         std::scoped_lock lock(g_mu);
         if (!g_block_max_run_at_refuse[0]) {
-            for (uint32_t r = 0; r < kIRGateReasonCount; ++r) {
-                g_block_max_run_at_refuse[r] =
-                    std::make_unique<std::atomic<uint16_t>[]>(kMaxBlocks);
+            for (auto& slot : g_block_max_run_at_refuse) {
+                slot = std::make_unique<std::atomic<uint16_t>[]>(kMaxBlocks);
             }
         }
     }

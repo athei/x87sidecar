@@ -1,5 +1,6 @@
 #include "rosetta_core/Translator.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <optional>
@@ -134,9 +135,7 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
     // at the moment of refusal (before any tick() decrement).
     const auto bump_max_run = [&](uint16_t reason) {
         const auto run = static_cast<uint16_t>(cache.run_remaining);
-        if (run > cache.max_run_at_gate[reason]) {
-            cache.max_run_at_gate[reason] = run;
-        }
+        cache.max_run_at_gate[reason] = std::max(run, cache.max_run_at_gate[reason]);
     };
 
     // ── IR pipeline: try whole-run optimization for runs of 3+ ─────────────

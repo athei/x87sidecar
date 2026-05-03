@@ -919,9 +919,7 @@ int main(int argc, char** argv) try {
                 total_exec_w += exec * static_cast<uint64_t>(gc.counts[r]);
                 if (have_mrr && b.id < max_run_at_refuse.size()) {
                     const uint16_t mr = max_run_at_refuse[b.id].max_run[r];
-                    if (mr > per_reason[r].max_run) {
-                        per_reason[r].max_run = mr;
-                    }
+                    per_reason[r].max_run = std::max(mr, per_reason[r].max_run);
                 }
             }
         }
