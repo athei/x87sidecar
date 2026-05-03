@@ -902,8 +902,11 @@ int main(int argc, char** argv) try {
             if (exec == 0) {
                 continue;
             }
-            // Weight by per-block top_dirty refusal count when IRG1 is
-            // present, otherwise by exec alone.
+            // After flush-and-proceed, the IRG1 top_dirty counter is ~0
+            // (only bumps on the rare defensive refusal), so exec_count is
+            // the right primary weight.  If a refusal IS recorded, scale
+            // by it — that's the sigal we still care about (defensive
+            // path firing == invariant violation worth investigating).
             uint64_t weight = exec;
             if (have_irg && b.id < ir_gate_counters.size()) {
                 const uint16_t td = ir_gate_counters[b.id].counts[profile::kIRGateReasonTopDirty];
@@ -920,7 +923,7 @@ int main(int argc, char** argv) try {
         std::ranges::sort(
             hrows, [](const auto& a, const auto& b) { return a.second.exec_w > b.second.exec_w; });
         std::printf("\n");
-        std::printf("# Top opcodes preceding top_dirty refusal (exec-weighted)\n");
+        std::printf("# Top opcodes preceding top_dirty event (flush or refusal, exec-weighted)\n");
         std::printf("rank,opcode,exec_count,share%%,blocks\n");
         const size_t hn = std::min<size_t>(hrows.size(), 20);
         for (size_t i = 0; i < hn; ++i) {
@@ -943,10 +946,13 @@ int main(int argc, char** argv) try {
             "top-dirty-pred histogram: skipped (no TDP0 section in input — older profile)\n");
     }
 
-    // ── Top-N blocks by max_run-at-top_dirty refusal ──────────────────────
-    // Picks the blocks where the longest contiguous x87 run was refused
-    // for top_dirty.  Useful for sanity-checking that "yes, this is a real
-    // workload sequence" before shipping a flush-and-proceed fix.
+    // ── Top-N blocks by max_run at top_dirty event ────────────────────────
+    // Picks the blocks where the longest contiguous x87 run hit top_dirty
+    // at the IR gate — now flushed-and-proceeded instead of refused, but
+    // max_run still tracks the longest run length seen.  Useful for
+    // identifying which blocks have the chains the flush-and-proceed fix
+    // unblocked.  td_refusals is the actual-refusal count (defensive
+    // path; ~0 in normal operation).
     if (have_mrr && have_irg) {
         struct R {
             uint32_t bid;
@@ -985,7 +991,7 @@ int main(int argc, char** argv) try {
             return a.exec > b.exec;
         });
         std::printf("\n");
-        std::printf("# Top blocks by max_run at top_dirty refusal\n");
+        std::printf("# Top blocks by max_run at top_dirty event\n");
         std::printf("rank,bid,start_pc,max_run,td_refusals,exec_count,block_len\n");
         const size_t n = std::min<size_t>(rs.size(), 10);
         for (size_t i = 0; i < n; ++i) {

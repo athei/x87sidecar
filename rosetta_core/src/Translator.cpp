@@ -168,37 +168,43 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                     bump_max_run(profile::kIRGateReasonShortRun);
                     gate_refused = true;
                 } else if (cache.top_dirty != 0) {
-                    cache.tally_ir_gate_top_dirty =
-                        static_cast<uint16_t>(cache.tally_ir_gate_top_dirty + 1);
-                    bump_max_run(profile::kIRGateReasonTopDirty);
-                    if (cache.profile_bid != profile::kOverflowId &&
-                        cache.prev_x87_opcode != 0xFFFFU) {
-                        profile::set_block_top_dirty_predecessor(cache.profile_bid,
-                                                                 cache.prev_x87_opcode);
-                    }
-                    mirror_gate_counters();
-                    // FLUSH-AND-PROCEED: emit one emit_store_top (3 ARM) to
-                    // commit the cached TOP to memory, clear top_dirty, then
-                    // fall through to compile_run instead of refusing.  IR's
-                    // lower() reads x87 state from memory; once memory is
-                    // up-to-date the IR run can proceed correctly.  Whenever
-                    // top_dirty=1 we also have gprs_valid=1 (top_dirty is
-                    // only set inside an active run, after x87_begin pinned
-                    // the base/top GPRs), so we use the cached pair directly
-                    // without re-allocating or re-emitting base/load.
-                    if (cache.gprs_valid) {
+                    // FLUSH-AND-PROCEED — but only if the run is long enough
+                    // for IR's win over peep+single to recoup the 3-ARM
+                    // emit_store_top cost.  Per the analyzer's
+                    // arm_production / arm_no_ir / arm_ir_forced columns:
+                    // length 3-4 chains show IR == peep (no win, flush is
+                    // pure loss); length 5-7 give marginal wins
+                    // (~2-5 ARM saved before flush); length 8+ give large
+                    // wins (10-30+ ARM).  Threshold of 5 captures the
+                    // crossover — shorter top_dirty runs fall back to
+                    // peep+single (the original refusal path) without
+                    // emitting the flush.
+                    constexpr int kMinRunForFlush = 5;
+                    if (cache.gprs_valid && cache.run_remaining >= kMinRunForFlush) {
                         AssemblerBuffer& buf = translation_result->insn_buf;
                         const int Wd_tmp = alloc_free_gpr(*translation_result);
                         emit_store_top(buf, cache.base_gpr, cache.top_gpr, Wd_tmp);
                         free_gpr(*translation_result, Wd_tmp);
                         cache.top_dirty = 0;
+                        bump_max_run(profile::kIRGateReasonTopDirty);
+                        if (cache.profile_bid != profile::kOverflowId &&
+                            cache.prev_x87_opcode != 0xFFFFU) {
+                            profile::set_block_top_dirty_predecessor(cache.profile_bid,
+                                                                     cache.prev_x87_opcode);
+                        }
+                        mirror_gate_counters();
                         // gate_refused stays false — fall through to compile_run.
+                        // Counter semantics: tally_ir_gate_top_dirty is NOT
+                        // bumped on the success path (IR DID run); only the
+                        // refusal-fallback path below bumps it.
                     } else {
-                        // Defensive: gprs_valid=0 with top_dirty=1 shouldn't
-                        // happen given the cache invariants.  If it does, we
-                        // can't safely emit_store_top without re-loading TOP
-                        // (which would lose the deferred update).  Refuse as
-                        // before.
+                        // Refusal path: short run (flush wouldn't pay off)
+                        // or defensive gprs_valid=0 (shouldn't happen).
+                        // Falls back to peep+single, same as the
+                        // pre-flush-and-proceed behavior.
+                        cache.tally_ir_gate_top_dirty =
+                            static_cast<uint16_t>(cache.tally_ir_gate_top_dirty + 1);
+                        bump_max_run(profile::kIRGateReasonTopDirty);
                         gate_refused = true;
                     }
                 } else if (cache.tag_push_pending != 0) {
