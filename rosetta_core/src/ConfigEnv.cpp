@@ -32,6 +32,7 @@ constexpr FusionEntry kFusionTable[] = {
     {.name = "fstp_fld", .id = FusionId::fstp_fld},
     {.name = "arith_fstp", .id = FusionId::arith_fstp},
     {.name = "arith_faddp", .id = FusionId::arith_faddp},
+    {.name = "fstp_arith_fstp", .id = FusionId::fstp_arith_fstp},
 };
 
 // Treat any non-null env value other than "" / "0" as truthy.  Matches

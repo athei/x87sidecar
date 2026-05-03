@@ -2013,6 +2013,173 @@ static auto try_fuse_arith_fstp(TranslationResult* a1, IRInstr* arith_instr, IRI
 }
 
 // =============================================================================
+// Peephole: FSTP m32/m64 + non-popping ARITH m32/m64 + FSTP m32/m64 fusion
+//
+// Workload pattern (~137 M execs/pass in TurtleWoW): a 3-op contiguous run
+// fstp [mA] | farith [mB] | fstp [mC] appears in matrix/transform code that
+// stores a row, computes a derived value from the next row + an external
+// constant, and stores the result.  Single-op emit was ~37 ARM (3 separate
+// memory ops with full TOP/tag bookkeeping per pop).
+//
+// Semantics:
+//   1. [mA] = ST(0) (f32 if m32-sized, f64 if m64), pop          → ST(0) = old ST(1)
+//   2. ST(0) = ST(0) OP [mB]  (no pop)                           → = old ST(1) OP [mB]
+//   3. [mC] = ST(0) (f32 / f64 per FSTP size), pop               → final pop
+//   Net stack delta: -2.
+//
+// Fused emit:
+//   - Load Dd_a = old ST(0); FCVT to f32 if m32; store [mA].  Order matters
+//     for the dest1==arith.src aliasing case: store [mA] BEFORE loading [mB]
+//     so the load picks up the stored f32-truncated value (matches x86).
+//   - Load Dd_b = old ST(1); load Dd_c = [mB] (with FCVT_s_to_d if m32);
+//     FOP Dd_b, Dd_b, Dd_c.
+//   - FCVT to f32 if m32; store [mC].
+//   - x87_pop_n(2) — batched 2-pop instead of two separate pops.
+//
+// Returns 3 (instructions consumed) if fused, std::nullopt otherwise.
+// =============================================================================
+
+static auto try_fuse_fstp_arith_fstp(TranslationResult* a1, IRInstr* fstp1_instr,
+                                     IRInstr* arith_instr, IRInstr* fstp2_instr)
+    -> std::optional<int> {
+    // ── 1. Validate first FSTP — must be memory, m32 or m64 (not m80, not stack-form) ──
+    if (fstp1_instr->opcode != kOpcodeName_fstp) {
+        return std::nullopt;
+    }
+    if (fstp1_instr->operands[0].kind == IROperandKind::Register) {
+        return std::nullopt;
+    }
+    if (fstp1_instr->operands[0].mem.size == IROperandSize::S80) {
+        return std::nullopt;
+    }
+
+    // ── 2. Validate ARITH — non-popping, memory operand ─────────────────────
+    enum ArithOp : std::uint8_t { kAdd, kSub, kSubR, kMul, kDiv, kDivR };
+    ArithOp arith;
+    switch (arith_instr->opcode) {
+        case kOpcodeName_fadd:
+            arith = kAdd;
+            break;
+        case kOpcodeName_fsub:
+            arith = kSub;
+            break;
+        case kOpcodeName_fsubr:
+            arith = kSubR;
+            break;
+        case kOpcodeName_fmul:
+            arith = kMul;
+            break;
+        case kOpcodeName_fdiv:
+            arith = kDiv;
+            break;
+        case kOpcodeName_fdivr:
+            arith = kDivR;
+            break;
+        default:
+            return std::nullopt;
+    }
+    if (arith_instr->operands[0].kind == IROperandKind::Register) {
+        return std::nullopt;
+    }
+
+    // ── 3. Validate second FSTP — same constraints as first ─────────────────
+    if (fstp2_instr->opcode != kOpcodeName_fstp) {
+        return std::nullopt;
+    }
+    if (fstp2_instr->operands[0].kind == IROperandKind::Register) {
+        return std::nullopt;
+    }
+    if (fstp2_instr->operands[0].mem.size == IROperandSize::S80) {
+        return std::nullopt;
+    }
+
+    // ── 4. Emit fused code ──────────────────────────────────────────────────
+    AssemblerBuffer& buf = a1->insn_buf;
+    auto [Xbase, Wd_top] = x87_begin(*a1, buf);
+    const int Xst_base = x87_get_st_base(*a1);
+    const int Wd_tmp = alloc_gpr(*a1, 2);
+
+    const int Dd_a = alloc_free_fpr(*a1);
+
+    // 4a: Load original ST(0) → Dd_a, store [mA] (with f32 truncation if m32).
+    //     Done BEFORE the arith load so that aliasing (mA == mB) reads the
+    //     stored truncated value (matches x86 behaviour).
+    emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Dd_a, Xst_base);
+    {
+        const bool is_f32 = (fstp1_instr->operands[0].mem.size == IROperandSize::S32);
+        if (is_f32) {
+            emit_fcvt_d_to_s(buf, Dd_a, Dd_a);
+        }
+        const int addr1 =
+            compute_operand_address(*a1, /*is_64bit=*/true, &fstp1_instr->operands[0], GPR::XZR);
+        emit_fstr_imm(buf, is_f32 ? 2 : 3, Dd_a, addr1, 0);
+        free_gpr(*a1, addr1);
+    }
+    free_fpr(*a1, Dd_a);
+
+    // 4b: Load original ST(1) → Dd_b (will become the arith destination).
+    const int Dd_b = alloc_free_fpr(*a1);
+    emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, 1), Wd_tmp, Dd_b, Xst_base);
+
+    // 4c: Load arith memory operand → Dd_c.
+    const int Dd_c = alloc_free_fpr(*a1);
+    {
+        const bool is_f32 = (arith_instr->operands[0].mem.size == IROperandSize::S32);
+        const int addr_src =
+            compute_operand_address(*a1, /*is_64bit=*/true, &arith_instr->operands[0], GPR::XZR);
+        emit_fldr_imm(buf, is_f32 ? 2 : 3, Dd_c, addr_src, /*imm12=*/0);
+        free_gpr(*a1, addr_src);
+        if (is_f32) {
+            emit_fcvt_s_to_d(buf, Dd_c, Dd_c);
+        }
+    }
+
+    // 4d: Arithmetic.
+    switch (arith) {
+        case kAdd:
+            emit_fadd_f64(buf, Dd_b, Dd_b, Dd_c);
+            break;
+        case kSub:
+            emit_fsub_f64(buf, Dd_b, Dd_b, Dd_c);
+            break;
+        case kSubR:
+            emit_fsub_f64(buf, Dd_b, Dd_c, Dd_b);
+            break;
+        case kMul:
+            emit_fmul_f64(buf, Dd_b, Dd_b, Dd_c);
+            break;
+        case kDiv:
+            emit_fdiv_f64(buf, Dd_b, Dd_b, Dd_c);
+            break;
+        case kDivR:
+            emit_fdiv_f64(buf, Dd_b, Dd_c, Dd_b);
+            break;
+    }
+    free_fpr(*a1, Dd_c);
+
+    // 4e: Store [mC] = Dd_b (with f32 truncation if m32).
+    {
+        const bool is_f32 = (fstp2_instr->operands[0].mem.size == IROperandSize::S32);
+        if (is_f32) {
+            emit_fcvt_d_to_s(buf, Dd_b, Dd_b);
+        }
+        const int addr2 =
+            compute_operand_address(*a1, /*is_64bit=*/true, &fstp2_instr->operands[0], GPR::XZR);
+        emit_fstr_imm(buf, is_f32 ? 2 : 3, Dd_b, addr2, 0);
+        free_gpr(*a1, addr2);
+    }
+    free_fpr(*a1, Dd_b);
+
+    // 4f: Two pops, batched.
+    x87_pop_n(buf, *a1, Xbase, Wd_top, Wd_tmp, 2);
+
+    x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp, /*consumed=*/3);
+    free_gpr(*a1, Wd_tmp);
+
+    return 3;
+}
+
+// =============================================================================
 // Peephole: FMUL + FADDP/FSUBP/FSUBRP fusion (OPT-F15) — FMA
 //
 // Patterns: FMUL + FADDP, FMUL + FSUBP, FMUL + FSUBRP
@@ -2447,6 +2614,15 @@ static auto try_fuse_fstp_group(TranslationResult* tr, IRInstr* instrs, int64_t 
                                 uint64_t disabled_mask) -> std::optional<int> {
     IRInstr* cur = &instrs[idx];
     IRInstr* next = &instrs[idx + 1];
+
+    // 3-instruction fusions (longest first)
+    if (idx + 2 < num) {
+        if (!fusion_disabled(disabled_mask, FusionId::fstp_arith_fstp)) {
+            if (auto r = try_fuse_fstp_arith_fstp(tr, cur, next, &instrs[idx + 2])) {
+                return r;
+            }
+        }
+    }
 
     if (!fusion_disabled(disabled_mask, FusionId::fstp_fld)) {
         if (auto r = try_fuse_fstp_fld(tr, cur, next)) {
