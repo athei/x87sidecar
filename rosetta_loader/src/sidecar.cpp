@@ -838,6 +838,22 @@ void dumpCountersIfEnabled(mach_port_t /*parentTaskPort*/) {
         std::fwrite(&entry, sizeof(entry), 1, g_profile.file);
     }
 
+    // Build-bail-opcode side-table: per block_id 0..count-1, the opcode at
+    // which X87IR::build()'s default arm bailed (or 0xFFFF sentinel).  The
+    // analyzer combines this with the counter section to produce an exec-
+    // weighted "which opcodes are blocking IR coverage" histogram.  Always
+    // written when profiling is enabled; entries are 0xFFFF for blocks that
+    // never tripped a bail.
+    profile::BuildFailOpSectionHeader bhdr{
+        .magic = profile::kBuildFailOpSectionMagic,
+        .count = count,
+    };
+    std::fwrite(&bhdr, sizeof(bhdr), 1, g_profile.file);
+    for (uint32_t bid = 0; bid < count; ++bid) {
+        const uint16_t op = profile::get_block_build_fail_op(bid);
+        std::fwrite(&op, sizeof(op), 1, g_profile.file);
+    }
+
     std::fflush(g_profile.file);
     std::fclose(g_profile.file);
     g_profile.file = nullptr;

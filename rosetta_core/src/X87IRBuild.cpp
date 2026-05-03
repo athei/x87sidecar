@@ -745,6 +745,7 @@ bool build(Context& ctx, IRInstr* instr_array, int64_t num_instrs, int64_t start
 
             // ── Bail on everything else ─────────────────────────────────
             default:
+                ctx.fail_opcode = static_cast<uint16_t>(op);
                 ok = false;
                 break;
         }

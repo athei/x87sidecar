@@ -1245,10 +1245,20 @@ int peak_live_fprs(const Context& ctx) {
 // ── Entry point ─────────────────────────────────────────────────────────────
 
 int compile_run(TranslationResult* result, IRInstr* instr_array, int64_t num_instrs,
-                int64_t start_idx, int run_length, IRFailReason* out_reason, int* out_peak_gprs) {
+                int64_t start_idx, int run_length, IRFailReason* out_reason, int* out_peak_gprs,
+                uint16_t* out_fail_opcode) {
     Context ctx;
 
-    if (!build(ctx, instr_array, num_instrs, start_idx, run_length)) {
+    const bool built = build(ctx, instr_array, num_instrs, start_idx, run_length);
+
+    // Surface the bail opcode whenever build observed an unsupported one,
+    // including the success-with-early-stop case (consumed >= 2 but the loop
+    // halted at position N).
+    if (out_fail_opcode && ctx.fail_opcode != 0xFFFFU) {
+        *out_fail_opcode = ctx.fail_opcode;
+    }
+
+    if (!built) {
         if (out_reason) {
             *out_reason = IRFailReason::kBuildFail;
         }

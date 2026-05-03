@@ -9,6 +9,7 @@
 #include "rosetta_core/CoreConfig.h"
 #include "rosetta_core/IRInstr.h"
 #include "rosetta_core/Opcode.h"
+#include "rosetta_core/ProfileFormat.h"
 #include "rosetta_core/ProfileRuntime.h"
 #include "rosetta_core/Register.h"
 #include "rosetta_core/TranslationResult.h"
@@ -105,9 +106,17 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
             cache.tag_push_pending == 0 && cache.deferred_pop_count == 0 && !cache.perm_dirty) {
             X87IR::IRFailReason ir_reason = X87IR::IRFailReason::kNone;
             int ir_peak_gprs = 0;
-            const int ir_consumed =
-                X87IR::compile_run(translation_result, instr_array, num_instrs, insn_idx,
-                                   cache.run_remaining, &ir_reason, &ir_peak_gprs);
+            // out_fail_opcode is only useful when we'll record it into the
+            // profile side-table.  Pass nullptr in non-profile builds so
+            // compile_run skips the conditional store entirely.
+            const bool profiling_block = cache.profile_bid != profile::kOverflowId;
+            uint16_t ir_fail_opcode = profile::kNoBuildFailOpcode;
+            const int ir_consumed = X87IR::compile_run(
+                translation_result, instr_array, num_instrs, insn_idx, cache.run_remaining,
+                &ir_reason, &ir_peak_gprs, profiling_block ? &ir_fail_opcode : nullptr);
+            if (profiling_block && ir_fail_opcode != profile::kNoBuildFailOpcode) {
+                profile::set_block_build_fail_op(cache.profile_bid, ir_fail_opcode);
+            }
             if (ir_peak_gprs > 0) {
                 const auto peak_unsigned = static_cast<uint32_t>(ir_peak_gprs);
                 if (peak_unsigned > cache.tally_max_gpr_peak) {

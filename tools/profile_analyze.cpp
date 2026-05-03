@@ -60,7 +60,7 @@ struct Tally {
 };
 
 bool readFile(const std::string& path, std::vector<Block>& out, std::vector<uint64_t>& counters,
-              std::vector<Tally>& tallies) {
+              std::vector<Tally>& tallies, std::vector<uint16_t>& build_fail_ops) {
     std::ifstream f(path, std::ios::binary);
     if (!f) {
         std::fprintf(stderr, "error: cannot open %s\n", path.c_str());
@@ -164,6 +164,28 @@ bool readFile(const std::string& path, std::vector<Block>& out, std::vector<uint
                     .max_gpr_peak = e.max_gpr_peak,
                 };
             }
+            off += tbytes;
+        }
+    }
+
+    // Optional build-bail-opcode side-table.  Older .prof files (before the
+    // histogram diagnostic landed) lack it; treat absence as "all-sentinel"
+    // so the histogram report just prints "no bails recorded".
+    if (off + sizeof(profile::BuildFailOpSectionHeader) <= buf.size()) {
+        profile::BuildFailOpSectionHeader bhdr;
+        std::memcpy(&bhdr, buf.data() + off, sizeof(bhdr));
+        if (bhdr.magic == profile::kBuildFailOpSectionMagic) {
+            off += sizeof(bhdr);
+            const size_t bbytes = static_cast<size_t>(bhdr.count) * sizeof(uint16_t);
+            if (off + bbytes > buf.size()) {
+                std::fprintf(stderr,
+                             "error: %s build-fail-op section truncated (declared %u entries)\n",
+                             path.c_str(), bhdr.count);
+                return false;
+            }
+            build_fail_ops.resize(bhdr.count);
+            std::memcpy(build_fail_ops.data(), buf.data() + off, bbytes);
+            off += bbytes;
         }
     }
     return true;
@@ -559,10 +581,12 @@ int main(int argc, char** argv) try {
     std::vector<Block> blocks;
     std::vector<uint64_t> counters;
     std::vector<Tally> tallies;
+    std::vector<uint16_t> build_fail_ops;
     for (const auto& f : files) {
         std::vector<uint64_t> file_counters;
         std::vector<Tally> file_tallies;
-        if (!readFile(f, blocks, file_counters, file_tallies)) {
+        std::vector<uint16_t> file_bfo;
+        if (!readFile(f, blocks, file_counters, file_tallies, file_bfo)) {
             return 1;
         }
         // Multi-file aggregation: union counters by block_id (each file's
@@ -571,15 +595,20 @@ int main(int argc, char** argv) try {
         if (counters.empty()) {
             counters = std::move(file_counters);
             tallies = std::move(file_tallies);
+            build_fail_ops = std::move(file_bfo);
         } else {
             counters.insert(counters.end(), file_counters.begin(), file_counters.end());
             tallies.insert(tallies.end(), file_tallies.begin(), file_tallies.end());
+            build_fail_ops.insert(build_fail_ops.end(), file_bfo.begin(), file_bfo.end());
         }
     }
     const bool have_tallies = !tallies.empty();
-    std::fprintf(stderr,
-                 "loaded %zu blocks, %zu counter entries, %zu tally entries from %zu file(s)\n",
-                 blocks.size(), counters.size(), tallies.size(), files.size());
+    const bool have_bfo = !build_fail_ops.empty();
+    std::fprintf(
+        stderr,
+        "loaded %zu blocks, %zu counter entries, %zu tally entries, %zu bfo entries from %zu "
+        "file(s)\n",
+        blocks.size(), counters.size(), tallies.size(), build_fail_ops.size(), files.size());
 
     // Slide all window lengths over each block.  Aggregate by pattern key,
     // weighting each occurrence by counter[block_id].  Per-block path mix
@@ -722,6 +751,61 @@ int main(int argc, char** argv) try {
         show_covered ? "including" : "hiding",
         have_tallies ? "; columns ir%/peep%/single%/ft% give exec-weighted path mix"
                      : "; no tally section in input — path columns omitted");
+
+    // ── Build-bail-opcode histogram ─────────────────────────────────────────
+    // For each block whose translation observed an unsupported x87 opcode in
+    // build()'s default arm, attribute counter[bid] to that opcode.  Top-N
+    // entries are the highest-leverage opcodes to add to X87IRBuild.cpp's
+    // build switch.  Only printed when the .prof contains a BFO0 section.
+    if (have_bfo) {
+        struct Bucket {
+            uint64_t exec_w = 0;
+            uint32_t blocks = 0;
+        };
+        std::unordered_map<uint16_t, Bucket> hist;
+        uint64_t total_exec_w = 0;
+        for (const auto& b : blocks) {
+            if (b.id >= build_fail_ops.size()) {
+                continue;
+            }
+            const uint16_t op = build_fail_ops[b.id];
+            if (op == profile::kNoBuildFailOpcode) {
+                continue;
+            }
+            const uint64_t exec = (b.id < counters.size()) ? counters[b.id] : 0;
+            if (exec == 0) {
+                continue;  // dead-code block
+            }
+            auto& bk = hist[op];
+            bk.exec_w += exec;
+            bk.blocks += 1;
+            total_exec_w += exec;
+        }
+        std::vector<std::pair<uint16_t, Bucket>> hrows(hist.begin(), hist.end());
+        std::ranges::sort(
+            hrows, [](const auto& a, const auto& b) { return a.second.exec_w > b.second.exec_w; });
+        std::printf("\n");
+        std::printf("# Top opcodes blocking X87IR::build() (exec-weighted)\n");
+        std::printf("rank,opcode,exec_count,share%%,blocks\n");
+        const size_t hn = std::min<size_t>(hrows.size(), 20);
+        for (size_t i = 0; i < hn; ++i) {
+            const auto& [op, bk] = hrows[i];
+            const char* name =
+                (op < kOpcodeNames.size() && kOpcodeNames[op] != nullptr) ? kOpcodeNames[op] : "?";
+            const double share = total_exec_w > 0 ? 100.0 * static_cast<double>(bk.exec_w) /
+                                                        static_cast<double>(total_exec_w)
+                                                  : 0.0;
+            std::printf("%zu,%s,%llu,%.1f,%u\n", i + 1, name,
+                        static_cast<unsigned long long>(bk.exec_w), share, bk.blocks);
+        }
+        std::fprintf(stderr,
+                     "build-bail histogram: %zu distinct opcodes across %llu exec-weighted bails "
+                     "(showing top %zu)\n",
+                     hrows.size(), static_cast<unsigned long long>(total_exec_w), hn);
+    } else {
+        std::fprintf(stderr,
+                     "build-bail histogram: skipped (no BFO0 section in input — older profile)\n");
+    }
     return 0;
 } catch (const std::exception& e) {
     std::fprintf(stderr, "profile_analyze: %s\n", e.what());

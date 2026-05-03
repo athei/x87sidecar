@@ -124,12 +124,19 @@ struct Context {
     // How many x87 instructions were successfully consumed.
     int16_t consumed;
 
+    // x87 opcode (kOpcodeName_*) at which build()'s default arm bailed on this
+    // run, or 0xFFFF if no bail occurred. Diagnostic for the build-blocking-
+    // opcode histogram. Even on success (consumed >= 2) this can be set when
+    // the loop stopped at an unsupported opcode at position N.
+    uint16_t fail_opcode;
+
     void init() {
         num_nodes = 0;
         top_delta = 0;
         consumed = 0;
         last_fcmp = -1;
         last_fcomi = -1;
+        fail_opcode = 0xFFFFU;
         for (int i = 0; i < 8; i++) {
             slot_val[i] = static_cast<int16_t>(-(i + 1));
             initial_read[i] = -1;
@@ -234,8 +241,13 @@ enum class IRFailReason : uint8_t {
 // diagnosing why compile_run keeps refusing on hot blocks — saturating
 // against the available pool tells us we need to either reduce IR pressure
 // or accept the fall-through.
+// out_fail_opcode (optional): set to the kOpcodeName_* value at which build()'s
+// default arm bailed.  Set whenever build observed an unsupported opcode, even
+// when compile_run returned a positive consumed (i.e. build succeeded on the
+// prefix but stopped early at position N).  Untouched (caller-initialized
+// sentinel preserved) when no bail was observed.
 int compile_run(TranslationResult* result, IRInstr* instr_array, int64_t num_instrs,
                 int64_t start_idx, int run_length, IRFailReason* out_reason = nullptr,
-                int* out_peak_gprs = nullptr);
+                int* out_peak_gprs = nullptr, uint16_t* out_fail_opcode = nullptr);
 
 }  // namespace X87IR

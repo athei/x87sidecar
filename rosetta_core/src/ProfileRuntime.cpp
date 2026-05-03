@@ -27,6 +27,10 @@ uint64_t g_counter_local_addr = 0;
 std::unique_ptr<std::atomic<uint64_t>[]> g_block_tally_lo;
 std::unique_ptr<std::atomic<uint64_t>[]> g_block_tally_hi;
 
+// Per-block build-bail opcode side-table.  2 B per slot × kMaxBlocks = 2 MiB
+// when allocated.  Lazy-allocated on first set_block_build_fail_op call.
+std::unique_ptr<std::atomic<uint16_t>[]> g_block_build_fail_op;
+
 void pack_tally(BlockTally t, uint64_t& lo, uint64_t& hi) {
     static_assert(sizeof(BlockTally) == 16);
     std::memcpy(&lo, reinterpret_cast<const std::byte*>(&t) + 0, 8);
@@ -114,6 +118,41 @@ BlockTally get_block_tally(uint32_t bid) {
     const uint64_t lo = lo_arr[bid].load(std::memory_order_relaxed);
     const uint64_t hi = hi_arr[bid].load(std::memory_order_relaxed);
     return unpack_tally(lo, hi);
+}
+
+void set_block_build_fail_op(uint32_t bid, uint16_t opcode) {
+    if (bid >= kMaxBlocks) {
+        return;
+    }
+    {
+        std::scoped_lock lock(g_mu);
+        if (!g_block_build_fail_op) {
+            g_block_build_fail_op = std::make_unique<std::atomic<uint16_t>[]>(kMaxBlocks);
+            // Default-constructed atomic<uint16_t> holds 0 (i.e. kOpcodeName_aaa,
+            // which is never an x87 opcode and never reaches build()'s default
+            // arm).  We initialize explicitly to the 0xFFFF sentinel so dump-
+            // time readback is unambiguous.
+            for (uint32_t i = 0; i < kMaxBlocks; ++i) {
+                g_block_build_fail_op[i].store(0xFFFFU, std::memory_order_relaxed);
+            }
+        }
+    }
+    g_block_build_fail_op[bid].store(opcode, std::memory_order_relaxed);
+}
+
+uint16_t get_block_build_fail_op(uint32_t bid) {
+    if (bid >= kMaxBlocks) {
+        return 0xFFFFU;
+    }
+    std::atomic<uint16_t>* arr;
+    {
+        std::scoped_lock lock(g_mu);
+        if (!g_block_build_fail_op) {
+            return 0xFFFFU;
+        }
+        arr = g_block_build_fail_op.get();
+    }
+    return arr[bid].load(std::memory_order_relaxed);
 }
 
 }  // namespace profile

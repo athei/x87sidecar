@@ -104,4 +104,23 @@ struct BlockTallyEntry {
 };
 static_assert(sizeof(BlockTallyEntry) == 16);
 
+// Build-bail-opcode side-table magic ('BFO0').  Optional section written
+// after the tally section at exit time.  Per block_id (0..count-1) records
+// the kOpcodeName_* value at which X87IR::build()'s default arm bailed —
+// the most-recent observation, latest-write-wins.  Sentinel 0xFFFF means
+// the block never tripped an unsupported-opcode bail.  Use this section
+// alongside the counter section to compute exec-weighted attribution of
+// which x87 opcodes are blocking IR coverage in the workload.  Older
+// .prof files lacking this section still parse; analyzer treats absence as
+// "all-sentinel".
+constexpr uint32_t kBuildFailOpSectionMagic = 0x304F4642U;  // 'BFO0'
+
+struct BuildFailOpSectionHeader {
+    uint32_t magic;  // = kBuildFailOpSectionMagic
+    uint32_t count;  // number of u16 entries that follow
+};
+static_assert(sizeof(BuildFailOpSectionHeader) == 8);
+
+constexpr uint16_t kNoBuildFailOpcode = 0xFFFFU;
+
 }  // namespace profile

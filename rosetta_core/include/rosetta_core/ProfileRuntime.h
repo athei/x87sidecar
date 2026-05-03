@@ -69,4 +69,10 @@ static_assert(sizeof(BlockTally) == 16);
 void set_block_tally(uint32_t bid, BlockTally tally);
 BlockTally get_block_tally(uint32_t bid);
 
+// Per-block build-bail opcode (kOpcodeName_*).  Latest-write-wins; sentinel
+// 0xFFFF means no bail observed.  Lazy-allocated on first set call (2 B/slot
+// × kMaxBlocks = 2 MiB), so profile-disabled runs never pay the cost.
+void set_block_build_fail_op(uint32_t bid, uint16_t opcode);
+uint16_t get_block_build_fail_op(uint32_t bid);
+
 }  // namespace profile
