@@ -705,10 +705,26 @@ int main(int argc, char** argv) try {
     // per-pattern), so no double-counting from window slicing.  Each x87
     // op in a block is counted once via the path that translated it
     // (ir/peep/single/ft).  Refusals are call-counts (not ops), so they
-    // are normalized per 1000 ops to be comparable.  This is the single
-    // most useful number for tracking the impact of changes across
-    // captures of different durations / different play sessions.
+    // are normalized per 1000 ops to be comparable.  Plus: total ARM
+    // emit / total x87 op = global emit-per-op ratio, the actual perf
+    // metric (lower = better).  This is the single most useful number
+    // for tracking the impact of changes across captures of different
+    // durations / different play sessions.
     if (have_tallies) {
+        // Per-block ARM emit measurement, in production mode (current JIT
+        // settings).  Each block's full IR stream is fed to translate_
+        // instruction (same machinery as the per-pattern measurement);
+        // non-x87 ops return nullopt and skip without emit, so the ARM
+        // count reflects only x87-attributable emit.
+        long double total_arm = 0;
+        for (const auto& b : blocks) {
+            const uint64_t exec = (b.id < counters.size()) ? counters[b.id] : 0;
+            if (exec == 0 || b.instrs.empty()) {
+                continue;
+            }
+            const auto arm = runOneMode(b.instrs.data(), b.instrs.size(), nullptr);
+            total_arm += static_cast<long double>(exec) * arm;
+        }
         long double total_ir = 0;
         long double total_peep = 0;
         long double total_single = 0;
@@ -744,13 +760,17 @@ int main(int argc, char** argv) try {
         const auto per_kop = [&](long double v) -> double {
             return total_ops > 0 ? static_cast<double>(1000.0L * v / total_ops) : 0.0;
         };
-        std::printf("# Workload-wide x87 op composition (block-level, %llu B exec-weighted ops)\n",
-                    static_cast<unsigned long long>(total_ops));
+        const double arm_per_x87 = total_ops > 0 ? static_cast<double>(total_arm / total_ops) : 0.0;
+        std::printf(
+            "# Workload-wide x87 op composition (block-level, %llu exec-weighted ops, "
+            "%llu exec-weighted ARM)\n",
+            static_cast<unsigned long long>(total_ops), static_cast<unsigned long long>(total_arm));
         std::printf("path,share%%\n");
         std::printf("ir,%.2f\n", pct(total_ir));
         std::printf("peep,%.2f\n", pct(total_peep));
         std::printf("single,%.2f\n", pct(total_single));
         std::printf("ft,%.2f\n", pct(total_ft));
+        std::printf("global_arm_per_x87,%.2f\n", arm_per_x87);
         std::printf("\n");
         std::printf("# Workload-wide refusals per 1000 x87 ops (call-counts, not ops)\n");
         std::printf("event,per_kop\n");
