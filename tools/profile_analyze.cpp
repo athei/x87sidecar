@@ -701,6 +701,71 @@ int main(int argc, char** argv) try {
         });
     }
 
+    // Workload-wide x87 op composition.  Computed at the BLOCK level (not
+    // per-pattern), so no double-counting from window slicing.  Each x87
+    // op in a block is counted once via the path that translated it
+    // (ir/peep/single/ft).  Refusals are call-counts (not ops), so they
+    // are normalized per 1000 ops to be comparable.  This is the single
+    // most useful number for tracking the impact of changes across
+    // captures of different durations / different play sessions.
+    if (have_tallies) {
+        long double total_ir = 0;
+        long double total_peep = 0;
+        long double total_single = 0;
+        long double total_ft = 0;
+        long double total_build_fail = 0;
+        long double total_fpr_fail = 0;
+        long double total_gpr_fail = 0;
+        long double total_irg[profile::kIRGateReasonCount] = {};
+        for (const auto& b : blocks) {
+            const uint64_t exec = (b.id < counters.size()) ? counters[b.id] : 0;
+            if (exec == 0 || b.id >= tallies.size()) {
+                continue;
+            }
+            const auto& t = tallies[b.id];
+            const auto e = static_cast<long double>(exec);
+            total_ir += e * t.ir;
+            total_peep += e * t.peep;
+            total_single += e * t.single;
+            total_ft += e * t.ft;
+            total_build_fail += e * t.ir_build_fail;
+            total_fpr_fail += e * t.ir_fpr_fail;
+            total_gpr_fail += e * t.ir_gpr_fail;
+            if (have_irg && b.id < ir_gate_counters.size()) {
+                for (uint16_t r = 0; r < profile::kIRGateReasonCount; ++r) {
+                    total_irg[r] += e * ir_gate_counters[b.id].counts[r];
+                }
+            }
+        }
+        const long double total_ops = total_ir + total_peep + total_single + total_ft;
+        const auto pct = [&](long double v) -> double {
+            return total_ops > 0 ? static_cast<double>(100.0L * v / total_ops) : 0.0;
+        };
+        const auto per_kop = [&](long double v) -> double {
+            return total_ops > 0 ? static_cast<double>(1000.0L * v / total_ops) : 0.0;
+        };
+        std::printf("# Workload-wide x87 op composition (block-level, %llu B exec-weighted ops)\n",
+                    static_cast<unsigned long long>(total_ops));
+        std::printf("path,share%%\n");
+        std::printf("ir,%.2f\n", pct(total_ir));
+        std::printf("peep,%.2f\n", pct(total_peep));
+        std::printf("single,%.2f\n", pct(total_single));
+        std::printf("ft,%.2f\n", pct(total_ft));
+        std::printf("\n");
+        std::printf("# Workload-wide refusals per 1000 x87 ops (call-counts, not ops)\n");
+        std::printf("event,per_kop\n");
+        std::printf("ir_build_fail,%.2f\n", per_kop(total_build_fail));
+        std::printf("ir_fpr_fail,%.2f\n", per_kop(total_fpr_fail));
+        std::printf("ir_gpr_fail,%.2f\n", per_kop(total_gpr_fail));
+        if (have_irg) {
+            for (uint16_t r = 0; r < profile::kIRGateReasonCount; ++r) {
+                std::printf("gate_%s,%.2f\n", profile::kIRGateReasonNames[r],
+                            per_kop(total_irg[r]));
+            }
+        }
+        std::printf("\n");
+    }
+
     if (have_tallies) {
         std::printf(
             "exec_count,arm_production,arm_no_ir,arm_ir_forced,arm_per_x87,"
