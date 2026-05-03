@@ -784,6 +784,105 @@ int main(int argc, char** argv) try {
             }
         }
         std::printf("\n");
+
+        // Per-block ranking by exec-weighted ARM emit.  The per-pattern
+        // table below slices every prefix length 2..run_len of each run
+        // and shares one exec_count across all the slices, which makes it
+        // easy to over-count savings if you sum (prod-ir_forced)*exec
+        // across rows of the same block.  This table reports each block
+        // exactly once with the actual production ARM emit, so cross-block
+        // ranking by total cost is unambiguous.  arm_no_ir / arm_ir_forced
+        // come from the same three configs as measurePattern: production,
+        // disable_x87_ir=1, force_x87_ir_gate=1.
+        struct BlockEmitRow {
+            uint64_t exec;
+            uint16_t x87_ops;
+            uint32_t arm_prod;
+            uint32_t arm_no_ir;
+            uint32_t arm_ir_forced;
+            std::string prefix;
+            const Tally* tally;
+        };
+        std::vector<BlockEmitRow> block_rows;
+        block_rows.reserve(blocks.size());
+        RosettaConfig no_ir_cfg{};
+        no_ir_cfg.disable_x87_ir = 1;
+        RosettaConfig force_gate_cfg{};
+        force_gate_cfg.force_x87_ir_gate = 1;
+        for (const auto& b : blocks) {
+            const uint64_t exec = (b.id < counters.size()) ? counters[b.id] : 0;
+            if (exec == 0 || b.instrs.empty()) {
+                continue;
+            }
+            BlockEmitRow row{};
+            row.exec = exec;
+            auto* mut_instrs = const_cast<IRInstr*>(b.instrs.data());
+            const auto L = static_cast<int64_t>(b.instrs.size());
+            int64_t idx = 0;
+            uint32_t x87_count = 0;
+            while (idx < L) {
+                const int run = X87Cache::lookahead(mut_instrs, L, idx);
+                if (run >= 1) {
+                    x87_count += static_cast<uint32_t>(run);
+                    idx += run;
+                } else {
+                    idx += 1;
+                }
+            }
+            row.x87_ops = static_cast<uint16_t>(std::min<uint32_t>(x87_count, 0xFFFFU));
+            row.arm_prod = runOneMode(b.instrs.data(), b.instrs.size(), nullptr);
+            row.arm_no_ir = runOneMode(b.instrs.data(), b.instrs.size(), &no_ir_cfg);
+            row.arm_ir_forced = runOneMode(b.instrs.data(), b.instrs.size(), &force_gate_cfg);
+            int picked = 0;
+            for (size_t i = 0; i < b.instrs.size() && picked < 5; ++i) {
+                if (X87Cache::lookahead(mut_instrs, L, static_cast<int64_t>(i)) == 0) {
+                    continue;
+                }
+                if (picked > 0) {
+                    row.prefix.push_back('|');
+                }
+                row.prefix += mnemonic(b.instrs[i].opcode);
+                row.prefix += opSuffix(b.instrs[i]);
+                ++picked;
+            }
+            row.tally = (b.id < tallies.size()) ? &tallies[b.id] : nullptr;
+            block_rows.push_back(std::move(row));
+        }
+        std::ranges::sort(block_rows, [](const BlockEmitRow& a, const BlockEmitRow& b) {
+            return static_cast<long double>(a.exec) * a.arm_prod >
+                   static_cast<long double>(b.exec) * b.arm_prod;
+        });
+
+        constexpr size_t kTopBlockN = 20;
+        const size_t top_n = std::min(kTopBlockN, block_rows.size());
+        std::printf("# Top %zu blocks by exec-weighted ARM emit (no prefix double-count)\n", top_n);
+        std::printf(
+            "rank,exec,x87_ops,arm_prod,arm_no_ir,arm_ir_forced,share%%,"
+            "ir%%,peep%%,single%%,prefix\n");
+        for (size_t i = 0; i < top_n; ++i) {
+            const auto& r = block_rows[i];
+            const auto block_arm = static_cast<long double>(r.exec) * r.arm_prod;
+            const double share =
+                total_arm > 0 ? static_cast<double>(100.0L * block_arm / total_arm) : 0.0;
+            double ir_pct = 0.0;
+            double peep_pct = 0.0;
+            double single_pct = 0.0;
+            if (r.tally != nullptr) {
+                const uint64_t tot = r.tally->total();
+                if (tot > 0) {
+                    ir_pct = 100.0 * static_cast<double>(r.tally->ir) / static_cast<double>(tot);
+                    peep_pct =
+                        100.0 * static_cast<double>(r.tally->peep) / static_cast<double>(tot);
+                    single_pct =
+                        100.0 * static_cast<double>(r.tally->single) / static_cast<double>(tot);
+                }
+            }
+            std::printf("%zu,%llu,%u,%u,%u,%u,%.2f,%.1f,%.1f,%.1f,%s\n", i + 1,
+                        static_cast<unsigned long long>(r.exec), static_cast<unsigned>(r.x87_ops),
+                        r.arm_prod, r.arm_no_ir, r.arm_ir_forced, share, ir_pct, peep_pct,
+                        single_pct, r.prefix.c_str());
+        }
+        std::printf("\n");
     }
 
     if (have_tallies) {
