@@ -23,7 +23,7 @@ static bench_ns_t bench_fld_fcomp_m32(void) {
     volatile float b = 1.5f;
     for (int i = 0; i < TIMES; i++) {
         __asm__ volatile(
-            "fldl %0\n\t"  /* push a */
+            "fldl %0\n\t"   /* push a */
             "fcomps %1\n\t" /* compare ST(0) vs b, pop */
             :
             : "m"(a), "m"(b));

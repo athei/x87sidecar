@@ -13,6 +13,8 @@ enum class FusionId : int {
     fld_fcomp_fstsw,   // FLD + FCOMP + FSTSW (3-instruction)
     fxch_arithp,       // FXCH + FADDP / FSUBP / etc.
     fxch_fstp,         // FXCH + FSTP
+    fxch_fcom_fstsw,   // FXCH ST(i) + FCOM/FCOMP* + FSTSW (3-instruction)
+    fxch_fcom,         // FXCH ST(i) + FCOM/FCOMP* (2-instruction, no FSTSW)
     fcom_fstsw,        // FCOM/FCOMP/FUCOM/FUCOMP/FCOMPP/FUCOMPP + FSTSW
     fld_fcompp_fstsw,  // FLD + FCOMPP/FUCOMPP + FSTSW (3-instruction, net pop)
     fld_fld_fucompp,   // FLD + FLD + FCOMPP/FUCOMPP [+ FSTSW] (3- or 4-instruction)

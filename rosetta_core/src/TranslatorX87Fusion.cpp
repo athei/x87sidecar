@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <utility>
 
 #include "TranslatorX87Internal.hpp"
 #include "rosetta_core/AssemblerBuffer.h"
@@ -626,6 +627,114 @@ static auto try_fuse_fcom_fstsw(TranslationResult* a1, IRInstr* fcom_instr, IRIn
     x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp, /*consumed=*/2);
     free_gpr(*a1, Wd_tmp);
 
+    return 2;
+}
+
+// =============================================================================
+// Peephole: FXCH ST(i) + FCOM/FCOMP/FUCOM/FUCOMP/FCOMPP/FUCOMPP + FSTSW AX
+//
+// Workload pattern (~625 M execs/pass in TurtleWoW): a 3-op contiguous run
+// fxch ST(i) | fcom mem | fnstsw ax appears in many fcom_st0,m32 chains
+// where the producer left the live value on ST(i) instead of ST(0).  Without
+// this fusion the run is too short for IR (run<3 after fxch consumed),
+// fxch_arithp/fxch_fstp don't match, and each op falls through to single-op
+// for ~35 ARM total.
+//
+// Fusion strategy: absorb FXCH as a compile-time slot redirect (OPT-G —
+// std::swap on cache.perm[] + perm_dirty=1).  After the swap, ST(0) reads
+// resolve to the old physical slot i, and any explicit ST(j) reads (for
+// register-form FCOM ST(j)) pass through unchanged perm[j] for j∉{0,i} or
+// pick up the swapped slot for j=i.  Then delegate to try_fuse_fcom_fstsw,
+// which already handles register/memory comparand and pop variants.
+//
+// Returns 3 (instructions consumed) if fused, std::nullopt otherwise.
+// =============================================================================
+
+static auto try_fuse_fxch_fcom_fstsw(TranslationResult* a1, IRInstr* fxch_instr,
+                                     IRInstr* fcom_instr, IRInstr* fstsw_instr)
+    -> std::optional<int> {
+    if (fxch_instr->opcode != kOpcodeName_fxch) {
+        return std::nullopt;
+    }
+    const int depth = fxch_instr->operands[1].reg.reg.index();
+    if (depth <= 0 || depth >= 8) {
+        return std::nullopt;
+    }
+
+    const auto fcom_op = fcom_instr->opcode;
+    if (fcom_op != kOpcodeName_fcom && fcom_op != kOpcodeName_fcomp &&
+        fcom_op != kOpcodeName_fucom && fcom_op != kOpcodeName_fucomp &&
+        fcom_op != kOpcodeName_fcompp && fcom_op != kOpcodeName_fucompp) {
+        return std::nullopt;
+    }
+    if (fstsw_instr->opcode != kOpcodeName_fstsw) {
+        return std::nullopt;
+    }
+    if (fstsw_instr->operands[0].kind != IROperandKind::Register) {
+        return std::nullopt;
+    }
+
+    // OPT-G: Apply FXCH as compile-time perm swap before delegating.
+    // resolve_depth() in the inner emit will honour the swapped perm so
+    // ST(0) loads from the old slot i and ST(j) (for j∉{0,i}) is unchanged.
+    std::swap(a1->x87_cache.perm[0], a1->x87_cache.perm[depth]);
+    a1->x87_cache.perm_dirty = 1;
+
+    // FXCH is absorbed (no code emitted), but consumes one tick. Pre-decrement
+    // run_remaining so the inner fusion's x87_end(consumed=2) sees the correct
+    // budget.
+    if (a1->x87_cache.run_remaining > 0) {
+        a1->x87_cache.run_remaining--;
+    }
+
+    auto inner = try_fuse_fcom_fstsw(a1, fcom_instr, fstsw_instr);
+    if (!inner) {
+        // Should never happen given our pre-validation matches the inner's
+        // checks, but defensively roll back the bookkeeping.
+        std::swap(a1->x87_cache.perm[0], a1->x87_cache.perm[depth]);
+        a1->x87_cache.run_remaining++;
+        return std::nullopt;
+    }
+    return *inner + 1;
+}
+
+// =============================================================================
+// Peephole: FXCH ST(i) + FCOM/FCOMP/FUCOM/FUCOMP/FCOMPP/FUCOMPP (no FSTSW)
+//
+// Workload pattern (~625 M execs/pass): same fxch-prefix shape as above but
+// without a trailing fstsw.  Run is exactly 2 ops contiguous, so IR is gated
+// out (short_run); single-op was emitting ~34 ARM (fxch ~10 + fcom ~14 + perm
+// flush). Fused emits ~14 ARM (FXCH absorbed, fcom body unchanged).
+//
+// Returns 2 (instructions consumed) if fused, std::nullopt otherwise.
+// =============================================================================
+
+static auto try_fuse_fxch_fcom(TranslationResult* a1, IRInstr* fxch_instr, IRInstr* fcom_instr)
+    -> std::optional<int> {
+    if (fxch_instr->opcode != kOpcodeName_fxch) {
+        return std::nullopt;
+    }
+    const int depth = fxch_instr->operands[1].reg.reg.index();
+    if (depth <= 0 || depth >= 8) {
+        return std::nullopt;
+    }
+
+    const auto fcom_op = fcom_instr->opcode;
+    if (fcom_op != kOpcodeName_fcom && fcom_op != kOpcodeName_fcomp &&
+        fcom_op != kOpcodeName_fucom && fcom_op != kOpcodeName_fucomp &&
+        fcom_op != kOpcodeName_fcompp && fcom_op != kOpcodeName_fucompp) {
+        return std::nullopt;
+    }
+
+    // OPT-G perm swap (see try_fuse_fxch_fcom_fstsw).
+    std::swap(a1->x87_cache.perm[0], a1->x87_cache.perm[depth]);
+    a1->x87_cache.perm_dirty = 1;
+
+    if (a1->x87_cache.run_remaining > 0) {
+        a1->x87_cache.run_remaining--;
+    }
+
+    translate_fcom(a1, fcom_instr);
     return 2;
 }
 
@@ -2258,6 +2367,15 @@ static auto try_fuse_fxch_group(TranslationResult* tr, IRInstr* instrs, int64_t 
     IRInstr* cur = &instrs[idx];
     IRInstr* next = &instrs[idx + 1];
 
+    // 3-instruction fusions (longest first)
+    if (idx + 2 < num) {
+        if (!fusion_disabled(disabled_mask, FusionId::fxch_fcom_fstsw)) {
+            if (auto r = try_fuse_fxch_fcom_fstsw(tr, cur, next, &instrs[idx + 2])) {
+                return r;
+            }
+        }
+    }
+
     if (!fusion_disabled(disabled_mask, FusionId::fxch_arithp)) {
         if (auto r = try_fuse_fxch_arithp(tr, cur, next)) {
             return r;
@@ -2265,6 +2383,11 @@ static auto try_fuse_fxch_group(TranslationResult* tr, IRInstr* instrs, int64_t 
     }
     if (!fusion_disabled(disabled_mask, FusionId::fxch_fstp)) {
         if (auto r = try_fuse_fxch_fstp(tr, cur, next)) {
+            return r;
+        }
+    }
+    if (!fusion_disabled(disabled_mask, FusionId::fxch_fcom)) {
+        if (auto r = try_fuse_fxch_fcom(tr, cur, next)) {
             return r;
         }
     }
