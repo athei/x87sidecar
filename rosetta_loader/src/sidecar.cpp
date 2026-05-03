@@ -860,7 +860,11 @@ void dumpCountersIfEnabled(mach_port_t /*parentTaskPort*/) {
     g_profile.file = nullptr;
 
     const uint64_t mx = *std::max_element(counts, counts + count);
-    fprintf(stdout, "[rosettax87] X87_PROFILE: wrote %u block counters; max=%llu\n", count,
+    // Leading \n: this fires from the sidecar's kqueue NOTE_EXIT handler
+    // *after* the parent process has already terminated and the shell
+    // has redrawn its prompt.  Without the leading \n the message glues
+    // onto the prompt line.
+    fprintf(stdout, "\n[rosettax87] X87_PROFILE: wrote %u block counters; max=%llu\n", count,
             static_cast<unsigned long long>(mx));
     fflush(stdout);
 }
