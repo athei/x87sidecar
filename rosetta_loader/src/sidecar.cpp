@@ -827,6 +827,21 @@ void dumpCountersIfEnabled(mach_port_t /*parentTaskPort*/) {
         std::fwrite(&c, sizeof(c), 1, g_profile.file);
     }
 
+    // Top-dirty predecessor side-table (TDP0): per block_id, the last x87
+    // opcode translated before the most-recent top_dirty gate refusal,
+    // or 0xFFFF if no top_dirty refusal was observed.  Used by the
+    // analyzer to render a "Top opcodes preceding top_dirty refusal"
+    // histogram, pinpointing which op leaves top_dirty=1.
+    profile::TopDirtyPredSectionHeader tdhdr{
+        .magic = profile::kTopDirtyPredSectionMagic,
+        .count = count,
+    };
+    std::fwrite(&tdhdr, sizeof(tdhdr), 1, g_profile.file);
+    for (uint32_t bid = 0; bid < count; ++bid) {
+        const uint16_t op = profile::get_block_top_dirty_predecessor(bid);
+        std::fwrite(&op, sizeof(op), 1, g_profile.file);
+    }
+
     std::fflush(g_profile.file);
     std::fclose(g_profile.file);
     g_profile.file = nullptr;

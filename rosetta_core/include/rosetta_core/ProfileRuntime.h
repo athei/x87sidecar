@@ -87,4 +87,11 @@ uint16_t get_block_build_fail_op(uint32_t bid);
 void set_block_ir_gate_counters(uint32_t bid, BlockIRGateCounters counters);
 BlockIRGateCounters get_block_ir_gate_counters(uint32_t bid);
 
+// Per-block predecessor-of-top_dirty (kOpcodeName_*).  Latest-write-wins;
+// sentinel 0xFFFF means no top_dirty refusal observed.  Lazy-allocated.
+// Records the last x87 opcode translated in the block before the
+// most-recent top_dirty gate refusal — pinpoints which op left top_dirty=1.
+void set_block_top_dirty_predecessor(uint32_t bid, uint16_t opcode);
+uint16_t get_block_top_dirty_predecessor(uint32_t bid);
+
 }  // namespace profile

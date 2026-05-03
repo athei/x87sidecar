@@ -65,7 +65,8 @@ struct Tally {
 
 bool readFile(const std::string& path, std::vector<Block>& out, std::vector<uint64_t>& counters,
               std::vector<Tally>& tallies, std::vector<uint16_t>& build_fail_ops,
-              std::vector<profile::BlockIRGateCounters>& ir_gate_counters) {
+              std::vector<profile::BlockIRGateCounters>& ir_gate_counters,
+              std::vector<uint16_t>& top_dirty_preds) {
     std::ifstream f(path, std::ios::binary);
     if (!f) {
         std::fprintf(stderr, "error: cannot open %s\n", path.c_str());
@@ -204,6 +205,27 @@ bool readFile(const std::string& path, std::vector<Block>& out, std::vector<uint
             ir_gate_counters.resize(ihdr.count);
             std::memcpy(ir_gate_counters.data(), buf.data() + off, ibytes);
             off += ibytes;
+        }
+    }
+
+    // Optional top-dirty predecessor side-table (TDP0).  Older .prof files
+    // lack it; treat absence as "all-sentinel" so the histogram report
+    // just prints "no predecessors recorded".
+    if (off + sizeof(profile::TopDirtyPredSectionHeader) <= buf.size()) {
+        profile::TopDirtyPredSectionHeader thdr;
+        std::memcpy(&thdr, buf.data() + off, sizeof(thdr));
+        if (thdr.magic == profile::kTopDirtyPredSectionMagic) {
+            off += sizeof(thdr);
+            const size_t tbytes = static_cast<size_t>(thdr.count) * sizeof(uint16_t);
+            if (off + tbytes > buf.size()) {
+                std::fprintf(stderr,
+                             "error: %s top-dirty-pred section truncated (declared %u entries)\n",
+                             path.c_str(), thdr.count);
+                return false;
+            }
+            top_dirty_preds.resize(thdr.count);
+            std::memcpy(top_dirty_preds.data(), buf.data() + off, tbytes);
+            off += tbytes;
         }
     }
     return true;
@@ -457,12 +479,14 @@ int main(int argc, char** argv) try {
     std::vector<Tally> tallies;
     std::vector<uint16_t> build_fail_ops;
     std::vector<profile::BlockIRGateCounters> ir_gate_counters;
+    std::vector<uint16_t> top_dirty_preds;
     for (const auto& f : files) {
         std::vector<uint64_t> file_counters;
         std::vector<Tally> file_tallies;
         std::vector<uint16_t> file_bfo;
         std::vector<profile::BlockIRGateCounters> file_irg;
-        if (!readFile(f, blocks, file_counters, file_tallies, file_bfo, file_irg)) {
+        std::vector<uint16_t> file_tdp;
+        if (!readFile(f, blocks, file_counters, file_tallies, file_bfo, file_irg, file_tdp)) {
             return 1;
         }
         if (counters.empty()) {
@@ -470,21 +494,24 @@ int main(int argc, char** argv) try {
             tallies = std::move(file_tallies);
             build_fail_ops = std::move(file_bfo);
             ir_gate_counters = std::move(file_irg);
+            top_dirty_preds = std::move(file_tdp);
         } else {
             counters.insert(counters.end(), file_counters.begin(), file_counters.end());
             tallies.insert(tallies.end(), file_tallies.begin(), file_tallies.end());
             build_fail_ops.insert(build_fail_ops.end(), file_bfo.begin(), file_bfo.end());
             ir_gate_counters.insert(ir_gate_counters.end(), file_irg.begin(), file_irg.end());
+            top_dirty_preds.insert(top_dirty_preds.end(), file_tdp.begin(), file_tdp.end());
         }
     }
     const bool have_tallies = !tallies.empty();
     const bool have_bfo = !build_fail_ops.empty();
     const bool have_irg = !ir_gate_counters.empty();
+    const bool have_tdp = !top_dirty_preds.empty();
     std::fprintf(stderr,
                  "loaded %zu blocks, %zu counter entries, %zu tally entries, %zu bfo entries, "
-                 "%zu irg entries from %zu file(s)\n",
+                 "%zu irg entries, %zu tdp entries from %zu file(s)\n",
                  blocks.size(), counters.size(), tallies.size(), build_fail_ops.size(),
-                 ir_gate_counters.size(), files.size());
+                 ir_gate_counters.size(), top_dirty_preds.size(), files.size());
 
     // Slice patterns within natural x87 runs.  X87Cache::lookahead is the
     // JIT's own run-detection function (Translator.cpp:74 calls the same).
@@ -809,6 +836,71 @@ int main(int argc, char** argv) try {
         std::fprintf(
             stderr,
             "ir-gate-refusal histogram: skipped (no IRG0 section in input — older profile)\n");
+    }
+
+    // ── Predecessor-of-top_dirty histogram ────────────────────────────────
+    // For each block whose top_dirty refusal was observed, attribute the
+    // block's exec_count × top_dirty_count to the kOpcodeName_* of the last
+    // x87 op translated before that refusal.  Top entries are the highest-
+    // leverage opcodes to add an early-flush handler for.
+    if (have_tdp) {
+        struct Bucket {
+            uint64_t exec_w = 0;
+            uint32_t blocks = 0;
+        };
+        std::unordered_map<uint16_t, Bucket> hist;
+        uint64_t total_exec_w = 0;
+        for (const auto& b : blocks) {
+            if (b.id >= top_dirty_preds.size()) {
+                continue;
+            }
+            const uint16_t op = top_dirty_preds[b.id];
+            if (op == profile::kNoTopDirtyPredecessor) {
+                continue;
+            }
+            const uint64_t exec = (b.id < counters.size()) ? counters[b.id] : 0;
+            if (exec == 0) {
+                continue;
+            }
+            // Weight by per-block top_dirty refusal count when IRG1 is
+            // present, otherwise by exec alone.
+            uint64_t weight = exec;
+            if (have_irg && b.id < ir_gate_counters.size()) {
+                const uint16_t td = ir_gate_counters[b.id].counts[profile::kIRGateReasonTopDirty];
+                if (td > 0) {
+                    weight = exec * static_cast<uint64_t>(td);
+                }
+            }
+            auto& bk = hist[op];
+            bk.exec_w += weight;
+            bk.blocks += 1;
+            total_exec_w += weight;
+        }
+        std::vector<std::pair<uint16_t, Bucket>> hrows(hist.begin(), hist.end());
+        std::ranges::sort(
+            hrows, [](const auto& a, const auto& b) { return a.second.exec_w > b.second.exec_w; });
+        std::printf("\n");
+        std::printf("# Top opcodes preceding top_dirty refusal (exec-weighted)\n");
+        std::printf("rank,opcode,exec_count,share%%,blocks\n");
+        const size_t hn = std::min<size_t>(hrows.size(), 20);
+        for (size_t i = 0; i < hn; ++i) {
+            const auto& [op, bk] = hrows[i];
+            const char* name =
+                (op < kOpcodeNames.size() && kOpcodeNames[op] != nullptr) ? kOpcodeNames[op] : "?";
+            const double share = total_exec_w > 0 ? 100.0 * static_cast<double>(bk.exec_w) /
+                                                        static_cast<double>(total_exec_w)
+                                                  : 0.0;
+            std::printf("%zu,%s,%llu,%.1f,%u\n", i + 1, name,
+                        static_cast<unsigned long long>(bk.exec_w), share, bk.blocks);
+        }
+        std::fprintf(stderr,
+                     "top-dirty-pred histogram: %zu distinct opcodes across %llu exec-weighted "
+                     "refusals (showing top %zu)\n",
+                     hrows.size(), static_cast<unsigned long long>(total_exec_w), hn);
+    } else {
+        std::fprintf(
+            stderr,
+            "top-dirty-pred histogram: skipped (no TDP0 section in input — older profile)\n");
     }
     return 0;
 } catch (const std::exception& e) {

@@ -36,6 +36,11 @@ std::unique_ptr<std::atomic<uint16_t>[]> g_block_build_fail_op;
 // set_block_ir_gate_counters call; absent when profiling is disabled.
 std::unique_ptr<std::atomic<uint16_t>[]> g_block_ir_gate_counts[kIRGateReasonCount];
 
+// Per-block predecessor-of-top_dirty side-table.  Same shape as the
+// build-bail side-table; lazy-allocated on first
+// set_block_top_dirty_predecessor call.
+std::unique_ptr<std::atomic<uint16_t>[]> g_block_top_dirty_pred;
+
 void pack_tally(BlockTally t, uint64_t& lo, uint64_t& hi) {
     static_assert(sizeof(BlockTally) == 16);
     std::memcpy(&lo, reinterpret_cast<const std::byte*>(&t) + 0, 8);
@@ -175,6 +180,37 @@ void set_block_ir_gate_counters(uint32_t bid, BlockIRGateCounters counters) {
     for (uint32_t r = 0; r < kIRGateReasonCount; ++r) {
         g_block_ir_gate_counts[r][bid].store(counters.counts[r], std::memory_order_relaxed);
     }
+}
+
+void set_block_top_dirty_predecessor(uint32_t bid, uint16_t opcode) {
+    if (bid >= kMaxBlocks) {
+        return;
+    }
+    {
+        std::scoped_lock lock(g_mu);
+        if (!g_block_top_dirty_pred) {
+            g_block_top_dirty_pred = std::make_unique<std::atomic<uint16_t>[]>(kMaxBlocks);
+            for (uint32_t i = 0; i < kMaxBlocks; ++i) {
+                g_block_top_dirty_pred[i].store(0xFFFFU, std::memory_order_relaxed);
+            }
+        }
+    }
+    g_block_top_dirty_pred[bid].store(opcode, std::memory_order_relaxed);
+}
+
+uint16_t get_block_top_dirty_predecessor(uint32_t bid) {
+    if (bid >= kMaxBlocks) {
+        return 0xFFFFU;
+    }
+    std::atomic<uint16_t>* arr;
+    {
+        std::scoped_lock lock(g_mu);
+        if (!g_block_top_dirty_pred) {
+            return 0xFFFFU;
+        }
+        arr = g_block_top_dirty_pred.get();
+    }
+    return arr[bid].load(std::memory_order_relaxed);
 }
 
 BlockIRGateCounters get_block_ir_gate_counters(uint32_t bid) {

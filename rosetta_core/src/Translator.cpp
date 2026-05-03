@@ -64,6 +64,7 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
             cache.tally_ir_gate_tag_push = 0;
             cache.tally_ir_gate_deferred_pop = 0;
             cache.tally_ir_gate_perm_dirty = 0;
+            cache.prev_x87_opcode = 0xFFFFU;
             cache.profile_bid = profile::kOverflowId;
             if (profile::counter_array_addr() != 0) {
                 const uint32_t bid = profile::register_block(block);
@@ -146,6 +147,11 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                 } else if (cache.top_dirty != 0) {
                     cache.tally_ir_gate_top_dirty =
                         static_cast<uint16_t>(cache.tally_ir_gate_top_dirty + 1);
+                    if (cache.profile_bid != profile::kOverflowId &&
+                        cache.prev_x87_opcode != 0xFFFFU) {
+                        profile::set_block_top_dirty_predecessor(cache.profile_bid,
+                                                                 cache.prev_x87_opcode);
+                    }
                     gate_refused = true;
                 } else if (cache.tag_push_pending != 0) {
                     cache.tally_ir_gate_tag_push =
@@ -587,6 +593,14 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
     translation_result->free_fpr_mask =
         translation_result->_unoccupied_temporary_fprs_for_xmm_scalars;
     translation_result->_pinned_temporary_scalars = 0;
+
+    // Track the most-recent x87 op translated in this block via the
+    // peep+single fallback — the IR-gate top_dirty diagnostic reads this
+    // to attribute which preceding op left top_dirty=1.  IR success path
+    // doesn't update this (it returns earlier at line 225); IR-consumed
+    // ops can't be the immediate predecessor of a NEXT-call top_dirty
+    // refusal because IR resets all dirty state on success.
+    cache.prev_x87_opcode = opcode;
 
     return insn_idx + consumed;
 }

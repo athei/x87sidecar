@@ -64,6 +64,11 @@ struct X87Cache {
     uint16_t tally_ir_gate_tag_push = 0;
     uint16_t tally_ir_gate_deferred_pop = 0;
     uint16_t tally_ir_gate_perm_dirty = 0;
+    // Last x87 opcode (kOpcodeName_*) translated in this block, or 0xFFFF
+    // if none yet.  Used by the IR-gate top_dirty diagnostic to attribute
+    // which preceding op left top_dirty=1 — surfaces in the analyzer's
+    // "Top opcodes preceding top_dirty refusal" histogram.
+    uint16_t prev_x87_opcode = 0xFFFFU;
     uint32_t profile_bid = 0xFFFFFFFFU;  // = profile::kOverflowId
 
     bool active() const;

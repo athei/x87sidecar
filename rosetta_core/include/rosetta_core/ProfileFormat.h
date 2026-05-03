@@ -144,4 +144,23 @@ constexpr const char* kIRGateReasonNames[kIRGateReasonCount] = {
     "short_run", "top_dirty", "tag_push_pending", "deferred_pop", "perm_dirty",
 };
 
+// Top-dirty predecessor side-table magic ('TDP0').  Optional section written
+// after IRG1 at exit time.  Per block_id (0..count-1), records the
+// kOpcodeName_* of the LAST x87 op translated in the block before the
+// most-recent top_dirty gate refusal.  Sentinel 0xFFFF means no top_dirty
+// refusal observed.  Used by the analyzer to render a "Top opcodes
+// preceding top_dirty refusal" histogram, pinpointing which op leaves
+// top_dirty=1 most often — the candidate site for an early flush.  Older
+// .prof files lacking this section parse with the rest of the file
+// intact; analyzer treats absence as "no predecessors recorded".
+constexpr uint32_t kTopDirtyPredSectionMagic = 0x30504454U;  // 'TDP0'
+
+struct TopDirtyPredSectionHeader {
+    uint32_t magic;  // = kTopDirtyPredSectionMagic
+    uint32_t count;  // number of u16 entries that follow
+};
+static_assert(sizeof(TopDirtyPredSectionHeader) == 8);
+
+constexpr uint16_t kNoTopDirtyPredecessor = 0xFFFFU;
+
 }  // namespace profile
