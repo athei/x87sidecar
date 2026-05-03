@@ -19,6 +19,44 @@
 //     each emit materialises that address into a scratch GPR.
 namespace TranslatorX87 {
 
+// Mode discriminator for the shared sin/cos polynomial body — selects the
+// range-reduction offset (sin: n = round(x/π); cos: n = round(x/π + 0.5)).
+enum class TrigReduceMode : std::uint8_t { Sin, Cos };
+
+// FPR-level core of the sin/cos polynomial.  Caller owns Dx (input value),
+// Xconst (pointer to the transcendental constants table), and Dd_out
+// (destination FPR for the result).  This function neither loads from nor
+// stores to the x87 stack — it just produces sin(Dx) or cos(Dx) in Dd_out.
+// Clears C0..C3 is the caller's responsibility (the wrappers below do it).
+void emit_inline_trig_body(TranslationResult& a1, AssemblerBuffer& buf, int Dx, int Xconst,
+                           int Dd_out, TrigReduceMode mode);
+
+// FPR-level core of fpatan: produces atan2(Dy_in, Dx_in) in Dd_out.  Caller
+// owns the input FPRs and Xconst; this function manages its own internal
+// scratch FPRs/GPRs.  Does NOT clear C0..C3 (fpatan's spec leaves them
+// undefined per `feedback_x87_cc_bits_must_be_cleared.md`).
+void emit_inline_fpatan_core(TranslationResult& a1, AssemblerBuffer& buf, int Dy_in, int Dx_in,
+                             int Dd_out, int Xconst);
+
+// FPR-level core of fptan: produces tan(Dx_in) in Dd_out.  Caller owns
+// Dx_in, Xconst, Dd_out.  Does NOT clear C0..C3 (caller must, since
+// fptan's spec defines them).
+void emit_inline_fptan_core(TranslationResult& a1, AssemblerBuffer& buf, int Dx_in, int Dd_out,
+                            int Xconst);
+
+// FPR-level core of fyl2x: produces Dy_in * log2(Dx_in) in Dd_out.  Caller
+// owns the input FPRs and Xconst.  Does NOT clear C0..C3 (fyl2x's spec
+// leaves them undefined).
+void emit_inline_fyl2x_core(TranslationResult& a1, AssemblerBuffer& buf, int Dy_in, int Dx_in,
+                            int Dd_out, int Xconst);
+
+// Clear C0/C1/C2/C3 (status_word bits 8/9/10/14).  See
+// `feedback_x87_cc_bits_must_be_cleared.md`: ops whose spec defines these
+// (fsin/fcos/fsincos/fptan/fprem/fprem1) MUST emit this after their body
+// or wine's argument-reduction loops can spin forever (the WoW world-load
+// freeze was exactly this).
+void emit_clear_x87_cc_bits(TranslationResult& a1, AssemblerBuffer& buf, int Xbase);
+
 // Inline ARM64 polynomial approximations of sin(x) / cos(x).  Source:
 // ARM-software/optimized-routines' math/aarch64/advsimd/{sin,cos}.c
 // scalarised.  ULP <= 3.3 in [-pi/2,pi/2], 2.73 ULP in [-2^23, 2^23].

@@ -3275,26 +3275,15 @@ auto translate_fnop(TranslationResult* a1, IRInstr* /*a2*/) -> void {
 // FMUL handles the remaining special-case fall-out automatically:
 //   ST(0) NaN → result NaN; 0·∞ → NaN; ∞·finite → ±∞ etc.
 // =============================================================================
-auto translate_fscale(TranslationResult* a1, IRInstr* /*a2*/) -> void {
-    AssemblerBuffer& buf = a1->insn_buf;
-
-    auto [Xbase, Wd_top] = x87_begin(*a1, buf);
-    const int Xst_base = x87_get_st_base(*a1);
-    const int Wd_tmp = alloc_gpr(*a1, 2);
-
-    // Load both stack values; resolve_depth honours deferred-fxch perm.
-    const int Dd_a = alloc_free_fpr(*a1);
-    emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Dd_a, Xst_base);
-    const int Dd_b = alloc_free_fpr(*a1);
-    emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, 1), Wd_tmp, Dd_b, Xst_base);
-
-    // ── k = trunc(ST(1)) as 32-bit signed (saturating) ──
-    const int Wd_k = alloc_free_gpr(*a1);
-    emit_fcvtzs(buf, /*ftype=*/1 /*f64*/, /*is_64bit_int=*/0, Wd_k, Dd_b);
+void emit_inline_fscale_core(TranslationResult& a1, AssemblerBuffer& buf, int Dx_in, int Dy_in,
+                             int Dd_out) {
+    // ── k = trunc(Dy_in) as 32-bit signed (saturating) ──
+    const int Wd_k = alloc_free_gpr(a1);
+    emit_fcvtzs(buf, /*ftype=*/1 /*f64*/, /*is_64bit_int=*/0, Wd_k, Dy_in);
 
     // ── Build multiplier bits in Wd_e (reused as 64-bit Xd_bits below) ──
     // exp_new = 1023 + k
-    const int Wd_e = alloc_free_gpr(*a1);
+    const int Wd_e = alloc_free_gpr(a1);
     emit_add_imm(buf, /*is_64bit=*/0, /*is_sub=*/0, /*is_set_flags=*/0,
                  /*shift=*/0, /*imm12=*/1023, Wd_k, Wd_e);
     // UBFIZ Xd_bits, Wd_e, #52, #11   → exp_new at bits[62:52], rest zero
@@ -3321,11 +3310,11 @@ auto translate_fscale(TranslationResult* a1, IRInstr* /*a2*/) -> void {
     emit_add_imm(buf, /*is_64bit=*/0, /*is_sub=*/1, /*is_set_flags=*/1,
                  /*shift=*/0, /*imm12=*/1023, Wd_k, /*Rd=*/31);
     {
-        const int Xtemp = alloc_free_gpr(*a1);
+        const int Xtemp = alloc_free_gpr(a1);
         // +Inf bits = 0x7FF0_0000_0000_0000 = MOVZ #0x7FF0 LSL #48
         emit_movn(buf, /*is_64bit=*/1, /*opc=*/2 /*MOVZ*/, /*hw=*/3, 0x7FF0, Xtemp);
         emit_csel(/*is_64bit=*/1, /*Rd=*/Wd_e, /*Rn=*/Xtemp, /*Rm=*/Wd_e, kGT);
-        free_gpr(*a1, Xtemp);
+        free_gpr(a1, Xtemp);
     }
 
     // CMN Wd_k, #1022 → flags as Wd_k + 1022.  LT → k < -1022 → underflow.
@@ -3335,30 +3324,40 @@ auto translate_fscale(TranslationResult* a1, IRInstr* /*a2*/) -> void {
                  /*shift=*/0, /*imm12=*/1022, Wd_k, /*Rd=*/31);
     // CSEL Wd_e = (LT) ? XZR : Wd_e — underflow → multiplier = 0.
     emit_csel(/*is_64bit=*/1, /*Rd=*/Wd_e, /*Rn=*/31 /*XZR*/, /*Rm=*/Wd_e, kLT);
-    free_gpr(*a1, Wd_k);
+    free_gpr(a1, Wd_k);
 
     // FMOV multiplier into FPR.
-    const int Dd_m = alloc_free_fpr(*a1);
+    const int Dd_m = alloc_free_fpr(a1);
     emit_fmov_x_to_d(buf, Dd_m, Wd_e);
-    free_gpr(*a1, Wd_e);
+    free_gpr(a1, Wd_e);
 
-    // result_norm = Dd_a * Dd_m
-    const int Dd_norm = alloc_free_fpr(*a1);
-    emit_fmul_f64(buf, Dd_norm, Dd_a, Dd_m);
-    free_fpr(*a1, Dd_m);
-    free_fpr(*a1, Dd_a);
+    // result_norm = Dx_in * Dd_m
+    const int Dd_norm = alloc_free_fpr(a1);
+    emit_fmul_f64(buf, Dd_norm, Dx_in, Dd_m);
+    free_fpr(a1, Dd_m);
 
-    // FCMP Dd_b, Dd_b → V=1 iff Dd_b is NaN.
-    // FCSEL Dd_result = (NaN) ? Dd_b : Dd_norm
-    emit_fcmp_f64(buf, Dd_b, Dd_b);
-    const int Dd_result = alloc_free_fpr(*a1);
-    emit_fcsel_f64(buf, Dd_result, Dd_b, Dd_norm, kVS);
-    free_fpr(*a1, Dd_norm);
-    free_fpr(*a1, Dd_b);
+    // FCMP Dy_in, Dy_in → V=1 iff Dy_in is NaN.
+    // FCSEL Dd_out = (NaN) ? Dy_in : Dd_norm
+    emit_fcmp_f64(buf, Dy_in, Dy_in);
+    emit_fcsel_f64(buf, Dd_out, Dy_in, Dd_norm, kVS);
+    free_fpr(a1, Dd_norm);
+}
 
-    // Write result back to ST(0).
-    emit_store_st(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Dd_result, Xst_base);
-    free_fpr(*a1, Dd_result);
+auto translate_fscale(TranslationResult* a1, IRInstr* /*a2*/) -> void {
+    AssemblerBuffer& buf = a1->insn_buf;
+
+    auto [Xbase, Wd_top] = x87_begin(*a1, buf);
+    const int Xst_base = x87_get_st_base(*a1);
+    const int Wd_tmp = alloc_gpr(*a1, 2);
+
+    // Inputs loaded directly into d0 / d1 (not in scratch pool — frees the
+    // pool for the core's internal scratch).  Output lands in d0.
+    emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, /*Dd=*/0, Xst_base);
+    emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, 1), Wd_tmp, /*Dd=*/1, Xst_base);
+
+    emit_inline_fscale_core(*a1, buf, /*Dx_in=*/0, /*Dy_in=*/1, /*Dd_out=*/0);
+
+    emit_store_st(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, /*Dd=*/0, Xst_base);
 
     x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp);
     free_gpr(*a1, Wd_tmp);

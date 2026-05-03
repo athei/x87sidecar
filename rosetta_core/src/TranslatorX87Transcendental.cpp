@@ -172,7 +172,7 @@ static_assert(offsetof(rosetta_core::TranscendentalConstants, tan_poly) ==
                   ConstOff::TanPoly0 * std::size_t{8},
               "ConstOff::TanPoly0 drift");
 
-enum class TrigReduceMode : std::uint8_t { Sin, Cos };
+// TrigReduceMode now lives in the public header (was anon namespace).
 
 // 3-step Cody-Waite range reduction shared by fsin / fcos / fsincos.
 //
@@ -281,6 +281,8 @@ void emit_apply_qn_sign(TranslationResult& a1, AssemblerBuffer& buf, int Dy_in, 
     free_gpr(a1, Xy);
 }
 
+}  // namespace
+
 // Body of fsin/fcos given a pre-loaded Dx and a pre-materialised Xconst.
 // Runs Cody-Waite reduction in `mode`, evaluates the sin polynomial,
 // applies the qn sign flip.  Result lands in Dd_out (caller-specified,
@@ -309,17 +311,18 @@ void emit_inline_trig_body(TranslationResult& a1, AssemblerBuffer& buf, int Dx, 
     free_fpr(a1, Dy);
 }
 
-// Single-output wrapper used by fsin / fcos.  Loads ST(0), materialises
-// Xconst, runs one trig body, then frees.  Result lands in d0 (matching
-// the IPC convention so the caller's emit_store_st(..., Dd=0, ...)
-// Just Works).
-void emit_inline_sin_or_cos(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, int Wd_top,
-                            int Wd_tmp, TrigReduceMode mode) {
+// Single-output wrapper used by fsin / fcos.  Loads ST(0) into d0 (NOT a
+// scratch-pool FPR — that gives the trig body the full 8-slot pool for
+// internal scratch), materialises Xconst, runs one trig body, then frees.
+// Result lands in d0 (matching the existing post-wrapper convention so the
+// caller's emit_store_st(..., Dd=0, ...) Just Works).  File-static — only
+// callers are emit_inline_fsin/fcos below.
+static void emit_inline_sin_or_cos(TranslationResult& a1, AssemblerBuffer& buf, int Xbase,
+                                   int Wd_top, int Wd_tmp, TrigReduceMode mode) {
     const int Xst_base = x87_get_st_base(a1);
     const int depth_st0 = resolve_depth(a1, 0);
 
-    const int Dx = alloc_free_fpr(a1);
-    emit_load_st(buf, Xbase, Wd_top, depth_st0, Wd_tmp, Dx, Xst_base);
+    emit_load_st(buf, Xbase, Wd_top, depth_st0, Wd_tmp, /*Dd=*/0, Xst_base);
 
     const int Xconst = alloc_free_gpr(a1);
     const uint64_t consts_addr = rosetta_core::get_transcendental_constants_addr();
@@ -327,10 +330,9 @@ void emit_inline_sin_or_cos(TranslationResult& a1, AssemblerBuffer& buf, int Xba
            "transcendental constants not installed; loader should have set address");
     emit_movz_movk_abs64(buf, Xconst, consts_addr);
 
-    emit_inline_trig_body(a1, buf, Dx, Xconst, /*Dd_out=*/0, mode);
+    emit_inline_trig_body(a1, buf, /*Dx=*/0, Xconst, /*Dd_out=*/0, mode);
 
     free_gpr(a1, Xconst);
-    free_fpr(a1, Dx);
 }
 
 // Clear C0/C1/C2/C3 (status_word bits 8/9/10/14) in the X87State.
@@ -361,8 +363,6 @@ void emit_clear_x87_cc_bits(TranslationResult& a1, AssemblerBuffer& buf, int Xba
     emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/0, kX87SwImm12, Xbase, Wd_sw);
     free_gpr(a1, Wd_sw);
 }
-
-}  // namespace
 
 void emit_inline_fsin(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, int Wd_top,
                       int Wd_tmp) {
@@ -713,32 +713,38 @@ void emit_inline_log2(TranslationResult& a1, AssemblerBuffer& buf, int Din, int 
     free_fpr(a1, Dhi);
 }
 
+// FPR-level core of fyl2x: produces Dy_in * log2(Dx_in) in Dd_out.  Caller
+// owns inputs + Xconst.  Note: emit_inline_log2 reads its `Din` only in the
+// first instruction (FMOV Xu, Din) — passing Dx_in == Dd_out is safe because
+// the input is consumed before Dd_out is written at the end.
+void emit_inline_fyl2x_core(TranslationResult& a1, AssemblerBuffer& buf, int Dy_in, int Dx_in,
+                            int Dd_out, int Xconst) {
+    emit_inline_log2(a1, buf, Dx_in, Xconst, Dd_out);  // Dd_out = log2(Dx_in)
+    emit_fmul_f64(buf, Dd_out, Dd_out, Dy_in);         // Dd_out *= Dy_in
+}
+
 void emit_inline_fyl2x(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, int Wd_top,
                        int Wd_tmp) {
     // x86 fyl2x: ST(0) := ST(1) * log2(ST(0)); pop.
-    // Caller (emit_2in_pop_translate) handles the writeback at depth 1
-    // and the x87_pop afterwards — we just leave the result in d0.
+    // Inputs loaded directly into d0 (Dx) / d1 (Dy) — neither is in the
+    // scratch pool, so the polynomial body has the full 8-slot pool for
+    // its internal scratch.  Output lands in d0.  Caller (translate_fyl2x)
+    // stores d0 to ST(1) and pops.
     const int Xst_base = x87_get_st_base(a1);
     const int depth_st0 = resolve_depth(a1, 0);
     const int depth_st1 = resolve_depth(a1, 1);
 
-    const int Dx = alloc_free_fpr(a1);
-    emit_load_st(buf, Xbase, Wd_top, depth_st0, Wd_tmp, Dx, Xst_base);
-
-    const int Dy = alloc_free_fpr(a1);
-    emit_load_st(buf, Xbase, Wd_top, depth_st1, Wd_tmp, Dy, Xst_base);
+    emit_load_st(buf, Xbase, Wd_top, depth_st0, Wd_tmp, /*Dd=*/0, Xst_base);
+    emit_load_st(buf, Xbase, Wd_top, depth_st1, Wd_tmp, /*Dd=*/1, Xst_base);
 
     const int Xconst = alloc_free_gpr(a1);
     const uint64_t consts_addr = rosetta_core::get_transcendental_constants_addr();
     assert(consts_addr != 0 && "transcendental constants not installed");
     emit_movz_movk_abs64(buf, Xconst, consts_addr);
 
-    emit_inline_log2(a1, buf, Dx, Xconst, /*Dd_out=*/0);  // d0 = log2(x)
-    free_fpr(a1, Dx);
-    free_gpr(a1, Xconst);
+    emit_inline_fyl2x_core(a1, buf, /*Dy_in=*/1, /*Dx_in=*/0, /*Dd_out=*/0, Xconst);
 
-    emit_fmul_f64(buf, /*Dd=*/0, /*Dn=*/0, /*Dm=*/Dy);  // d0 = y * log2(x)
-    free_fpr(a1, Dy);
+    free_gpr(a1, Xconst);
 }
 
 // fpatan: replace ST(1) with atan2(ST(1), ST(0)); pop.  Port of
@@ -761,29 +767,18 @@ void emit_inline_fyl2x(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, i
 // Special cases (zero/inf/NaN) follow whatever IEEE FP arithmetic does;
 // no scalar fallback as in the AdvSIMD source (real game workloads
 // don't feed degenerate inputs to fpatan).
-void emit_inline_fpatan(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, int Wd_top,
-                        int Wd_tmp) {
-    const int Xst_base = x87_get_st_base(a1);
-    const int depth_st0 = resolve_depth(a1, 0);
-    const int depth_st1 = resolve_depth(a1, 1);
-
-    // 1. Load Dx = ST(0), Dy = ST(1).
-    const int Dx = alloc_free_fpr(a1);
-    emit_load_st(buf, Xbase, Wd_top, depth_st0, Wd_tmp, Dx, Xst_base);
-    const int Dy = alloc_free_fpr(a1);
-    emit_load_st(buf, Xbase, Wd_top, depth_st1, Wd_tmp, Dy, Xst_base);
-
-    const int Xconst = alloc_free_gpr(a1);
-    const uint64_t consts_addr = rosetta_core::get_transcendental_constants_addr();
-    assert(consts_addr != 0 && "transcendental constants not installed");
-    emit_movz_movk_abs64(buf, Xconst, consts_addr);
-
-    // 2. sign_xy = (bits(x) ^ bits(y)) & 0x8000000000000000
+// FPR-level core of fpatan: produces atan2(Dy_in, Dx_in) in Dd_out.  Caller
+// owns Dy_in / Dx_in / Xconst — this function does not free them.  Inputs
+// are read-only (the body uses FMOV-d-to-x copies and FABS to derived
+// scratch FPRs, never mutating Dy_in/Dx_in).
+void emit_inline_fpatan_core(TranslationResult& a1, AssemblerBuffer& buf, int Dy_in, int Dx_in,
+                             int Dd_out, int Xconst) {
+    // 1. sign_xy = (bits(x) ^ bits(y)) & 0x8000000000000000
     const int Xsign_xy = alloc_free_gpr(a1);
     {
         const int Xtmp = alloc_free_gpr(a1);
-        emit_fmov_d_to_x(buf, Xsign_xy, Dx);
-        emit_fmov_d_to_x(buf, Xtmp, Dy);
+        emit_fmov_d_to_x(buf, Xsign_xy, Dx_in);
+        emit_fmov_d_to_x(buf, Xtmp, Dy_in);
         emit_logical_shifted_reg(buf, /*is_64bit=*/1, /*opc=*/2 /*EOR*/, /*n=*/0,
                                  /*shift_type=LSL*/ 0, /*Rm=*/Xtmp,
                                  /*shift_amount=*/0, /*Rn=*/Xsign_xy, /*Rd=*/Xsign_xy);
@@ -793,15 +788,13 @@ void emit_inline_fpatan(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, 
         free_gpr(a1, Xtmp);
     }
 
-    // 3. ax = |x|, ay = |y|
+    // 2. ax = |x|, ay = |y|  (in fresh scratch FPRs; inputs untouched)
     const int Dax = alloc_free_fpr(a1);
     const int Day = alloc_free_fpr(a1);
-    emit_fabs_f64(buf, Dax, Dx);
-    emit_fabs_f64(buf, Day, Dy);
-    free_fpr(a1, Dy);
-    // Dx is still needed for the sign-of-x test below — keep it.
+    emit_fabs_f64(buf, Dax, Dx_in);
+    emit_fabs_f64(buf, Day, Dy_in);
 
-    // 4. pred_aygtax = (ay > ax).  FCMP Day, Dax sets NZCV.
+    // 3. pred_aygtax = (ay > ax).  FCMP Day, Dax sets NZCV.
     //    Then build num, den, shift_b via FCSEL on the same flags.
     emit_fcmp_f64(buf, Day, Dax);
     const int Dneg_ax = alloc_free_fpr(a1);
@@ -825,14 +818,14 @@ void emit_inline_fpatan(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, 
         free_fpr(a1, Done);
     }
 
-    // 5. z = num / den
+    // 4. z = num / den
     const int Dz = alloc_free_fpr(a1);
     emit_fdiv_f64(buf, Dz, Dnum, Dden);
     free_fpr(a1, Dnum);
     free_fpr(a1, Dden);
 
-    // 6. shift_a = (x < 0) ? -2.0 : 0.0;  shift = shift_a + shift_b
-    emit_fcmp_zero_f64(buf, Dx);
+    // 5. shift_a = (x < 0) ? -2.0 : 0.0;  shift = shift_a + shift_b
+    emit_fcmp_zero_f64(buf, Dx_in);
     const int Dshift = alloc_free_fpr(a1);
     {
         const int Dneg_two = alloc_free_fpr(a1);
@@ -845,15 +838,14 @@ void emit_inline_fpatan(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, 
     }
     emit_fadd_f64(buf, Dshift, Dshift, Dshift_b);
     free_fpr(a1, Dshift_b);
-    free_fpr(a1, Dx);
 
-    // 7. z2 = z·z, z3 = z2·z
+    // 6. z2 = z·z, z3 = z2·z
     const int Dz2 = alloc_free_fpr(a1);
     emit_fmul_f64(buf, Dz2, Dz, Dz);
     const int Dz3 = alloc_free_fpr(a1);
     emit_fmul_f64(buf, Dz3, Dz2, Dz);
 
-    // 8. Horner polynomial in z²: poly = c19; poly = c[i] + z²·poly for i=18..0
+    // 7. Horner polynomial in z²: poly = c19; poly = c[i] + z²·poly for i=18..0
     const int Dpoly = alloc_free_fpr(a1);
     {
         const int Dtmp = alloc_free_fpr(a1);
@@ -866,7 +858,7 @@ void emit_inline_fpatan(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, 
     }
     free_fpr(a1, Dz2);
 
-    // 9. ret = z + shift·(π/2) + z³·poly
+    // 8. ret = z + shift·(π/2) + z³·poly
     {
         const int Dpi2 = alloc_free_fpr(a1);
         emit_fldr_imm(buf, 3, Dpi2, Xconst, ConstOff::Atan2PiOver2);
@@ -878,19 +870,39 @@ void emit_inline_fpatan(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, 
     free_fpr(a1, Dz3);
     free_fpr(a1, Dshift);
 
-    // 10. result = bits_to_double(bits(ret) ^ sign_xy) → d0
+    // 9. Dd_out = bits_to_double(bits(ret) ^ sign_xy)
     {
         const int Xret = alloc_free_gpr(a1);
         emit_fmov_d_to_x(buf, Xret, Dz);
         emit_logical_shifted_reg(buf, /*is_64bit=*/1, /*opc=*/2 /*EOR*/, /*n=*/0,
                                  /*shift_type=LSL*/ 0, /*Rm=*/Xsign_xy,
                                  /*shift_amount=*/0, /*Rn=*/Xret, /*Rd=*/Xret);
-        emit_fmov_x_to_d(buf, /*Dd=*/0, Xret);
+        emit_fmov_x_to_d(buf, Dd_out, Xret);
         free_gpr(a1, Xret);
     }
     free_gpr(a1, Xsign_xy);
-    free_gpr(a1, Xconst);
     free_fpr(a1, Dz);
+}
+
+void emit_inline_fpatan(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, int Wd_top,
+                        int Wd_tmp) {
+    // Inputs loaded directly into d0 (Dx) / d1 (Dy) — neither is in the
+    // scratch pool, so the polynomial body has the full 8-slot pool.
+    const int Xst_base = x87_get_st_base(a1);
+    const int depth_st0 = resolve_depth(a1, 0);
+    const int depth_st1 = resolve_depth(a1, 1);
+
+    emit_load_st(buf, Xbase, Wd_top, depth_st0, Wd_tmp, /*Dd=*/0, Xst_base);
+    emit_load_st(buf, Xbase, Wd_top, depth_st1, Wd_tmp, /*Dd=*/1, Xst_base);
+
+    const int Xconst = alloc_free_gpr(a1);
+    const uint64_t consts_addr = rosetta_core::get_transcendental_constants_addr();
+    assert(consts_addr != 0 && "transcendental constants not installed");
+    emit_movz_movk_abs64(buf, Xconst, consts_addr);
+
+    emit_inline_fpatan_core(a1, buf, /*Dy_in=*/1, /*Dx_in=*/0, /*Dd_out=*/0, Xconst);
+
+    free_gpr(a1, Xconst);
 }
 
 // fptan: replace ST(0) with tan(ST(0)); push 1.0.  Port of
@@ -914,29 +926,19 @@ void emit_inline_fpatan(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, 
 //     odd  qi (qi&1 == 1): result =  n / d  ((p²-1)/(2p) = -cot(2r))
 //
 // Caller (translate_fptan) then pushes 1.0 onto the stack post-tan.
-void emit_inline_fptan(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, int Wd_top,
-                       int Wd_tmp) {
-    const int Xst_base = x87_get_st_base(a1);
-    const int depth_st0 = resolve_depth(a1, 0);
-
-    // 1. Load Dx = ST(0)
-    const int Dx = alloc_free_fpr(a1);
-    emit_load_st(buf, Xbase, Wd_top, depth_st0, Wd_tmp, Dx, Xst_base);
-
-    const int Xconst = alloc_free_gpr(a1);
-    const uint64_t consts_addr = rosetta_core::get_transcendental_constants_addr();
-    assert(consts_addr != 0 && "transcendental constants not installed");
-    emit_movz_movk_abs64(buf, Xconst, consts_addr);
-
-    // 2. q = round(x · 2/π) via FMA shift trick
+// FPR-level core of fptan: produces tan(Dx_in) in Dd_out.  Caller owns
+// Dx_in (read-only) and Xconst.  Does NOT clear C0..C3; the wrapper does.
+void emit_inline_fptan_core(TranslationResult& a1, AssemblerBuffer& buf, int Dx_in, int Dd_out,
+                            int Xconst) {
+    // 1. q = round(x · 2/π) via FMA shift trick
     const int Dq = alloc_free_fpr(a1);
     {
         const int Dshift = alloc_free_fpr(a1);
         const int Dtwopi = alloc_free_fpr(a1);
         emit_fldr_imm(buf, 3, Dshift, Xconst, ConstOff::TanShift);
         emit_fldr_imm(buf, 3, Dtwopi, Xconst, ConstOff::TanTwoOverPi);
-        emit_fmadd_f64(buf, Dq, Dx, Dtwopi, Dshift);  // Dq = shift + x·2/π
-        emit_fsub_f64(buf, Dq, Dq, Dshift);           // Dq -= shift  → Dq = round(x·2/π)
+        emit_fmadd_f64(buf, Dq, Dx_in, Dtwopi, Dshift);  // Dq = shift + x·2/π
+        emit_fsub_f64(buf, Dq, Dq, Dshift);              // Dq -= shift  → Dq = round(x·2/π)
         free_fpr(a1, Dshift);
         free_fpr(a1, Dtwopi);
     }
@@ -950,7 +952,7 @@ void emit_inline_fptan(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, i
     {
         const int Dtmp = alloc_free_fpr(a1);
         emit_fldr_imm(buf, 3, Dtmp, Xconst, ConstOff::TanHalfPiHi);
-        emit_fmsub_f64(buf, Dr, Dq, Dtmp, Dx);  // r = x - q·hpi_hi
+        emit_fmsub_f64(buf, Dr, Dq, Dtmp, Dx_in);  // r = x - q·hpi_hi
         emit_fldr_imm(buf, 3, Dtmp, Xconst, ConstOff::TanHalfPiLo);
         emit_fmsub_f64(buf, Dr, Dq, Dtmp, Dr);  // r -= q·hpi_lo
         // r *= 0.5
@@ -958,7 +960,6 @@ void emit_inline_fptan(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, i
         emit_fmul_f64(buf, Dr, Dr, Dtmp);
         free_fpr(a1, Dtmp);
     }
-    free_fpr(a1, Dx);
     free_fpr(a1, Dq);
 
     // 5. r2, r4, r8
@@ -1066,11 +1067,29 @@ void emit_inline_fptan(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, i
     free_fpr(a1, Dn);
     free_fpr(a1, Dd);
 
-    // 12. result = num / den → d0
-    emit_fdiv_f64(buf, /*Dd=*/0, Dnum_final, Dden_final);
+    // 12. result = num / den → Dd_out
+    emit_fdiv_f64(buf, Dd_out, Dnum_final, Dden_final);
 
     free_fpr(a1, Dnum_final);
     free_fpr(a1, Dden_final);
+}
+
+void emit_inline_fptan(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, int Wd_top,
+                       int Wd_tmp) {
+    // Input loaded directly into d0 (not in scratch pool), so the polynomial
+    // body has the full 8-slot pool for internal scratch.  Output lands in d0.
+    const int Xst_base = x87_get_st_base(a1);
+    const int depth_st0 = resolve_depth(a1, 0);
+
+    emit_load_st(buf, Xbase, Wd_top, depth_st0, Wd_tmp, /*Dd=*/0, Xst_base);
+
+    const int Xconst = alloc_free_gpr(a1);
+    const uint64_t consts_addr = rosetta_core::get_transcendental_constants_addr();
+    assert(consts_addr != 0 && "transcendental constants not installed");
+    emit_movz_movk_abs64(buf, Xconst, consts_addr);
+
+    emit_inline_fptan_core(a1, buf, /*Dx_in=*/0, /*Dd_out=*/0, Xconst);
+
     free_gpr(a1, Xconst);
 
     emit_clear_x87_cc_bits(a1, buf, Xbase);
@@ -1187,15 +1206,13 @@ void emit_inline_fsincos(TranslationResult& a1, AssemblerBuffer& buf, int Xbase,
                          int Wd_tmp) {
     // fsincos: replace ST(0) with sin(ST(0)) and push cos(ST(0)).
     // Convention matches the prior IPC path — d0 = sin, d1 = cos.
-    // Both share the input load and the Xconst pointer; their range
-    // reductions and qn values differ (sin uses round(x*inv_pi), cos
-    // uses round(x*inv_pi + 0.5) - 0.5) so there's nothing to share
-    // beyond Dx / Xconst between the two pipelines.
+    // Input x is loaded into d2 (not in the scratch pool, so trig_body has
+    // the full 8-slot pool); d2 is preserved across both calls (trig_body
+    // only reads Dx, never writes it).  d0/d1 receive sin/cos results.
     const int Xst_base = x87_get_st_base(a1);
     const int depth_st0 = resolve_depth(a1, 0);
 
-    const int Dx = alloc_free_fpr(a1);
-    emit_load_st(buf, Xbase, Wd_top, depth_st0, Wd_tmp, Dx, Xst_base);
+    emit_load_st(buf, Xbase, Wd_top, depth_st0, Wd_tmp, /*Dd=*/2, Xst_base);
 
     const int Xconst = alloc_free_gpr(a1);
     const uint64_t consts_addr = rosetta_core::get_transcendental_constants_addr();
@@ -1203,11 +1220,10 @@ void emit_inline_fsincos(TranslationResult& a1, AssemblerBuffer& buf, int Xbase,
            "transcendental constants not installed; loader should have set address");
     emit_movz_movk_abs64(buf, Xconst, consts_addr);
 
-    emit_inline_trig_body(a1, buf, Dx, Xconst, /*Dd_out=*/0, TrigReduceMode::Sin);
-    emit_inline_trig_body(a1, buf, Dx, Xconst, /*Dd_out=*/1, TrigReduceMode::Cos);
+    emit_inline_trig_body(a1, buf, /*Dx=*/2, Xconst, /*Dd_out=*/0, TrigReduceMode::Sin);
+    emit_inline_trig_body(a1, buf, /*Dx=*/2, Xconst, /*Dd_out=*/1, TrigReduceMode::Cos);
 
     free_gpr(a1, Xconst);
-    free_fpr(a1, Dx);
 
     emit_clear_x87_cc_bits(a1, buf, Xbase);
 }

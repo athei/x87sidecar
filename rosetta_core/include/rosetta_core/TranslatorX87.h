@@ -4,6 +4,7 @@
 
 struct TranslationResult;
 struct IRInstr;
+struct AssemblerBuffer;
 
 namespace TranslatorX87 {
 
@@ -100,6 +101,15 @@ auto translate_ffree(TranslationResult* a1, IRInstr* a2) -> void;
 auto translate_fxtract(TranslationResult* a1, IRInstr* a2) -> void;
 
 auto translate_fscale(TranslationResult* a1, IRInstr* a2) -> void;
+
+// FPR-level core of fscale: produces (Dx_in * 2^trunc(Dy_in)) in Dd_out,
+// with NaN-on-NaN(Dy_in) propagation matching the x87 spec.  Caller owns
+// Dx_in / Dy_in (read-only).  Internal scratch: 2 transient GPRs (Wd_k,
+// Wd_e + a brief Xtemp during overflow CSEL) and 2 transient FPRs (Dd_m,
+// Dd_norm).  No Xconst needed (multiplier built from raw bitfield ops).
+// fscale's spec leaves C0..C3 undefined, so the core does not clear them.
+void emit_inline_fscale_core(TranslationResult& a1, AssemblerBuffer& buf, int Dx_in, int Dy_in,
+                             int Dd_out);
 
 auto translate_fbstp(TranslationResult* a1, IRInstr* a2) -> void;
 
