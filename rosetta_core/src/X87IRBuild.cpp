@@ -605,6 +605,136 @@ bool build(Context& ctx, IRInstr* instr_array, int64_t num_instrs, int64_t start
                 break;
             }
 
+            // ── Transcendentals ─────────────────────────────────────────
+            // All of these read ST(0) (and ST(1) where indicated) and either
+            // overwrite ST(0) in place, push, or pop.  Lowering calls the
+            // matching emit_inline_<op>_core helper from
+            // TranslatorX87Transcendental.cpp; see X87IRLower.cpp.
+            case kOpcodeName_fsin: {
+                auto st0 = ctx.resolve(0);
+                if (st0 < 0) {
+                    ok = false;
+                    break;
+                }
+                auto id = ctx.add_node(Op::FSin, st0);
+                if (id < 0) {
+                    ok = false;
+                    break;
+                }
+                ctx.slot_val[0] = id;
+                break;
+            }
+            case kOpcodeName_fcos: {
+                auto st0 = ctx.resolve(0);
+                if (st0 < 0) {
+                    ok = false;
+                    break;
+                }
+                auto id = ctx.add_node(Op::FCos, st0);
+                if (id < 0) {
+                    ok = false;
+                    break;
+                }
+                ctx.slot_val[0] = id;
+                break;
+            }
+            // fsincos: replace ST(0) with sin, push cos.  Modeled as two
+            // FSin + FCos nodes sharing the same input — argument-reduction
+            // work duplicates in lowering, but the IR-coverage unlock for
+            // chain blocks is the dominant win.  Future refactor: introduce
+            // a true paired-output node if profiling justifies it.
+            case kOpcodeName_fsincos: {
+                auto orig = ctx.resolve(0);
+                if (orig < 0) {
+                    ok = false;
+                    break;
+                }
+                auto sin_id = ctx.add_node(Op::FSin, orig);
+                if (sin_id < 0) {
+                    ok = false;
+                    break;
+                }
+                auto cos_id = ctx.add_node(Op::FCos, orig);
+                if (cos_id < 0) {
+                    ok = false;
+                    break;
+                }
+                ctx.slot_val[0] = sin_id;  // replace ST(0) with sin
+                ctx.push(cos_id);          // push cos → new ST(0) = cos, ST(1) = sin
+                break;
+            }
+            // fptan: replace ST(0) with tan, push 1.0.
+            case kOpcodeName_fptan: {
+                auto st0 = ctx.resolve(0);
+                if (st0 < 0) {
+                    ok = false;
+                    break;
+                }
+                auto tan_id = ctx.add_node(Op::FPtan, st0);
+                if (tan_id < 0) {
+                    ok = false;
+                    break;
+                }
+                auto one_id = ctx.add_node(Op::ConstOne);
+                if (one_id < 0) {
+                    ok = false;
+                    break;
+                }
+                ctx.slot_val[0] = tan_id;  // replace ST(0) with tan
+                ctx.push(one_id);          // push 1.0 → new ST(0) = 1.0, ST(1) = tan
+                break;
+            }
+            // fpatan: ST(1) ← atan2(ST(1), ST(0)); pop.
+            case kOpcodeName_fpatan: {
+                auto st0 = ctx.resolve(0);
+                auto st1 = ctx.resolve(1);
+                if (st0 < 0 || st1 < 0) {
+                    ok = false;
+                    break;
+                }
+                auto id = ctx.add_node(Op::FPatan, st1, st0);
+                if (id < 0) {
+                    ok = false;
+                    break;
+                }
+                ctx.slot_val[1] = id;
+                ctx.pop();
+                break;
+            }
+            // fyl2x: ST(1) ← ST(1) * log2(ST(0)); pop.
+            case kOpcodeName_fyl2x: {
+                auto st0 = ctx.resolve(0);
+                auto st1 = ctx.resolve(1);
+                if (st0 < 0 || st1 < 0) {
+                    ok = false;
+                    break;
+                }
+                auto id = ctx.add_node(Op::FYl2x, st1, st0);
+                if (id < 0) {
+                    ok = false;
+                    break;
+                }
+                ctx.slot_val[1] = id;
+                ctx.pop();
+                break;
+            }
+            // fscale: ST(0) ← ST(0) * 2^trunc(ST(1)); ST(1) unchanged.
+            case kOpcodeName_fscale: {
+                auto st0 = ctx.resolve(0);
+                auto st1 = ctx.resolve(1);
+                if (st0 < 0 || st1 < 0) {
+                    ok = false;
+                    break;
+                }
+                auto id = ctx.add_node(Op::FScale, st0, st1);
+                if (id < 0) {
+                    ok = false;
+                    break;
+                }
+                ctx.slot_val[0] = id;  // ST(1) untouched
+                break;
+            }
+
             // ── FXCH — compile-time swap ────────────────────────────────
             case kOpcodeName_fxch: {
                 // Rosetta encodes FXCH as [ST(0), ST(i)] — target depth is operands[1].

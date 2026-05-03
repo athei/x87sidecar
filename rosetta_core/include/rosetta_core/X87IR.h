@@ -50,6 +50,18 @@ enum class Op : uint8_t {
     FSqrt,
     FRndInt,
 
+    // Transcendentals (side-effect-free; lowered via emit_inline_<op>_core).
+    // Each lowering reserves +1 transient FPR for the result and +1 transient
+    // GPR for the constants table pointer (Xconst); see peak_live_fprs /
+    // peak_live_gprs in X87IRLower.cpp.  fsincos is NOT a single op — build()
+    // models it as two FSin + FCos nodes sharing the input.
+    FSin,    // 1 in, 1 out: sin(in0)
+    FCos,    // 1 in, 1 out: cos(in0)
+    FPatan,  // 2 in, 1 out: atan2(in0, in1)
+    FPtan,   // 1 in, 1 out: tan(in0); caller pushes ConstOne for the +1.0
+    FYl2x,   // 2 in, 1 out: in0 * log2(in1)
+    FScale,  // 2 in, 1 out: in0 * 2^trunc(in1); ST(1) (=in1) unchanged in slot
+
     // Conditional select (FCMOV): inputs[0]=ST(0) false arm, inputs[1]=ST(i) true arm
     // imm_bits[3:0] = AArch64 condition code
     FCSel,
