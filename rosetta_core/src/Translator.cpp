@@ -167,51 +167,63 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                         static_cast<uint16_t>(cache.tally_ir_gate_short_run + 1);
                     bump_max_run(profile::kIRGateReasonShortRun);
                     gate_refused = true;
-                } else if (cache.top_dirty != 0) {
-                    // FLUSH-AND-PROCEED — but only if the run is long enough
-                    // for IR's win over peep+single to recoup the 3-ARM
-                    // emit_store_top cost.  Per the analyzer's
-                    // arm_production / arm_no_ir / arm_ir_forced columns:
-                    // length 3-4 chains show IR == peep (no win, flush is
-                    // pure loss); length 5-7 give marginal wins
-                    // (~2-5 ARM saved before flush); length 8+ give large
-                    // wins (10-30+ ARM).  Threshold of 5 captures the
-                    // crossover — shorter top_dirty runs fall back to
-                    // peep+single (the original refusal path) without
-                    // emitting the flush.
-                    constexpr int kMinRunForFlush = 5;
-                    if (cache.gprs_valid && cache.run_remaining >= kMinRunForFlush) {
+                } else if (cache.top_dirty != 0 || cache.tag_push_pending != 0) {
+                    // FLUSH-AND-PROCEED for top_dirty and/or tag_push_pending.
+                    // Both are set together by x87_push; tag_push alone can
+                    // happen after a partial pop.  Cost depends on what's
+                    // set: emit_store_top = 3 ARM, emit_x87_tag_clear = 6
+                    // ARM.  IR savings per op are ~1-2 ARM, so the run
+                    // threshold to recoup is roughly flush_cost + a small
+                    // margin.
+                    //   top_dirty only         (3 ARM): threshold 5
+                    //   tag_push only          (6 ARM): threshold 8
+                    //   top_dirty + tag_push   (9 ARM): threshold 10
+                    // Below threshold we refuse (original behavior); the
+                    // refusal counter records which condition fired first
+                    // (top_dirty preferred for backward-compat).
+                    const bool need_top = cache.top_dirty != 0;
+                    const bool need_tag = cache.tag_push_pending != 0;
+                    const int min_run = (need_top && need_tag) ? 10 : (need_tag ? 8 : 5);
+                    if (cache.gprs_valid && cache.run_remaining >= min_run) {
                         AssemblerBuffer& buf = translation_result->insn_buf;
                         const int Wd_tmp = alloc_free_gpr(*translation_result);
-                        emit_store_top(buf, cache.base_gpr, cache.top_gpr, Wd_tmp);
-                        free_gpr(*translation_result, Wd_tmp);
-                        cache.top_dirty = 0;
-                        bump_max_run(profile::kIRGateReasonTopDirty);
-                        if (cache.profile_bid != profile::kOverflowId &&
-                            cache.prev_x87_opcode != 0xFFFFU) {
-                            profile::set_block_top_dirty_predecessor(cache.profile_bid,
-                                                                     cache.prev_x87_opcode);
+                        if (need_tag) {
+                            const int Wd_tmp2 = alloc_free_gpr(*translation_result);
+                            emit_x87_tag_clear(buf, cache.base_gpr, cache.top_gpr, Wd_tmp, Wd_tmp2);
+                            free_gpr(*translation_result, Wd_tmp2);
+                            cache.tag_push_pending = 0;
+                            bump_max_run(profile::kIRGateReasonTagPush);
                         }
+                        if (need_top) {
+                            emit_store_top(buf, cache.base_gpr, cache.top_gpr, Wd_tmp);
+                            cache.top_dirty = 0;
+                            bump_max_run(profile::kIRGateReasonTopDirty);
+                            if (cache.profile_bid != profile::kOverflowId &&
+                                cache.prev_x87_opcode != 0xFFFFU) {
+                                profile::set_block_top_dirty_predecessor(cache.profile_bid,
+                                                                         cache.prev_x87_opcode);
+                            }
+                        }
+                        free_gpr(*translation_result, Wd_tmp);
                         mirror_gate_counters();
                         // gate_refused stays false — fall through to compile_run.
-                        // Counter semantics: tally_ir_gate_top_dirty is NOT
-                        // bumped on the success path (IR DID run); only the
-                        // refusal-fallback path below bumps it.
+                        // Counter semantics: tally_ir_gate_* is NOT bumped on
+                        // the success path (IR DID run).  Only the refusal-
+                        // fallback path below bumps an IRG counter.
                     } else {
-                        // Refusal path: short run (flush wouldn't pay off)
-                        // or defensive gprs_valid=0 (shouldn't happen).
-                        // Falls back to peep+single, same as the
-                        // pre-flush-and-proceed behavior.
-                        cache.tally_ir_gate_top_dirty =
-                            static_cast<uint16_t>(cache.tally_ir_gate_top_dirty + 1);
-                        bump_max_run(profile::kIRGateReasonTopDirty);
+                        // Refusal path: run too short, or defensive
+                        // gprs_valid=0.  Falls back to peep+single.
+                        if (need_top) {
+                            cache.tally_ir_gate_top_dirty =
+                                static_cast<uint16_t>(cache.tally_ir_gate_top_dirty + 1);
+                            bump_max_run(profile::kIRGateReasonTopDirty);
+                        } else {
+                            cache.tally_ir_gate_tag_push =
+                                static_cast<uint16_t>(cache.tally_ir_gate_tag_push + 1);
+                            bump_max_run(profile::kIRGateReasonTagPush);
+                        }
                         gate_refused = true;
                     }
-                } else if (cache.tag_push_pending != 0) {
-                    cache.tally_ir_gate_tag_push =
-                        static_cast<uint16_t>(cache.tally_ir_gate_tag_push + 1);
-                    bump_max_run(profile::kIRGateReasonTagPush);
-                    gate_refused = true;
                 } else if (cache.deferred_pop_count != 0) {
                     cache.tally_ir_gate_deferred_pop =
                         static_cast<uint16_t>(cache.tally_ir_gate_deferred_pop + 1);
