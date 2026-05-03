@@ -51,6 +51,7 @@ ALL_TESTS=(
     test_arithp_fstp
     test_arith_faddp
     test_fstp_arith_fstp
+    test_fld_arith
     test_fstp_fld
     test_fistt
     test_tag_batch

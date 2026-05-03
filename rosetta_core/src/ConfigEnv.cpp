@@ -28,6 +28,7 @@ constexpr FusionEntry kFusionTable[] = {
     {.name = "fld_fld_fucompp", .id = FusionId::fld_fld_fucompp},
     {.name = "fld_fcomp", .id = FusionId::fld_fcomp},
     {.name = "fld_arith_arithp", .id = FusionId::fld_arith_arithp},
+    {.name = "fld_arith", .id = FusionId::fld_arith},
     {.name = "arithp_fstp", .id = FusionId::arithp_fstp},
     {.name = "fstp_fld", .id = FusionId::fstp_fld},
     {.name = "arith_fstp", .id = FusionId::arith_fstp},

@@ -146,7 +146,7 @@ static void run_m32_fadd_aliased(double a, double b, float* shared, float* d2) {
         : "=m"(*shared), "+m"(a), "+m"(b)
         : "m"(*d2)
         : "memory");
-    (void)d2;  /* d2 written via inline asm above */
+    (void)d2; /* d2 written via inline asm above */
 }
 
 /* Same aliased shape but using *d2 as the actual destination address. */

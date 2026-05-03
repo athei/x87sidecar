@@ -296,6 +296,123 @@ static auto try_fuse_fld_arithp(TranslationResult* a1, IRInstr* fld_instr, IRIns
 }
 
 // =============================================================================
+// Peephole: FLD + non-popping ARITH mem fusion (2-instruction, single net push)
+//
+// Workload pattern (~230 M execs/pass for fld_m32|fmul_m32 alone in TurtleWoW;
+// fadd/fsub/fdiv variants add more): produces ST(0) = m_a OP m_b with one
+// net push.  The 3-op fld_arith_fstp covers the case when an fstp follows;
+// this handles the case when fld+arith is the entire 2-op contiguous run
+// (gate_short_run blocks IR there).
+//
+// Fused emit:
+//   load m_a → Dd_a (FCVT_s_to_d if m32)         (via emit_fld_value)
+//   load m_b → Dd_b (FCVT_s_to_d if m32)
+//   FOP Dd_a, Dd_a, Dd_b
+//   x87_push                                    (deferred tag/top updates)
+//   store Dd_a → ST(0)                          (post-push depth 0)
+//
+// Restricted to memory-form ARITH; register-form (fadd ST(0), ST(N)) is rare
+// and would need extra depth-shift logic.
+//
+// Returns 2 (instructions consumed) if fused, std::nullopt otherwise.
+// =============================================================================
+
+static auto try_fuse_fld_arith(TranslationResult* a1, IRInstr* fld_instr, IRInstr* arith_instr)
+    -> std::optional<int> {
+    auto cls = classify_fld_source(fld_instr);
+    if (cls.source == kFldInvalid) {
+        return std::nullopt;
+    }
+
+    enum ArithOp : std::uint8_t { kAdd, kSub, kSubR, kMul, kDiv, kDivR };
+    ArithOp arith;
+    switch (arith_instr->opcode) {
+        case kOpcodeName_fadd:
+            arith = kAdd;
+            break;
+        case kOpcodeName_fsub:
+            arith = kSub;
+            break;
+        case kOpcodeName_fsubr:
+            arith = kSubR;
+            break;
+        case kOpcodeName_fmul:
+            arith = kMul;
+            break;
+        case kOpcodeName_fdiv:
+            arith = kDiv;
+            break;
+        case kOpcodeName_fdivr:
+            arith = kDivR;
+            break;
+        default:
+            return std::nullopt;
+    }
+    if (arith_instr->operands[0].kind == IROperandKind::Register) {
+        return std::nullopt;
+    }
+
+    AssemblerBuffer& buf = a1->insn_buf;
+    auto [Xbase, Wd_top] = x87_begin(*a1, buf);
+    const int Xst_base = x87_get_st_base(*a1);
+    const int Wd_tmp = alloc_gpr(*a1, 2);
+    const int Wd_tmp2 = alloc_gpr(*a1, 3);
+
+    const int Dd_a = alloc_free_fpr(*a1);
+    const int Dd_b = alloc_free_fpr(*a1);
+
+    // 1. Materialise the FLD value into Dd_a (does not modify the stack).
+    emit_fld_value(buf, *a1, cls, fld_instr, Xbase, Wd_top, Wd_tmp, Dd_a, Xst_base);
+
+    // 2. Load the arith memory operand into Dd_b.
+    {
+        const bool is_f32 = (arith_instr->operands[0].mem.size == IROperandSize::S32);
+        const int addr =
+            compute_operand_address(*a1, /*is_64bit=*/true, &arith_instr->operands[0], GPR::XZR);
+        emit_fldr_imm(buf, is_f32 ? 2 : 3, Dd_b, addr, /*imm12=*/0);
+        free_gpr(*a1, addr);
+        if (is_f32) {
+            emit_fcvt_s_to_d(buf, Dd_b, Dd_b);
+        }
+    }
+
+    // 3. FOP into Dd_a.
+    switch (arith) {
+        case kAdd:
+            emit_fadd_f64(buf, Dd_a, Dd_a, Dd_b);
+            break;
+        case kSub:
+            emit_fsub_f64(buf, Dd_a, Dd_a, Dd_b);
+            break;
+        case kSubR:
+            emit_fsub_f64(buf, Dd_a, Dd_b, Dd_a);
+            break;
+        case kMul:
+            emit_fmul_f64(buf, Dd_a, Dd_a, Dd_b);
+            break;
+        case kDiv:
+            emit_fdiv_f64(buf, Dd_a, Dd_a, Dd_b);
+            break;
+        case kDivR:
+            emit_fdiv_f64(buf, Dd_a, Dd_b, Dd_a);
+            break;
+    }
+    free_fpr(*a1, Dd_b);
+
+    // 4. Push the result onto the stack.  x87_push handles deferred TOP/tag
+    // bookkeeping; the actual data write is the emit_store_st below.
+    x87_push(buf, *a1, Xbase, Wd_top, Wd_tmp, Wd_tmp2);
+    emit_store_st(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Dd_a, Xst_base);
+    free_fpr(*a1, Dd_a);
+
+    x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp, /*consumed=*/2);
+    free_gpr(*a1, Wd_tmp2);
+    free_gpr(*a1, Wd_tmp);
+
+    return 2;
+}
+
+// =============================================================================
 // Peephole: FXCH ST(1) + popping-arithmetic fusion
 //
 // FXCH ST(1) swaps ST(0) and ST(1). When followed by a popping arithmetic op
@@ -2522,6 +2639,11 @@ static auto try_fuse_fld_group(TranslationResult* tr, IRInstr* instrs, int64_t n
     }
     if (!fusion_disabled(disabled_mask, FusionId::fld_fcomp)) {
         if (auto r = try_fuse_fld_fcomp(tr, cur, next)) {
+            return r;
+        }
+    }
+    if (!fusion_disabled(disabled_mask, FusionId::fld_arith)) {
+        if (auto r = try_fuse_fld_arith(tr, cur, next)) {
             return r;
         }
     }
