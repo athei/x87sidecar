@@ -942,6 +942,58 @@ int main(int argc, char** argv) try {
             stderr,
             "top-dirty-pred histogram: skipped (no TDP0 section in input — older profile)\n");
     }
+
+    // ── Top-N blocks by max_run-at-top_dirty refusal ──────────────────────
+    // Picks the blocks where the longest contiguous x87 run was refused
+    // for top_dirty.  Useful for sanity-checking that "yes, this is a real
+    // workload sequence" before shipping a flush-and-proceed fix.
+    if (have_mrr && have_irg) {
+        struct R {
+            uint32_t bid;
+            uint32_t start_pc;
+            uint64_t exec;
+            uint16_t max_run;
+            uint16_t td_count;
+            uint32_t block_len;
+        };
+        std::vector<R> rs;
+        rs.reserve(blocks.size());
+        for (const auto& b : blocks) {
+            if (b.id >= max_run_at_refuse.size() || b.id >= ir_gate_counters.size()) {
+                continue;
+            }
+            const uint16_t mr = max_run_at_refuse[b.id].max_run[profile::kIRGateReasonTopDirty];
+            if (mr == 0) {
+                continue;
+            }
+            const uint64_t exec = (b.id < counters.size()) ? counters[b.id] : 0;
+            if (exec == 0) {
+                continue;
+            }
+            rs.push_back({.bid = b.id,
+                          .start_pc = b.start_pc,
+                          .exec = exec,
+                          .max_run = mr,
+                          .td_count = ir_gate_counters[b.id].counts[profile::kIRGateReasonTopDirty],
+                          .block_len = static_cast<uint32_t>(b.instrs.size())});
+        }
+        // Sort by max_run desc, tie-break by exec desc.
+        std::ranges::sort(rs, [](const R& a, const R& b) {
+            if (a.max_run != b.max_run) {
+                return a.max_run > b.max_run;
+            }
+            return a.exec > b.exec;
+        });
+        std::printf("\n");
+        std::printf("# Top blocks by max_run at top_dirty refusal\n");
+        std::printf("rank,bid,start_pc,max_run,td_refusals,exec_count,block_len\n");
+        const size_t n = std::min<size_t>(rs.size(), 10);
+        for (size_t i = 0; i < n; ++i) {
+            const auto& r = rs[i];
+            std::printf("%zu,%u,0x%08x,%u,%u,%llu,%u\n", i + 1, r.bid, r.start_pc, r.max_run,
+                        r.td_count, static_cast<unsigned long long>(r.exec), r.block_len);
+        }
+    }
     return 0;
 } catch (const std::exception& e) {
     std::fprintf(stderr, "profile_analyze: %s\n", e.what());
