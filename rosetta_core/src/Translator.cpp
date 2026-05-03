@@ -13,8 +13,10 @@
 #include "rosetta_core/ProfileRuntime.h"
 #include "rosetta_core/Register.h"
 #include "rosetta_core/TranslationResult.h"
+#include "rosetta_core/TranslatorHelpers.hpp"
 #include "rosetta_core/TranslatorX87.h"
 #include "rosetta_core/TranslatorX87Fusion.h"
+#include "rosetta_core/TranslatorX87Helpers.hpp"
 #include "rosetta_core/X87Cache.h"
 #include "rosetta_core/X87IR.h"
 
@@ -174,7 +176,31 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                         profile::set_block_top_dirty_predecessor(cache.profile_bid,
                                                                  cache.prev_x87_opcode);
                     }
-                    gate_refused = true;
+                    mirror_gate_counters();
+                    // FLUSH-AND-PROCEED: emit one emit_store_top (3 ARM) to
+                    // commit the cached TOP to memory, clear top_dirty, then
+                    // fall through to compile_run instead of refusing.  IR's
+                    // lower() reads x87 state from memory; once memory is
+                    // up-to-date the IR run can proceed correctly.  Whenever
+                    // top_dirty=1 we also have gprs_valid=1 (top_dirty is
+                    // only set inside an active run, after x87_begin pinned
+                    // the base/top GPRs), so we use the cached pair directly
+                    // without re-allocating or re-emitting base/load.
+                    if (cache.gprs_valid) {
+                        AssemblerBuffer& buf = translation_result->insn_buf;
+                        const int Wd_tmp = alloc_free_gpr(*translation_result);
+                        emit_store_top(buf, cache.base_gpr, cache.top_gpr, Wd_tmp);
+                        free_gpr(*translation_result, Wd_tmp);
+                        cache.top_dirty = 0;
+                        // gate_refused stays false — fall through to compile_run.
+                    } else {
+                        // Defensive: gprs_valid=0 with top_dirty=1 shouldn't
+                        // happen given the cache invariants.  If it does, we
+                        // can't safely emit_store_top without re-loading TOP
+                        // (which would lose the deferred update).  Refuse as
+                        // before.
+                        gate_refused = true;
+                    }
                 } else if (cache.tag_push_pending != 0) {
                     cache.tally_ir_gate_tag_push =
                         static_cast<uint16_t>(cache.tally_ir_gate_tag_push + 1);
