@@ -221,15 +221,61 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                         gate_refused = true;
                     }
                 } else if (cache.deferred_pop_count != 0) {
-                    cache.tally_ir_gate_deferred_pop =
-                        static_cast<uint16_t>(cache.tally_ir_gate_deferred_pop + 1);
-                    bump_max_run(profile::kIRGateReasonDeferredPop);
-                    gate_refused = true;
+                    // FLUSH deferred_pop_count alone (2 + 6*count ARM,
+                    // threshold 10).  Reaches here when top_dirty=0 (the
+                    // top_dirty branch fired earlier in the run + IR partial
+                    // consumed leaving deferred_pop_count behind).  Cap on
+                    // count<=2 keeps the flush cost under ~14 ARM; count>=3
+                    // is rare and the threshold for that case would need to
+                    // climb further.
+                    constexpr int kMinRunForFlush = 10;
+                    if (cache.gprs_valid && cache.run_remaining >= kMinRunForFlush &&
+                        cache.deferred_pop_count <= 2) {
+                        AssemblerBuffer& buf = translation_result->insn_buf;
+                        const int Wd_tmp = alloc_free_gpr(*translation_result);
+                        const int Wd_tmp2 = alloc_free_gpr(*translation_result);
+                        const int Wd_tagw = alloc_free_gpr(*translation_result);
+                        emit_x87_tag_set_empty_batch(buf, cache.base_gpr, cache.top_gpr, Wd_tmp,
+                                                     Wd_tmp2, Wd_tagw, cache.deferred_pop_count);
+                        free_gpr(*translation_result, Wd_tagw);
+                        free_gpr(*translation_result, Wd_tmp2);
+                        free_gpr(*translation_result, Wd_tmp);
+                        cache.deferred_pop_count = 0;
+                        bump_max_run(profile::kIRGateReasonDeferredPop);
+                        mirror_gate_counters();
+                    } else {
+                        cache.tally_ir_gate_deferred_pop =
+                            static_cast<uint16_t>(cache.tally_ir_gate_deferred_pop + 1);
+                        bump_max_run(profile::kIRGateReasonDeferredPop);
+                        gate_refused = true;
+                    }
                 } else if (cache.perm_dirty) {
-                    cache.tally_ir_gate_perm_dirty =
-                        static_cast<uint16_t>(cache.tally_ir_gate_perm_dirty + 1);
-                    bump_max_run(profile::kIRGateReasonPermDirty);
-                    gate_refused = true;
+                    // FLUSH perm_dirty alone (~6 ARM for the typical 2-cycle
+                    // FXCH-ST(1) case, threshold 8).  By design invariant
+                    // (every push/pop path calls perm_flush_before_stack_change
+                    // first), perm_dirty=1 implies all other deferred flags=0,
+                    // so this branch always fires alone in the cascade.
+                    constexpr int kMinRunForFlush = 8;
+                    if (cache.gprs_valid && cache.run_remaining >= kMinRunForFlush) {
+                        AssemblerBuffer& buf = translation_result->insn_buf;
+                        const int Wd_tmp = alloc_free_gpr(*translation_result);
+                        const int Dd_save = alloc_free_fpr(*translation_result);
+                        const int Dd_chain = alloc_free_fpr(*translation_result);
+                        const int Xst_base = cache.gprs_valid ? cache.st_base_gpr : -1;
+                        emit_x87_perm_flush(buf, cache.base_gpr, cache.top_gpr, Wd_tmp, cache.perm,
+                                            Xst_base, Dd_save, Dd_chain);
+                        free_fpr(*translation_result, Dd_chain);
+                        free_fpr(*translation_result, Dd_save);
+                        free_gpr(*translation_result, Wd_tmp);
+                        cache.reset_perm();
+                        bump_max_run(profile::kIRGateReasonPermDirty);
+                        mirror_gate_counters();
+                    } else {
+                        cache.tally_ir_gate_perm_dirty =
+                            static_cast<uint16_t>(cache.tally_ir_gate_perm_dirty + 1);
+                        bump_max_run(profile::kIRGateReasonPermDirty);
+                        gate_refused = true;
+                    }
                 }
             }
             if (gate_refused) {
