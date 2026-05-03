@@ -1,18 +1,18 @@
-// profile_analyze — offline pattern miner for X87_PROFILE dumps.
+// profile_analyze — offline pattern miner + JIT emit-quality scorer for
+// X87_PROFILE dumps.
 //
 // Reads one or more binary .prof files produced by the sidecar's
 // dumpBlockIfNew() (rosetta_loader/src/sidecar.cpp) and emits a CSV of
-// adjacent-instruction patterns ranked by occurrence count across all
-// blocks.  Window length is unbounded — every N from 2 to block_length
-// is considered, so longer fusions (5+, 6+) surface naturally if they
-// repeat often enough.  Min-support filter drops the long tail of
-// unique-to-one-block sequences.
+// adjacent-instruction patterns ranked by their exec-weighted ARM emit
+// cost.  Each unique pattern is run through the real translator twice
+// (production / IR-disabled) and the emitted ARM64 instruction count is
+// reported alongside the workload's runtime path mix from TLY1.
 //
 // Usage:
-//   profile_analyze [--min-count N] [--max-rows N] file1.prof [file2.prof ...]
+//   profile_analyze [--min-exec N] [--max-rows N] [--max-arm-per-x87 R]
+//                   [--rank-by exec|emit] file1.prof [file2.prof ...]
 
 #include <algorithm>
-#include <array>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -26,22 +26,26 @@
 #include <utility>
 #include <vector>
 
+#include "rosetta_core/Config.h"
+#include "rosetta_core/CoreConfig.h"
+#include "rosetta_core/IRBlock.h"
+#include "rosetta_core/IRInstr.h"
+#include "rosetta_core/IROperand.h"
 #include "rosetta_core/Opcode.h"
 #include "rosetta_core/ProfileFormat.h"
+#include "rosetta_core/Register.h"
+#include "rosetta_core/ThreadContextOffsets.h"
+#include "rosetta_core/TranscendentalHelper.h"
+#include "rosetta_core/TranslationResult.h"
+#include "rosetta_core/Translator.h"
+#include "rosetta_core/X87Cache.h"
 
 namespace {
-
-struct Instr {
-    uint16_t opcode;
-    uint8_t num_operands;
-    uint8_t ir_kind;
-    profile::OperandSummary operands[4];
-};
 
 struct Block {
     uint32_t id;
     uint32_t start_pc;
-    std::vector<Instr> instrs;
+    std::vector<IRInstr> instrs;
 };
 
 struct Tally {
@@ -60,7 +64,8 @@ struct Tally {
 };
 
 bool readFile(const std::string& path, std::vector<Block>& out, std::vector<uint64_t>& counters,
-              std::vector<Tally>& tallies, std::vector<uint16_t>& build_fail_ops) {
+              std::vector<Tally>& tallies, std::vector<uint16_t>& build_fail_ops,
+              std::vector<profile::BlockIRGateCounters>& ir_gate_counters) {
     std::ifstream f(path, std::ios::binary);
     if (!f) {
         std::fprintf(stderr, "error: cannot open %s\n", path.c_str());
@@ -70,7 +75,7 @@ bool readFile(const std::string& path, std::vector<Block>& out, std::vector<uint
 
     size_t off = 0;
     while (off + sizeof(uint32_t) <= buf.size()) {
-        uint32_t lead;
+        uint32_t lead = 0;
         std::memcpy(&lead, buf.data() + off, sizeof(lead));
         if (lead == profile::kCounterSectionMagic) {
             break;  // start of counter section
@@ -81,26 +86,16 @@ bool readFile(const std::string& path, std::vector<Block>& out, std::vector<uint
         profile::BlockHeader hdr;
         std::memcpy(&hdr, buf.data() + off, sizeof(hdr));
         off += sizeof(hdr);
-        const size_t need = static_cast<size_t>(hdr.num_instrs) * sizeof(profile::InstrRecord);
+        const size_t need = static_cast<size_t>(hdr.num_instrs) * sizeof(IRInstr);
         if (off + need > buf.size()) {
-            std::fprintf(stderr, "error: truncated InstrRecord array in %s at offset %zu\n",
+            std::fprintf(stderr, "error: truncated IRInstr array in %s at offset %zu\n",
                          path.c_str(), off);
             return false;
         }
         Block b{.id = hdr.block_id, .start_pc = hdr.start_pc, .instrs = {}};
-        b.instrs.reserve(hdr.num_instrs);
-        for (uint32_t i = 0; i < hdr.num_instrs; ++i) {
-            profile::InstrRecord rec;
-            std::memcpy(&rec, buf.data() + off, sizeof(rec));
-            off += sizeof(rec);
-            Instr ins{
-                .opcode = rec.opcode,
-                .num_operands = rec.num_operands,
-                .ir_kind = rec.ir_kind,
-                .operands = {rec.operands[0], rec.operands[1], rec.operands[2], rec.operands[3]},
-            };
-            b.instrs.push_back(ins);
-        }
+        b.instrs.resize(hdr.num_instrs);
+        std::memcpy(b.instrs.data(), buf.data() + off, need);
+        off += need;
         out.push_back(std::move(b));
     }
 
@@ -188,73 +183,96 @@ bool readFile(const std::string& path, std::vector<Block>& out, std::vector<uint
             off += bbytes;
         }
     }
+
+    // Optional IR-gate per-reason counter side-table (IRG1).  Older .prof
+    // files (before the per-reason instrumentation landed, or with the
+    // earlier IRG0 sentinel format) lack it; treat absence as "no refusals
+    // recorded" so the histogram + per-pattern columns gracefully degrade.
+    if (off + sizeof(profile::IRGateRefuseSectionHeader) <= buf.size()) {
+        profile::IRGateRefuseSectionHeader ihdr;
+        std::memcpy(&ihdr, buf.data() + off, sizeof(ihdr));
+        if (ihdr.magic == profile::kIRGateRefuseSectionMagic) {
+            off += sizeof(ihdr);
+            const size_t ibytes =
+                static_cast<size_t>(ihdr.count) * sizeof(profile::BlockIRGateCounters);
+            if (off + ibytes > buf.size()) {
+                std::fprintf(stderr,
+                             "error: %s ir-gate-counter section truncated (declared %u entries)\n",
+                             path.c_str(), ihdr.count);
+                return false;
+            }
+            ir_gate_counters.resize(ihdr.count);
+            std::memcpy(ir_gate_counters.data(), buf.data() + off, ibytes);
+            off += ibytes;
+        }
+    }
     return true;
 }
 
-// Convert operand summary to a short suffix: m32/m64/m80, abs, i8/i16/i32/i64,
-// reg, st(i), cc, seg, br.  Empty if num_operands == 0.
-std::string opSuffix(const Instr& ins) {
-    auto sizeStr = [](uint8_t s) -> const char* {
-        switch (s) {
-            case 0:
-                return "8";
-            case 1:
-                return "16";
-            case 2:
-                return "32";
-            case 3:
-                return "64";
-            case 4:
-                return "128";
-            case 5:
-                return "256";
-            case 0xFF:
-                return "80";
-            default:
-                return "?";
-        }
-    };
+// Convert one operand to a short suffix: m32/m64/m80, abs, i8/i16/i32/i64,
+// reg, st(i), cc, seg, br.  Display-only formatting; no JIT counterpart.
+const char* sizeStr(IROperandSize s) {
+    switch (s) {
+        case IROperandSize::S8:
+            return "8";
+        case IROperandSize::S16:
+            return "16";
+        case IROperandSize::S32:
+            return "32";
+        case IROperandSize::S64:
+            return "64";
+        case IROperandSize::S128:
+            return "128";
+        case IROperandSize::S256:
+            return "256";
+        case IROperandSize::S80:
+            return "80";
+    }
+    return "?";
+}
+
+void appendOpToken(std::string& s, const IROperand& op) {
+    switch (op.kind) {
+        case IROperandKind::Register:
+            // STi (stack regs are encoded 0x70..0x77) vs gpr.
+            if ((op.reg.reg.value & 0xF0) == 0x70) {
+                s += "st";
+                s += static_cast<char>('0' + (op.reg.reg.value & 0x07));
+            } else {
+                s += "r";
+                s += sizeStr(op.reg.size);
+            }
+            break;
+        case IROperandKind::MemRef:
+            s += "m";
+            s += sizeStr(op.mem.size);
+            break;
+        case IROperandKind::AbsMem:
+            s += "abs";
+            s += sizeStr(op.abs_mem.size);
+            break;
+        case IROperandKind::Immediate:
+            s += "i";
+            s += sizeStr(op.imm.size);
+            break;
+        case IROperandKind::BranchOffset:
+            s += "br";
+            break;
+        case IROperandKind::ConditionCode:
+            s += "cc";
+            break;
+        case IROperandKind::SegmentRegister:
+            s += "seg";
+            break;
+    }
+}
+
+std::string opSuffix(const IRInstr& ins) {
     std::string s;
     const uint8_t n = std::min<uint8_t>(ins.num_operands, 4);
     for (uint8_t k = 0; k < n; ++k) {
-        const auto& op = ins.operands[k];
         s.push_back(k == 0 ? '_' : ',');
-        switch (op.kind) {
-            case 0:  // Register
-                // STi vs gpr: stack regs have value (0x70..0x77).
-                if ((op.reg & 0xF0) == 0x70) {
-                    s += "st";
-                    s += static_cast<char>('0' + (op.reg & 0x07));
-                } else {
-                    s += "r";
-                    s += sizeStr(op.size);
-                }
-                break;
-            case 1:  // MemRef
-                s += "m";
-                s += sizeStr(op.size);
-                break;
-            case 2:  // AbsMem
-                s += "abs";
-                s += sizeStr(op.size);
-                break;
-            case 3:  // Immediate
-                s += "i";
-                s += sizeStr(op.size);
-                break;
-            case 4:  // BranchOffset
-                s += "br";
-                break;
-            case 5:  // ConditionCode
-                s += "cc";
-                break;
-            case 6:  // SegmentRegister
-                s += "seg";
-                break;
-            default:
-                s += "?";
-                break;
-        }
+        appendOpToken(s, ins.operands[k]);
     }
     return s;
 }
@@ -269,259 +287,79 @@ std::string mnemonic(uint16_t opcode) {
 }
 
 // Pattern key: pipe-separated tokens like "fld_m32|fmul_m32|fstp_m32".
-std::string patternKey(const std::vector<Instr>& instrs, size_t start, size_t len) {
+std::string patternKey(const std::vector<IRInstr>& instrs, size_t start, size_t len) {
     std::string s;
     for (size_t i = 0; i < len; ++i) {
         if (i > 0) {
             s.push_back('|');
         }
-        const Instr& ins = instrs[start + i];
+        const IRInstr& ins = instrs[start + i];
         s += mnemonic(ins.opcode);
         s += opSuffix(ins);
     }
     return s;
 }
 
-bool isX87(uint16_t op) {
-    return (op >= 0x25 && op <= 0x30) || (op >= 0xBD && op <= 0x10C);
+// ── JIT emit-quality measurement ──────────────────────────────────────
+// For each unique pattern, run the translator twice (production / IR
+// disabled) and report ARM64-insn emit count.  See the plan for the
+// rationale: production is IR-first, --disable-x87-ir is the meaningful
+// "without IR" config — three columns would have collapsed into two.
+struct EmitMeasurement {
+    uint32_t arm_production = 0;
+    uint32_t arm_no_ir = 0;
+};
+
+uint32_t runOneMode(const IRInstr* instrs, size_t len, const RosettaConfig* cfg) {
+    // emit_x87_base reads thread_context_offsets->x87_state_offset.  We
+    // never execute the emitted code, so any small value picks the
+    // single-ADD branch and keeps emit count stable.  Static so all
+    // translations see the same address/offset (avoids cache-base resets).
+    static ThreadContextOffsets stub_tco{};
+
+    TranslationResult result{};
+    constexpr size_t kBufSize = 64UL * 1024;
+    result.insn_buf.data = static_cast<uint32_t*>(std::malloc(kBufSize));
+    result.insn_buf.end = 0;
+    result.insn_buf.end_cap = kBufSize;
+    result.insn_buf.use_heap = 1;
+    result.free_gpr_mask = kGprScratchMask;
+    result.free_fpr_mask = kFprScratchMask;
+    // The IR-success path restores free_fpr_mask from this field after
+    // each whole-run lower (Translator.cpp:156).  In production, stock
+    // sets it before invoking our hook; offline we have to seed it
+    // ourselves so subsequent translate calls still have FPR scratch.
+    result._unoccupied_temporary_fprs_for_xmm_scalars = kFprScratchMask;
+    result._pinned_temporary_scalars = 0;
+    result.thread_context_offsets = &stub_tco;
+    result.translator_variant = 0;
+
+    IRBlock dummy{};  // pointer identity only; cache.invalidate() runs on first call
+
+    rosetta_set_config(cfg);
+    // Translator::translate_instruction takes IRInstr* (non-const) but
+    // doesn't mutate the array.  Copy to a local mutable buffer.
+    std::vector<IRInstr> mut(instrs, instrs + len);
+    int64_t idx = 0;
+    const auto n = static_cast<int64_t>(len);
+    while (idx < n) {
+        auto next = Translator::translate_instruction(&result, &dummy, mut.data(), n, idx);
+        idx = next.value_or(idx + 1);
+    }
+    rosetta_set_config(nullptr);
+
+    const auto arm_count = static_cast<uint32_t>(result.insn_buf.end / 4);
+    std::free(result.insn_buf.data);
+    return arm_count;
 }
 
-// ── Fusion-coverage classifier ────────────────────────────────────────
-// Faithfully replicates each try_fuse_X predicate in
-// rosetta_core/src/TranslatorX87Fusion.cpp so we can tell whether a
-// pattern's prefix is ALREADY fused (no opportunity) versus actually
-// uncovered (real fusion candidate).  The shallow heuristic this
-// replaces ("first opcode appears in the dispatcher") was misleading —
-// e.g. fld_m32|fstp_m32 gets prefix_in_fusion_family=1 but is in fact
-// already handled by try_fuse_fld_fstp.
-
-bool is_fld_class(uint16_t op) {
-    switch (op) {
-        case kOpcodeName_fld:
-        case kOpcodeName_fild:
-        case kOpcodeName_fldz:
-        case kOpcodeName_fld1:
-        case kOpcodeName_fldpi:
-        case kOpcodeName_fldl2e:
-        case kOpcodeName_fldl2t:
-        case kOpcodeName_fldlg2:
-        case kOpcodeName_fldln2:
-            return true;
-        default:
-            return false;
-    }
-}
-
-// classify_fld_source rejects m80 FLDs.
-bool fld_source_valid(const Instr& ins) {
-    if (!is_fld_class(ins.opcode)) {
-        return false;
-    }
-    if (ins.opcode == kOpcodeName_fld || ins.opcode == kOpcodeName_fild) {
-        // fld/fild from a memory operand — m80 is rejected by the
-        // fusions, register-form FLD ST(i) is accepted.
-        if (ins.num_operands >= 1 && ins.operands[0].kind == 1 /*MemRef*/ &&
-            ins.operands[0].size == 0xFF /*S80*/) {
-            return false;
-        }
-    }
-    return true;
-}
-
-bool is_fcomp_reg_or_mem_class(uint16_t op) {
-    return op == kOpcodeName_fcomp || op == kOpcodeName_fucomp || op == kOpcodeName_fcom ||
-           op == kOpcodeName_fucom;
-}
-
-bool is_fcompp_class(uint16_t op) {
-    return op == kOpcodeName_fcompp || op == kOpcodeName_fucompp;
-}
-
-bool is_arith_nonpopping(uint16_t op) {
-    return op == kOpcodeName_fadd || op == kOpcodeName_fsub || op == kOpcodeName_fsubr ||
-           op == kOpcodeName_fmul || op == kOpcodeName_fdiv || op == kOpcodeName_fdivr;
-}
-
-bool is_arithp(uint16_t op) {
-    return op == kOpcodeName_faddp || op == kOpcodeName_fsubp || op == kOpcodeName_fsubrp ||
-           op == kOpcodeName_fmulp || op == kOpcodeName_fdivp || op == kOpcodeName_fdivrp;
-}
-
-bool is_fstp(uint16_t op) {
-    return op == kOpcodeName_fstp || op == kOpcodeName_fstp_stack;
-}
-
-bool first_op_is_st1(const Instr& ins) {
-    return ins.num_operands >= 1 && ins.operands[0].kind == 0 /*Register*/ &&
-           ins.operands[0].reg == 0x71;  // ST(1)
-}
-
-bool first_op_is_st0(const Instr& ins) {
-    return ins.num_operands >= 1 && ins.operands[0].kind == 0 /*Register*/ &&
-           ins.operands[0].reg == 0x70;  // ST(0)
-}
-
-bool first_op_mem_not_m80(const Instr& ins) {
-    return ins.num_operands >= 1 && ins.operands[0].kind == 1 /*MemRef*/ &&
-           ins.operands[0].size != 0xFF;
-}
-
-// FSTP destination predicate matching try_fuse_fld_fstp / try_fuse_fld_arith_fstp:
-// reg form ST(1) OR mem form non-m80.
-bool fstp_dest_valid(const Instr& ins) {
-    if (!is_fstp(ins.opcode)) {
-        return false;
-    }
-    if (ins.num_operands < 1) {
-        return false;
-    }
-    if (ins.operands[0].kind == 0 /*Register*/) {
-        return ins.operands[0].reg == 0x71;  // ST(1) only
-    }
-    return ins.operands[0].size != 0xFF;  // non-m80 mem
-}
-
-// ARITH operand-kind predicate for fld_arith_fstp / arith_fstp / fld_arith_arithp:
-// either register-register with ST(0)/ST(1) OR mem source.
-bool arith_operands_for_fld_arith_fstp(const Instr& ins) {
-    if (ins.num_operands < 1) {
-        return false;
-    }
-    if (ins.operands[0].kind != 0 /*Register*/) {
-        return true;  // memory source — accepted
-    }
-    // reg-reg: dst must be ST(0), src must be ST(1)
-    if (ins.num_operands < 2) {
-        return false;
-    }
-    return ins.operands[0].reg == 0x70 && ins.operands[1].reg == 0x71;
-}
-
-// Returns the name of the fusion that would fire on the prefix of
-// instrs[start..end), or nullptr if none.  When non-null, *consumed_out
-// is set to how many instructions the fusion absorbs (2..4).  Match
-// order mirrors try_fuse_*_group + try_peephole exactly.
-const char* classifyFusion(const std::vector<Instr>& w, size_t start, size_t end,
-                           int* consumed_out) {
-    const auto have = [&](size_t k) { return start + k <= end; };
-
-    if (!have(2)) {
-        return nullptr;
-    }
-    const Instr& a = w[start];
-    const Instr& b = w[start + 1];
-
-    // ── FLD-class first opcode: try_fuse_fld_group ────────────────────
-    if (is_fld_class(a.opcode) && fld_source_valid(a)) {
-        // 4-op: fld_fld_fucompp [+ fstsw]
-        if (have(4)) {
-            const Instr& c = w[start + 2];
-            const Instr& d = w[start + 3];
-            if (is_fld_class(b.opcode) && fld_source_valid(b) && is_fcompp_class(c.opcode) &&
-                d.opcode == kOpcodeName_fstsw) {
-                *consumed_out = 4;
-                return "fld_fld_fucompp_fstsw";
-            }
-        }
-        // 3-op fusions
-        if (have(3)) {
-            const Instr& c = w[start + 2];
-            // fld_arith_fstp: FLD + arith(reg/mem) + FSTP
-            if (is_arith_nonpopping(b.opcode) && arith_operands_for_fld_arith_fstp(b) &&
-                fstp_dest_valid(c)) {
-                *consumed_out = 3;
-                return "fld_arith_fstp";
-            }
-            // fld_arith_arithp: FLD + arith + arithp ST(1)
-            if (is_arith_nonpopping(b.opcode) && arith_operands_for_fld_arith_fstp(b) &&
-                is_arithp(c.opcode) && first_op_is_st1(c)) {
-                *consumed_out = 3;
-                return "fld_arith_arithp";
-            }
-            // fld_fcomp_fstsw
-            if (is_fcomp_reg_or_mem_class(b.opcode) && c.opcode == kOpcodeName_fstsw) {
-                *consumed_out = 3;
-                return "fld_fcomp_fstsw";
-            }
-            // fld_fcompp_fstsw
-            if (is_fcompp_class(b.opcode) && c.opcode == kOpcodeName_fstsw) {
-                *consumed_out = 3;
-                return "fld_fcompp_fstsw";
-            }
-            // fld_fld_fucompp without trailing fstsw
-            if (is_fld_class(b.opcode) && fld_source_valid(b) && is_fcompp_class(c.opcode)) {
-                *consumed_out = 3;
-                return "fld_fld_fucompp";
-            }
-        }
-        // 2-op fusions
-        if (is_arithp(b.opcode) && first_op_is_st1(b)) {
-            *consumed_out = 2;
-            return "fld_arithp";
-        }
-        if (fstp_dest_valid(b)) {
-            *consumed_out = 2;
-            return "fld_fstp";
-        }
-        if (is_fcomp_reg_or_mem_class(b.opcode)) {
-            *consumed_out = 2;
-            return "fld_fcomp";
-        }
-    }
-
-    // ── FXCH-group ────────────────────────────────────────────────────
-    if (a.opcode == kOpcodeName_fxch) {
-        // fxch_arithp: fxch ST(1), arithp ST(1) — operand index check.
-        if (a.num_operands >= 2 && a.operands[1].kind == 0 && a.operands[1].reg == 0x71) {
-            if (is_arithp(b.opcode) && first_op_is_st1(b)) {
-                *consumed_out = 2;
-                return "fxch_arithp";
-            }
-            if (is_fstp(b.opcode) && first_op_is_st1(b)) {
-                *consumed_out = 2;
-                return "fxch_fstp";
-            }
-        }
-    }
-
-    // ── FCOM-group ────────────────────────────────────────────────────
-    if ((is_fcomp_reg_or_mem_class(a.opcode) || is_fcompp_class(a.opcode)) &&
-        b.opcode == kOpcodeName_fstsw) {
-        *consumed_out = 2;
-        return "fcom_fstsw";
-    }
-
-    // ── ARITHp-group ──────────────────────────────────────────────────
-    if (is_arithp(a.opcode) && first_op_is_st1(a) && is_fstp(b.opcode) && first_op_mem_not_m80(b)) {
-        *consumed_out = 2;
-        return "arithp_fstp";
-    }
-
-    // ── ARITH-group ───────────────────────────────────────────────────
-    if (is_arith_nonpopping(a.opcode)) {
-        // arith_faddp: FMUL + FADDP/FSUBP/FSUBRP (FMA fusion)
-        if (a.opcode == kOpcodeName_fmul &&
-            (b.opcode == kOpcodeName_faddp || b.opcode == kOpcodeName_fsubp ||
-             b.opcode == kOpcodeName_fsubrp) &&
-            first_op_is_st1(b)) {
-            *consumed_out = 2;
-            return "arith_faddp";
-        }
-        // arith_fstp: arith mem + fstp mem
-        if (a.num_operands >= 1 && a.operands[0].kind == 1 /*MemRef*/ && is_fstp(b.opcode) &&
-            first_op_mem_not_m80(b)) {
-            *consumed_out = 2;
-            return "arith_fstp";
-        }
-    }
-
-    // ── FSTP-group ────────────────────────────────────────────────────
-    if (is_fstp(a.opcode) && is_fld_class(b.opcode) && fld_source_valid(b)) {
-        *consumed_out = 2;
-        return "fstp_fld";
-    }
-
-    return nullptr;
+EmitMeasurement measurePattern(const IRInstr* instrs, size_t len) {
+    RosettaConfig no_ir_cfg{};
+    no_ir_cfg.disable_x87_ir = 1;
+    return EmitMeasurement{
+        .arm_production = runOneMode(instrs, len, nullptr),
+        .arm_no_ir = runOneMode(instrs, len, &no_ir_cfg),
+    };
 }
 
 }  // namespace
@@ -529,7 +367,8 @@ const char* classifyFusion(const std::vector<Instr>& w, size_t start, size_t end
 int main(int argc, char** argv) try {
     uint64_t min_exec = 1000;
     size_t max_rows = 200;
-    bool show_covered = false;
+    double max_arm_per_x87 = 0.0;  // 0 = no filter
+    enum class RankBy : std::uint8_t { Emit, Exec } rank_by = RankBy::Emit;
     std::vector<std::string> files;
 
     for (int i = 1; i < argc; ++i) {
@@ -538,32 +377,54 @@ int main(int argc, char** argv) try {
             min_exec = std::strtoull(argv[++i], nullptr, 10);
         } else if (a == "--max-rows" && i + 1 < argc) {
             max_rows = std::strtoull(argv[++i], nullptr, 10);
-        } else if (a == "--show-covered") {
-            show_covered = true;
+        } else if (a == "--max-arm-per-x87" && i + 1 < argc) {
+            max_arm_per_x87 = std::strtod(argv[++i], nullptr);
+        } else if (a == "--rank-by" && i + 1 < argc) {
+            const std::string v = argv[++i];
+            if (v == "exec") {
+                rank_by = RankBy::Exec;
+            } else if (v == "emit") {
+                rank_by = RankBy::Emit;
+            } else {
+                std::fprintf(stderr, "unknown --rank-by value: %s (expected exec|emit)\n",
+                             v.c_str());
+                return 2;
+            }
         } else if (a == "--help" || a == "-h") {
             std::printf(
-                "Usage: profile_analyze [--min-exec N] [--max-rows N] [--show-covered] "
-                "file1.prof [file2.prof ...]\n"
+                "Usage: profile_analyze [--min-exec N] [--max-rows N]\n"
+                "                       [--max-arm-per-x87 R] [--rank-by exec|emit]\n"
+                "                       file1.prof [file2.prof ...]\n"
                 "\n"
-                "Each window is classified by classifyFusion() — a faithful re-encoding of\n"
-                "every try_fuse_X predicate in TranslatorX87Fusion.cpp.  The 'fusion' column\n"
-                "is the name of the fusion that fires on the window's prefix (or '-' if no\n"
-                "existing fusion matches).  When fusion!='-' AND consumed >= window_size, the\n"
-                "ENTIRE pattern is already fused in production — those rows are hidden by\n"
-                "default to keep the output focused on uncovered targets.  --show-covered\n"
-                "includes them.\n"
+                "Each unique x87 pattern is run through Translator::translate_instruction\n"
+                "twice — once with no Config installed (production: IR-first dispatcher)\n"
+                "and once with disable_x87_ir=1 (peephole + single-op only).  The emitted\n"
+                "ARM64 instruction count is reported as arm_production / arm_no_ir, with\n"
+                "the ratio arm_production / pattern_length as arm_per_x87 (lower = better).\n"
                 "\n"
-                "Patterns are ranked by exec_count = sum over blocks of (counter[block_id] *\n"
-                "occurrences of the pattern within that block).  --min-exec drops patterns\n"
-                "that never accumulate that many executions.\n"
+                "When the input contains a tally section (TLY1), workload-mix columns are\n"
+                "printed: ir%% (share of pattern's executions whose containing block had\n"
+                "its x87 ops dispatched via the IR pipeline), ft%% (forwarded to stock),\n"
+                "and the IR-failure-reason classifiers build_fail%% / fpr_fail%% /\n"
+                "gpr_fail%% with max_gpr_peak diagnostic.  peep%% and single%% are now\n"
+                "implicit (the residual non-IR non-FT share); the with-IR vs without-IR\n"
+                "emit comparison answers 'did peep help' more directly than the path mix.\n"
                 "\n"
-                "When the input contains a tally section (TLY0), four extra columns are\n"
-                "printed: ir%%/peep%%/single%%/ft%% — the exec-weighted share of the\n"
-                "pattern's executions whose containing block had its x87 ops dispatched via\n"
-                "the X87IR pipeline, the peephole fusion family, the single-op fallthrough,\n"
-                "or the stock-forward fallthrough.  Per-block path mix is propagated into\n"
-                "per-pattern shares as the average over contributing blocks.  Older .prof\n"
-                "files without TLY0 just omit the four columns.\n");
+                "Patterns are sliced within natural x87 runs via X87Cache::lookahead — the\n"
+                "JIT's own run-detection function — so every measured pattern is contiguous\n"
+                "x87 by construction.\n"
+                "\n"
+                "Default sort: exec_count * arm_production desc (highest exec-weighted\n"
+                "ARM emit first).  --rank-by exec restores raw exec_count ordering.\n"
+                "--max-arm-per-x87 R hides rows whose ratio is at or below R (already\n"
+                "well-optimized).\n"
+                "\n"
+                "Caveat: the pattern is measured in isolation.  Block context (cache dirty\n"
+                "state, surrounding ops) that determines whether IR's gate refuses in\n"
+                "production is not modeled — the TLY1 columns cover that side.  Read both:\n"
+                "arm_production/arm_no_ir says 'what's the best each configuration can do\n"
+                "for this pattern'; ir%% says 'how often we actually achieve the with-IR\n"
+                "result in this workload'.\n");
             return 0;
         } else if (!a.empty() && a[0] == '-') {
             std::fprintf(stderr, "unknown flag: %s\n", a.c_str());
@@ -578,57 +439,70 @@ int main(int argc, char** argv) try {
         return 2;
     }
 
+    // Inline transcendentals (fsin/fcos/fpatan/...) materialise an absolute
+    // address constant via emit_movz_movk_abs64.  The translator asserts the
+    // address has been installed; emit count doesn't depend on the value, so
+    // any non-zero placeholder satisfies the gate.
+    rosetta_core::set_transcendental_constants_addr(0x1000);
+
     std::vector<Block> blocks;
     std::vector<uint64_t> counters;
     std::vector<Tally> tallies;
     std::vector<uint16_t> build_fail_ops;
+    std::vector<profile::BlockIRGateCounters> ir_gate_counters;
     for (const auto& f : files) {
         std::vector<uint64_t> file_counters;
         std::vector<Tally> file_tallies;
         std::vector<uint16_t> file_bfo;
-        if (!readFile(f, blocks, file_counters, file_tallies, file_bfo)) {
+        std::vector<profile::BlockIRGateCounters> file_irg;
+        if (!readFile(f, blocks, file_counters, file_tallies, file_bfo, file_irg)) {
             return 1;
         }
-        // Multi-file aggregation: union counters by block_id (each file's
-        // block_ids are independent, so we offset on append). For now the
-        // common case is one file per run; the simple path is fine.
         if (counters.empty()) {
             counters = std::move(file_counters);
             tallies = std::move(file_tallies);
             build_fail_ops = std::move(file_bfo);
+            ir_gate_counters = std::move(file_irg);
         } else {
             counters.insert(counters.end(), file_counters.begin(), file_counters.end());
             tallies.insert(tallies.end(), file_tallies.begin(), file_tallies.end());
             build_fail_ops.insert(build_fail_ops.end(), file_bfo.begin(), file_bfo.end());
+            ir_gate_counters.insert(ir_gate_counters.end(), file_irg.begin(), file_irg.end());
         }
     }
     const bool have_tallies = !tallies.empty();
     const bool have_bfo = !build_fail_ops.empty();
-    std::fprintf(
-        stderr,
-        "loaded %zu blocks, %zu counter entries, %zu tally entries, %zu bfo entries from %zu "
-        "file(s)\n",
-        blocks.size(), counters.size(), tallies.size(), build_fail_ops.size(), files.size());
+    const bool have_irg = !ir_gate_counters.empty();
+    std::fprintf(stderr,
+                 "loaded %zu blocks, %zu counter entries, %zu tally entries, %zu bfo entries, "
+                 "%zu irg entries from %zu file(s)\n",
+                 blocks.size(), counters.size(), tallies.size(), build_fail_ops.size(),
+                 ir_gate_counters.size(), files.size());
 
-    // Slide all window lengths over each block.  Aggregate by pattern key,
-    // weighting each occurrence by counter[block_id].  Per-block path mix
-    // (ir_ops/peephole_ops/single_ops/fallthrough_ops over all the block's
-    // x87 ops) is propagated into a per-pattern share by accumulating
-    // exec * (path_ops / total_x87_ops) for each path.
+    // Slice patterns within natural x87 runs.  X87Cache::lookahead is the
+    // JIT's own run-detection function (Translator.cpp:74 calls the same).
+    // For each block: walk idx; for each x87 run, generate every window
+    // length 2..run_len starting at the run's first idx, and accumulate
+    // exec-weighted contributions per pattern key.
     struct Stats {
         uint64_t exec_count = 0;
         size_t window_size = 0;
-        const char* fusion = nullptr;  // existing fusion firing on prefix, or null
-        int fusion_consumed = 0;       // how many leading instrs the fusion absorbs
+        uint32_t arm_production = 0;
+        uint32_t arm_no_ir = 0;
         // Path-weighted exec contributions; ratios at print time.
         long double ir_w = 0.0L;
-        long double peep_w = 0.0L;
-        long double single_w = 0.0L;
         long double ft_w = 0.0L;
         long double build_fail_w = 0.0L;
         long double fpr_fail_w = 0.0L;
         long double gpr_fail_w = 0.0L;
-        uint16_t max_gpr_peak = 0;  // max across contributing blocks
+        uint16_t max_gpr_peak = 0;
+        // Per-pattern exec-weighted IRG reason attribution.  Each containing
+        // block contributes its IRG sentinel × pattern_exec to one bucket.
+        // At print time the dominant bucket gives the pattern's gate column.
+        long double gate_w[profile::kIRGateReasonCount] = {};
+        // Pointer to one occurrence's first IRInstr; the analyzer picks the
+        // first sighting and keeps the pointer stable until measurement time.
+        const IRInstr* sample_instrs = nullptr;
     };
     std::unordered_map<std::string, Stats> patterns;
     patterns.reserve(blocks.size() * 4);
@@ -636,13 +510,9 @@ int main(int argc, char** argv) try {
     for (const auto& b : blocks) {
         const uint64_t exec = (b.id < counters.size()) ? counters[b.id] : 0;
         if (exec == 0) {
-            continue;  // dead-code block contributes nothing — skip work
+            continue;  // dead-code block contributes nothing
         }
-        // Per-block path fractions; default to all-zero when no tally
-        // section was present in the input.
         long double ir_frac = 0.0L;
-        long double peep_frac = 0.0L;
-        long double single_frac = 0.0L;
         long double ft_frac = 0.0L;
         long double build_fail_frac = 0.0L;
         long double fpr_fail_frac = 0.0L;
@@ -652,41 +522,34 @@ int main(int argc, char** argv) try {
             const uint64_t tot = t.total();
             if (tot > 0) {
                 ir_frac = static_cast<long double>(t.ir) / tot;
-                peep_frac = static_cast<long double>(t.peep) / tot;
-                single_frac = static_cast<long double>(t.single) / tot;
                 ft_frac = static_cast<long double>(t.ft) / tot;
                 build_fail_frac = static_cast<long double>(t.ir_build_fail) / tot;
                 fpr_fail_frac = static_cast<long double>(t.ir_fpr_fail) / tot;
                 gpr_fail_frac = static_cast<long double>(t.ir_gpr_fail) / tot;
             }
         }
-        const size_t L = b.instrs.size();
-        for (size_t start = 0; start < L; ++start) {
-            const size_t maxLen = L - start;
-            for (size_t len = 2; len <= maxLen; ++len) {
-                bool hasX87 = false;
-                for (size_t k = 0; k < len; ++k) {
-                    if (isX87(b.instrs[start + k].opcode)) {
-                        hasX87 = true;
-                        break;
-                    }
-                }
-                if (!hasX87) {
-                    continue;
-                }
-                std::string key = patternKey(b.instrs, start, len);
+        const auto L = static_cast<int64_t>(b.instrs.size());
+        // X87Cache::lookahead expects non-const IRInstr*.  It doesn't
+        // mutate; this is just an API quirk.
+        auto* mut_instrs = const_cast<IRInstr*>(b.instrs.data());
+        int64_t idx = 0;
+        while (idx < L) {
+            const int run = X87Cache::lookahead(mut_instrs, L, idx);
+            if (run < 2) {
+                idx += (run == 0) ? 1 : run;
+                continue;
+            }
+            for (int len = 2; len <= run; ++len) {
+                std::string key =
+                    patternKey(b.instrs, static_cast<size_t>(idx), static_cast<size_t>(len));
                 auto& s = patterns[key];
                 if (s.exec_count == 0) {
-                    s.window_size = len;
-                    int consumed = 0;
-                    s.fusion = classifyFusion(b.instrs, start, start + len, &consumed);
-                    s.fusion_consumed = consumed;
+                    s.window_size = static_cast<size_t>(len);
+                    s.sample_instrs = &b.instrs[static_cast<size_t>(idx)];
                 }
                 s.exec_count += exec;
                 const auto execL = static_cast<long double>(exec);
                 s.ir_w += execL * ir_frac;
-                s.peep_w += execL * peep_frac;
-                s.single_w += execL * single_frac;
                 s.ft_w += execL * ft_frac;
                 s.build_fail_w += execL * build_fail_frac;
                 s.fpr_fail_w += execL * fpr_fail_frac;
@@ -694,63 +557,129 @@ int main(int argc, char** argv) try {
                 if (b.id < tallies.size() && tallies[b.id].max_gpr_peak > s.max_gpr_peak) {
                     s.max_gpr_peak = tallies[b.id].max_gpr_peak;
                 }
+                if (b.id < ir_gate_counters.size()) {
+                    // Per-reason exec-weighted accumulation.  Each pattern
+                    // inherits ALL of its containing block's gate counts
+                    // weighted by block exec — so a pattern that appears
+                    // only in blocks where top_dirty fired sees gate_w
+                    // concentrated on top_dirty.
+                    const auto& gc = ir_gate_counters[b.id];
+                    for (uint16_t r = 0; r < profile::kIRGateReasonCount; ++r) {
+                        s.gate_w[r] += execL * static_cast<long double>(gc.counts[r]);
+                    }
+                }
             }
+            idx += run;
         }
     }
 
+    // Filter by min_exec, then run the JIT once per surviving unique
+    // pattern.  Measurement is the expensive step (TranslationResult
+    // alloc + 64 KB malloc + two translator runs); cap by --max-rows
+    // before measuring to bound cost.
     std::vector<std::pair<std::string, Stats>> rows;
     rows.reserve(patterns.size());
     for (auto& kv : patterns) {
         if (kv.second.exec_count < min_exec) {
             continue;
         }
-        // A pattern is "fully covered" iff a fusion fires on its prefix
-        // AND consumes at least the entire window.  These are not new
-        // fusion targets — hide unless --show-covered.
-        const bool fully_covered =
-            kv.second.fusion != nullptr && kv.second.fusion_consumed > 0 &&
-            std::cmp_greater_equal(kv.second.fusion_consumed, kv.second.window_size);
-        if (!show_covered && fully_covered) {
-            continue;
-        }
         rows.emplace_back(kv.first, kv.second);
     }
+
+    // Pre-rank by exec_count desc for the bound-by---max-rows pre-measure.
+    // After measurement we re-rank by the user's --rank-by choice.
     std::ranges::sort(rows, [](const auto& a, const auto& b) {
         return a.second.exec_count > b.second.exec_count;
     });
 
+    // Cap rows BEFORE measuring so we don't JIT 50k unique patterns.
+    // --max-rows N keeps the top N by exec_count for measurement.  After
+    // re-ranking, the displayed top-N is the same set ordered by emit
+    // leverage if --rank-by emit (default) or by exec if --rank-by exec.
+    const size_t to_measure = std::min(max_rows * 4, rows.size());
+    rows.resize(to_measure);
+
+    for (auto& [_, s] : rows) {
+        if (s.sample_instrs == nullptr || s.window_size == 0) {
+            continue;
+        }
+        const auto m = measurePattern(s.sample_instrs, s.window_size);
+        s.arm_production = m.arm_production;
+        s.arm_no_ir = m.arm_no_ir;
+    }
+
+    // Apply the optional emit-ratio filter post-measurement.
+    if (max_arm_per_x87 > 0.0) {
+        std::erase_if(rows, [max_arm_per_x87](const auto& kv) {
+            const auto& s = kv.second;
+            if (s.window_size == 0) {
+                return false;
+            }
+            const double ratio =
+                static_cast<double>(s.arm_production) / static_cast<double>(s.window_size);
+            return ratio <= max_arm_per_x87;
+        });
+    }
+
+    // Final sort by --rank-by.
+    if (rank_by == RankBy::Emit) {
+        std::ranges::sort(rows, [](const auto& a, const auto& b) {
+            const auto la = static_cast<long double>(a.second.exec_count) *
+                            static_cast<long double>(a.second.arm_production);
+            const auto lb = static_cast<long double>(b.second.exec_count) *
+                            static_cast<long double>(b.second.arm_production);
+            return la > lb;
+        });
+    } else {
+        std::ranges::sort(rows, [](const auto& a, const auto& b) {
+            return a.second.exec_count > b.second.exec_count;
+        });
+    }
+
     if (have_tallies) {
         std::printf(
-            "exec_count,window_size,fusion,consumed,"
-            "ir%%,peep%%,single%%,ft%%,build_fail%%,fpr_fail%%,gpr_fail%%,max_gpr_peak,"
-            "sequence\n");
+            "exec_count,arm_production,arm_no_ir,arm_per_x87,"
+            "ir%%,ft%%,build_fail%%,fpr_fail%%,gpr_fail%%,max_gpr_peak,"
+            "gate_reason,sequence\n");
     } else {
-        std::printf("exec_count,window_size,fusion,consumed,sequence\n");
+        std::printf("exec_count,arm_production,arm_no_ir,arm_per_x87,sequence\n");
     }
     const size_t n = std::min(max_rows, rows.size());
     for (size_t i = 0; i < n; ++i) {
         const auto& [key, s] = rows[i];
+        const double arm_per_x87 = s.window_size > 0 ? static_cast<double>(s.arm_production) /
+                                                           static_cast<double>(s.window_size)
+                                                     : 0.0;
         if (have_tallies) {
             const auto exec = static_cast<long double>(s.exec_count);
             const auto pct = [&](long double w) -> double {
                 return exec > 0 ? static_cast<double>(100.0L * w / exec) : 0.0;
             };
-            std::printf("%llu,%zu,%s,%d,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%u,%s\n",
-                        static_cast<unsigned long long>(s.exec_count), s.window_size,
-                        s.fusion ? s.fusion : "-", s.fusion_consumed, pct(s.ir_w), pct(s.peep_w),
-                        pct(s.single_w), pct(s.ft_w), pct(s.build_fail_w), pct(s.fpr_fail_w),
-                        pct(s.gpr_fail_w), static_cast<unsigned>(s.max_gpr_peak), key.c_str());
+            // Dominant IRG reason for this pattern (or "-" if none).
+            const char* gate_reason = "-";
+            long double best = 0.0L;
+            for (uint16_t r = 0; r < profile::kIRGateReasonCount; ++r) {
+                if (s.gate_w[r] > best) {
+                    best = s.gate_w[r];
+                    gate_reason = profile::kIRGateReasonNames[r];
+                }
+            }
+            std::printf("%llu,%u,%u,%.2f,%.1f,%.1f,%.1f,%.1f,%.1f,%u,%s,%s\n",
+                        static_cast<unsigned long long>(s.exec_count), s.arm_production,
+                        s.arm_no_ir, arm_per_x87, pct(s.ir_w), pct(s.ft_w), pct(s.build_fail_w),
+                        pct(s.fpr_fail_w), pct(s.gpr_fail_w), static_cast<unsigned>(s.max_gpr_peak),
+                        gate_reason, key.c_str());
         } else {
-            std::printf("%llu,%zu,%s,%d,%s\n", static_cast<unsigned long long>(s.exec_count),
-                        s.window_size, s.fusion ? s.fusion : "-", s.fusion_consumed, key.c_str());
+            std::printf("%llu,%u,%u,%.2f,%s\n", static_cast<unsigned long long>(s.exec_count),
+                        s.arm_production, s.arm_no_ir, arm_per_x87, key.c_str());
         }
     }
-    std::fprintf(
-        stderr, "%zu unique patterns >= min_exec=%llu (showing %zu; %s fully-covered patterns%s)\n",
-        rows.size(), static_cast<unsigned long long>(min_exec), n,
-        show_covered ? "including" : "hiding",
-        have_tallies ? "; columns ir%/peep%/single%/ft% give exec-weighted path mix"
-                     : "; no tally section in input — path columns omitted");
+    std::fprintf(stderr, "%zu measured patterns >= min_exec=%llu (showing %zu, ranked by %s%s)\n",
+                 rows.size(), static_cast<unsigned long long>(min_exec), n,
+                 rank_by == RankBy::Emit ? "exec_count*arm_production" : "exec_count",
+                 have_tallies
+                     ? "; columns ir%/ft%/build_fail%/fpr_fail%/gpr_fail% give workload mix"
+                     : "; no tally section in input — workload-mix columns omitted");
 
     // ── Build-bail-opcode histogram ─────────────────────────────────────────
     // For each block whose translation observed an unsupported x87 opcode in
@@ -774,7 +703,7 @@ int main(int argc, char** argv) try {
             }
             const uint64_t exec = (b.id < counters.size()) ? counters[b.id] : 0;
             if (exec == 0) {
-                continue;  // dead-code block
+                continue;
             }
             auto& bk = hist[op];
             bk.exec_w += exec;
@@ -805,6 +734,72 @@ int main(int argc, char** argv) try {
     } else {
         std::fprintf(stderr,
                      "build-bail histogram: skipped (no BFO0 section in input — older profile)\n");
+    }
+
+    // ── IR-gate per-reason refusal histogram ───────────────────────────────
+    // Per-reason exec-weighted bumps from BlockIRGateCounters (IRG1).  Each
+    // gate refusal increments a counter; the analyzer multiplies by the
+    // block's exec_count to compute exec-weighted contribution.  Per-reason
+    // counts (vs a single sentinel) avoid trailing-tail short_run records
+    // masking longer-run refusals — every refusal is recorded in its own
+    // bucket and contributes to the histogram independently.
+    if (have_irg) {
+        struct Bucket {
+            uint64_t exec_w = 0;     // exec_count × per-block refusal count
+            uint32_t blocks = 0;     // distinct blocks recording this reason
+        };
+        Bucket per_reason[profile::kIRGateReasonCount]{};
+        uint64_t total_exec_w = 0;
+        for (const auto& b : blocks) {
+            if (b.id >= ir_gate_counters.size()) {
+                continue;
+            }
+            const uint64_t exec = (b.id < counters.size()) ? counters[b.id] : 0;
+            if (exec == 0) {
+                continue;
+            }
+            const auto& gc = ir_gate_counters[b.id];
+            for (uint16_t r = 0; r < profile::kIRGateReasonCount; ++r) {
+                if (gc.counts[r] == 0) {
+                    continue;
+                }
+                per_reason[r].exec_w += exec * static_cast<uint64_t>(gc.counts[r]);
+                per_reason[r].blocks += 1;
+                total_exec_w += exec * static_cast<uint64_t>(gc.counts[r]);
+            }
+        }
+        struct Row {
+            uint16_t reason;
+            uint64_t exec_w;
+            uint32_t blocks;
+        };
+        std::vector<Row> rows_h;
+        for (uint16_t r = 0; r < profile::kIRGateReasonCount; ++r) {
+            if (per_reason[r].blocks > 0) {
+                rows_h.push_back(
+                    {.reason = r, .exec_w = per_reason[r].exec_w, .blocks = per_reason[r].blocks});
+            }
+        }
+        std::ranges::sort(rows_h, [](const Row& a, const Row& b) { return a.exec_w > b.exec_w; });
+        std::printf("\n");
+        std::printf("# Top reasons IR-gate refused (exec-weighted)\n");
+        std::printf("rank,reason,exec_count,share%%,blocks\n");
+        for (size_t i = 0; i < rows_h.size(); ++i) {
+            const auto& row = rows_h[i];
+            const double share = total_exec_w > 0 ? 100.0 * static_cast<double>(row.exec_w) /
+                                                        static_cast<double>(total_exec_w)
+                                                  : 0.0;
+            std::printf("%zu,%s,%llu,%.1f,%u\n", i + 1, profile::kIRGateReasonNames[row.reason],
+                        static_cast<unsigned long long>(row.exec_w), share, row.blocks);
+        }
+        std::fprintf(
+            stderr,
+            "ir-gate-refusal histogram: %zu distinct reasons across %llu exec-weighted refusals\n",
+            rows_h.size(), static_cast<unsigned long long>(total_exec_w));
+    } else {
+        std::fprintf(
+            stderr,
+            "ir-gate-refusal histogram: skipped (no IRG0 section in input — older profile)\n");
     }
     return 0;
 } catch (const std::exception& e) {

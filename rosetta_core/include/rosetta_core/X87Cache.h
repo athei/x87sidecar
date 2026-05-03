@@ -53,6 +53,17 @@ struct X87Cache {
     // block.  Saturating at its u16 upper bound is a sufficient signal — we
     // only care about "was peak high enough to refuse?".
     uint16_t tally_max_gpr_peak = 0;
+    // Per-reason IR-gate refusal counters.  Bumped each time the dispatcher
+    // gate refuses entry to compile_run before checking; one counter per
+    // condition.  Disjoint from tally_ir_*_fail (those count failures
+    // *after* compile_run was called).  Per-reason counts (rather than a
+    // single first/last-write-wins sentinel) avoid trailing-tail short_run
+    // records masking a longer run's actual cause.
+    uint16_t tally_ir_gate_short_run = 0;
+    uint16_t tally_ir_gate_top_dirty = 0;
+    uint16_t tally_ir_gate_tag_push = 0;
+    uint16_t tally_ir_gate_deferred_pop = 0;
+    uint16_t tally_ir_gate_perm_dirty = 0;
     uint32_t profile_bid = 0xFFFFFFFFU;  // = profile::kOverflowId
 
     bool active() const;

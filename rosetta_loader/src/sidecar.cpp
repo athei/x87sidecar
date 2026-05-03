@@ -21,7 +21,6 @@
 #include "rosetta_core/CoreConfig.h"
 #include "rosetta_core/Fixup.h"
 #include "rosetta_core/IRInstr.h"
-#include "rosetta_core/IROperand.h"
 #include "rosetta_core/Opcode.h"
 #include "rosetta_core/ProfileFormat.h"
 #include "rosetta_core/ProfileRuntime.h"
@@ -88,57 +87,16 @@ void dumpBlockIfNew(uint64_t block_ptr, const IRInstr* ir, uint64_t num_instrs) 
     };
     std::fwrite(&hdr, sizeof(hdr), 1, g_profile.file);
 
-    for (uint64_t i = 0; i < num_instrs; ++i) {
-        profile::InstrRecord rec{};
-        rec.opcode = ir[i].opcode;
-        rec.num_operands = ir[i].num_operands;
-        rec.ir_kind = ir[i].ir_kind;
-        const uint8_t n = std::min<uint8_t>(ir[i].num_operands, 4);
-        for (uint8_t k = 0; k < n; ++k) {
-            const auto& op = ir[i].operands[k];
-            const auto kind = static_cast<uint8_t>(op.kind);
-            rec.operands[k].kind = kind;
-            switch (op.kind) {
-                case IROperandKind::Register:
-                    rec.operands[k].size = static_cast<uint8_t>(op.reg.size);
-                    rec.operands[k].reg = op.reg.reg.value;
-                    rec.operands[k].flags = 0;
-                    break;
-                case IROperandKind::MemRef:
-                    rec.operands[k].size = static_cast<uint8_t>(op.mem.size);
-                    rec.operands[k].reg = op.mem.base_reg;
-                    rec.operands[k].flags = op.mem.mem_flags;
-                    break;
-                case IROperandKind::AbsMem:
-                    rec.operands[k].size = static_cast<uint8_t>(op.abs_mem.size);
-                    rec.operands[k].reg = 0;
-                    rec.operands[k].flags = 0;
-                    break;
-                case IROperandKind::Immediate:
-                    rec.operands[k].size = static_cast<uint8_t>(op.imm.size);
-                    rec.operands[k].reg = 0;
-                    rec.operands[k].flags = op.imm.mem_flags;
-                    break;
-                case IROperandKind::ConditionCode:
-                    rec.operands[k].size = 0;
-                    rec.operands[k].reg = op.cc.cc;
-                    rec.operands[k].flags = 0;
-                    break;
-                case IROperandKind::SegmentRegister:
-                    rec.operands[k].size = 0;
-                    rec.operands[k].reg = op.seg.seg_idx;
-                    rec.operands[k].flags = 0;
-                    break;
-                case IROperandKind::BranchOffset:
-                default:
-                    rec.operands[k].size = 0;
-                    rec.operands[k].reg = 0;
-                    rec.operands[k].flags = 0;
-                    break;
-            }
-        }
-        std::fwrite(&rec, sizeof(rec), 1, g_profile.file);
+    // Stream full IRInstr values; analyzer feeds them straight to
+    // Translator::translate_instruction so it gets real disp/index/imm
+    // and emit counts match production exactly.  PC is per-run and the
+    // analyzer never reads it — zero it so identical patterns hash
+    // identically across captures.
+    std::vector<IRInstr> stable(ir, ir + num_instrs);
+    for (auto& rec : stable) {
+        rec.pc = 0;
     }
+    std::fwrite(stable.data(), sizeof(IRInstr), num_instrs, g_profile.file);
     std::fflush(g_profile.file);
 }
 
@@ -852,6 +810,21 @@ void dumpCountersIfEnabled(mach_port_t /*parentTaskPort*/) {
     for (uint32_t bid = 0; bid < count; ++bid) {
         const uint16_t op = profile::get_block_build_fail_op(bid);
         std::fwrite(&op, sizeof(op), 1, g_profile.file);
+    }
+
+    // IR-gate per-reason refusal counter side-table (IRG1): per block_id
+    // 0..count-1, 5 uint16 counters indexed by kIRGateReason*.  Pinpoints
+    // the silent "ir%=0 with all-zero failure tallies" cohort the BFO0
+    // histogram can't see; per-reason counts (vs a single sentinel) avoid
+    // trailing-tail short_run records masking longer-run refusals.
+    profile::IRGateRefuseSectionHeader ihdr{
+        .magic = profile::kIRGateRefuseSectionMagic,
+        .count = count,
+    };
+    std::fwrite(&ihdr, sizeof(ihdr), 1, g_profile.file);
+    for (uint32_t bid = 0; bid < count; ++bid) {
+        const profile::BlockIRGateCounters c = profile::get_block_ir_gate_counters(bid);
+        std::fwrite(&c, sizeof(c), 1, g_profile.file);
     }
 
     std::fflush(g_profile.file);

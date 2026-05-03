@@ -31,6 +31,11 @@ std::unique_ptr<std::atomic<uint64_t>[]> g_block_tally_hi;
 // when allocated.  Lazy-allocated on first set_block_build_fail_op call.
 std::unique_ptr<std::atomic<uint16_t>[]> g_block_build_fail_op;
 
+// Per-block IR-gate refusal counters: 5 parallel atomic<u16>[] arrays
+// indexed by kIRGateReason*.  Lazy-allocated together on first
+// set_block_ir_gate_counters call; absent when profiling is disabled.
+std::unique_ptr<std::atomic<uint16_t>[]> g_block_ir_gate_counts[kIRGateReasonCount];
+
 void pack_tally(BlockTally t, uint64_t& lo, uint64_t& hi) {
     static_assert(sizeof(BlockTally) == 16);
     std::memcpy(&lo, reinterpret_cast<const std::byte*>(&t) + 0, 8);
@@ -153,6 +158,45 @@ uint16_t get_block_build_fail_op(uint32_t bid) {
         arr = g_block_build_fail_op.get();
     }
     return arr[bid].load(std::memory_order_relaxed);
+}
+
+void set_block_ir_gate_counters(uint32_t bid, BlockIRGateCounters counters) {
+    if (bid >= kMaxBlocks) {
+        return;
+    }
+    {
+        std::scoped_lock lock(g_mu);
+        if (!g_block_ir_gate_counts[0]) {
+            for (uint32_t r = 0; r < kIRGateReasonCount; ++r) {
+                g_block_ir_gate_counts[r] =
+                    std::make_unique<std::atomic<uint16_t>[]>(kMaxBlocks);
+            }
+        }
+    }
+    for (uint32_t r = 0; r < kIRGateReasonCount; ++r) {
+        g_block_ir_gate_counts[r][bid].store(counters.counts[r], std::memory_order_relaxed);
+    }
+}
+
+BlockIRGateCounters get_block_ir_gate_counters(uint32_t bid) {
+    BlockIRGateCounters out{};
+    if (bid >= kMaxBlocks) {
+        return out;
+    }
+    std::atomic<uint16_t>* arrs[kIRGateReasonCount];
+    {
+        std::scoped_lock lock(g_mu);
+        if (!g_block_ir_gate_counts[0]) {
+            return out;
+        }
+        for (uint32_t r = 0; r < kIRGateReasonCount; ++r) {
+            arrs[r] = g_block_ir_gate_counts[r].get();
+        }
+    }
+    for (uint32_t r = 0; r < kIRGateReasonCount; ++r) {
+        out.counts[r] = arrs[r][bid].load(std::memory_order_relaxed);
+    }
+    return out;
 }
 
 }  // namespace profile

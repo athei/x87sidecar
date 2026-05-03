@@ -3,6 +3,8 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "rosetta_core/ProfileFormat.h"
+
 struct IRBlock;
 
 // Cross-component runtime state for X87_PROFILE.
@@ -74,5 +76,15 @@ BlockTally get_block_tally(uint32_t bid);
 // × kMaxBlocks = 2 MiB), so profile-disabled runs never pay the cost.
 void set_block_build_fail_op(uint32_t bid, uint16_t opcode);
 uint16_t get_block_build_fail_op(uint32_t bid);
+
+// Per-block IR-gate refusal counters (5 × uint16, indexed by kIRGateReason*).
+// Lazy-allocated on first set call (10 B/slot × kMaxBlocks = 10 MiB total
+// across the 5 atomic arrays), so profile-disabled runs never pay the cost.
+// Records which pre-build dispatcher gate condition refused entry to
+// compile_run AND how many times.  Idempotent set (latest-write-wins per
+// counter); the translator accumulates non-atomically in X87Cache and
+// mirrors the running totals here.
+void set_block_ir_gate_counters(uint32_t bid, BlockIRGateCounters counters);
+BlockIRGateCounters get_block_ir_gate_counters(uint32_t bid);
 
 }  // namespace profile

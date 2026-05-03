@@ -59,6 +59,11 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
             cache.tally_ir_fpr_fail = 0;
             cache.tally_ir_gpr_fail = 0;
             cache.tally_max_gpr_peak = 0;
+            cache.tally_ir_gate_short_run = 0;
+            cache.tally_ir_gate_top_dirty = 0;
+            cache.tally_ir_gate_tag_push = 0;
+            cache.tally_ir_gate_deferred_pop = 0;
+            cache.tally_ir_gate_perm_dirty = 0;
             cache.profile_bid = profile::kOverflowId;
             if (profile::counter_array_addr() != 0) {
                 const uint32_t bid = profile::register_block(block);
@@ -96,67 +101,114 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
         }
     };
 
+    // Mirror the per-reason gate-refusal counters (separate side-table from
+    // BlockTally; see ProfileFormat.h IRG1 section).  Called whenever any of
+    // the 5 gate counters increments.
+    const auto mirror_gate_counters = [&] {
+        if (cache.profile_bid != profile::kOverflowId) {
+            profile::BlockIRGateCounters c{};
+            c.counts[profile::kIRGateReasonShortRun] = cache.tally_ir_gate_short_run;
+            c.counts[profile::kIRGateReasonTopDirty] = cache.tally_ir_gate_top_dirty;
+            c.counts[profile::kIRGateReasonTagPush] = cache.tally_ir_gate_tag_push;
+            c.counts[profile::kIRGateReasonDeferredPop] = cache.tally_ir_gate_deferred_pop;
+            c.counts[profile::kIRGateReasonPermDirty] = cache.tally_ir_gate_perm_dirty;
+            profile::set_block_ir_gate_counters(cache.profile_bid, c);
+        }
+    };
+
     // ── IR pipeline: try whole-run optimization for runs of 3+ ─────────────
     // The IR fires once at the start of a fresh run (no deferred cache state).
     // It builds an SSA-like IR, runs optimization passes (DSE, FMA, FCOM+FSTSW
     // fusion), and lowers directly to AArch64.
+    //
+    // X87_PROFILE diagnostic: when the cache is active (i.e. an x87 run is
+    // in flight) but one of the eligibility conditions below refuses entry
+    // to compile_run, record which condition fired into the IRG0 side-table.
+    // Latest-write-wins per block — analyzer aggregates exec-weighted across
+    // blocks to surface the dominant refusal cause.  Was previously a single
+    // combined &&-chain whose failures were invisible to the profiler.
     {
         const bool ir_disabled = g_rosetta_config && g_rosetta_config->disable_x87_ir;
-        if (!ir_disabled && cache.active() && cache.run_remaining >= 3 && cache.top_dirty == 0 &&
-            cache.tag_push_pending == 0 && cache.deferred_pop_count == 0 && !cache.perm_dirty) {
-            X87IR::IRFailReason ir_reason = X87IR::IRFailReason::kNone;
-            int ir_peak_gprs = 0;
-            // out_fail_opcode is only useful when we'll record it into the
-            // profile side-table.  Pass nullptr in non-profile builds so
-            // compile_run skips the conditional store entirely.
-            const bool profiling_block = cache.profile_bid != profile::kOverflowId;
-            uint16_t ir_fail_opcode = profile::kNoBuildFailOpcode;
-            const int ir_consumed = X87IR::compile_run(
-                translation_result, instr_array, num_instrs, insn_idx, cache.run_remaining,
-                &ir_reason, &ir_peak_gprs, profiling_block ? &ir_fail_opcode : nullptr);
-            if (profiling_block && ir_fail_opcode != profile::kNoBuildFailOpcode) {
-                profile::set_block_build_fail_op(cache.profile_bid, ir_fail_opcode);
+        if (!ir_disabled && cache.active()) {
+            bool gate_refused = false;
+            if (cache.run_remaining < 3) {
+                cache.tally_ir_gate_short_run =
+                    static_cast<uint16_t>(cache.tally_ir_gate_short_run + 1);
+                gate_refused = true;
+            } else if (cache.top_dirty != 0) {
+                cache.tally_ir_gate_top_dirty =
+                    static_cast<uint16_t>(cache.tally_ir_gate_top_dirty + 1);
+                gate_refused = true;
+            } else if (cache.tag_push_pending != 0) {
+                cache.tally_ir_gate_tag_push =
+                    static_cast<uint16_t>(cache.tally_ir_gate_tag_push + 1);
+                gate_refused = true;
+            } else if (cache.deferred_pop_count != 0) {
+                cache.tally_ir_gate_deferred_pop =
+                    static_cast<uint16_t>(cache.tally_ir_gate_deferred_pop + 1);
+                gate_refused = true;
+            } else if (cache.perm_dirty) {
+                cache.tally_ir_gate_perm_dirty =
+                    static_cast<uint16_t>(cache.tally_ir_gate_perm_dirty + 1);
+                gate_refused = true;
             }
-            if (ir_peak_gprs > 0) {
-                const auto peak_unsigned = static_cast<uint32_t>(ir_peak_gprs);
-                if (peak_unsigned > cache.tally_max_gpr_peak) {
-                    cache.tally_max_gpr_peak = static_cast<uint16_t>(peak_unsigned);
+            if (gate_refused) {
+                mirror_gate_counters();
+            } else {
+                X87IR::IRFailReason ir_reason = X87IR::IRFailReason::kNone;
+                int ir_peak_gprs = 0;
+                // out_fail_opcode is only useful when we'll record it into the
+                // profile side-table.  Pass nullptr in non-profile builds so
+                // compile_run skips the conditional store entirely.
+                const bool profiling_block = cache.profile_bid != profile::kOverflowId;
+                uint16_t ir_fail_opcode = profile::kNoBuildFailOpcode;
+                const int ir_consumed = X87IR::compile_run(
+                    translation_result, instr_array, num_instrs, insn_idx, cache.run_remaining,
+                    &ir_reason, &ir_peak_gprs, profiling_block ? &ir_fail_opcode : nullptr);
+                if (profiling_block && ir_fail_opcode != profile::kNoBuildFailOpcode) {
+                    profile::set_block_build_fail_op(cache.profile_bid, ir_fail_opcode);
                 }
-            }
-            if (ir_consumed == 0) {
-                switch (ir_reason) {
-                    case X87IR::IRFailReason::kBuildFail:
-                        cache.tally_ir_build_fail =
-                            static_cast<uint16_t>(cache.tally_ir_build_fail + 1);
-                        break;
-                    case X87IR::IRFailReason::kFprPressure:
-                        cache.tally_ir_fpr_fail =
-                            static_cast<uint16_t>(cache.tally_ir_fpr_fail + 1);
-                        break;
-                    case X87IR::IRFailReason::kGprPressure:
-                        cache.tally_ir_gpr_fail =
-                            static_cast<uint16_t>(cache.tally_ir_gpr_fail + 1);
-                        break;
-                    case X87IR::IRFailReason::kNone:
-                        break;
+                if (ir_peak_gprs > 0) {
+                    const auto peak_unsigned = static_cast<uint32_t>(ir_peak_gprs);
+                    if (peak_unsigned > cache.tally_max_gpr_peak) {
+                        cache.tally_max_gpr_peak = static_cast<uint16_t>(peak_unsigned);
+                    }
                 }
-                mirror_tally();
-            }
-            if (ir_consumed > 0) {
-                cache.tally_ir = static_cast<uint16_t>(cache.tally_ir + ir_consumed);
-                mirror_tally();
-                for (int i = 0; i < ir_consumed; i++) {
-                    cache.tick();
+                if (ir_consumed == 0) {
+                    switch (ir_reason) {
+                        case X87IR::IRFailReason::kBuildFail:
+                            cache.tally_ir_build_fail =
+                                static_cast<uint16_t>(cache.tally_ir_build_fail + 1);
+                            break;
+                        case X87IR::IRFailReason::kFprPressure:
+                            cache.tally_ir_fpr_fail =
+                                static_cast<uint16_t>(cache.tally_ir_fpr_fail + 1);
+                            break;
+                        case X87IR::IRFailReason::kGprPressure:
+                            cache.tally_ir_gpr_fail =
+                                static_cast<uint16_t>(cache.tally_ir_gpr_fail + 1);
+                            break;
+                        case X87IR::IRFailReason::kNone:
+                            break;
+                    }
+                    mirror_tally();
                 }
-                if (cache.active()) {
-                    translation_result->free_gpr_mask = kGprScratchMask & ~cache.pinned_mask();
-                } else {
-                    translation_result->free_gpr_mask = kGprScratchMask;
+                if (ir_consumed > 0) {
+                    cache.tally_ir = static_cast<uint16_t>(cache.tally_ir + ir_consumed);
+                    mirror_tally();
+                    for (int i = 0; i < ir_consumed; i++) {
+                        cache.tick();
+                    }
+                    if (cache.active()) {
+                        translation_result->free_gpr_mask = kGprScratchMask & ~cache.pinned_mask();
+                    } else {
+                        translation_result->free_gpr_mask = kGprScratchMask;
+                    }
+                    translation_result->free_fpr_mask =
+                        translation_result->_unoccupied_temporary_fprs_for_xmm_scalars;
+                    translation_result->_pinned_temporary_scalars = 0;
+                    return insn_idx + ir_consumed;
                 }
-                translation_result->free_fpr_mask =
-                    translation_result->_unoccupied_temporary_fprs_for_xmm_scalars;
-                translation_result->_pinned_temporary_scalars = 0;
-                return insn_idx + ir_consumed;
             }
         }
     }
