@@ -797,6 +797,12 @@ int main(int argc, char** argv) try {
         struct BlockEmitRow {
             uint64_t exec;
             uint16_t x87_ops;
+            // Longest single consecutive x87 run inside the block.  When this
+            // is < 2 the block can never benefit from peep+IR fusion (the
+            // cache only activates at run length >= 2; isolated x87 ops
+            // always go through single-op emit), regardless of how many x87
+            // ops the block has in total.
+            uint16_t max_run;
             uint32_t arm_prod;
             uint32_t arm_no_ir;
             uint32_t arm_ir_forced;
@@ -820,16 +826,19 @@ int main(int argc, char** argv) try {
             const auto L = static_cast<int64_t>(b.instrs.size());
             int64_t idx = 0;
             uint32_t x87_count = 0;
+            uint32_t max_run = 0;
             while (idx < L) {
                 const int run = X87Cache::lookahead(mut_instrs, L, idx);
                 if (run >= 1) {
                     x87_count += static_cast<uint32_t>(run);
+                    max_run = std::max(max_run, static_cast<uint32_t>(run));
                     idx += run;
                 } else {
                     idx += 1;
                 }
             }
             row.x87_ops = static_cast<uint16_t>(std::min<uint32_t>(x87_count, 0xFFFFU));
+            row.max_run = static_cast<uint16_t>(std::min<uint32_t>(max_run, 0xFFFFU));
             row.arm_prod = runOneMode(b.instrs.data(), b.instrs.size(), nullptr);
             row.arm_no_ir = runOneMode(b.instrs.data(), b.instrs.size(), &no_ir_cfg);
             row.arm_ir_forced = runOneMode(b.instrs.data(), b.instrs.size(), &force_gate_cfg);
@@ -857,7 +866,7 @@ int main(int argc, char** argv) try {
         const size_t top_n = std::min(kTopBlockN, block_rows.size());
         std::printf("# Top %zu blocks by exec-weighted ARM emit (no prefix double-count)\n", top_n);
         std::printf(
-            "rank,exec,x87_ops,arm_prod,arm_no_ir,arm_ir_forced,share%%,"
+            "rank,exec,x87_ops,max_run,arm_prod,arm_no_ir,arm_ir_forced,share%%,"
             "ir%%,peep%%,single%%,prefix\n");
         for (size_t i = 0; i < top_n; ++i) {
             const auto& r = block_rows[i];
@@ -877,10 +886,10 @@ int main(int argc, char** argv) try {
                         100.0 * static_cast<double>(r.tally->single) / static_cast<double>(tot);
                 }
             }
-            std::printf("%zu,%llu,%u,%u,%u,%u,%.2f,%.1f,%.1f,%.1f,%s\n", i + 1,
+            std::printf("%zu,%llu,%u,%u,%u,%u,%u,%.2f,%.1f,%.1f,%.1f,%s\n", i + 1,
                         static_cast<unsigned long long>(r.exec), static_cast<unsigned>(r.x87_ops),
-                        r.arm_prod, r.arm_no_ir, r.arm_ir_forced, share, ir_pct, peep_pct,
-                        single_pct, r.prefix.c_str());
+                        static_cast<unsigned>(r.max_run), r.arm_prod, r.arm_no_ir, r.arm_ir_forced,
+                        share, ir_pct, peep_pct, single_pct, r.prefix.c_str());
         }
         std::printf("\n");
     }
