@@ -317,11 +317,15 @@ void lower(Context& ctx, TranslationResult* result) {
 
     if (!(g_rosetta_config && g_rosetta_config->fast_round)) {
         int rc_count = 0;
-        bool use_rc_cache = false;
+        bool has_fcmp = false;
         for (int i = 0; i < ctx.num_nodes; i++) {
             auto& n = ctx.nodes[i];
             if (n.flags & kDead) {
                 continue;
+            }
+            if (n.op == Op::FCmp || n.op == Op::FTst) {
+                has_fcmp = true;
+                break;
             }
             if (n.op == Op::StoreCW) {
                 continue;
@@ -329,11 +333,11 @@ void lower(Context& ctx, TranslationResult* result) {
             bool is_rc = (n.op == Op::FRndInt) ||
                          ((n.op == Op::StoreI16 || n.op == Op::StoreI32 || n.op == Op::StoreI64) &&
                           !(n.flags & kTruncate));
-            if (is_rc && ++rc_count >= 2) {
-                use_rc_cache = true;
-                break;
+            if (is_rc) {
+                rc_count++;
             }
         }
+        const bool use_rc_cache = !has_fcmp && rc_count >= 2;
         if (use_rc_cache) {
             Wd_rc_cached = alloc_gpr(*result, 3);
         }
@@ -1113,13 +1117,25 @@ void lower(Context& ctx, TranslationResult* result) {
 // We track this as a "held" count that overlaps with per-node transient demand.
 int peak_live_gprs(const Context& ctx) {
     // Determine if RC caching will be active (same logic as lower()).
+    // RC cache is disabled when the run contains FCmp/FTst: emit_fcom_cc_pack
+    // has a structurally-unavoidable 4-wide GPR peak (Wd_save + Wd_packed +
+    // Wd_cc + Wd_vs) which combined with rc_cache's pinned Wd_rc_cached
+    // pushes total demand to 9 vs. the 8-slot scratch pool.  Letting the
+    // FCmp run lower successfully saves far more (long compare-heavy blocks
+    // see arm_no_ir 590 → arm_ir_forced 305, ~285 ARM/exec) than rc_cache's
+    // per-RC-op micro-saving (~2 ARM × few ops).
     bool rc_cache = false;
     if (!(g_rosetta_config && g_rosetta_config->fast_round)) {
         int rc_count = 0;
+        bool has_fcmp = false;
         for (int i = 0; i < ctx.num_nodes; i++) {
             const auto& n = ctx.nodes[i];
             if (n.flags & kDead) {
                 continue;
+            }
+            if (n.op == Op::FCmp || n.op == Op::FTst) {
+                has_fcmp = true;
+                break;
             }
             if (n.op == Op::StoreCW) {
                 continue;
@@ -1127,11 +1143,11 @@ int peak_live_gprs(const Context& ctx) {
             bool is_rc = (n.op == Op::FRndInt) ||
                          ((n.op == Op::StoreI16 || n.op == Op::StoreI32 || n.op == Op::StoreI64) &&
                           !(n.flags & kTruncate));
-            if (is_rc && ++rc_count >= 2) {
-                rc_cache = true;
-                break;
+            if (is_rc) {
+                rc_count++;
             }
         }
+        rc_cache = !has_fcmp && rc_count >= 2;
     }
 
     int pinned = 4;  // Xbase, Wd_top, Wd_tmp, Xst_base
