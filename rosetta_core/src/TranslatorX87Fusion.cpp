@@ -1223,12 +1223,18 @@ static auto try_fuse_fld_fcomp_fstsw(TranslationResult* a1, IRInstr* fld_instr,
 // =============================================================================
 // Peephole: FLD + FCOMP/FUCOMP fusion (no FSTSW)
 //
-// The pattern  FLD src / FCOMP ST(1)  appears ~1649 times in a real-world MMO binary.
-// After FLD push, ST(0)=loaded value and ST(1)=old_ST(0).
-// FCOMP compares ST(0) vs ST(1) and pops.
-// Net stack change: push + pop = zero.
+// Two forms supported:
+//   Register form: FLD src / FCOMP ST(1)        — compare fld_value vs old_ST(0)
+//   Memory form:   FLD src / FCOMP m32/m64      — compare fld_value vs memory
+// (~1649 occurrences register-form in CoD2; memory-form dominates the
+//  fld_m32|fcomp_m32 hot pattern at ~500 M execs in WoW/turtle.)
 //
-// Fused: materialise FLD value + load old_ST(0), FCMP, map NZCV → x87 CC,
+// After FLD push, ST(0)=loaded value and ST(1)=old_ST(0).
+// Register form: FCOMP compares ST(0) vs ST(1), pops.
+// Memory form:   FCOMP compares ST(0) vs memory, pops (old_ST(0) untouched).
+// Net stack change in both forms: push + pop = zero.
+//
+// Fused: materialise FLD value + load comparand, FCMP, map NZCV → x87 CC,
 // write CC bits to status_word.  No push/pop emitted.
 // Identical to fld_fcomp_fstsw but without the FSTSW BFI-into-AX step.
 //
@@ -1243,12 +1249,19 @@ static auto try_fuse_fld_fcomp(TranslationResult* a1, IRInstr* fld_instr, IRInst
         return std::nullopt;
     }
 
-    // After FLD push, FCOMP must compare ST(0) vs ST(1) (register form).
-    if (fcomp_instr->operands[0].kind != IROperandKind::Register) {
-        return std::nullopt;
-    }
-    if (fcomp_instr->operands[1].reg.reg.index() != 1) {
-        return std::nullopt;
+    // After FLD push, FCOMP can be:
+    //   Register form: FCOMP ST(0), ST(1)  — compares fld_value vs old_ST(0)
+    //   Memory form:   FCOMP ST(0), m32/m64 — compares fld_value vs memory
+    // Rosetta IR: operands[0] = ST(0) (implicit), operands[1] = comparand.
+    const bool fcomp_is_mem = (fcomp_instr->operands[1].kind != IROperandKind::Register);
+    if (!fcomp_is_mem) {
+        if (fcomp_instr->operands[1].reg.reg.index() != 1) {
+            return std::nullopt;
+        }
+    } else {
+        if (fcomp_instr->operands[1].mem.size == IROperandSize::S80) {
+            return std::nullopt;
+        }
     }
 
     // ── 2. Classify FLD source ──────────────────────────────────────────────
@@ -1267,19 +1280,30 @@ static auto try_fuse_fld_fcomp(TranslationResult* a1, IRInstr* fld_instr, IRInst
     const int Wd_tmp = alloc_gpr(*a1, 2);
     const int Wd_tmp2 = alloc_gpr(*a1, 3);
     const int Dd_fld = alloc_free_fpr(*a1);
-    const int Dd_st0 = alloc_free_fpr(*a1);
+    const int Dd_cmp = alloc_free_fpr(*a1);
 
     // ── 3a: Materialise FLD value → Dd_fld ──────────────────────────────────
     emit_fld_value(buf, *a1, cls, fld_instr, Xbase, Wd_top, Wd_tmp, Dd_fld, Xst_base);
 
-    // ── 3b: Load old ST(0) → Dd_st0 ────────────────────────────────────────
-    emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Dd_st0, Xst_base);
+    // ── 3b: Load comparand → Dd_cmp ────────────────────────────────────────
+    if (fcomp_is_mem) {
+        const bool is_f32 = (fcomp_instr->operands[1].mem.size == IROperandSize::S32);
+        const int addr_reg =
+            compute_operand_address(*a1, /*is_64bit=*/true, &fcomp_instr->operands[1], GPR::XZR);
+        emit_fldr_imm(buf, is_f32 ? 2 : 3, Dd_cmp, addr_reg, /*imm12=*/0);
+        free_gpr(*a1, addr_reg);
+        if (is_f32) {
+            emit_fcvt_s_to_d(buf, Dd_cmp, Dd_cmp);
+        }
+    } else {
+        emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Dd_cmp, Xst_base);
+    }
 
     // ── 3c: Save NZCV, FCMP, branchless CC mapping, restore NZCV ───────────
     emit_mrs_nzcv(buf, Wd_tmp2);
-    emit_fcmp_f64(buf, Dd_fld, Dd_st0);
+    emit_fcmp_f64(buf, Dd_fld, Dd_cmp);
 
-    free_fpr(*a1, Dd_st0);
+    free_fpr(*a1, Dd_cmp);
     free_fpr(*a1, Dd_fld);
 
     // OPT-L: Branchless FCMP NZCV → packed x87 CC bits.
