@@ -867,7 +867,7 @@ int main(int argc, char** argv) try {
         std::printf("# Top %zu blocks by exec-weighted ARM emit (no prefix double-count)\n", top_n);
         std::printf(
             "rank,exec,x87_ops,max_run,arm_prod,arm_no_ir,arm_ir_forced,share%%,"
-            "ir%%,peep%%,single%%,prefix\n");
+            "ir%%,peep%%,single%%,t_ir,t_peep,t_single,t_ft,prefix\n");
         for (size_t i = 0; i < top_n; ++i) {
             const auto& r = block_rows[i];
             const auto block_arm = static_cast<long double>(r.exec) * r.arm_prod;
@@ -886,10 +886,15 @@ int main(int argc, char** argv) try {
                         100.0 * static_cast<double>(r.tally->single) / static_cast<double>(tot);
                 }
             }
-            std::printf("%zu,%llu,%u,%u,%u,%u,%u,%.2f,%.1f,%.1f,%.1f,%s\n", i + 1,
+            const unsigned t_ir = r.tally != nullptr ? r.tally->ir : 0U;
+            const unsigned t_peep = r.tally != nullptr ? r.tally->peep : 0U;
+            const unsigned t_single = r.tally != nullptr ? r.tally->single : 0U;
+            const unsigned t_ft = r.tally != nullptr ? r.tally->ft : 0U;
+            std::printf("%zu,%llu,%u,%u,%u,%u,%u,%.2f,%.1f,%.1f,%.1f,%u,%u,%u,%u,%s\n", i + 1,
                         static_cast<unsigned long long>(r.exec), static_cast<unsigned>(r.x87_ops),
                         static_cast<unsigned>(r.max_run), r.arm_prod, r.arm_no_ir, r.arm_ir_forced,
-                        share, ir_pct, peep_pct, single_pct, r.prefix.c_str());
+                        share, ir_pct, peep_pct, single_pct, t_ir, t_peep, t_single, t_ft,
+                        r.prefix.c_str());
         }
         std::printf("\n");
     }
