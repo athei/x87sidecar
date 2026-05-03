@@ -168,8 +168,7 @@ void set_block_ir_gate_counters(uint32_t bid, BlockIRGateCounters counters) {
         std::scoped_lock lock(g_mu);
         if (!g_block_ir_gate_counts[0]) {
             for (uint32_t r = 0; r < kIRGateReasonCount; ++r) {
-                g_block_ir_gate_counts[r] =
-                    std::make_unique<std::atomic<uint16_t>[]>(kMaxBlocks);
+                g_block_ir_gate_counts[r] = std::make_unique<std::atomic<uint16_t>[]>(kMaxBlocks);
             }
         }
     }

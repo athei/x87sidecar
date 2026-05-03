@@ -308,6 +308,7 @@ std::string patternKey(const std::vector<IRInstr>& instrs, size_t start, size_t 
 struct EmitMeasurement {
     uint32_t arm_production = 0;
     uint32_t arm_no_ir = 0;
+    uint32_t arm_ir_forced = 0;  // gate bypassed via RosettaConfig::force_x87_ir_gate
 };
 
 uint32_t runOneMode(const IRInstr* instrs, size_t len, const RosettaConfig* cfg) {
@@ -356,9 +357,12 @@ uint32_t runOneMode(const IRInstr* instrs, size_t len, const RosettaConfig* cfg)
 EmitMeasurement measurePattern(const IRInstr* instrs, size_t len) {
     RosettaConfig no_ir_cfg{};
     no_ir_cfg.disable_x87_ir = 1;
+    RosettaConfig force_gate_cfg{};
+    force_gate_cfg.force_x87_ir_gate = 1;
     return EmitMeasurement{
         .arm_production = runOneMode(instrs, len, nullptr),
         .arm_no_ir = runOneMode(instrs, len, &no_ir_cfg),
+        .arm_ir_forced = runOneMode(instrs, len, &force_gate_cfg),
     };
 }
 
@@ -397,10 +401,13 @@ int main(int argc, char** argv) try {
                 "                       file1.prof [file2.prof ...]\n"
                 "\n"
                 "Each unique x87 pattern is run through Translator::translate_instruction\n"
-                "twice — once with no Config installed (production: IR-first dispatcher)\n"
-                "and once with disable_x87_ir=1 (peephole + single-op only).  The emitted\n"
-                "ARM64 instruction count is reported as arm_production / arm_no_ir, with\n"
-                "the ratio arm_production / pattern_length as arm_per_x87 (lower = better).\n"
+                "three times: once with no Config installed (production: IR-first dispatcher),\n"
+                "once with disable_x87_ir=1 (peephole + single-op only), and once with\n"
+                "force_x87_ir_gate=1 (gate bypassed — IR called regardless of conditions).\n"
+                "Counts are reported as arm_production / arm_no_ir / arm_ir_forced.  The\n"
+                "third column answers 'what would IR emit for this pattern if we lifted the\n"
+                "gate' — particularly relevant for length-2 patterns and chains where the\n"
+                "gate refuses on top_dirty etc.  arm_per_x87 = arm_production / pattern_length.\n"
                 "\n"
                 "When the input contains a tally section (TLY1), workload-mix columns are\n"
                 "printed: ir%% (share of pattern's executions whose containing block had\n"
@@ -489,6 +496,7 @@ int main(int argc, char** argv) try {
         size_t window_size = 0;
         uint32_t arm_production = 0;
         uint32_t arm_no_ir = 0;
+        uint32_t arm_ir_forced = 0;
         // Path-weighted exec contributions; ratios at print time.
         long double ir_w = 0.0L;
         long double ft_w = 0.0L;
@@ -606,6 +614,7 @@ int main(int argc, char** argv) try {
         const auto m = measurePattern(s.sample_instrs, s.window_size);
         s.arm_production = m.arm_production;
         s.arm_no_ir = m.arm_no_ir;
+        s.arm_ir_forced = m.arm_ir_forced;
     }
 
     // Apply the optional emit-ratio filter post-measurement.
@@ -638,11 +647,11 @@ int main(int argc, char** argv) try {
 
     if (have_tallies) {
         std::printf(
-            "exec_count,arm_production,arm_no_ir,arm_per_x87,"
+            "exec_count,arm_production,arm_no_ir,arm_ir_forced,arm_per_x87,"
             "ir%%,ft%%,build_fail%%,fpr_fail%%,gpr_fail%%,max_gpr_peak,"
             "gate_reason,sequence\n");
     } else {
-        std::printf("exec_count,arm_production,arm_no_ir,arm_per_x87,sequence\n");
+        std::printf("exec_count,arm_production,arm_no_ir,arm_ir_forced,arm_per_x87,sequence\n");
     }
     const size_t n = std::min(max_rows, rows.size());
     for (size_t i = 0; i < n; ++i) {
@@ -664,14 +673,14 @@ int main(int argc, char** argv) try {
                     gate_reason = profile::kIRGateReasonNames[r];
                 }
             }
-            std::printf("%llu,%u,%u,%.2f,%.1f,%.1f,%.1f,%.1f,%.1f,%u,%s,%s\n",
+            std::printf("%llu,%u,%u,%u,%.2f,%.1f,%.1f,%.1f,%.1f,%.1f,%u,%s,%s\n",
                         static_cast<unsigned long long>(s.exec_count), s.arm_production,
-                        s.arm_no_ir, arm_per_x87, pct(s.ir_w), pct(s.ft_w), pct(s.build_fail_w),
-                        pct(s.fpr_fail_w), pct(s.gpr_fail_w), static_cast<unsigned>(s.max_gpr_peak),
-                        gate_reason, key.c_str());
+                        s.arm_no_ir, s.arm_ir_forced, arm_per_x87, pct(s.ir_w), pct(s.ft_w),
+                        pct(s.build_fail_w), pct(s.fpr_fail_w), pct(s.gpr_fail_w),
+                        static_cast<unsigned>(s.max_gpr_peak), gate_reason, key.c_str());
         } else {
-            std::printf("%llu,%u,%u,%.2f,%s\n", static_cast<unsigned long long>(s.exec_count),
-                        s.arm_production, s.arm_no_ir, arm_per_x87, key.c_str());
+            std::printf("%llu,%u,%u,%u,%.2f,%s\n", static_cast<unsigned long long>(s.exec_count),
+                        s.arm_production, s.arm_no_ir, s.arm_ir_forced, arm_per_x87, key.c_str());
         }
     }
     std::fprintf(stderr, "%zu measured patterns >= min_exec=%llu (showing %zu, ranked by %s%s)\n",
@@ -745,8 +754,8 @@ int main(int argc, char** argv) try {
     // bucket and contributes to the histogram independently.
     if (have_irg) {
         struct Bucket {
-            uint64_t exec_w = 0;     // exec_count × per-block refusal count
-            uint32_t blocks = 0;     // distinct blocks recording this reason
+            uint64_t exec_w = 0;  // exec_count × per-block refusal count
+            uint32_t blocks = 0;  // distinct blocks recording this reason
         };
         Bucket per_reason[profile::kIRGateReasonCount]{};
         uint64_t total_exec_w = 0;

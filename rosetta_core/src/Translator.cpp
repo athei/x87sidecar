@@ -130,27 +130,36 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
     {
         const bool ir_disabled = g_rosetta_config && g_rosetta_config->disable_x87_ir;
         if (!ir_disabled && cache.active()) {
+            // Measurement-only override: profile_analyze can ask for compile_run
+            // to fire regardless of the gate so we can score "what would IR emit
+            // for this pattern if the gate were lifted?".  The emitted code is
+            // not necessarily correct under the dirty conditions; the analyzer
+            // discards it and only reads insn_buf.end / 4.
+            const bool force_gate =
+                g_rosetta_config != nullptr && g_rosetta_config->force_x87_ir_gate != 0;
             bool gate_refused = false;
-            if (cache.run_remaining < 3) {
-                cache.tally_ir_gate_short_run =
-                    static_cast<uint16_t>(cache.tally_ir_gate_short_run + 1);
-                gate_refused = true;
-            } else if (cache.top_dirty != 0) {
-                cache.tally_ir_gate_top_dirty =
-                    static_cast<uint16_t>(cache.tally_ir_gate_top_dirty + 1);
-                gate_refused = true;
-            } else if (cache.tag_push_pending != 0) {
-                cache.tally_ir_gate_tag_push =
-                    static_cast<uint16_t>(cache.tally_ir_gate_tag_push + 1);
-                gate_refused = true;
-            } else if (cache.deferred_pop_count != 0) {
-                cache.tally_ir_gate_deferred_pop =
-                    static_cast<uint16_t>(cache.tally_ir_gate_deferred_pop + 1);
-                gate_refused = true;
-            } else if (cache.perm_dirty) {
-                cache.tally_ir_gate_perm_dirty =
-                    static_cast<uint16_t>(cache.tally_ir_gate_perm_dirty + 1);
-                gate_refused = true;
+            if (!force_gate) {
+                if (cache.run_remaining < 3) {
+                    cache.tally_ir_gate_short_run =
+                        static_cast<uint16_t>(cache.tally_ir_gate_short_run + 1);
+                    gate_refused = true;
+                } else if (cache.top_dirty != 0) {
+                    cache.tally_ir_gate_top_dirty =
+                        static_cast<uint16_t>(cache.tally_ir_gate_top_dirty + 1);
+                    gate_refused = true;
+                } else if (cache.tag_push_pending != 0) {
+                    cache.tally_ir_gate_tag_push =
+                        static_cast<uint16_t>(cache.tally_ir_gate_tag_push + 1);
+                    gate_refused = true;
+                } else if (cache.deferred_pop_count != 0) {
+                    cache.tally_ir_gate_deferred_pop =
+                        static_cast<uint16_t>(cache.tally_ir_gate_deferred_pop + 1);
+                    gate_refused = true;
+                } else if (cache.perm_dirty) {
+                    cache.tally_ir_gate_perm_dirty =
+                        static_cast<uint16_t>(cache.tally_ir_gate_perm_dirty + 1);
+                    gate_refused = true;
+                }
             }
             if (gate_refused) {
                 mirror_gate_counters();

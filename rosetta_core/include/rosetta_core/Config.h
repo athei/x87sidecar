@@ -38,6 +38,14 @@ struct RosettaConfig {
     uint8_t fast_round;              // --fast-round            skip RC dispatch (round-to-nearest)
     uint8_t disable_deferred_fxch;   // --disable-deferred-fxch disable OPT-G
     uint8_t disable_x87_ir;          // --disable-x87-ir        disable IR optimisation pipeline
+    uint8_t force_x87_ir_gate;       // measurement-only flag for tools/profile_analyze: bypass
+                                     // the IR-eligibility gate's pre-build refusal conditions
+                                     // (run_remaining<3, top_dirty, tag_push_pending,
+                                     // deferred_pop_count, perm_dirty) so compile_run is
+                                     // called regardless.  The emitted code is *not*
+                                     // semantically correct when the dirty conditions hold —
+                                     // do NOT set in production.  Used to answer "what would
+                                     // IR emit for this pattern if the gate were lifted?".
     uint8_t extended_fpr_scratch;    // --extended-fpr-scratch  V16-V31 scratch pool (16, not 8)
     uint64_t disabled_fusions_mask;  // --disable-fusions=fld_arithp,...
 
