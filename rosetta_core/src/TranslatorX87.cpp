@@ -1474,6 +1474,15 @@ auto translate_fstsw(TranslationResult* a1, IRInstr* a2) -> void {
         a1->x87_cache.top_dirty = 0;
     }
 
+    // OPT-D2: Flush deferred pops.  FSTSW does not call x87_end, and
+    // tick() silently zeros deferred_pop_count when run_remaining hits 0.
+    // If FSTSW is the last handled op of a sub-run (e.g. fstp, fnstsw,
+    // movw — where movw breaks lookahead), the deferred tag-set-empty
+    // for prior pops would be lost, leaving slots tagged kValid in memory.
+    if (a1->x87_cache.deferred_pop_count > 0 && base_cached) {
+        x87_flush_deferred_pops(buf, *a1, Xbase, a1->x87_cache.top_gpr, Wd_sw);
+    }
+
     // OPT-D: FSTSW doesn't call x87_end, so it must flush the pending tag
     // itself.  Otherwise, if FSTSW is the last instruction in the cache run,
     // x87_cache_tick clears tag_push_pending without emitting the tag-clear,

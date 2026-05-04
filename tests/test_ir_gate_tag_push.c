@@ -69,8 +69,7 @@ static void test_a_mv_dot(void) {
         "faddp\n\t"
         "fstpl %[r]\n"
         : [r] "=m"(r)
-        : [m00] "m"(m00), [m01] "m"(m01), [m02] "m"(m02), [v0] "m"(v0), [v1] "m"(v1),
-          [v2] "m"(v2));
+        : [m00] "m"(m00), [m01] "m"(m01), [m02] "m"(m02), [v0] "m"(v0), [v1] "m"(v1), [v2] "m"(v2));
     check_f64("A: mv_dot (1.5*2 + -0.5*3 + 0.25*4 = 2.5)", r, 2.5);
 }
 
@@ -163,7 +162,7 @@ static void test_d_net_push_1(void) {
         "faddp\n\t" /* ST(0) = a+b = 3 */
         "fldl %[c]\n\t"
         "fldl %[d]\n\t"
-        "faddp\n\t" /* ST(0) = c+d = 7, ST(1) = 3 */
+        "faddp\n\t"     /* ST(0) = c+d = 7, ST(1) = 3 */
         "fldl %[e]\n\t" /* push e — net push = +1 vs entry */
         "movl $0, %[dummy]\n\t"
         "fstpl %[r0]\n\t"  /* r0 = e = 5 */
@@ -265,6 +264,7 @@ static void test_f_tag_word_balanced_run(void) {
 static void test_g_fxam_after_gate(void) {
     volatile double a = 3.14, b = 2.71;
     volatile uint16_t sw0, sw1, sw2;
+    volatile uint8_t env_exit[28];
     __asm__ volatile(
         "fldl %[a]\n\t" /* push a */
         "fldl %[b]\n\t" /* push b */
@@ -285,9 +285,13 @@ static void test_g_fxam_after_gate(void) {
         "fnstsw %%ax\n\t"
         "movw %%ax, %[sw2]\n\t"
         "fstp %%st(0)\n\t"
-        : [sw0] "=m"(sw0), [sw1] "=m"(sw1), [sw2] "=m"(sw2)
+        "fnstenv %[env_exit]\n\t" /* probe tag word at function exit */
+        : [sw0] "=m"(sw0), [sw1] "=m"(sw1), [sw2] "=m"(sw2), [env_exit] "=m"(env_exit)
         : [a] "m"(a), [b] "m"(b)
         : "ax", "st");
+    uint16_t tagw_exit;
+    memcpy(&tagw_exit, (const void*)&env_exit[8], 2);
+    check_u16("G: tag_word at exit (all empty)", tagw_exit, 0xffff);
     /* All three should be Normal (C3=0, C2=1, C0=0).  Mask 0x4500 ignores C1.*/
     check_u16("G: fxam ST(0) (Normal)", sw0 & 0x4500, 0x0400);
     check_u16("G: fxam ST(1) (Normal)", sw1 & 0x4500, 0x0400);
@@ -420,6 +424,53 @@ static void test_jf_compare_chain(void) {
 }
 
 /* ========================================================================= */
+/* JH — fcomp+fstp tag-word coherence (open bug from 2026-05-04 session).   */
+/*                                                                           */
+/* Shape (one iter):                                                         */
+/*   fldl a; fstpl s;            push + pop                                 */
+/*   fldl a; fstl  s;            push + non-pop store                       */
+/*   fldl b; fcomp; fstpl s;     push, double-pop                            */
+/*                                                                           */
+/* Net stack effect per iter = 0.  Repeating across N iters with probes     */
+/* between each iter must always read tag word = 0xffff (all 8 slots empty).*/
+/* Native + X87_DISABLE_HOOK=1 give 0xffff; our JIT empirically gives       */
+/* 0xc3ff (slots 5+6 spuriously kValid).                                    */
+/* ========================================================================= */
+
+static void test_jh_compare_chain_tagword(void) {
+    volatile double a = 1.0, b = 2.0;
+    volatile double sink;
+    volatile uint8_t e1[28], e2[28];
+    __asm__ volatile(
+        /* Iter 1 */
+        "fldl %[a]\n\t"
+        "fstpl %[s]\n\t"
+        "fldl %[a]\n\t"
+        "fstl  %[s]\n\t"
+        "fldl %[b]\n\t"
+        "fcomp\n\t"
+        "fstpl %[s]\n\t"
+        "fnstenv %[e1]\n\t"
+        /* Iter 2 */
+        "fldl %[a]\n\t"
+        "fstpl %[s]\n\t"
+        "fldl %[a]\n\t"
+        "fstl  %[s]\n\t"
+        "fldl %[b]\n\t"
+        "fcomp\n\t"
+        "fstpl %[s]\n\t"
+        "fnstenv %[e2]\n\t"
+        : [s] "=m"(sink), [e1] "=m"(e1), [e2] "=m"(e2)
+        : [a] "m"(a), [b] "m"(b)
+        : "ax", "st");
+    uint16_t tagw1, tagw2;
+    memcpy(&tagw1, (const void*)&e1[8], 2);
+    memcpy(&tagw2, (const void*)&e2[8], 2);
+    check_u16("JH: tag_word after iter 1 (all empty)", tagw1, 0xffff);
+    check_u16("JH: tag_word after iter 2 (all empty)", tagw2, 0xffff);
+}
+
+/* ========================================================================= */
 /* J — Two consecutive runs separated by a non-x87 break.                    */
 /* ========================================================================= */
 
@@ -459,6 +510,7 @@ int main(void) {
     test_h_long_acc_chain();
     test_i_mixed_32bit_chain();
     test_jf_compare_chain();
+    test_jh_compare_chain_tagword();
     test_j_two_runs();
 
     printf("\n%s: %d failure(s)\n", failures ? "FAILED" : "ALL PASSED", failures);
