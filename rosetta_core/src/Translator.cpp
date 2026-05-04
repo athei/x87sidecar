@@ -163,23 +163,17 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                     bump_max_run(profile::kIRGateReasonShortRun);
                     gate_refused = true;
                 } else if (cache.top_dirty != 0) {
-                    // FLUSH top_dirty only (3 ARM, threshold 5).  When
-                    // tag_push_pending is also set (common after x87_push),
-                    // we deliberately leave it: combining flushes raises
-                    // the threshold so high it loses on length-5-9 cases
-                    // that previously benefited from cheap top_dirty-only
-                    // flush.  If IR consumes all ops the tick() chain
-                    // clears tag_push as a side effect; on partial-consume
-                    // (rare) the tag_push branch below catches it on the
-                    // next call.
-                    // Test-only override via X87_GATE_FLUSH_THRESHOLD; 0 = use
-                    // hardcoded 5.  See Config.h and the regression test
-                    // tests/test_ir_gate_top_dirty_tag_invariant.c.
+                    // FLUSH top_dirty only (3 ARM).  When tag_push_pending is
+                    // also set (common after x87_push), we deliberately leave
+                    // it: if IR consumes all ops the tick() chain clears
+                    // tag_push as a side effect; on partial-consume (rare) the
+                    // tag_push branch below catches it on the next call.
+                    // Override via X87_GATE_FLUSH_THRESHOLD; 0 = default 3.
                     const int kMinRunForFlush =
                         (g_rosetta_config != nullptr &&
                          g_rosetta_config->x87_ir_gate_flush_threshold_top_dirty != 0)
                             ? g_rosetta_config->x87_ir_gate_flush_threshold_top_dirty
-                            : 5;
+                            : 3;
                     if (cache.gprs_valid && cache.run_remaining >= kMinRunForFlush) {
                         AssemblerBuffer& buf = translation_result->insn_buf;
                         const int Wd_tmp = alloc_free_gpr(*translation_result);
@@ -201,12 +195,25 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                         gate_refused = true;
                     }
                 } else if (cache.tag_push_pending != 0) {
-                    // FLUSH tag_push_pending alone (6 ARM, threshold 8).
-                    // Reaches here when top_dirty=0 but tag_push lingers —
-                    // typically because the top_dirty branch fired earlier
-                    // in the run, IR partial-consumed leaving tag_push set,
-                    // and the next call now sees tag_push alone.
-                    constexpr int kMinRunForFlush = 8;
+                    // FLUSH tag_push_pending alone (6 ARM).  Reaches here when
+                    // top_dirty=0 but tag_push lingers — typically because the
+                    // top_dirty branch fired earlier in the run, IR partial-
+                    // consumed leaving tag_push set, and the next call now sees
+                    // tag_push alone.
+                    //
+                    // Default stays at 8 (NOT 3 like the other three branches):
+                    // empirically, lowering this branch to 3 corrupts WoW
+                    // character-rotation matrix transforms while leaving weapon
+                    // transforms intact (bisected 2026-05-04 with the per-branch
+                    // X87_GATE_FLUSH_THRESHOLD_TAG_PUSH knob).  The other three
+                    // gate branches lower to 3 cleanly; tag_push exposes a real
+                    // IR-side mishandling on short runs after a flush-and-proceed.
+                    // Override via X87_GATE_FLUSH_THRESHOLD_TAG_PUSH; 0 = default 8.
+                    const int kMinRunForFlush =
+                        (g_rosetta_config != nullptr &&
+                         g_rosetta_config->x87_ir_gate_flush_threshold_tag_push != 0)
+                            ? g_rosetta_config->x87_ir_gate_flush_threshold_tag_push
+                            : 8;
                     if (cache.gprs_valid && cache.run_remaining >= kMinRunForFlush) {
                         AssemblerBuffer& buf = translation_result->insn_buf;
                         const int Wd_tmp = alloc_free_gpr(*translation_result);
@@ -224,14 +231,17 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                         gate_refused = true;
                     }
                 } else if (cache.deferred_pop_count != 0) {
-                    // FLUSH deferred_pop_count alone (2 + 6*count ARM,
-                    // threshold 10).  Reaches here when top_dirty=0 (the
-                    // top_dirty branch fired earlier in the run + IR partial
-                    // consumed leaving deferred_pop_count behind).  Cap on
-                    // count<=2 keeps the flush cost under ~14 ARM; count>=3
-                    // is rare and the threshold for that case would need to
-                    // climb further.
-                    constexpr int kMinRunForFlush = 10;
+                    // FLUSH deferred_pop_count alone (2 + 6*count ARM).  Reaches
+                    // here when top_dirty=0 (the top_dirty branch fired earlier
+                    // in the run + IR partial-consumed leaving deferred_pop_count
+                    // behind).  Cap on count<=2 keeps the flush cost under
+                    // ~14 ARM; count>=3 is rare.
+                    // Override via X87_GATE_FLUSH_THRESHOLD_DEFERRED_POP; 0 = default 3.
+                    const int kMinRunForFlush =
+                        (g_rosetta_config != nullptr &&
+                         g_rosetta_config->x87_ir_gate_flush_threshold_deferred_pop != 0)
+                            ? g_rosetta_config->x87_ir_gate_flush_threshold_deferred_pop
+                            : 3;
                     if (cache.gprs_valid && cache.run_remaining >= kMinRunForFlush &&
                         cache.deferred_pop_count <= 2) {
                         AssemblerBuffer& buf = translation_result->insn_buf;
@@ -254,11 +264,16 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                     }
                 } else if (cache.perm_dirty) {
                     // FLUSH perm_dirty alone (~6 ARM for the typical 2-cycle
-                    // FXCH-ST(1) case, threshold 8).  By design invariant
-                    // (every push/pop path calls perm_flush_before_stack_change
-                    // first), perm_dirty=1 implies all other deferred flags=0,
-                    // so this branch always fires alone in the cascade.
-                    constexpr int kMinRunForFlush = 8;
+                    // FXCH-ST(1) case).  By design invariant (every push/pop
+                    // path calls perm_flush_before_stack_change first),
+                    // perm_dirty=1 implies all other deferred flags=0, so this
+                    // branch always fires alone in the cascade.
+                    // Override via X87_GATE_FLUSH_THRESHOLD_PERM_DIRTY; 0 = default 3.
+                    const int kMinRunForFlush =
+                        (g_rosetta_config != nullptr &&
+                         g_rosetta_config->x87_ir_gate_flush_threshold_perm_dirty != 0)
+                            ? g_rosetta_config->x87_ir_gate_flush_threshold_perm_dirty
+                            : 3;
                     if (cache.gprs_valid && cache.run_remaining >= kMinRunForFlush) {
                         AssemblerBuffer& buf = translation_result->insn_buf;
                         const int Wd_tmp = alloc_free_gpr(*translation_result);

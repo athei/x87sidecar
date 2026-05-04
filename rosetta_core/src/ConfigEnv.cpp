@@ -87,21 +87,34 @@ RosettaConfig load_config_from_env() {
         apply_fusion_list(csv, cfg.disabled_fusions_mask);
     }
 
-    // X87_GATE_FLUSH_THRESHOLD: numeric override for the top_dirty
-    // IR-gate flush-and-proceed threshold.  Clamp to [3, 16]; outside
-    // that range silently fall back to default (0).  See Config.h.
-    if (const char* t = std::getenv("X87_GATE_FLUSH_THRESHOLD"); t != nullptr && t[0] != '\0') {
+    // X87_GATE_FLUSH_THRESHOLD[_TAG_PUSH|_DEFERRED_POP|_PERM_DIRTY]:
+    // per-branch override of the IR-gate flush-and-proceed minimum
+    // run length.  Clamp to [3, 16]; outside that range fall back to
+    // default (0 = compile-time default of 3 for every branch).  See
+    // Config.h.
+    auto parse_gate_threshold = [](const char* env_name, const char* label, uint8_t& target) {
+        const char* t = std::getenv(env_name);
+        if (t == nullptr || t[0] == '\0') {
+            return;
+        }
         char* end = nullptr;
         const long v = std::strtol(t, &end, 10);
         if (end != t && *end == '\0' && v >= 3 && v <= 16) {
-            cfg.x87_ir_gate_flush_threshold_top_dirty = static_cast<uint8_t>(v);
+            target = static_cast<uint8_t>(v);
+            std::printf("[rosettax87] %s=%ld (%s IR-gate)\n", env_name, v, label);
         } else {
-            std::fprintf(stderr,
-                         "X87_GATE_FLUSH_THRESHOLD: '%s' out of range [3,16] or not an integer "
-                         "(ignored)\n",
-                         t);
+            std::printf("[rosettax87] %s: '%s' out of range [3,16] or not an integer (ignored)\n",
+                        env_name, t);
         }
-    }
+    };
+    parse_gate_threshold("X87_GATE_FLUSH_THRESHOLD", "top_dirty",
+                         cfg.x87_ir_gate_flush_threshold_top_dirty);
+    parse_gate_threshold("X87_GATE_FLUSH_THRESHOLD_TAG_PUSH", "tag_push",
+                         cfg.x87_ir_gate_flush_threshold_tag_push);
+    parse_gate_threshold("X87_GATE_FLUSH_THRESHOLD_DEFERRED_POP", "deferred_pop",
+                         cfg.x87_ir_gate_flush_threshold_deferred_pop);
+    parse_gate_threshold("X87_GATE_FLUSH_THRESHOLD_PERM_DIRTY", "perm_dirty",
+                         cfg.x87_ir_gate_flush_threshold_perm_dirty);
 
     // Loader-only knobs (aotinvoke leaves them at 0; harmless because it
     // ignores the loader_* fields anyway).
@@ -156,12 +169,14 @@ void print_env_help(std::FILE* out) {
                  "  X87_EXTENDED_FPR_SCRATCH=1    expand FPR scratch pool from 8 (V24-V31)\n"
                  "                                to 16 (V16-V31)\n"
                  "  X87_DISABLE_ALL_FUSIONS=1     disable every peephole fusion\n"
-                 "  X87_GATE_FLUSH_THRESHOLD=N    test-only override for the top_dirty\n"
-                 "                                IR-gate flush threshold (default 5;\n"
-                 "                                clamped to [3,16]).  Lowering exposes a\n"
-                 "                                latent IR-epilogue tag-word bug — see the\n"
-                 "                                regression test\n"
-                 "                                test_ir_gate_top_dirty_tag_invariant.\n"
+                 "  X87_GATE_FLUSH_THRESHOLD=N             override the IR-gate flush-and-\n"
+                 "  X87_GATE_FLUSH_THRESHOLD_TAG_PUSH=N     proceed minimum run length per\n"
+                 "  X87_GATE_FLUSH_THRESHOLD_DEFERRED_POP=N branch.  Defaults: top_dirty=3,\n"
+                 "  X87_GATE_FLUSH_THRESHOLD_PERM_DIRTY=N   tag_push=8, deferred_pop=3,\n"
+                 "                                perm_dirty=3.  Clamp to [3,16].\n"
+                 "                                Useful for dialing back a specific branch\n"
+                 "                                if a workload regresses (bumps the threshold\n"
+                 "                                so the branch flushes only on longer runs).\n"
                  "  X87_DISABLE_FUSIONS=name1,…   disable specific fusions; names:\n");
     for (const auto& e : kFusionTable) {
         std::fprintf(out, "                                  %s\n", e.name);
