@@ -172,7 +172,14 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                     // clears tag_push as a side effect; on partial-consume
                     // (rare) the tag_push branch below catches it on the
                     // next call.
-                    constexpr int kMinRunForFlush = 5;
+                    // Test-only override via X87_GATE_FLUSH_THRESHOLD; 0 = use
+                    // hardcoded 5.  See Config.h and the regression test
+                    // tests/test_ir_gate_top_dirty_tag_invariant.c.
+                    const int kMinRunForFlush =
+                        (g_rosetta_config != nullptr &&
+                         g_rosetta_config->x87_ir_gate_flush_threshold_top_dirty != 0)
+                            ? g_rosetta_config->x87_ir_gate_flush_threshold_top_dirty
+                            : 5;
                     if (cache.gprs_valid && cache.run_remaining >= kMinRunForFlush) {
                         AssemblerBuffer& buf = translation_result->insn_buf;
                         const int Wd_tmp = alloc_free_gpr(*translation_result);

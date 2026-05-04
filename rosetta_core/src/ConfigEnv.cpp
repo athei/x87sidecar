@@ -87,6 +87,22 @@ RosettaConfig load_config_from_env() {
         apply_fusion_list(csv, cfg.disabled_fusions_mask);
     }
 
+    // X87_GATE_FLUSH_THRESHOLD: numeric override for the top_dirty
+    // IR-gate flush-and-proceed threshold.  Clamp to [3, 16]; outside
+    // that range silently fall back to default (0).  See Config.h.
+    if (const char* t = std::getenv("X87_GATE_FLUSH_THRESHOLD"); t != nullptr && t[0] != '\0') {
+        char* end = nullptr;
+        const long v = std::strtol(t, &end, 10);
+        if (end != t && *end == '\0' && v >= 3 && v <= 16) {
+            cfg.x87_ir_gate_flush_threshold_top_dirty = static_cast<uint8_t>(v);
+        } else {
+            std::fprintf(stderr,
+                         "X87_GATE_FLUSH_THRESHOLD: '%s' out of range [3,16] or not an integer "
+                         "(ignored)\n",
+                         t);
+        }
+    }
+
     // Loader-only knobs (aotinvoke leaves them at 0; harmless because it
     // ignores the loader_* fields anyway).
     cfg.loader_logs = env_truthy("X87_LOGS") ? 1 : 0;
@@ -140,6 +156,12 @@ void print_env_help(std::FILE* out) {
                  "  X87_EXTENDED_FPR_SCRATCH=1    expand FPR scratch pool from 8 (V24-V31)\n"
                  "                                to 16 (V16-V31)\n"
                  "  X87_DISABLE_ALL_FUSIONS=1     disable every peephole fusion\n"
+                 "  X87_GATE_FLUSH_THRESHOLD=N    test-only override for the top_dirty\n"
+                 "                                IR-gate flush threshold (default 5;\n"
+                 "                                clamped to [3,16]).  Lowering exposes a\n"
+                 "                                latent IR-epilogue tag-word bug — see the\n"
+                 "                                regression test\n"
+                 "                                test_ir_gate_top_dirty_tag_invariant.\n"
                  "  X87_DISABLE_FUSIONS=name1,…   disable specific fusions; names:\n");
     for (const auto& e : kFusionTable) {
         std::fprintf(out, "                                  %s\n", e.name);

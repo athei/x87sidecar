@@ -52,6 +52,18 @@ struct RosettaConfig {
                                      // IR emit for this pattern if the gate were lifted?".
     uint64_t disabled_fusions_mask;  // --disable-fusions=fld_arithp,...
 
+    // X87_GATE_FLUSH_THRESHOLD  test-only knob to override the
+    // top_dirty IR-gate flush-and-proceed threshold at
+    // Translator.cpp's IR-gate cascade.  0 (default) keeps the
+    // hardcoded 5; valid override range is [3, 16] (clamped at parse
+    // time).  Lowering exposes a latent IR epilogue bug in which a
+    // 3- or 4-op balanced run after a deferred-push leaves the tag
+    // word stale (see plan recall-memery-we-had-effervescent-sunset
+    // and feedback_ir_gate_top_dirty_threshold.md).  Used by the
+    // regression test that pins that bug; do NOT lower in
+    // production.
+    uint8_t x87_ir_gate_flush_threshold_top_dirty;
+
     // Loader-only knobs (read by rosettax87 main; aotinvoke leaves them 0)
     uint8_t loader_logs;            // --logs           verbose loader logging
     uint8_t loader_force_attach;    // --force-attach   attach even for x64 PE binaries
