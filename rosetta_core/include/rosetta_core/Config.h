@@ -77,6 +77,32 @@ struct RosettaConfig {
     uint8_t x87_ir_gate_flush_threshold_deferred_pop;
     uint8_t x87_ir_gate_flush_threshold_perm_dirty;
 
+    // Investigation knobs for the open Bug 2 (speculative-flush rollback
+    // corruption).  These are NOT for production — they exist on the
+    // inv/rollback-hyp3 branch only.  When all three are unset, gate +
+    // rollback behavior is bit-exact identical to current ship.  See
+    // ~/.claude/plans/recall-memory-lets-attack-functional-naur.md.
+    //
+    // X87_LOG_ROLLBACK=1
+    //   Print one stdout line per IR-gate speculative-flush rollback
+    //   firing: which branch, ir_fail reason, buf_end delta, the cache
+    //   fields restored (pre->post), and the cur_instr opcode/pc.
+    //
+    // X87_ENABLE_ROLLBACK_TOP_DIRTY=1
+    //   Re-enables rollback for the top_dirty branch.  Saves
+    //   cache.top_dirty before the flush and restores it on bail.  Sets
+    //   the `flushed` flag so the rollback block fires.  Default off
+    //   because this corrupts WoW weapon vertex transforms via an
+    //   unidentified mechanism (testing Hypothesis 3).
+    //
+    // X87_ENABLE_ROLLBACK_DEFERRED_POP=1
+    //   Symmetric for the deferred_pop branch.  Saves
+    //   cache.deferred_pop_count and restores it on bail.  Default off
+    //   for the same reason.
+    uint8_t x87_log_rollback;
+    uint8_t x87_enable_rollback_top_dirty;
+    uint8_t x87_enable_rollback_deferred_pop;
+
     // Loader-only knobs (read by rosettax87 main; aotinvoke leaves them 0)
     uint8_t loader_logs;            // --logs           verbose loader logging
     uint8_t loader_force_attach;    // --force-attach   attach even for x64 PE binaries

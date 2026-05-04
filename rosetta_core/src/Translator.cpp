@@ -170,22 +170,42 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
             // always-refuse in the WoW character-rotation fix.  No flush, no
             // rollback needed for that branch.
             // Speculative-flush rollback state — only the perm_dirty branch
-            // participates.  The top_dirty and deferred_pop branches were
-            // also amenable on paper (alloc/free symmetric, no fixups, the
-            // sidecar respects the rewound buf.end), but enabling rollback
-            // for either independently corrupted WoW weapon transforms in a
-            // way that no static-trace analysis pinned in the 2026-05-04
-            // session.  Only perm_dirty rollback ships; the other two
-            // branches' wasted-flush amortization is deferred.  See
-            // feedback_open_bugs_for_next_session.md for the bisect data
-            // and what was tried.
+            // participates by default.  The top_dirty and deferred_pop
+            // branches were also amenable on paper (alloc/free symmetric,
+            // no fixups, the sidecar respects the rewound buf.end), but
+            // enabling rollback for either independently corrupted WoW
+            // weapon transforms in a way that no static-trace analysis
+            // pinned in the 2026-05-04 session.  Only perm_dirty rollback
+            // ships.  See feedback_open_bugs_for_next_session.md.
+            //
+            // INVESTIGATION (inv/rollback-hyp3 branch only): the
+            // X87_ENABLE_ROLLBACK_TOP_DIRTY / _DEFERRED_POP env knobs
+            // re-enable rollback for the bisect-corrupting branches so
+            // we can build a deterministic in-test repro.  Saves are
+            // captured unconditionally (cheap); restores fire only when
+            // the matching knob is set.  X87_LOG_ROLLBACK=1 prints one
+            // diagnostic line per rollback firing.
             const uint64_t saved_buf_end = translation_result->insn_buf.end;
             const int8_t saved_perm_dirty = cache.perm_dirty;
             int8_t saved_perm[8];
             for (int i = 0; i < 8; i++) {
                 saved_perm[i] = cache.perm[i];
             }
+            // Investigation-only saves (inv/rollback-hyp3): captured
+            // unconditionally (cheap), restored only when the matching
+            // X87_ENABLE_ROLLBACK_* knob is set.
+            const int8_t saved_top_dirty = cache.top_dirty;
+            const int8_t saved_tag_push_pending = cache.tag_push_pending;
+            const int8_t saved_deferred_pop_count = cache.deferred_pop_count;
             bool flushed = false;
+            // Track which branch set `flushed` so the X87_LOG_ROLLBACK
+            // diagnostic can name it.  kNone when no branch fired.
+            enum RollbackBranch : uint8_t {
+                kRollbackNone = 0,
+                kRollbackTopDirty,
+                kRollbackDeferredPop,
+                kRollbackPermDirty,
+            } flushed_branch = kRollbackNone;
             if (!force_gate) {
                 if (cache.run_remaining < 3) {
                     cache.tally_ir_gate_short_run =
@@ -217,6 +237,12 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                                                                      cache.prev_x87_opcode);
                         }
                         mirror_gate_counters();
+                        // Investigation knob: enable rollback for this branch.
+                        if (g_rosetta_config != nullptr &&
+                            g_rosetta_config->x87_enable_rollback_top_dirty != 0) {
+                            flushed = true;
+                            flushed_branch = kRollbackTopDirty;
+                        }
                         // gate_refused stays false — fall through to compile_run.
                     } else {
                         cache.tally_ir_gate_top_dirty =
@@ -275,6 +301,12 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                         cache.deferred_pop_count = 0;
                         bump_max_run(profile::kIRGateReasonDeferredPop);
                         mirror_gate_counters();
+                        // Investigation knob: enable rollback for this branch.
+                        if (g_rosetta_config != nullptr &&
+                            g_rosetta_config->x87_enable_rollback_deferred_pop != 0) {
+                            flushed = true;
+                            flushed_branch = kRollbackDeferredPop;
+                        }
                     } else {
                         cache.tally_ir_gate_deferred_pop =
                             static_cast<uint16_t>(cache.tally_ir_gate_deferred_pop + 1);
@@ -307,6 +339,7 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                         free_gpr(*translation_result, Wd_tmp);
                         cache.reset_perm();
                         flushed = true;
+                        flushed_branch = kRollbackPermDirty;
                         bump_max_run(profile::kIRGateReasonPermDirty);
                         mirror_gate_counters();
                     } else {
@@ -366,10 +399,68 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                     // mirror_gate_counters) intentionally stay — they record
                     // that an attempt was made.
                     if (flushed) {
+                        const uint64_t pre_rewind_end = translation_result->insn_buf.end;
+                        const int8_t pre_top_dirty = cache.top_dirty;
+                        const int8_t pre_tag_push_pending = cache.tag_push_pending;
+                        const int8_t pre_deferred_pop_count = cache.deferred_pop_count;
+                        const int8_t pre_perm_dirty = cache.perm_dirty;
                         translation_result->insn_buf.end = saved_buf_end;
-                        cache.perm_dirty = saved_perm_dirty;
-                        for (int i = 0; i < 8; i++) {
-                            cache.perm[i] = saved_perm[i];
+                        // perm_dirty branch always restores cache.perm[] + perm_dirty
+                        // (this is the shipped behavior).
+                        if (flushed_branch == kRollbackPermDirty) {
+                            cache.perm_dirty = saved_perm_dirty;
+                            for (int i = 0; i < 8; i++) {
+                                cache.perm[i] = saved_perm[i];
+                            }
+                        }
+                        // Investigation-only: branch-specific cache restores.
+                        if (flushed_branch == kRollbackTopDirty) {
+                            cache.top_dirty = saved_top_dirty;
+                        }
+                        if (flushed_branch == kRollbackDeferredPop) {
+                            cache.deferred_pop_count = saved_deferred_pop_count;
+                        }
+                        if (g_rosetta_config != nullptr &&
+                            g_rosetta_config->x87_log_rollback != 0) {
+                            const char* branch_name = "none";
+                            switch (flushed_branch) {
+                                case kRollbackTopDirty:
+                                    branch_name = "top_dirty";
+                                    break;
+                                case kRollbackDeferredPop:
+                                    branch_name = "deferred_pop";
+                                    break;
+                                case kRollbackPermDirty:
+                                    branch_name = "perm_dirty";
+                                    break;
+                                case kRollbackNone:
+                                    break;
+                            }
+                            const char* fail_name = "None";
+                            switch (ir_reason) {
+                                case X87IR::IRFailReason::kBuildFail:
+                                    fail_name = "BuildFail";
+                                    break;
+                                case X87IR::IRFailReason::kFprPressure:
+                                    fail_name = "FprPressure";
+                                    break;
+                                case X87IR::IRFailReason::kGprPressure:
+                                    fail_name = "GprPressure";
+                                    break;
+                                case X87IR::IRFailReason::kNone:
+                                    break;
+                            }
+                            std::printf(
+                                "[rollback] branch=%s ir_fail=%s buf_end_delta=%lld "
+                                "td %d->%d tp %d->%d dpc %d->%d pd %d->%d "
+                                "opcode=0x%04x pc=0x%08x\n",
+                                branch_name, fail_name,
+                                static_cast<long long>(pre_rewind_end -
+                                                       translation_result->insn_buf.end),
+                                pre_top_dirty, cache.top_dirty, pre_tag_push_pending,
+                                cache.tag_push_pending, pre_deferred_pop_count,
+                                cache.deferred_pop_count, pre_perm_dirty, cache.perm_dirty,
+                                cur_instr->opcode, cur_instr->pc);
                         }
                     }
                 }
