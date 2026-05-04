@@ -52,18 +52,20 @@ struct RosettaConfig {
                                      // IR emit for this pattern if the gate were lifted?".
     uint64_t disabled_fusions_mask;  // --disable-fusions=fld_arithp,...
 
-    // X87_GATE_FLUSH_THRESHOLD[_TAG_PUSH|_DEFERRED_POP|_PERM_DIRTY]
+    // X87_GATE_FLUSH_THRESHOLD[_DEFERRED_POP|_PERM_DIRTY]
     // Per-branch override of the IR-gate flush-and-proceed minimum
     // run length in `Translator.cpp`'s gate cascade.  0 (default)
     // keeps the compile-time default for that branch.  Valid override
     // range is [3, 16] (clamped at parse time).
     //
-    // Compile-time defaults: top_dirty=3, tag_push=8, deferred_pop=3,
-    // perm_dirty=3.  The asymmetry on tag_push is empirical: lowering
-    // it to 3 corrupts WoW character-rotation matrix transforms while
-    // the other three lower to 3 cleanly — bisected 2026-05-04 via
-    // the per-branch knobs.  See Translator.cpp's tag_push branch
-    // comment for the IR-side hypothesis.
+    // Compile-time defaults: top_dirty=3, deferred_pop=3, perm_dirty=3.
+    // The tag_push_pending branch has no threshold knob: it always
+    // refuses (never flushes).  The previous flush-and-proceed design
+    // was wasted ARM in 100% of WoW firings (compile_run bailed every
+    // time on GPR pressure from the FCmp-heavy follow-on shape) and
+    // was the suspected culprit for character-rotation matrix
+    // corruption when its threshold was lowered to 3.  See
+    // feedback_ir_gate_top_dirty_threshold.md.
     //
     // Originally all four had higher defaults (5/8/10/8) under the
     // suspicion that lowering top_dirty caused WoW vertex-transform
@@ -72,7 +74,6 @@ struct RosettaConfig {
     // 923ad2e, not top_dirty's threshold.  Once 923ad2e was reverted,
     // top_dirty=3 / deferred_pop=3 / perm_dirty=3 are all clean.
     uint8_t x87_ir_gate_flush_threshold_top_dirty;
-    uint8_t x87_ir_gate_flush_threshold_tag_push;
     uint8_t x87_ir_gate_flush_threshold_deferred_pop;
     uint8_t x87_ir_gate_flush_threshold_perm_dirty;
 

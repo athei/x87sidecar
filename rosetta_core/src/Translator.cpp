@@ -156,6 +156,36 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
             const bool force_gate =
                 g_rosetta_config != nullptr && g_rosetta_config->force_x87_ir_gate != 0;
             bool gate_refused = false;
+            // Speculative-flush rollback state.  The gate-refusal cascade may
+            // emit a small flush (3-14 ARM) and clear a deferred cache flag,
+            // then fall through to compile_run.  If compile_run subsequently
+            // bails on kFprPressure / kGprPressure (the flush passed the gate
+            // but the lower's per-node peak still exceeds the pool), the flush
+            // emit is pure overhead — the next dispatch path (peephole or
+            // single-op) doesn't benefit from the cleared flag because each
+            // single-op handles deferred state itself.  Capture pre-flush
+            // state so we can rewind the buffer + cache flags on IR failure.
+            //
+            // The tag_push_pending branch is excluded — it was converted to
+            // always-refuse in the WoW character-rotation fix.  No flush, no
+            // rollback needed for that branch.
+            // Speculative-flush rollback state — only the perm_dirty branch
+            // participates.  The top_dirty and deferred_pop branches were
+            // also amenable on paper (alloc/free symmetric, no fixups, the
+            // sidecar respects the rewound buf.end), but enabling rollback
+            // for either independently corrupted WoW weapon transforms in a
+            // way that no static-trace analysis pinned in the 2026-05-04
+            // session.  Only perm_dirty rollback ships; the other two
+            // branches' wasted-flush amortization is deferred.  See
+            // feedback_open_bugs_for_next_session.md for the bisect data
+            // and what was tried.
+            const uint64_t saved_buf_end = translation_result->insn_buf.end;
+            const int8_t saved_perm_dirty = cache.perm_dirty;
+            int8_t saved_perm[8];
+            for (int i = 0; i < 8; i++) {
+                saved_perm[i] = cache.perm[i];
+            }
+            bool flushed = false;
             if (!force_gate) {
                 if (cache.run_remaining < 3) {
                     cache.tally_ir_gate_short_run =
@@ -195,41 +225,30 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                         gate_refused = true;
                     }
                 } else if (cache.tag_push_pending != 0) {
-                    // FLUSH tag_push_pending alone (6 ARM).  Reaches here when
-                    // top_dirty=0 but tag_push lingers — typically because the
-                    // top_dirty branch fired earlier in the run, IR partial-
-                    // consumed leaving tag_push set, and the next call now sees
-                    // tag_push alone.
+                    // REFUSE the IR run when tag_push_pending is set without
+                    // the top_dirty companion.  The previous design ("flush
+                    // tag and proceed to compile_run") emitted a 6-ARM tag
+                    // clear and fell through.  Diagnostic 2026-05-04 (WoW
+                    // capture, X87_LOG_TAG_PUSH_FLUSH=1) showed every single
+                    // firing of that flush at threshold=3 was followed by
+                    // compile_run bailing on GPR pressure (peak_gpr=9 vs
+                    // pool=8) — the dominant trigger shape was prev=fst →
+                    // next=fld+fcomp+fstsw, where the FCmp's structural 4-wide
+                    // GPR peak forces the bail.  100% wasted ARM, and the
+                    // wasted-flush variant was the suspected culprit for the
+                    // WoW character-rotation corruption that gated the
+                    // threshold at 8 (effectively making the firing rare).
                     //
-                    // Default stays at 8 (NOT 3 like the other three branches):
-                    // empirically, lowering this branch to 3 corrupts WoW
-                    // character-rotation matrix transforms while leaving weapon
-                    // transforms intact (bisected 2026-05-04 with the per-branch
-                    // X87_GATE_FLUSH_THRESHOLD_TAG_PUSH knob).  The other three
-                    // gate branches lower to 3 cleanly; tag_push exposes a real
-                    // IR-side mishandling on short runs after a flush-and-proceed.
-                    // Override via X87_GATE_FLUSH_THRESHOLD_TAG_PUSH; 0 = default 8.
-                    const int kMinRunForFlush =
-                        (g_rosetta_config != nullptr &&
-                         g_rosetta_config->x87_ir_gate_flush_threshold_tag_push != 0)
-                            ? g_rosetta_config->x87_ir_gate_flush_threshold_tag_push
-                            : 8;
-                    if (cache.gprs_valid && cache.run_remaining >= kMinRunForFlush) {
-                        AssemblerBuffer& buf = translation_result->insn_buf;
-                        const int Wd_tmp = alloc_free_gpr(*translation_result);
-                        const int Wd_tmp2 = alloc_free_gpr(*translation_result);
-                        emit_x87_tag_clear(buf, cache.base_gpr, cache.top_gpr, Wd_tmp, Wd_tmp2);
-                        free_gpr(*translation_result, Wd_tmp2);
-                        free_gpr(*translation_result, Wd_tmp);
-                        cache.tag_push_pending = 0;
-                        bump_max_run(profile::kIRGateReasonTagPush);
-                        mirror_gate_counters();
-                    } else {
-                        cache.tally_ir_gate_tag_push =
-                            static_cast<uint16_t>(cache.tally_ir_gate_tag_push + 1);
-                        bump_max_run(profile::kIRGateReasonTagPush);
-                        gate_refused = true;
-                    }
+                    // Refusing here matches the threshold=8/no-fire behavior
+                    // for correctness.  The previous threshold knob
+                    // (X87_GATE_FLUSH_THRESHOLD_TAG_PUSH) is now a no-op kept
+                    // only for backward env-var compatibility — it's still
+                    // parsed and clamped at startup but the value is unused
+                    // by this branch.  See feedback_ir_gate_top_dirty_threshold.md.
+                    cache.tally_ir_gate_tag_push =
+                        static_cast<uint16_t>(cache.tally_ir_gate_tag_push + 1);
+                    bump_max_run(profile::kIRGateReasonTagPush);
+                    gate_refused = true;
                 } else if (cache.deferred_pop_count != 0) {
                     // FLUSH deferred_pop_count alone (2 + 6*count ARM).  Reaches
                     // here when top_dirty=0 (the top_dirty branch fired earlier
@@ -287,6 +306,7 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                         free_fpr(*translation_result, Dd_save);
                         free_gpr(*translation_result, Wd_tmp);
                         cache.reset_perm();
+                        flushed = true;
                         bump_max_run(profile::kIRGateReasonPermDirty);
                         mirror_gate_counters();
                     } else {
@@ -337,6 +357,21 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                             break;
                     }
                     mirror_tally();
+                    // Speculative-flush rollback (perm_dirty branch only):
+                    // if the perm_dirty flush emitted ARM and compile_run
+                    // bailed, the flush ARM is wasted — peephole / single-op
+                    // handles the deferred perm via perm_flush_before_stack_change.
+                    // Rewind the buffer and restore cache.perm[] + perm_dirty
+                    // to pre-flush state.  Diagnostic counters (bump_max_run,
+                    // mirror_gate_counters) intentionally stay — they record
+                    // that an attempt was made.
+                    if (flushed) {
+                        translation_result->insn_buf.end = saved_buf_end;
+                        cache.perm_dirty = saved_perm_dirty;
+                        for (int i = 0; i < 8; i++) {
+                            cache.perm[i] = saved_perm[i];
+                        }
+                    }
                 }
                 if (ir_consumed > 0) {
                     cache.tally_ir = static_cast<uint16_t>(cache.tally_ir + ir_consumed);

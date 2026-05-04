@@ -67,6 +67,7 @@ ALL_TESTS=(
     test_ficom
     test_rc_recache
     test_fstpt_gs
+    test_ir_gate_tag_push
     test_fbld
     test_fclex
     test_fdecstp

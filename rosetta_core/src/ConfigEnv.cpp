@@ -109,8 +109,6 @@ RosettaConfig load_config_from_env() {
     };
     parse_gate_threshold("X87_GATE_FLUSH_THRESHOLD", "top_dirty",
                          cfg.x87_ir_gate_flush_threshold_top_dirty);
-    parse_gate_threshold("X87_GATE_FLUSH_THRESHOLD_TAG_PUSH", "tag_push",
-                         cfg.x87_ir_gate_flush_threshold_tag_push);
     parse_gate_threshold("X87_GATE_FLUSH_THRESHOLD_DEFERRED_POP", "deferred_pop",
                          cfg.x87_ir_gate_flush_threshold_deferred_pop);
     parse_gate_threshold("X87_GATE_FLUSH_THRESHOLD_PERM_DIRTY", "perm_dirty",
