@@ -421,6 +421,9 @@ int main(int argc, char** argv) try {
     std::vector<std::string> files;
     std::vector<uint32_t> dump_block_ids;
     std::vector<uint64_t> dump_block_hashes;
+    uint64_t dump_ir_binary_hash = 0;
+    bool dump_ir_binary_set = false;
+    std::string dump_ir_binary_path;
 
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -471,6 +474,18 @@ int main(int argc, char** argv) try {
                 }
                 start = comma + 1;
             }
+        } else if (a == "--dump-ir-binary" && i + 2 < argc) {
+            // --dump-ir-binary 0xH out_path: write the matching block's
+            // raw IRInstr[] to out_path (no header).  Used by
+            // tests/test_rollback_geom_diff to re-feed a captured IR
+            // stream into the in-process Translator.
+            const char* p = argv[++i];
+            if (std::strlen(p) > 2 && p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) {
+                p += 2;
+            }
+            dump_ir_binary_hash = std::strtoull(p, nullptr, 16);
+            dump_ir_binary_path = argv[++i];
+            dump_ir_binary_set = true;
         } else if (a == "--rank-by" && i + 1 < argc) {
             const std::string v = argv[++i];
             if (v == "exec") {
@@ -532,7 +547,10 @@ int main(int argc, char** argv) try {
                 "                          (FNV-1a, PC zeroed) — stable across WoW launches\n"
                 "                          while block_id is registration-order-dependent.\n"
                 "                          Hash is shown in the header of every dumped\n"
-                "                          block, and printed in the [rollback] log line.\n");
+                "                          block, and printed in the [rollback] log line.\n"
+                "  --dump-ir-binary 0xH P  Write the matching block's raw IRInstr[] (no\n"
+                "                          header) to path P.  Used by tests that re-feed\n"
+                "                          a captured IR stream into the Translator.\n");
             return 0;
         } else if (!a.empty() && a[0] == '-') {
             std::fprintf(stderr, "unknown flag: %s\n", a.c_str());
@@ -662,6 +680,37 @@ int main(int argc, char** argv) try {
             std::printf("\n");
         }
     };
+    if (dump_ir_binary_set) {
+        const Block* match = nullptr;
+        for (const Block& b : blocks) {
+            if (profile::hash_ir_stream(b.instrs.data(), b.instrs.size()) == dump_ir_binary_hash) {
+                match = &b;
+                break;
+            }
+        }
+        if (match == nullptr) {
+            std::fprintf(stderr, "error: hash 0x%016llx not found in profile\n",
+                         static_cast<unsigned long long>(dump_ir_binary_hash));
+            return 1;
+        }
+        std::ofstream out(dump_ir_binary_path, std::ios::binary | std::ios::trunc);
+        if (!out) {
+            std::fprintf(stderr, "error: cannot open %s for write\n", dump_ir_binary_path.c_str());
+            return 1;
+        }
+        const size_t bytes = match->instrs.size() * sizeof(IRInstr);
+        out.write(reinterpret_cast<const char*>(match->instrs.data()),
+                  static_cast<std::streamsize>(bytes));
+        if (!out) {
+            std::fprintf(stderr, "error: write failed for %s\n", dump_ir_binary_path.c_str());
+            return 1;
+        }
+        std::fprintf(stderr, "wrote %zu IRInstr (%zu bytes) for hash 0x%016llx to %s\n",
+                     match->instrs.size(), bytes,
+                     static_cast<unsigned long long>(dump_ir_binary_hash),
+                     dump_ir_binary_path.c_str());
+        return 0;
+    }
     if (!dump_block_ids.empty() || !dump_block_hashes.empty()) {
         for (const uint32_t want : dump_block_ids) {
             const auto it =
