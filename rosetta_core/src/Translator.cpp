@@ -450,17 +450,26 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                                 case X87IR::IRFailReason::kNone:
                                     break;
                             }
+                            // block_id = cache.profile_bid when X87_PROFILE is on
+                            // (kOverflowId otherwise).  insn_idx + run_remaining
+                            // pin the rollback to a position inside the IR
+                            // stream so an offline tool can lift the
+                            // surrounding instructions from the .prof file.
                             std::printf(
                                 "[rollback] branch=%s ir_fail=%s buf_end_delta=%lld "
                                 "td %d->%d tp %d->%d dpc %d->%d pd %d->%d "
-                                "opcode=0x%04x pc=0x%08x\n",
+                                "opcode=0x%04x pc=0x%08x "
+                                "block_id=%u insn_idx=%lld run_remaining=%d\n",
                                 branch_name, fail_name,
                                 static_cast<long long>(pre_rewind_end -
                                                        translation_result->insn_buf.end),
                                 pre_top_dirty, cache.top_dirty, pre_tag_push_pending,
                                 cache.tag_push_pending, pre_deferred_pop_count,
                                 cache.deferred_pop_count, pre_perm_dirty, cache.perm_dirty,
-                                cur_instr->opcode, cur_instr->pc);
+                                cur_instr->opcode, cur_instr->pc,
+                                static_cast<unsigned>(cache.profile_bid),
+                                static_cast<long long>(insn_idx),
+                                static_cast<int>(cache.run_remaining));
                         }
                     }
                 }

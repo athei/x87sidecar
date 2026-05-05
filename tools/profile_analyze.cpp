@@ -418,6 +418,7 @@ int main(int argc, char** argv) try {
     double max_arm_per_x87 = 0.0;  // 0 = no filter
     enum class RankBy : std::uint8_t { Emit, Exec } rank_by = RankBy::Emit;
     std::vector<std::string> files;
+    std::vector<uint32_t> dump_block_ids;
 
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -427,6 +428,24 @@ int main(int argc, char** argv) try {
             max_rows = std::strtoull(argv[++i], nullptr, 10);
         } else if (a == "--max-arm-per-x87" && i + 1 < argc) {
             max_arm_per_x87 = std::strtod(argv[++i], nullptr);
+        } else if (a == "--dump-block" && i + 1 < argc) {
+            // Comma-separated list of block_ids to dump verbatim.  Skips
+            // pattern analysis and exits after dumping.
+            std::string list = argv[++i];
+            size_t start = 0;
+            while (start <= list.size()) {
+                const size_t comma = list.find(',', start);
+                const std::string tok = list.substr(
+                    start, comma == std::string::npos ? std::string::npos : comma - start);
+                if (!tok.empty()) {
+                    dump_block_ids.push_back(
+                        static_cast<uint32_t>(std::strtoul(tok.c_str(), nullptr, 10)));
+                }
+                if (comma == std::string::npos) {
+                    break;
+                }
+                start = comma + 1;
+            }
         } else if (a == "--rank-by" && i + 1 < argc) {
             const std::string v = argv[++i];
             if (v == "exec") {
@@ -475,7 +494,15 @@ int main(int argc, char** argv) try {
                 "production is not modeled — the TLY1 columns cover that side.  Read both:\n"
                 "arm_production/arm_no_ir says 'what's the best each configuration can do\n"
                 "for this pattern'; ir%% says 'how often we actually achieve the with-IR\n"
-                "result in this workload'.\n");
+                "result in this workload'.\n"
+                "\n"
+                "Block dump mode:\n"
+                "  --dump-block N1,N2,N3   Print the IR stream for the listed block_ids\n"
+                "                          (verbose form: insn_idx, opcode_name, operand\n"
+                "                          summary, original x86 PC).  Useful with the\n"
+                "                          X87_LOG_ROLLBACK / X87_LOG_OPS lines to lift\n"
+                "                          the surrounding instructions of a hot block.\n"
+                "                          Skips pattern analysis and exits after dump.\n");
             return 0;
         } else if (!a.empty() && a[0] == '-') {
             std::fprintf(stderr, "unknown flag: %s\n", a.c_str());
@@ -530,6 +557,86 @@ int main(int argc, char** argv) try {
             max_run_at_refuse.insert(max_run_at_refuse.end(), file_mrr.begin(), file_mrr.end());
         }
     }
+    // --dump-block: print requested blocks' IR streams and exit.
+    if (!dump_block_ids.empty()) {
+        for (const uint32_t want : dump_block_ids) {
+            const auto it = std::find_if(blocks.begin(), blocks.end(),
+                                         [want](const Block& b) { return b.id == want; });
+            if (it == blocks.end()) {
+                std::printf("# block_id=%u: NOT FOUND in profile\n", want);
+                continue;
+            }
+            const Block& b = *it;
+            const uint64_t exec =
+                static_cast<size_t>(b.id) < counters.size() ? counters[b.id] : 0ULL;
+            std::printf("# block_id=%u start_pc=0x%08x num_instrs=%zu exec_count=%llu\n", b.id,
+                        b.start_pc, b.instrs.size(), static_cast<unsigned long long>(exec));
+            for (size_t i = 0; i < b.instrs.size(); ++i) {
+                const IRInstr& ins = b.instrs[i];
+                const char* name =
+                    (ins.opcode < kOpcodeNames.size() && kOpcodeNames[ins.opcode] != nullptr)
+                        ? kOpcodeNames[ins.opcode]
+                        : "?";
+                std::printf("  [%3zu] pc=0x%08x op=0x%04x %-12s nops=%u", i,
+                            static_cast<unsigned>(ins.pc), static_cast<unsigned>(ins.opcode), name,
+                            static_cast<unsigned>(ins.num_operands));
+                const int nops = std::min<int>(ins.num_operands, 4);
+                for (int op_idx = 0; op_idx < nops; ++op_idx) {
+                    const IROperand& o = ins.operands[op_idx];
+                    const char* kn = "?";
+                    switch (o.kind) {
+                        case IROperandKind::Register:
+                            kn = "Reg";
+                            break;
+                        case IROperandKind::MemRef:
+                            kn = "Mem";
+                            break;
+                        case IROperandKind::AbsMem:
+                            kn = "AbsMem";
+                            break;
+                        case IROperandKind::Immediate:
+                            kn = "Imm";
+                            break;
+                        case IROperandKind::BranchOffset:
+                            kn = "Brn";
+                            break;
+                        case IROperandKind::ConditionCode:
+                            kn = "CC";
+                            break;
+                        case IROperandKind::SegmentRegister:
+                            kn = "Seg";
+                            break;
+                    }
+                    std::printf(" [%d:%s", op_idx, kn);
+                    if (o.kind == IROperandKind::Register) {
+                        std::printf(" s=0x%02x reg=%d", static_cast<uint8_t>(o.reg.size),
+                                    o.reg.reg.index());
+                    } else if (o.kind == IROperandKind::MemRef) {
+                        std::printf(
+                            " s=0x%02x base=%d idx=%d disp=%lld", static_cast<uint8_t>(o.mem.size),
+                            static_cast<int>(o.mem.base_reg), static_cast<int>(o.mem.index_reg),
+                            static_cast<long long>(o.mem.disp));
+                    } else if (o.kind == IROperandKind::Immediate) {
+                        std::printf(" s=0x%02x v=0x%llx", static_cast<uint8_t>(o.imm.size),
+                                    static_cast<unsigned long long>(o.imm.value));
+                    } else if (o.kind == IROperandKind::AbsMem) {
+                        std::printf(" s=0x%02x v=0x%llx", static_cast<uint8_t>(o.abs_mem.size),
+                                    static_cast<unsigned long long>(o.abs_mem.value));
+                    } else if (o.kind == IROperandKind::BranchOffset) {
+                        std::printf(" v=0x%llx", static_cast<unsigned long long>(o.branch.value));
+                    } else if (o.kind == IROperandKind::ConditionCode) {
+                        std::printf(" cc=%u", static_cast<unsigned>(o.cc.cc));
+                    } else if (o.kind == IROperandKind::SegmentRegister) {
+                        std::printf(" seg=%u", static_cast<unsigned>(o.seg.seg_idx));
+                    }
+                    std::printf("]");
+                }
+                std::printf("\n");
+            }
+        }
+        return 0;
+    }
+
     const bool have_tallies = !tallies.empty();
     const bool have_bfo = !build_fail_ops.empty();
     const bool have_irg = !ir_gate_counters.empty();
