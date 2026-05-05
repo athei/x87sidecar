@@ -66,10 +66,15 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
             }
             cache.prev_x87_opcode = 0xFFFFU;
             cache.profile_bid = profile::kOverflowId;
+            // Compute the IR hash unconditionally so the X87_*_HASH_LIST
+            // rollback gate works without X87_PROFILE.  The hash is
+            // FNV-1a over the IR stream with each instr's `pc` zeroed,
+            // so it identifies the block by content and is stable across
+            // launches (unlike profile_bid, which is registration order).
+            cache.profile_hash =
+                profile::hash_ir_stream(instr_array, static_cast<size_t>(num_instrs));
             if (profile::counter_array_addr() != 0) {
-                const uint64_t ir_hash =
-                    profile::hash_ir_stream(instr_array, static_cast<size_t>(num_instrs));
-                const uint32_t bid = profile::register_block(block, ir_hash);
+                const uint32_t bid = profile::register_block(block, cache.profile_hash);
                 if (bid != profile::kOverflowId) {
                     emit_block_counter_bump(*translation_result, bid);
                     cache.profile_bid = bid;
@@ -132,6 +137,26 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
     const auto bump_max_run = [&](uint16_t reason) {
         const auto run = static_cast<uint16_t>(cache.run_remaining);
         cache.max_run_at_gate[reason] = std::max(run, cache.max_run_at_gate[reason]);
+    };
+
+    // Consolidate the rollback-eligibility check used by the top_dirty /
+    // deferred_pop gates.  Returns true when the per-branch enable knob is
+    // set AND the hash include/exclude lists allow this block.  Hash exclude
+    // wins over hash include.  Empty hash lists are no-ops.
+    const auto rollback_allowed = [&](uint8_t branch_enable) -> bool {
+        if (g_rosetta_config == nullptr || branch_enable == 0) {
+            return false;
+        }
+        const auto& cfg = *g_rosetta_config;
+        if (!cfg.x87_no_rollback_hash_list.empty() &&
+            std::ranges::binary_search(cfg.x87_no_rollback_hash_list, cache.profile_hash)) {
+            return false;
+        }
+        if (!cfg.x87_rollback_hash_list.empty() &&
+            !std::ranges::binary_search(cfg.x87_rollback_hash_list, cache.profile_hash)) {
+            return false;
+        }
+        return true;
     };
 
     // ── IR pipeline: try whole-run optimization for runs of 3+ ─────────────
@@ -238,8 +263,12 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                         }
                         mirror_gate_counters();
                         // Investigation knob: enable rollback for this branch.
-                        if (g_rosetta_config != nullptr &&
-                            g_rosetta_config->x87_enable_rollback_top_dirty != 0) {
+                        // Composes hash-list bounds via rollback_allowed().
+                        // With empty hash lists this is equivalent to
+                        // "branch enable knob set?".
+                        if (rollback_allowed(g_rosetta_config != nullptr
+                                                 ? g_rosetta_config->x87_enable_rollback_top_dirty
+                                                 : 0)) {
                             flushed = true;
                             flushed_branch = kRollbackTopDirty;
                         }
@@ -302,8 +331,11 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                         bump_max_run(profile::kIRGateReasonDeferredPop);
                         mirror_gate_counters();
                         // Investigation knob: enable rollback for this branch.
-                        if (g_rosetta_config != nullptr &&
-                            g_rosetta_config->x87_enable_rollback_deferred_pop != 0) {
+                        // Composes hash-list bounds via rollback_allowed().
+                        if (rollback_allowed(
+                                g_rosetta_config != nullptr
+                                    ? g_rosetta_config->x87_enable_rollback_deferred_pop
+                                    : 0)) {
                             flushed = true;
                             flushed_branch = kRollbackDeferredPop;
                         }
@@ -451,15 +483,19 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                                     break;
                             }
                             // block_id = cache.profile_bid when X87_PROFILE is on
-                            // (kOverflowId otherwise).  insn_idx + run_remaining
-                            // pin the rollback to a position inside the IR
-                            // stream so an offline tool can lift the
-                            // surrounding instructions from the .prof file.
+                            // (kOverflowId otherwise).  hash is FNV-1a IR-content
+                            // hash, populated unconditionally — stable across
+                            // launches and the right key for cross-run bisect.
+                            // insn_idx + run_remaining pin the rollback to a
+                            // position inside the IR stream so an offline tool
+                            // can lift the surrounding instructions from the
+                            // .prof file.
                             std::printf(
                                 "[rollback] branch=%s ir_fail=%s buf_end_delta=%lld "
                                 "td %d->%d tp %d->%d dpc %d->%d pd %d->%d "
                                 "opcode=0x%04x pc=0x%08x "
-                                "block_id=%u insn_idx=%lld run_remaining=%d\n",
+                                "block_id=%u hash=0x%016llx insn_idx=%lld "
+                                "run_remaining=%d\n",
                                 branch_name, fail_name,
                                 static_cast<long long>(pre_rewind_end -
                                                        translation_result->insn_buf.end),
@@ -468,6 +504,7 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                                 cache.deferred_pop_count, pre_perm_dirty, cache.perm_dirty,
                                 cur_instr->opcode, cur_instr->pc,
                                 static_cast<unsigned>(cache.profile_bid),
+                                static_cast<unsigned long long>(cache.profile_hash),
                                 static_cast<long long>(insn_idx),
                                 static_cast<int>(cache.run_remaining));
                         }

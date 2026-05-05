@@ -82,6 +82,10 @@ struct X87Cache {
     // "Top opcodes preceding top_dirty refusal" histogram.
     uint16_t prev_x87_opcode = 0xFFFFU;
     uint32_t profile_bid = 0xFFFFFFFFU;  // = profile::kOverflowId
+    // FNV-1a IR-content hash, stable across runs (PC zeroed before hashing).
+    // Populated unconditionally on block transition so the X87_*_HASH_LIST
+    // rollback gate works even when X87_PROFILE is off.
+    uint64_t profile_hash = 0;
 
     bool active() const;
     void invalidate();

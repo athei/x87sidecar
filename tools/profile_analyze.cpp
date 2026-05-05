@@ -33,6 +33,7 @@
 #include "rosetta_core/IROperand.h"
 #include "rosetta_core/Opcode.h"
 #include "rosetta_core/ProfileFormat.h"
+#include "rosetta_core/ProfileRuntime.h"
 #include "rosetta_core/Register.h"
 #include "rosetta_core/ThreadContextOffsets.h"
 #include "rosetta_core/TranscendentalHelper.h"
@@ -419,6 +420,7 @@ int main(int argc, char** argv) try {
     enum class RankBy : std::uint8_t { Emit, Exec } rank_by = RankBy::Emit;
     std::vector<std::string> files;
     std::vector<uint32_t> dump_block_ids;
+    std::vector<uint64_t> dump_block_hashes;
 
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -440,6 +442,29 @@ int main(int argc, char** argv) try {
                 if (!tok.empty()) {
                     dump_block_ids.push_back(
                         static_cast<uint32_t>(std::strtoul(tok.c_str(), nullptr, 10)));
+                }
+                if (comma == std::string::npos) {
+                    break;
+                }
+                start = comma + 1;
+            }
+        } else if (a == "--dump-block-by-hash" && i + 1 < argc) {
+            // Comma-separated 64-bit hex IR-content hashes (with or without
+            // "0x" prefix).  Hash matches profile::hash_ir_stream, so the
+            // value is stable across WoW launches — the right key for
+            // bisect-target lookup.  Skips pattern analysis and exits.
+            std::string list = argv[++i];
+            size_t start = 0;
+            while (start <= list.size()) {
+                const size_t comma = list.find(',', start);
+                std::string tok = list.substr(
+                    start, comma == std::string::npos ? std::string::npos : comma - start);
+                if (!tok.empty()) {
+                    const char* p = tok.c_str();
+                    if (tok.size() > 2 && p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) {
+                        p += 2;
+                    }
+                    dump_block_hashes.push_back(std::strtoull(p, nullptr, 16));
                 }
                 if (comma == std::string::npos) {
                     break;
@@ -502,7 +527,12 @@ int main(int argc, char** argv) try {
                 "                          summary, original x86 PC).  Useful with the\n"
                 "                          X87_LOG_ROLLBACK / X87_LOG_OPS lines to lift\n"
                 "                          the surrounding instructions of a hot block.\n"
-                "                          Skips pattern analysis and exits after dump.\n");
+                "                          Skips pattern analysis and exits after dump.\n"
+                "  --dump-block-by-hash 0xH1,0xH2  Same, but lookup is by IR-content hash\n"
+                "                          (FNV-1a, PC zeroed) — stable across WoW launches\n"
+                "                          while block_id is registration-order-dependent.\n"
+                "                          Hash is shown in the header of every dumped\n"
+                "                          block, and printed in the [rollback] log line.\n");
             return 0;
         } else if (!a.empty() && a[0] == '-') {
             std::fprintf(stderr, "unknown flag: %s\n", a.c_str());
@@ -557,81 +587,103 @@ int main(int argc, char** argv) try {
             max_run_at_refuse.insert(max_run_at_refuse.end(), file_mrr.begin(), file_mrr.end());
         }
     }
-    // --dump-block: print requested blocks' IR streams and exit.
-    if (!dump_block_ids.empty()) {
+    // --dump-block / --dump-block-by-hash: print requested blocks' IR
+    // streams and exit.  The header shows both block_id AND ir_hash so a
+    // user can take an id from one capture and feed the hash back to a
+    // future bisect run, or vice versa.
+    const auto print_block = [&](const Block& b) {
+        const uint64_t exec = static_cast<size_t>(b.id) < counters.size() ? counters[b.id] : 0ULL;
+        const uint64_t ir_hash = profile::hash_ir_stream(b.instrs.data(), b.instrs.size());
+        std::printf(
+            "# block_id=%u hash=0x%016llx start_pc=0x%08x num_instrs=%zu "
+            "exec_count=%llu\n",
+            b.id, static_cast<unsigned long long>(ir_hash), b.start_pc, b.instrs.size(),
+            static_cast<unsigned long long>(exec));
+        for (size_t i = 0; i < b.instrs.size(); ++i) {
+            const IRInstr& ins = b.instrs[i];
+            const char* name =
+                (ins.opcode < kOpcodeNames.size() && kOpcodeNames[ins.opcode] != nullptr)
+                    ? kOpcodeNames[ins.opcode]
+                    : "?";
+            std::printf("  [%3zu] pc=0x%08x op=0x%04x %-12s nops=%u", i,
+                        static_cast<unsigned>(ins.pc), static_cast<unsigned>(ins.opcode), name,
+                        static_cast<unsigned>(ins.num_operands));
+            const int nops = std::min<int>(ins.num_operands, 4);
+            for (int op_idx = 0; op_idx < nops; ++op_idx) {
+                const IROperand& o = ins.operands[op_idx];
+                const char* kn = "?";
+                switch (o.kind) {
+                    case IROperandKind::Register:
+                        kn = "Reg";
+                        break;
+                    case IROperandKind::MemRef:
+                        kn = "Mem";
+                        break;
+                    case IROperandKind::AbsMem:
+                        kn = "AbsMem";
+                        break;
+                    case IROperandKind::Immediate:
+                        kn = "Imm";
+                        break;
+                    case IROperandKind::BranchOffset:
+                        kn = "Brn";
+                        break;
+                    case IROperandKind::ConditionCode:
+                        kn = "CC";
+                        break;
+                    case IROperandKind::SegmentRegister:
+                        kn = "Seg";
+                        break;
+                }
+                std::printf(" [%d:%s", op_idx, kn);
+                if (o.kind == IROperandKind::Register) {
+                    std::printf(" s=0x%02x reg=%d", static_cast<uint8_t>(o.reg.size),
+                                o.reg.reg.index());
+                } else if (o.kind == IROperandKind::MemRef) {
+                    std::printf(" s=0x%02x base=%d idx=%d disp=%lld",
+                                static_cast<uint8_t>(o.mem.size), static_cast<int>(o.mem.base_reg),
+                                static_cast<int>(o.mem.index_reg),
+                                static_cast<long long>(o.mem.disp));
+                } else if (o.kind == IROperandKind::Immediate) {
+                    std::printf(" s=0x%02x v=0x%llx", static_cast<uint8_t>(o.imm.size),
+                                static_cast<unsigned long long>(o.imm.value));
+                } else if (o.kind == IROperandKind::AbsMem) {
+                    std::printf(" s=0x%02x v=0x%llx", static_cast<uint8_t>(o.abs_mem.size),
+                                static_cast<unsigned long long>(o.abs_mem.value));
+                } else if (o.kind == IROperandKind::BranchOffset) {
+                    std::printf(" v=0x%llx", static_cast<unsigned long long>(o.branch.value));
+                } else if (o.kind == IROperandKind::ConditionCode) {
+                    std::printf(" cc=%u", static_cast<unsigned>(o.cc.cc));
+                } else if (o.kind == IROperandKind::SegmentRegister) {
+                    std::printf(" seg=%u", static_cast<unsigned>(o.seg.seg_idx));
+                }
+                std::printf("]");
+            }
+            std::printf("\n");
+        }
+    };
+    if (!dump_block_ids.empty() || !dump_block_hashes.empty()) {
         for (const uint32_t want : dump_block_ids) {
-            const auto it = std::find_if(blocks.begin(), blocks.end(),
-                                         [want](const Block& b) { return b.id == want; });
+            const auto it =
+                std::ranges::find_if(blocks, [want](const Block& b) { return b.id == want; });
             if (it == blocks.end()) {
                 std::printf("# block_id=%u: NOT FOUND in profile\n", want);
                 continue;
             }
-            const Block& b = *it;
-            const uint64_t exec =
-                static_cast<size_t>(b.id) < counters.size() ? counters[b.id] : 0ULL;
-            std::printf("# block_id=%u start_pc=0x%08x num_instrs=%zu exec_count=%llu\n", b.id,
-                        b.start_pc, b.instrs.size(), static_cast<unsigned long long>(exec));
-            for (size_t i = 0; i < b.instrs.size(); ++i) {
-                const IRInstr& ins = b.instrs[i];
-                const char* name =
-                    (ins.opcode < kOpcodeNames.size() && kOpcodeNames[ins.opcode] != nullptr)
-                        ? kOpcodeNames[ins.opcode]
-                        : "?";
-                std::printf("  [%3zu] pc=0x%08x op=0x%04x %-12s nops=%u", i,
-                            static_cast<unsigned>(ins.pc), static_cast<unsigned>(ins.opcode), name,
-                            static_cast<unsigned>(ins.num_operands));
-                const int nops = std::min<int>(ins.num_operands, 4);
-                for (int op_idx = 0; op_idx < nops; ++op_idx) {
-                    const IROperand& o = ins.operands[op_idx];
-                    const char* kn = "?";
-                    switch (o.kind) {
-                        case IROperandKind::Register:
-                            kn = "Reg";
-                            break;
-                        case IROperandKind::MemRef:
-                            kn = "Mem";
-                            break;
-                        case IROperandKind::AbsMem:
-                            kn = "AbsMem";
-                            break;
-                        case IROperandKind::Immediate:
-                            kn = "Imm";
-                            break;
-                        case IROperandKind::BranchOffset:
-                            kn = "Brn";
-                            break;
-                        case IROperandKind::ConditionCode:
-                            kn = "CC";
-                            break;
-                        case IROperandKind::SegmentRegister:
-                            kn = "Seg";
-                            break;
-                    }
-                    std::printf(" [%d:%s", op_idx, kn);
-                    if (o.kind == IROperandKind::Register) {
-                        std::printf(" s=0x%02x reg=%d", static_cast<uint8_t>(o.reg.size),
-                                    o.reg.reg.index());
-                    } else if (o.kind == IROperandKind::MemRef) {
-                        std::printf(
-                            " s=0x%02x base=%d idx=%d disp=%lld", static_cast<uint8_t>(o.mem.size),
-                            static_cast<int>(o.mem.base_reg), static_cast<int>(o.mem.index_reg),
-                            static_cast<long long>(o.mem.disp));
-                    } else if (o.kind == IROperandKind::Immediate) {
-                        std::printf(" s=0x%02x v=0x%llx", static_cast<uint8_t>(o.imm.size),
-                                    static_cast<unsigned long long>(o.imm.value));
-                    } else if (o.kind == IROperandKind::AbsMem) {
-                        std::printf(" s=0x%02x v=0x%llx", static_cast<uint8_t>(o.abs_mem.size),
-                                    static_cast<unsigned long long>(o.abs_mem.value));
-                    } else if (o.kind == IROperandKind::BranchOffset) {
-                        std::printf(" v=0x%llx", static_cast<unsigned long long>(o.branch.value));
-                    } else if (o.kind == IROperandKind::ConditionCode) {
-                        std::printf(" cc=%u", static_cast<unsigned>(o.cc.cc));
-                    } else if (o.kind == IROperandKind::SegmentRegister) {
-                        std::printf(" seg=%u", static_cast<unsigned>(o.seg.seg_idx));
-                    }
-                    std::printf("]");
+            print_block(*it);
+        }
+        for (const uint64_t want : dump_block_hashes) {
+            bool found = false;
+            for (const Block& b : blocks) {
+                const uint64_t h = profile::hash_ir_stream(b.instrs.data(), b.instrs.size());
+                if (h == want) {
+                    print_block(b);
+                    found = true;
                 }
-                std::printf("\n");
+            }
+            if (!found) {
+                std::printf("# hash=0x%016llx: NOT FOUND in profile\n",
+                            static_cast<unsigned long long>(want));
             }
         }
         return 0;

@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 // ── x87 peephole-fusion identifiers ─────────────────────────────────────────
 // Bit positions in `RosettaConfig::disabled_fusions_mask`.  See
@@ -102,6 +103,17 @@ struct RosettaConfig {
     uint8_t x87_log_rollback;
     uint8_t x87_enable_rollback_top_dirty;
     uint8_t x87_enable_rollback_deferred_pop;
+
+    // X87_ROLLBACK_HASH_LIST / X87_NO_ROLLBACK_HASH_LIST — comma-separated
+    // 64-bit hex hashes (with or without "0x" prefix).  Hash is
+    // profile::hash_ir_stream over the block's IR (PC zeroed), stable
+    // across runs.  Populated unconditionally on block transition into
+    // cache.profile_hash so these gates work even when X87_PROFILE is off.
+    //   - Include list non-empty → rollback only when current hash is in it.
+    //   - Exclude list non-empty → rollback never when current hash is in it.
+    //     Exclude takes precedence over include.
+    std::vector<uint64_t> x87_rollback_hash_list;     // sorted, binary-searched
+    std::vector<uint64_t> x87_no_rollback_hash_list;  // sorted, binary-searched
 
     // Loader-only knobs (read by rosettax87 main; aotinvoke leaves them 0)
     uint8_t loader_logs;            // --logs           verbose loader logging

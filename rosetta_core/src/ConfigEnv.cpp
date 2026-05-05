@@ -1,9 +1,11 @@
 #include "rosetta_core/ConfigEnv.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 
 #include "rosetta_core/Config.h"
 
@@ -69,6 +71,35 @@ void apply_fusion_list(const char* csv, uint64_t& mask) {
     }
 }
 
+// Comma-separated 64-bit hex hashes (with or without "0x" prefix).  Sized
+// for ~1k unique hashes worst-case (each "0xHHHHHHHHHHHHHHHH," = 19 bytes →
+// ~19 KB envelope), so the local buffer just bounds the input length.
+void parse_hash_list(const char* csv, std::vector<uint64_t>& out) {
+    out.clear();
+    if (csv == nullptr || csv[0] == '\0') {
+        return;
+    }
+    char buf[32 * 1024];
+    std::strncpy(buf, csv, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
+
+    char* save = nullptr;
+    for (char* tok = strtok_r(buf, ",", &save); tok != nullptr;
+         tok = strtok_r(nullptr, ",", &save)) {
+        if (tok[0] == '0' && (tok[1] == 'x' || tok[1] == 'X')) {
+            tok += 2;
+        }
+        char* end = nullptr;
+        const uint64_t h = std::strtoull(tok, &end, 16);
+        if (end != tok && *end == '\0') {
+            out.push_back(h);
+        }
+    }
+    std::ranges::sort(out);
+    const auto dup = std::ranges::unique(out);
+    out.erase(dup.begin(), dup.end());
+}
+
 }  // namespace
 
 RosettaConfig load_config_from_env() {
@@ -119,6 +150,16 @@ RosettaConfig load_config_from_env() {
     cfg.x87_log_rollback = env_truthy("X87_LOG_ROLLBACK") ? 1 : 0;
     cfg.x87_enable_rollback_top_dirty = env_truthy("X87_ENABLE_ROLLBACK_TOP_DIRTY") ? 1 : 0;
     cfg.x87_enable_rollback_deferred_pop = env_truthy("X87_ENABLE_ROLLBACK_DEFERRED_POP") ? 1 : 0;
+    if (const char* v = std::getenv("X87_ROLLBACK_HASH_LIST"); v != nullptr && v[0] != '\0') {
+        parse_hash_list(v, cfg.x87_rollback_hash_list);
+        std::printf("[rosettax87] X87_ROLLBACK_HASH_LIST: %zu unique hashes\n",
+                    cfg.x87_rollback_hash_list.size());
+    }
+    if (const char* v = std::getenv("X87_NO_ROLLBACK_HASH_LIST"); v != nullptr && v[0] != '\0') {
+        parse_hash_list(v, cfg.x87_no_rollback_hash_list);
+        std::printf("[rosettax87] X87_NO_ROLLBACK_HASH_LIST: %zu unique hashes\n",
+                    cfg.x87_no_rollback_hash_list.size());
+    }
 
     // Loader-only knobs (aotinvoke leaves them at 0; harmless because it
     // ignores the loader_* fields anyway).
@@ -193,6 +234,20 @@ void print_env_help(std::FILE* out) {
         "                                branches.  Default off — both corrupt WoW\n"
         "                                weapon vertex transforms via an unidentified\n"
         "                                mechanism.  Used to bisect that mechanism.\n"
+        "  X87_ROLLBACK_BLOCK_MIN=N      INVESTIGATION ONLY: bisect rollback by\n"
+        "  X87_ROLLBACK_BLOCK_MAX=N      profile_bid range (within-run only — bid\n"
+        "                                is registration order, not stable across\n"
+        "                                WoW launches).\n"
+        "  X87_NO_ROLLBACK_BLOCK_MIN=N   Exclusion-range counterparts for\n"
+        "  X87_NO_ROLLBACK_BLOCK_MAX=N   subtraction-bisect.\n"
+        "  X87_ROLLBACK_HASH_LIST=0xH,…  INVESTIGATION ONLY: bisect rollback by IR-\n"
+        "  X87_NO_ROLLBACK_HASH_LIST=…   content hash (FNV-1a, PC zeroed); stable\n"
+        "                                across runs.  Comma-separated 64-bit hex\n"
+        "                                values.  Include list non-empty → rollback\n"
+        "                                only for those hashes.  Exclude list non-\n"
+        "                                empty → rollback never for those hashes\n"
+        "                                (exclude wins over include).  Hashes are\n"
+        "                                printed in the [rollback] log line.\n"
         "  X87_DISABLE_FUSIONS=name1,…   disable specific fusions; names:\n");
     for (const auto& e : kFusionTable) {
         std::fprintf(out, "                                  %s\n", e.name);
