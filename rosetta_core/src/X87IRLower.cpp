@@ -42,6 +42,31 @@ inline auto x87_begin(TranslationResult& a1, AssemblerBuffer& buf) -> std::pair<
 inline int x87_get_st_base(TranslationResult& a1) {
     return (a1.x87_cache.gprs_valid && a1.x87_cache.st_base_valid) ? a1.x87_cache.st_base_gpr : -1;
 }
+inline void x87_flush_deferred_pops(AssemblerBuffer& buf, TranslationResult& a1, int Xbase,
+                                    int Wd_top, int Wd_tmp) {
+    if (a1.x87_cache.deferred_pop_count > 0) {
+        const int Wd_tmp2 = alloc_free_gpr(a1);
+        const int Wd_tagw = alloc_free_gpr(a1);
+        emit_x87_tag_set_empty_batch(buf, Xbase, Wd_top, Wd_tmp, Wd_tmp2, Wd_tagw,
+                                     a1.x87_cache.deferred_pop_count);
+        free_gpr(a1, Wd_tagw);
+        free_gpr(a1, Wd_tmp2);
+        a1.x87_cache.deferred_pop_count = 0;
+    }
+}
+inline void perm_flush_before_stack_change(AssemblerBuffer& buf, TranslationResult& a1, int Xbase,
+                                           int Wd_top, int Wd_tmp) {
+    if (a1.x87_cache.perm_dirty) {
+        const int Xst_base = x87_get_st_base(a1);
+        const int Dd_save = alloc_free_fpr(a1);
+        const int Dd_chain = alloc_free_fpr(a1);
+        emit_x87_perm_flush(buf, Xbase, Wd_top, Wd_tmp, a1.x87_cache.perm, Xst_base, Dd_save,
+                            Dd_chain);
+        free_fpr(a1, Dd_chain);
+        free_fpr(a1, Dd_save);
+        a1.x87_cache.reset_perm();
+    }
+}
 }  // namespace TranslatorX87
 
 namespace X87IR {
@@ -306,6 +331,23 @@ void lower(Context& ctx, TranslationResult* result) {
     auto [Xbase, Wd_top] = TranslatorX87::x87_begin(*result, buf);
     int Xst_base = TranslatorX87::x87_get_st_base(*result);
     int Wd_tmp = alloc_gpr(*result, 2);
+
+    // Flush incoming deferred state.  The IR-gate's top_dirty branch
+    // (Translator.cpp) flushes only top_dirty and falls through with
+    // tag_push_pending / deferred_pop_count / perm_dirty potentially still
+    // set; the deferred_pop branch can fall through with perm_dirty still
+    // set.  The body's tag-update epilogue covers only its own net delta,
+    // so without these the entering slot's tag/perm state never reaches
+    // memory.  Mirror x87_push's incoming-flag handling
+    // (TranslatorX87Internal.hpp:170-178).
+    if (result->x87_cache.tag_push_pending) {
+        const int Wd_tmp2 = alloc_free_gpr(*result);
+        emit_x87_tag_clear(buf, Xbase, Wd_top, Wd_tmp, Wd_tmp2);
+        free_gpr(*result, Wd_tmp2);
+        result->x87_cache.tag_push_pending = 0;
+    }
+    TranslatorX87::x87_flush_deferred_pops(buf, *result, Xbase, Wd_top, Wd_tmp);
+    TranslatorX87::perm_flush_before_stack_change(buf, *result, Xbase, Wd_top, Wd_tmp);
 
     // ── FPR assignment ──────────────────────────────────────────────────────
     FPRState fprs;

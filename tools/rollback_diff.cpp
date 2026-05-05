@@ -24,13 +24,17 @@
 //     pivots to lldb-on-WoW.
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <fstream>
 #include <ios>
 #include <iterator>
+#include <string>
+#include <utility>
 #include <vector>
 
 #include "rosetta_core/Config.h"
@@ -59,9 +63,9 @@ struct CacheSnap {
 };
 
 struct RunResult {
-    std::vector<uint32_t> arm;             // emitted ARM instructions (one per uint32_t)
-    std::vector<int64_t> idx_per_word;     // IR insn_idx that produced each ARM word
-    std::vector<CacheSnap> snap_after_idx; // post-translate_instruction cache state per idx
+    std::vector<uint32_t> arm;              // emitted ARM instructions (one per uint32_t)
+    std::vector<int64_t> idx_per_word;      // IR insn_idx that produced each ARM word
+    std::vector<CacheSnap> snap_after_idx;  // post-translate_instruction cache state per idx
 };
 
 // One translation pass.  cfg is installed via rosetta_set_config; the
@@ -167,8 +171,7 @@ int main(int argc, char** argv) try {
         std::fprintf(stderr, "error: cannot open %s\n", path);
         return 1;
     }
-    std::vector<uint8_t> raw((std::istreambuf_iterator<char>(f)),
-                             std::istreambuf_iterator<char>());
+    std::vector<uint8_t> raw((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
     if (raw.empty() || raw.size() % sizeof(IRInstr) != 0) {
         std::fprintf(stderr, "error: %s size %zu is not a multiple of sizeof(IRInstr)=%zu\n", path,
                      raw.size(), sizeof(IRInstr));
@@ -259,8 +262,8 @@ int main(int argc, char** argv) try {
         bool suffix_match = false;
         if (a.size() >= b.size()) {
             const size_t prefix = a.size() - b.size();
-            suffix_match = std::equal(a.begin() + static_cast<std::ptrdiff_t>(prefix), a.end(),
-                                      b.begin());
+            suffix_match =
+                std::equal(a.begin() + static_cast<std::ptrdiff_t>(prefix), a.end(), b.begin());
         }
         if (suffix_match) {
             ++benign_rewind_count;
@@ -291,7 +294,8 @@ int main(int argc, char** argv) try {
     };
     std::printf("\nCache-state divergences across the block:\n");
     size_t state_diff_count = 0;
-    int8_t last_off_td = 0, last_on_td = 0;
+    int8_t last_off_td = 0;
+    int8_t last_on_td = 0;
     for (size_t i = 0; i < instrs.size(); ++i) {
         const CacheSnap& a = off.snap_after_idx[i];
         const CacheSnap& b = on.snap_after_idx[i];
@@ -303,8 +307,7 @@ int main(int argc, char** argv) try {
         }
         ++state_diff_count;
         if (state_diff_count <= 20) {
-            std::printf("  idx=%3zu  op=0x%04x\n", i,
-                        static_cast<unsigned>(instrs[i].opcode));
+            std::printf("  idx=%3zu  op=0x%04x\n", i, static_cast<unsigned>(instrs[i].opcode));
             print_snap("OFF", a);
             print_snap("ON ", b);
         }
@@ -317,20 +320,23 @@ int main(int argc, char** argv) try {
     }
 
     if (suspect_count == 0) {
-        std::printf("\nVERDICT: every divergence is a clean rollback rewind.  "
-                    "ON is exactly OFF with the speculative-flush prefix elided "
-                    "at each rollback site.  Bug is cross-block — not in the "
-                    "emitted code for this block alone.\n");
-        std::printf("Next step: lldb on running WoW with X87_ROLLBACK_HASH_LIST=0x... "
-                    "scoping rollback to the geom block; capture cache state vs "
-                    "X87State memory truth at each rollback firing.\n");
+        std::printf(
+            "\nVERDICT: every divergence is a clean rollback rewind.  "
+            "ON is exactly OFF with the speculative-flush prefix elided "
+            "at each rollback site.  Bug is cross-block — not in the "
+            "emitted code for this block alone.\n");
+        std::printf(
+            "Next step: lldb on running WoW with X87_ROLLBACK_HASH_LIST=0x... "
+            "scoping rollback to the geom block; capture cache state vs "
+            "X87State memory truth at each rollback firing.\n");
         return 0;
     }
 
-    std::printf("\nVERDICT: %zu IR positions emit semantically different ARM "
-                "between rollback OFF and ON.  The first such position pins "
-                "the divergence.\n",
-                suspect_count);
+    std::printf(
+        "\nVERDICT: %zu IR positions emit semantically different ARM "
+        "between rollback OFF and ON.  The first such position pins "
+        "the divergence.\n",
+        suspect_count);
 
     // Print every suspect position in detail.  For each, show the IR op,
     // the ARM emitted in each run.  In a suspect, ON and OFF emit different
@@ -346,8 +352,8 @@ int main(int argc, char** argv) try {
         bool suffix_match = false;
         if (a.size() >= b.size()) {
             const size_t prefix = a.size() - b.size();
-            suffix_match = std::equal(a.begin() + static_cast<std::ptrdiff_t>(prefix), a.end(),
-                                      b.begin());
+            suffix_match =
+                std::equal(a.begin() + static_cast<std::ptrdiff_t>(prefix), a.end(), b.begin());
         }
         if (suffix_match) {
             continue;
@@ -355,8 +361,7 @@ int main(int argc, char** argv) try {
         ++printed;
         const auto& ins = instrs[i];
         std::printf("\n--- suspect #%zu  IR idx=%zu  opcode=0x%04x  num_operands=%u\n", printed, i,
-                    static_cast<unsigned>(ins.opcode),
-                    static_cast<unsigned>(ins.num_operands));
+                    static_cast<unsigned>(ins.opcode), static_cast<unsigned>(ins.num_operands));
         std::printf("  OFF emitted %zu ARM:", a.size());
         for (uint32_t w : a) {
             std::printf(" 0x%08x", w);
