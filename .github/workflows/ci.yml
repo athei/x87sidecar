@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+
+jobs:
+  build-and-test:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Ensure Rosetta is installed
+        run: softwareupdate --install-rosetta --agree-to-license
+
+      - name: Configure
+        run: cmake -B build
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Run tests
+        run: scripts/run_tests.sh --no-build

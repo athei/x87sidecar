@@ -1,63 +1,70 @@
-name: Build and Release
+name: Release
 
 on:
   push:
-  workflow_dispatch:
+    tags: ['v*']
 
 jobs:
-  build:
-    runs-on: macos-14
+  release:
+    runs-on: macos-26
     permissions:
       contents: write
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Select Xcode 15
-        run: sudo xcode-select -s /Applications/Xcode_15.4.app
+      - name: Verify tag is on master
+        run: |
+          git fetch origin master --depth=1 || true
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/master; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not point at a commit on master"
+            exit 1
+          fi
 
-      - name: Configure CMake
+      - name: Configure
         run: cmake -B build
 
-      - name: Build
+      - name: Build rosettax87
         run: cmake --build build --target rosettax87 --parallel
 
-      - name: Verify binaries
+      - name: Package rosettax87.tar.xz
+        run: tar --xz -cf rosettax87.tar.xz -C build/bin rosettax87
+
+      - name: Generate changelog
+        id: changelog
         run: |
-          echo "=== rosettax87 ==="
-          file build/bin/rosettax87
+          set -euo pipefail
+          PREV=$(git tag --list 'v*' --sort=-creatordate \
+                  | grep -v "^${GITHUB_REF_NAME}$" | head -1 || true)
+          if [ -n "$PREV" ]; then
+            RANGE="${PREV}..${GITHUB_REF_NAME}"
+            HEADER="Changes since ${PREV}"
+          else
+            RANGE="${GITHUB_REF_NAME}"
+            HEADER="Initial release"
+          fi
+          REPO_URL="https://github.com/${GITHUB_REPOSITORY}"
+          {
+            echo "## ${HEADER}"
+            echo
+            git log "$RANGE" --no-merges \
+              --pretty=format:"- [\`%h\`](${REPO_URL}/commit/%H) %s"
+            echo
+          } > CHANGELOG.md
+          {
+            echo 'body<<EOF'
+            cat CHANGELOG.md
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
 
-      - name: Package artifacts
-        run: |
-          mkdir -p release
-          cp build/bin/rosettax87 release/
-          cd release
-          tar czf ../rosettax87-jit-macos-arm64.tar.gz .
-
-      - name: Update latest release
-        if: github.ref == 'refs/heads/main'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: latest
-          name: Latest Build (${{ github.sha }})
-          prerelease: true
-          make_latest: false
-          files: |
-            rosettax87-jit-macos-arm64.tar.gz
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Create versioned release
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Create draft release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
           name: rosettax87_jit ${{ github.ref_name }}
-          draft: false
-          prerelease: false
-          generate_release_notes: true
-          files: |
-            rosettax87-jit-macos-arm64.tar.gz
+          draft: true
+          body: ${{ steps.changelog.outputs.body }}
+          files: rosettax87.tar.xz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
