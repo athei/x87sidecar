@@ -43,6 +43,7 @@ ALL_BENCHMARKS=(
     bench_fusion_arith_faddp
     bench_fusion_fld_arith_arithp
     bench_fstp_fld
+    bench_dot_product
     bench_round
     bench_fistt
     bench_tag_batch

@@ -121,6 +121,7 @@ RosettaConfig load_config_from_env() {
     cfg.fast_round = env_truthy("X87_FAST_ROUND") ? 1 : 0;
     cfg.disable_deferred_fxch = env_truthy("X87_DISABLE_DEFERRED_FXCH") ? 1 : 0;
     cfg.disable_x87_ir = env_truthy("X87_DISABLE_X87_IR") ? 1 : 0;
+    cfg.enable_fma_reduce = env_default_on("X87_ENABLE_FMA_REDUCE");
 
     if (env_truthy("X87_DISABLE_ALL_FUSIONS")) {
         cfg.disabled_fusions_mask = ~0ULL;
@@ -228,6 +229,14 @@ void print_env_help(std::FILE* out) {
                  "                                 uses FLDCW to change rounding mode, e.g. Lua)\n"
                  "  X87_DISABLE_DEFERRED_FXCH=1   disable OPT-G (deferred FXCH permutation)\n"
                  "  X87_DISABLE_X87_IR=1          disable the IR optimisation pipeline\n"
+                 "  X87_ENABLE_FMA_REDUCE=0       disable NEON FMA-reduction lowering for serial\n"
+                 "                                FMADD chains.  Default ON.  Pays off only on\n"
+                 "                                workloads with +4-contiguous data/weight\n"
+                 "                                streams (audio FIR/IIR, software vertex\n"
+                 "                                pipelines).  TurtleWoW's matrix-vector idiom\n"
+                 "                                is stride-16, so the pass detects no chains\n"
+                 "                                there but is correctness-clean and ships ON\n"
+                 "                                so it stays exercised.\n"
                  "  X87_DISABLE_ALL_FUSIONS=1     disable every peephole fusion\n"
                  "  X87_GATE_FLUSH_THRESHOLD=N             override the IR-gate flush-and-\n"
                  "  X87_GATE_FLUSH_THRESHOLD_DEFERRED_POP=N proceed minimum run length per\n"

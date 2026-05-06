@@ -247,6 +247,39 @@ auto emit_str_q_imm(AssemblerBuffer& buf, int Qt, int Rn, int16_t imm12) -> void
 // the byte offset divided by 4; valid range is [-256, +252] step 4.
 auto emit_stp_s_imm(AssemblerBuffer& buf, int St1, int St2, int Rn, int16_t simm7) -> void;
 
+// -----------------------------------------------------------------------------
+// 1e2 — NEON FMA-reduce helpers (dot-product / matrix-vector reduction lowering)
+//
+// Used by X87IRLower::lower_fma_reduce to vectorise serial FMA reduction
+// chains of the form `(LoadF32 + LoadF32 + FMAdd-into-prior) × N` into pair-
+// loaded LDR D + FCVTL .2D + FMLA .2D bodies, with a final FADDP scalar
+// horizontal sum.
+// -----------------------------------------------------------------------------
+
+// LDR Qt, [Rn, #imm12] — load a 128-bit Q register (4×f32 or 2×f64) using
+// the unsigned-immediate addressing mode.  imm12 is scaled by 16; the byte
+// offset must be a multiple of 16 in [0, 65520].  Mirror of emit_str_q_imm.
+auto emit_ldr_q_imm(AssemblerBuffer& buf, int Qt, int Rn, int16_t imm12) -> void;
+
+// FCVTL Vd.2D, Vn.2S — widen the LOW 64 bits of Vn (2×f32) to 2×f64 in Vd.
+// Used to widen a pair of f32s loaded by LDR D into the f64 lanes that the
+// FMA reduction accumulator works in.
+auto emit_fcvtl_v2d_from_v2s(AssemblerBuffer& buf, int Vd, int Vn) -> void;
+
+// FCVTL2 Vd.2D, Vn.4S — widen the HIGH 64 bits of Vn (lanes [2,3] = 2×f32)
+// to 2×f64 in Vd.  Used as the second-half companion to FCVTL when an LDR Q
+// is used to load 4 f32s in one shot.
+auto emit_fcvtl2_v2d_from_v4s(AssemblerBuffer& buf, int Vd, int Vn) -> void;
+
+// FMLA Vd.2D, Vn.2D, Vm.2D — vector fused multiply-add into accumulator.
+// For each lane i ∈ {0,1}: Vd.D[i] = Vd.D[i] + Vn.D[i] * Vm.D[i].
+auto emit_fmla_v2d(AssemblerBuffer& buf, int Vd, int Vn, int Vm) -> void;
+
+// FADDP Dd, Vn.2D — scalar horizontal pairwise add: Dd = Vn.D[0] + Vn.D[1].
+// Used to collapse the vector accumulator into a scalar f64 result at the
+// end of the reduction body.
+auto emit_faddp_d_from_v2d(AssemblerBuffer& buf, int Dd, int Vn) -> void;
+
 // CSET Wd, cond — set Wd to 1 if condition holds, else 0
 // Encodes as CSINC Rd, XZR, XZR, invert(cond)
 // AArch64 cond codes: EQ=0 NE=1 CS=2 CC=3 MI=4 PL=5 VS=6 VC=7

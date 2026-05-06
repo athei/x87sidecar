@@ -668,6 +668,113 @@ auto emit_stp_s_imm(AssemblerBuffer& buf, int St1, int St2, int Rn, int16_t simm
     buf.emit(insn);
 }
 
+// ---------------------------------------------------------------------------
+// 1e2 — NEON FMA-reduce helpers (dot-product / matrix-vector reduction lowering)
+// ---------------------------------------------------------------------------
+
+auto emit_ldr_q_imm(AssemblerBuffer& buf, int Qt, int Rn, int16_t imm12) -> void {
+    // LDR Qt, [Rn, #imm] — load 128-bit Q register, unsigned-immediate form.
+    //
+    // Same field layout as STR Q (see emit_str_q_imm) except bits[23:22] opc:
+    //   bits[23:22] opc=11       // load, Q-form (vs 10 for store, Q-form)
+    //
+    // Concatenated: 00_111_1_01_11_imm12_Rn_Rt
+    //             = 0x3DC00000 | (imm12<<10) | (Rn<<5) | Qt
+    //
+    // imm12 must fit in 12 unsigned bits; byte offset = imm12 * 16.
+    uint32_t insn = 0x3DC00000U;
+    insn |= (static_cast<uint32_t>(imm12) & 0xFFFU) << 10;
+    insn |= static_cast<uint32_t>(Rn & 0x1F) << 5;
+    insn |= static_cast<uint32_t>(Qt & 0x1F);
+    buf.emit(insn);
+}
+
+auto emit_fcvtl_v2d_from_v2s(AssemblerBuffer& buf, int Vd, int Vn) -> void {
+    // FCVTL Vd.2D, Vn.2S — widen LOW 2×f32 lanes of Vn to 2×f64 in Vd.
+    //
+    // Advanced SIMD two-register miscellaneous, FCVTL variant:
+    //   bit[31] 0
+    //   bit[30] Q=0             // .2D <- .2S (low half)
+    //   bit[29] U=0
+    //   bits[28:24]=01110
+    //   bits[23] 0
+    //   bit[22] sz=1            // .2D destination (sz=0 selects .4S<-.4H)
+    //   bits[21:17]=10000
+    //   bits[16:12]=10111
+    //   bits[11:10]=10
+    //   bits[9:5]   Rn
+    //   bits[4:0]   Rd
+    //
+    // Concatenated: 0_0_0_01110_0_1_10000_10111_10_Rn_Rd
+    //             = 0x0E617800 | (Rn<<5) | Rd
+    uint32_t insn = 0x0E617800U;
+    insn |= static_cast<uint32_t>(Vn & 0x1F) << 5;
+    insn |= static_cast<uint32_t>(Vd & 0x1F);
+    buf.emit(insn);
+}
+
+auto emit_fcvtl2_v2d_from_v4s(AssemblerBuffer& buf, int Vd, int Vn) -> void {
+    // FCVTL2 Vd.2D, Vn.4S — widen HIGH 2×f32 lanes (Vn.S[2..3]) to 2×f64.
+    //
+    // Identical encoding to FCVTL except bit[30] Q=1 selects the upper half.
+    //   = 0x4E617800 | (Rn<<5) | Rd
+    uint32_t insn = 0x4E617800U;
+    insn |= static_cast<uint32_t>(Vn & 0x1F) << 5;
+    insn |= static_cast<uint32_t>(Vd & 0x1F);
+    buf.emit(insn);
+}
+
+auto emit_fmla_v2d(AssemblerBuffer& buf, int Vd, int Vn, int Vm) -> void {
+    // FMLA Vd.2D, Vn.2D, Vm.2D — vector fused multiply-add (accumulator form):
+    //   for each lane i ∈ {0,1}: Vd.D[i] = Vd.D[i] + Vn.D[i] * Vm.D[i]
+    //
+    // Advanced SIMD three same, FMLA (vector) variant:
+    //   bit[31] 0
+    //   bit[30] Q=1             // .2D form
+    //   bit[29] U=0
+    //   bits[28:24]=01110
+    //   bit[23] 0
+    //   bit[22] sz=1            // f64 lanes
+    //   bit[21] 1
+    //   bits[20:16] Rm
+    //   bits[15:11]=11001
+    //   bit[10] 1
+    //   bits[9:5]   Rn
+    //   bits[4:0]   Rd
+    //
+    // Concatenated: 0_1_0_01110_0_1_1_Rm_11001_1_Rn_Rd
+    //             = 0x4E60CC00 | (Rm<<16) | (Rn<<5) | Rd
+    uint32_t insn = 0x4E60CC00U;
+    insn |= static_cast<uint32_t>(Vm & 0x1F) << 16;
+    insn |= static_cast<uint32_t>(Vn & 0x1F) << 5;
+    insn |= static_cast<uint32_t>(Vd & 0x1F);
+    buf.emit(insn);
+}
+
+auto emit_faddp_d_from_v2d(AssemblerBuffer& buf, int Dd, int Vn) -> void {
+    // FADDP Dd, Vn.2D — scalar floating-point pairwise add:
+    //   Dd = Vn.D[0] + Vn.D[1]
+    //
+    // Advanced SIMD scalar pairwise variant:
+    //   bits[31:30]=01
+    //   bit[29] U=1
+    //   bits[28:24]=11110
+    //   bit[23] 0
+    //   bit[22] sz=1            // f64
+    //   bits[21:17]=11000
+    //   bits[16:12]=01101
+    //   bits[11:10]=10
+    //   bits[9:5]   Rn
+    //   bits[4:0]   Rd
+    //
+    // Concatenated: 01_1_11110_0_1_11000_01101_10_Rn_Rd
+    //             = 0x7E70D800 | (Rn<<5) | Rd
+    uint32_t insn = 0x7E70D800U;
+    insn |= static_cast<uint32_t>(Vn & 0x1F) << 5;
+    insn |= static_cast<uint32_t>(Dd & 0x1F);
+    buf.emit(insn);
+}
+
 auto emit_ldr_literal_f64(AssemblerBuffer& buf, int Dd, uint64_t constant) -> void {
     // OPT-H: LDR Dd, [PC, #8] — load from 2 instructions ahead (the .quad)
     // Encoding (LDR literal, SIMD&FP):

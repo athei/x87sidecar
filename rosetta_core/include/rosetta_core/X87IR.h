@@ -96,6 +96,16 @@ enum NodeFlags : uint8_t {
     kFcomFused = 1 << 1,     // FCOM+FSTSW fused: CC stays in register
     kTruncate = 1 << 2,      // StoreI*: always truncate (FISTTP), skip RC dispatch
     kFcomIPopping = 1 << 3,  // FComI: pop ST(0) after compare (FCOMIP/FUCOMIP)
+
+    // FMA-reduction chain tagging (set by pass_fma_reduce, consumed by lower
+    // and peak_live_fprs).  Recognises serial reductions of the form
+    //   A_{i+1} = FMAdd(L_i, W_i, A_i)
+    // where L_i / W_i are LoadF32s with simple (base+disp) operands and the
+    // two streams are independently +4-contiguous, so the body can be
+    // vectorised into LDR D + FCVTL .2D + FMLA .2D pairs ending with a
+    // scalar FADDP horizontal sum.
+    kFmaReduceHead = 1 << 4,    // First FMAdd of a chain: lower emits whole body
+    kFmaReduceMember = 1 << 5,  // FMAdd / LoadF32 absorbed by a chain (incl. head)
 };
 
 // ── IR node ─────────────────────────────────────────────────────────────────
@@ -223,6 +233,35 @@ bool build(Context& ctx, IRInstr* instr_array, int64_t num_instrs, int64_t start
 
 // Run optimization passes on the IR (DSE, FMA detection, FCOM+FSTSW fusion).
 void optimize(Context& ctx);
+
+// pass_fma_reduce diagnostics.  Atomic counters incremented as the pass
+// walks a Context, plus a reject-reason histogram for chains the pass
+// considered but didn't tag.  Survey-style instrumentation for the
+// optimization toolkit — useful when measuring how an optimization
+// covers a real workload vs. synthetic benches.  Mirror this shape for
+// future passes (e.g. attempted-fusion counters).
+//
+// Counters are global atomics because translate_instruction is called
+// from worker threads; tools/profile_analyze invokes it serially but the
+// runtime sidecar may not.
+struct FmaReduceStats {
+    uint64_t invocations;         // pass_fma_reduce called this many times
+    uint64_t candidates_seen;     // FMAdd nodes considered as chain heads
+    uint64_t chains_tagged;       // chains successfully tagged for vector lowering
+    uint64_t rejected_short;      // chain length < 2 (lone FMAdd)
+    uint64_t rejected_load_kind;  // input[0] or input[1] not LoadF32
+    uint64_t rejected_load_use;   // L_i / W_i is multi-use or already absorbed
+    uint64_t rejected_mem_shape;  // mem_operand has index reg or seg override
+    uint64_t rejected_stride;     // stream isn't +4 contiguous (e.g. WoW's
+                                  // stride-16 matrix-vector idiom)
+};
+
+// Snapshot the current counter values.  Cheap (relaxed loads).
+FmaReduceStats fma_reduce_stats();
+
+// Print a one-line summary of fma_reduce_stats() to stdout.  Called by
+// profile_analyze when X87_LOG_FMA_REDUCE=1 is set; no-op otherwise.
+void fma_reduce_print_stats();
 
 // Compute the peak number of simultaneously live FPR-bearing nodes that the
 // lowering pass will require, accounting for transient temporaries (e.g. the

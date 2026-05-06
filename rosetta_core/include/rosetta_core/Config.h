@@ -43,6 +43,13 @@ struct RosettaConfig {
     uint8_t fast_round;             // X87_FAST_ROUND            skip RC dispatch (round-to-nearest)
     uint8_t disable_deferred_fxch;  // X87_DISABLE_DEFERRED_FXCH disable OPT-G
     uint8_t disable_x87_ir;         // X87_DISABLE_X87_IR        disable IR optimisation pipeline
+    uint8_t enable_fma_reduce;      // X87_ENABLE_FMA_REDUCE     NEON FMA-reduction pass
+                                    //                           (default ON).  Pays off on
+                                    //                           +4-contiguous dot products
+                                    //                           (audio DSP, sw vertex pipelines).
+                                    //                           Set =0 to disable.  Diagnostic
+                                    //                           counters via fma_reduce_stats()
+                                    //                           and X87_LOG_FMA_REDUCE=1.
     uint8_t force_x87_ir_gate;      // measurement-only flag for tools/profile_analyze: bypass
                                     // the IR-eligibility gate's pre-build refusal conditions
                                     // (run_remaining<3, top_dirty, deferred_pop_count,

@@ -40,6 +40,7 @@
 #include "rosetta_core/TranslationResult.h"
 #include "rosetta_core/Translator.h"
 #include "rosetta_core/X87Cache.h"
+#include "rosetta_core/X87IR.h"
 
 namespace {
 
@@ -399,13 +400,29 @@ uint32_t runOneMode(const IRInstr* instrs, size_t len, const RosettaConfig* cfg)
     return arm_count;
 }
 
+// Production-equivalent config: matches what `load_config_from_env()`
+// produces when the user launches with no env overrides.  Knobs that
+// default ON (env_default_on) get 1; knobs that default OFF (env_truthy)
+// stay 0.  Use this for the "production" measurement so its emit count
+// reflects what the JIT actually produces in default operation, rather
+// than the all-zero-cfg legacy baseline.
+RosettaConfig make_production_cfg() {
+    RosettaConfig cfg{};
+    cfg.enable_fma_reduce = 1;
+    // Rollback knobs default ON too but only matter to Translator's gate
+    // cascade, which measurePattern doesn't exercise (it builds a fresh
+    // x87 cache per call); leave them 0 here.
+    return cfg;
+}
+
 EmitMeasurement measurePattern(const IRInstr* instrs, size_t len) {
+    RosettaConfig prod_cfg = make_production_cfg();
     RosettaConfig no_ir_cfg{};
     no_ir_cfg.disable_x87_ir = 1;
     RosettaConfig force_gate_cfg{};
     force_gate_cfg.force_x87_ir_gate = 1;
     return EmitMeasurement{
-        .arm_production = runOneMode(instrs, len, nullptr),
+        .arm_production = runOneMode(instrs, len, &prod_cfg),
         .arm_no_ir = runOneMode(instrs, len, &no_ir_cfg),
         .arm_ir_forced = runOneMode(instrs, len, &force_gate_cfg),
     };
@@ -919,19 +936,31 @@ int main(int argc, char** argv) try {
     // for tracking the impact of changes across captures of different
     // durations / different play sessions.
     if (have_tallies) {
-        // Per-block ARM emit measurement, in production mode (current JIT
-        // settings).  Each block's full IR stream is fed to translate_
+        // Per-block ARM emit measurement, in production mode (matches JIT
+        // env defaults).  Each block's full IR stream is fed to translate_
         // instruction (same machinery as the per-pattern measurement);
         // non-x87 ops return nullopt and skip without emit, so the ARM
         // count reflects only x87-attributable emit.
+        //
+        // The companion `total_arm_no_fma_reduce` measurement reuses the
+        // same loop with a config that disables the FMA-reduce pass, so
+        // we can quantify how much that one pass contributes to the
+        // workload.  Pattern is general — extend with another column for
+        // any future pass we want to measure delta on.
+        const RosettaConfig prod_cfg = make_production_cfg();
+        RosettaConfig no_fma_cfg = prod_cfg;
+        no_fma_cfg.enable_fma_reduce = 0;
         long double total_arm = 0;
+        long double total_arm_no_fma_reduce = 0;
         for (const auto& b : blocks) {
             const uint64_t exec = (b.id < counters.size()) ? counters[b.id] : 0;
             if (exec == 0 || b.instrs.empty()) {
                 continue;
             }
-            const auto arm = runOneMode(b.instrs.data(), b.instrs.size(), nullptr);
+            const auto arm = runOneMode(b.instrs.data(), b.instrs.size(), &prod_cfg);
             total_arm += static_cast<long double>(exec) * arm;
+            const auto arm_no_fma = runOneMode(b.instrs.data(), b.instrs.size(), &no_fma_cfg);
+            total_arm_no_fma_reduce += static_cast<long double>(exec) * arm_no_fma;
         }
         long double total_ir = 0;
         long double total_peep = 0;
@@ -979,6 +1008,17 @@ int main(int argc, char** argv) try {
         std::printf("single,%.2f\n", pct(total_single));
         std::printf("ft,%.2f\n", pct(total_ft));
         std::printf("global_arm_per_x87,%.2f\n", arm_per_x87);
+        const double arm_per_x87_no_fma_reduce =
+            total_ops > 0 ? static_cast<double>(total_arm_no_fma_reduce / total_ops) : 0.0;
+        const double fma_contribution_pct =
+            arm_per_x87_no_fma_reduce > 0
+                ? 100.0 * (arm_per_x87_no_fma_reduce - arm_per_x87) / arm_per_x87_no_fma_reduce
+                : 0.0;
+        std::printf("global_arm_per_x87_without_fma_reduce,%.2f  (FMA-reduce pass saves %.2f%%)\n",
+                    arm_per_x87_no_fma_reduce, fma_contribution_pct);
+        if (std::getenv("X87_LOG_FMA_REDUCE") != nullptr) {
+            X87IR::fma_reduce_print_stats();
+        }
         std::printf("\n");
         std::printf("# Workload-wide refusals per 1000 x87 ops (call-counts, not ops)\n");
         std::printf("event,per_kop\n");
@@ -1019,6 +1059,7 @@ int main(int argc, char** argv) try {
         };
         std::vector<BlockEmitRow> block_rows;
         block_rows.reserve(blocks.size());
+        // prod_cfg already declared above for the workload-wide loop.
         RosettaConfig no_ir_cfg{};
         no_ir_cfg.disable_x87_ir = 1;
         RosettaConfig force_gate_cfg{};
@@ -1047,7 +1088,7 @@ int main(int argc, char** argv) try {
             }
             row.x87_ops = static_cast<uint16_t>(std::min<uint32_t>(x87_count, 0xFFFFU));
             row.max_run = static_cast<uint16_t>(std::min<uint32_t>(max_run, 0xFFFFU));
-            row.arm_prod = runOneMode(b.instrs.data(), b.instrs.size(), nullptr);
+            row.arm_prod = runOneMode(b.instrs.data(), b.instrs.size(), &prod_cfg);
             row.arm_no_ir = runOneMode(b.instrs.data(), b.instrs.size(), &no_ir_cfg);
             row.arm_ir_forced = runOneMode(b.instrs.data(), b.instrs.size(), &force_gate_cfg);
             int picked = 0;

@@ -322,6 +322,157 @@ static void emit_rcmode_dispatch(AssemblerBuffer& buf, int Wd_int, int Dd_val, i
     }
 }
 
+// ── FMA reduction chain lowering ────────────────────────────────────────────
+//
+// Emits the body for an FMA reduction chain whose head is at `head_idx`.
+// Pre-conditions (established by pass_fma_reduce in X87IROptimize.cpp):
+//   * Every chain FMAdd has kFmaReduceMember; head additionally kFmaReduceHead
+//   * Every absorbed L_i / W_i LoadF32 has kFmaReduceMember
+//   * For each chain member k, inputs[0]/inputs[1] are LoadF32 with simple
+//     base+disp memrefs; the L stream and W stream are independently
+//     +4-contiguous from a per-stream base register
+//
+// Body shape (N = chain length):
+//   FMOV V_acc, A_init          ; lane 0 = A_init, lane 1 = 0 (NEON write
+//                                 semantics zero the upper 64 bits)
+//   for p in 0..floor(N/2)-1:
+//       LDR D V_data, [base_l + disp_l + 8*p]
+//       LDR D V_w,    [base_w + disp_w + 8*p]
+//       FCVTL V_data.2D, V_data.2S    ; widen 2×f32 → 2×f64
+//       FCVTL V_w.2D,    V_w.2S
+//       FMLA  V_acc.2D, V_data.2D, V_w.2D
+//   FADDP D_result, V_acc.2D    ; horizontal sum: D_result = lane0 + lane1
+//   if N odd:
+//       LDR S + FCVT s→d for L_{N-1} into D_l
+//       LDR S + FCVT s→d for W_{N-1} into D_w
+//       FMADD D_result, D_l, D_w, D_result
+//
+// Per-pair cost: 5 ARM ÷ 2 trios = 2.5 ARM/trio.  For comparison the
+// scalar FMADD chain emits ~5 ARM/trio (LDR S + FCVT + LDR S + FCVT +
+// FMADD), so the matched body runs at roughly half the scalar cost.
+//
+// FP rounding note: the vector path accumulates even-indexed and odd-
+// indexed products into separate lanes, then does a single FADDP combine
+// at the end, plus a leading FMOV that places A_init in lane 0.  This
+// re-associates the additions versus the strict left-to-right scalar
+// chain.  Each individual product is still fused (FMLA per lane mirrors
+// FMADD), but the inter-lane combination is a regular FADD.  Bit-exact
+// equality with the scalar path is therefore not guaranteed; tests use
+// ULP tolerance.
+static void lower_fma_reduce(AssemblerBuffer& buf, TranslationResult* result, FPRState& fprs,
+                             const Context& ctx, int head_idx) {
+    // Re-walk the chain (mirror of pass_fma_reduce's extension loop).  No
+    // re-validation needed — the pass already proved the shape.
+    int chain[X87IR::kMaxNodes];
+    int chain_len = 0;
+    chain[chain_len++] = head_idx;
+    int tail = head_idx;
+    while (chain_len < X87IR::kMaxNodes) {
+        int next = -1;
+        for (int j = tail + 1; j < ctx.num_nodes; j++) {
+            const auto& m = ctx.nodes[j];
+            if (m.flags & kDead) {
+                continue;
+            }
+            if (m.op != Op::FMAdd) {
+                continue;
+            }
+            if (!(m.flags & kFmaReduceMember)) {
+                continue;
+            }
+            if (m.inputs[2] != tail) {
+                continue;
+            }
+            next = j;
+            break;
+        }
+        if (next < 0) {
+            break;
+        }
+        chain[chain_len++] = next;
+        tail = next;
+    }
+
+    const int N = chain_len;
+    const int num_pairs = N / 2;
+    const bool has_odd = (N & 1) != 0;
+
+    // Capture A_init's FPR (head's input[2]).  Will be FMOV'd into V_acc
+    // lane 0 to seed the accumulator.  Auto-freed by free_dead_inputs at
+    // the end of the head's iteration since last_use[A_init] == head_idx.
+    const int D_init = fprs.get(ctx.nodes[head_idx].inputs[2]);
+
+    // Allocate the vector accumulator and seed it with A_init in lane 0.
+    const int V_acc = alloc_free_fpr(*result);
+    emit_fmov_f64(buf, V_acc, D_init);
+
+    // Allocate transient vector regs reused across all pairs.
+    const int V_data = alloc_free_fpr(*result);
+    const int V_w = alloc_free_fpr(*result);
+
+    for (int p = 0; p < num_pairs; p++) {
+        // Each pair processes two adjacent trios: chain[2p] and chain[2p+1].
+        // Both trios' L and W are at consecutive +4 offsets (validated by
+        // pass), so one LDR D loads the f32-pair and one FCVTL widens it.
+        const int pair_idx = 2 * p;
+        const auto& a_pair = ctx.nodes[chain[pair_idx]];
+        const auto& l_node = ctx.nodes[a_pair.inputs[0]];
+        const auto& w_node = ctx.nodes[a_pair.inputs[1]];
+
+        const int Xaddr_l =
+            compute_operand_address(*result, /*is_64bit=*/true, l_node.mem_operand, GPR::XZR);
+        emit_fldr_imm(buf, /*size=*/3, V_data, Xaddr_l, /*imm12=*/0);
+        free_gpr(*result, Xaddr_l);
+
+        const int Xaddr_w =
+            compute_operand_address(*result, /*is_64bit=*/true, w_node.mem_operand, GPR::XZR);
+        emit_fldr_imm(buf, /*size=*/3, V_w, Xaddr_w, /*imm12=*/0);
+        free_gpr(*result, Xaddr_w);
+
+        emit_fcvtl_v2d_from_v2s(buf, V_data, V_data);
+        emit_fcvtl_v2d_from_v2s(buf, V_w, V_w);
+        emit_fmla_v2d(buf, V_acc, V_data, V_w);
+    }
+
+    free_fpr(*result, V_data);
+    free_fpr(*result, V_w);
+
+    // Horizontal reduction into a fresh scalar D register.
+    const int D_result = alloc_free_fpr(*result);
+    emit_faddp_d_from_v2d(buf, D_result, V_acc);
+    free_fpr(*result, V_acc);
+
+    // Odd-trio scalar tail (only when N is odd).
+    if (has_odd) {
+        const auto& a_tail = ctx.nodes[chain[N - 1]];
+        const auto& l_node = ctx.nodes[a_tail.inputs[0]];
+        const auto& w_node = ctx.nodes[a_tail.inputs[1]];
+
+        const int D_l = alloc_free_fpr(*result);
+        const int Xaddr_l =
+            compute_operand_address(*result, /*is_64bit=*/true, l_node.mem_operand, GPR::XZR);
+        emit_fldr_imm(buf, /*size=*/2, D_l, Xaddr_l, /*imm12=*/0);
+        free_gpr(*result, Xaddr_l);
+        emit_fcvt_s_to_d(buf, D_l, D_l);
+
+        const int D_w = alloc_free_fpr(*result);
+        const int Xaddr_w =
+            compute_operand_address(*result, /*is_64bit=*/true, w_node.mem_operand, GPR::XZR);
+        emit_fldr_imm(buf, /*size=*/2, D_w, Xaddr_w, /*imm12=*/0);
+        free_gpr(*result, Xaddr_w);
+        emit_fcvt_s_to_d(buf, D_w, D_w);
+
+        emit_fmadd_f64(buf, D_result, D_l, D_w, D_result);
+        free_fpr(*result, D_l);
+        free_fpr(*result, D_w);
+    }
+
+    // Assign result to chain tail's FPR slot so downstream consumers see it
+    // via fprs.get(A_N).  Intermediate A_2..A_{N-1} keep node_fpr=-1 (they
+    // have no externally-visible value).
+    fprs.node_fpr[chain[N - 1]] = static_cast<int8_t>(D_result);
+}
+
 // ── Main lowering ───────────────────────────────────────────────────────────
 
 void lower(Context& ctx, TranslationResult* result) {
@@ -389,6 +540,12 @@ void lower(Context& ctx, TranslationResult* result) {
     for (int i = 0; i < ctx.num_nodes; i++) {
         auto& n = ctx.nodes[i];
         if (n.flags & kDead) {
+            continue;
+        }
+        // FMA reduction members (LoadF32 / FMAdd in a tagged chain) are
+        // absorbed by the head's lower_fma_reduce emission.  The head is
+        // dispatched from the FMAdd case below.
+        if ((n.flags & kFmaReduceMember) && !(n.flags & kFmaReduceHead)) {
             continue;
         }
 
@@ -520,6 +677,14 @@ void lower(Context& ctx, TranslationResult* result) {
 
             // ── FMA ─────────────────────────────────────────────────────────
             case Op::FMAdd: {
+                // Vectorised FMA reduction chain head: emit the whole chain
+                // body via lower_fma_reduce.  Members of the chain were
+                // already filtered out by the kFmaReduceMember early-skip
+                // above; only the head reaches here.
+                if (n.flags & kFmaReduceHead) {
+                    lower_fma_reduce(buf, result, fprs, ctx, i);
+                    break;
+                }
                 // FMADD Dd, Dn, Dm, Da → Da + Dn * Dm
                 // inputs[0] = Dn, inputs[1] = Dm, inputs[2] = Da
                 int Dn = fprs.get(n.inputs[0]);
@@ -1428,10 +1593,24 @@ int peak_live_fprs(const Context& ctx) {
                 break;
         }
 
-        if (produces_fpr) {
+        // FMA-reduction members (non-head FMAdd, absorbed LoadF32) are
+        // emitted as part of the chain head's lower_fma_reduce body — no
+        // FPR is allocated for them.  Skip the produces_fpr accounting.
+        const bool absorbed_member = (n.flags & kFmaReduceMember) && !(n.flags & kFmaReduceHead);
+        if (produces_fpr && !absorbed_member) {
             live++;
             holding[i] = true;
             peak = std::max(live, peak);
+        }
+
+        // FMA-reduction head: lower_fma_reduce allocates 2 transient vector
+        // FPRs (V_data, V_w) on top of the held accumulator V_acc (counted
+        // by produces_fpr).  Odd-tail D_l/D_w come AFTER V_data/V_w are
+        // freed and after V_acc is freed (D_result already allocated), so
+        // their +2 spike doesn't stack with the pair-body +2; one model
+        // covers both.
+        if (n.flags & kFmaReduceHead && live + 2 > peak) {
+            peak = live + 2;
         }
 
         // StoreF32 allocates a transient Ds_tmp (fcvt d→s narrowing) that is

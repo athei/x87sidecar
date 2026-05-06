@@ -9,6 +9,8 @@
 #   3. rosettax87 with X87_DISABLE_X87_IR=1 (direct translator only)
 #   4. rosettax87 with X87_DISABLE_X87_IR=1 + X87_DISABLE_ALL_FUSIONS=1
 #   5. rosettax87 with X87_DISABLE_HOOK=1 (stock translate_insn only)
+#   6. rosettax87 with X87_ENABLE_FMA_REDUCE=0 (legacy scalar FMADD path —
+#      regression catch since FMA-reduce now defaults ON)
 #
 # Usage:
 #   bash scripts/run_tests.sh                # build + test (all phases)
@@ -68,6 +70,7 @@ ALL_TESTS=(
     test_rc_recache
     test_fstpt_gs
     test_ir_gate_tag_push
+    test_fma_reduce
     test_fbld
     test_fclex
     test_fdecstp
@@ -258,6 +261,29 @@ if [[ $NATIVE_ONLY -eq 0 ]]; then
         fi
         EXIT=0
         OUT=$(X87_DISABLE_HOOK=1 "$LOADER" "$BINARY" 2>/dev/null | filter_runtime_lines) || EXIT=$?
+        check_output "$t" "$OUT" "$EXIT"
+    done
+fi
+
+# ── Phase 6: rosettax87 X87_ENABLE_FMA_REDUCE=0 ──────────────────────────
+# FMA-reduce defaults ON in production, so Phase 2 already covers the
+# vector-lowered path.  This phase forces the pass OFF to keep the
+# scalar FMADD path under continuous test — protects against regressions
+# in the legacy lowering (or in places that take a different path when
+# the pass doesn't pre-tag chain heads).
+if [[ $NATIVE_ONLY -eq 0 ]]; then
+    echo ""
+    echo -e "${BOLD}=== Phase 6: rosettax87 X87_ENABLE_FMA_REDUCE=0 (scalar FMADD) ===${NC}"
+
+    for t in "${TESTS[@]}"; do
+        BINARY="$TESTS_BIN/$t"
+        if [[ ! -x "$BINARY" ]]; then
+            echo -e "${YELLOW}SKIP${NC}  $t  (binary not found)"
+            ERRORS=$((ERRORS + 1))
+            continue
+        fi
+        EXIT=0
+        OUT=$(X87_ENABLE_FMA_REDUCE=0 "$LOADER" "$BINARY" 2>/dev/null | filter_runtime_lines) || EXIT=$?
         check_output "$t" "$OUT" "$EXIT"
     done
 fi
