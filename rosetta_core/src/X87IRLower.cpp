@@ -1157,6 +1157,11 @@ void lower(Context& ctx, TranslationResult* result) {
 //
 // Fused FCmp/FTst holds 1 GPR (Wd_packed) alive across nodes until FStsw.
 // We track this as a "held" count that overlaps with per-node transient demand.
+// The held delta is applied AFTER each node's peak — Wd_packed is included
+// in FCmp's transient=4 during the FCmp's own emit, so incrementing held
+// before node_total would double-count it (predicting peak=9 instead of 8
+// for the common single-fused-FCmp+FStsw pair, gating off real WoW blocks
+// that fit in the 8-slot pool).
 int peak_live_gprs(const Context& ctx) {
     // Determine if RC caching will be active (same logic as lower()).
     // RC cache is disabled when the run contains FCmp/FTst: emit_fcom_cc_pack
@@ -1273,15 +1278,13 @@ int peak_live_gprs(const Context& ctx) {
                 break;
 
             // FCmp/FTst: 4 peak inside emit_fcom_cc_pack
-            // (Wd_save + Wd_packed + Wd_cc + Wd_vs simultaneously live)
-            // If fused, Wd_packed stays alive after → held++
+            // (Wd_save + Wd_packed + Wd_cc + Wd_vs simultaneously live).
+            // Wd_packed is one of those 4; if fused, it remains held after
+            // the node, so `held` is incremented AFTER node_total below —
+            // incrementing here would double-count Wd_packed.
             case Op::FCmp:
             case Op::FTst:
                 transient = 4;
-                if (n.flags & kFcomFused) {
-                    // After the node, Wd_packed remains held until FStsw
-                    held++;
-                }
                 break;
 
             // FComI: 3 GPRs (Wd_z + Wd_v + Wd_c)
@@ -1312,6 +1315,15 @@ int peak_live_gprs(const Context& ctx) {
 
         int node_total = pinned + held + transient;
         peak = std::max(node_total, peak);
+
+        // FCmp/FTst fused: Wd_packed becomes held AFTER the node — counted
+        // here so that subsequent nodes see it in `held` but the FCmp's own
+        // node_total above isn't double-counted.  FStsw's held-- happens
+        // BEFORE its node_total because Wd_packed is consumed inside FStsw
+        // and the transient=2 accounting already includes it.
+        if ((n.op == Op::FCmp || n.op == Op::FTst) && (n.flags & kFcomFused)) {
+            held++;
+        }
     }
 
     // Epilogue: if top_delta != 0, needs 2 more transient GPRs (Wd_tmp2 + Wd_tagw).
