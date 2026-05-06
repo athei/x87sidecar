@@ -18,46 +18,50 @@ rosetta error: no code fragment associated with the given arm pc
 
 The longer the JIT runs, the more time the thread spends with PC inside the injected dylib's `__TEXT`, and the more likely a signal will arrive at exactly the wrong moment. In real workloads (e.g. World of Warcraft under wine) this surfaced as random crashes proportional to JIT load — un-fixable without leaving the dylib model.
 
-**The fix is structural:** keep all our ARM64 code out of the Rosetta'd process entirely. Run the translator in a separate native arm64 process — the **sidecar**. The only thing we still write *inside* the Rosetta'd process is a tiny IPC stub, and we write it into the same translation-output buffer stock's `translate_insn` would have written into — i.e., into pages stock has already allocated and registered with Rosetta as translated-from-x86. We don't introduce any new executable mappings of our own; we just put different bytes into pages the runtime already considers blessed, so the reverse-lookup tables cover the stub for free.
+**The fix is structural:** keep all our ARM64 code out of the Rosetta'd process entirely. Run the translator in a separate native arm64 process — the **sidecar**. The only ARM64 we still need *inside* the Rosetta'd process is a tiny IPC stub, written **once at install time** into the **page padding** at the tail of stock's translation-output buffer. We don't allocate any new executable mappings of our own; the stub sits on pages stock has already allocated and registered with Rosetta as translated-from-x86, so the reverse-lookup tables cover it for free. The one place we do touch stock code is the prologue of `translate_insn` itself: we overwrite the first few bytes with a branch into the stub, and we preserve the displaced bytes inside the stub so they can run unchanged on the fall-through path. The stub is intentionally minimal — its only runtime work is two bounds checks against the contiguous x87 opcode ranges in Rosetta's enum. If the opcode is in range, the stub sends a Mach message to the sidecar; if not, it executes the preserved prologue bytes and branches back into stock. On the IPC reply, the stub either returns to translate_insn's caller with the sidecar's result (handled) or falls through to stock (the sidecar reported unhandled).
 
 ## Architecture
 
 ```
 ┌──────────────────── wine + x86 app (under Rosetta) ─────────────────────┐
 │                                                                          │
-│   x86 stream ─► stock translate_insn  ─► is x87?                         │
-│                                              │                           │
-│                                       no ◄───┴───► yes                   │
-│                                       │             │                    │
-│                                       ▼             ▼                    │
-│                              stock writes     we write IPC stub          │
-│                              ARM64 into       into the SAME              │
-│                              its output       output buffer              │
-│                              buffer           (Rosetta-blessed)          │
-│                                                     │                    │
-│                                                     │ mach_msg2          │
-└─────────────────────────────────────────────────────┼────────────────────┘
-                                                      │
-                                                      ▼
+│   x86 stream ─► stock translate_insn (prologue patched)                  │
+│                              │                                           │
+│                       branch into our stub                               │
+│                       (in page padding, written once at install)         │
+│                              │                                           │
+│                       opcode in x87 ranges?  ◄── two bounds checks       │
+│                              │                                           │
+│                       no ◄───┴───► yes                                   │
+│                       │             │                                    │
+│                       ▼             ▼                                    │
+│                resume stock     mach_msg2 to sidecar                     │
+│                via preserved          │                                  │
+│                prologue bytes         │                                  │
+└───────────────────────────────────────┼──────────────────────────────────┘
+                                        │
+                                        ▼
 ┌──────────────────────── x87sidecar (native arm64) ──────────────────────┐
 │                                                                          │
-│   IR translator  ─►  peephole fusion / FMA / inline transcendentals      │
-│                                       │                                  │
-│                                       ▼                                  │
-│                              ARM64 bytes + fixups                        │
-│                                       │                                  │
-│                                       ▼ reply                            │
-│                           (caller installs into                          │
-│                            stock's translated cache)                     │
+│   IR translator ─► peephole fusion / FMA / inline transcendentals        │
+│                              │                                           │
+│                              ▼                                           │
+│                  ARM64 bytes (handled) | "unhandled"                     │
+│                              │                                           │
+│                              ▼ reply                                     │
+│           handled  → stub returns to translate_insn's caller             │
+│           unhandled → stub falls through to stock                        │
 │                                                                          │
-│   per-call: mach_vm_read of source bytes, mach_vm_write of result        │
+│   per-call: mach_vm_read of source, mach_vm_write of result              │
 │   shared (mach_vm_remap'd, copy=FALSE): per-block exec counters          │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
 The cost is real: every cold-translated x87 block now pays a Mach IPC round-trip plus 4–6 `mach_vm_read` / `mach_vm_write` syscalls (for the IR buffer, insn buffer, and translation-result struct) that the in-process dylib didn't pay. Once stock has installed the ARM64 bytes the sidecar is no longer on the hot path, so steady-state execution speed is unaffected, but cold translation is slower than it used to be. Profile counters are already `mach_vm_remap`'d (copy=FALSE) so JIT-emitted `LDADDAL` on a parent VA hits the same backing page the sidecar reads; doing the same for the IR / insn / TR buffers is a planned change to claw back the per-call syscalls.
 
-The upside is that the sidecar is a normal arm64 process, free to use the C++ standard library and any arm64 dependencies. The in-process dylib had to stay close to no-std discipline — every call from our `__TEXT` to a library increased the wall-clock fraction the parent thread spent with its PC inside our pages, and therefore the rate of the reverse-lookup panic. Out of process, that constraint is gone.
+There are two genuine upsides relative to the dylib approach. First, the sidecar is a normal arm64 process, free to use the C++ standard library and any arm64 dependencies. The in-process dylib had to stay close to no-std discipline — every call from our `__TEXT` to a library increased the wall-clock fraction the parent thread spent with its PC inside our pages, and therefore the rate of the reverse-lookup panic. Out of process, that constraint is gone.
+
+Second, we no longer hijack Rosetta's export table to install the hook. The dylib version rewrote `X19` mid-init so that Rosetta's loader called *our* exports instead of its own; that worked but was brittle, because it depended on undocumented loader semantics that drift between Rosetta versions. The sidecar version simply overwrites the prologue of `translate_insn` with a branch — a much smaller, more stable surface to maintain.
 
 The `x87sidecar` binary plays both roles: when invoked with a target x86 program, it launches the target under Rosetta, `PT_ATTACH`es, patches `translate_insn`, then drops into its own receive loop serving IPC requests.
 
