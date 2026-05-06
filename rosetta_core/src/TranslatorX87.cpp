@@ -726,7 +726,7 @@ auto translate_fsub(TranslationResult* a1, IRInstr* a2) -> void {
     auto [Xbase, Wd_top] = x87_begin(*a1, buf);
     const int Xst_base = x87_get_st_base(*a1);
 
-    const bool is_fsubr = (a2->opcode == kOpcodeName_fsubr);
+    const bool is_fsubr = (a2->opcode() == kOpcodeName_fsubr);
 
     const int Wd_tmp = alloc_gpr(*a1, 2);
     const int Dd_dst = alloc_free_fpr(*a1);
@@ -826,7 +826,7 @@ auto translate_fsubp(TranslationResult* a1, IRInstr* a2) -> void {
     auto [Xbase, Wd_top] = x87_begin(*a1, buf);
     const int Xst_base = x87_get_st_base(*a1);
 
-    const bool is_fsubrp = (a2->opcode == kOpcodeName_fsubrp);
+    const bool is_fsubrp = (a2->opcode() == kOpcodeName_fsubrp);
     const int depth_dst = a2->operands[0].reg.reg.index();  // ST(i)
     // operands[1] is always ST(0); depth_src == 0 by definition.
 
@@ -901,7 +901,7 @@ auto translate_fdiv(TranslationResult* a1, IRInstr* a2) -> void {
     auto [Xbase, Wd_top] = x87_begin(*a1, buf);
     const int Xst_base = x87_get_st_base(*a1);
 
-    const bool is_fdivr = (a2->opcode == kOpcodeName_fdivr);
+    const bool is_fdivr = (a2->opcode() == kOpcodeName_fdivr);
 
     const int Wd_tmp = alloc_gpr(*a1, 2);
     const int Dd_dst = alloc_free_fpr(*a1);
@@ -1001,7 +1001,7 @@ auto translate_fdivp(TranslationResult* a1, IRInstr* a2) -> void {
     auto [Xbase, Wd_top] = x87_begin(*a1, buf);
     const int Xst_base = x87_get_st_base(*a1);
 
-    const bool is_fdivrp = (a2->opcode == kOpcodeName_fdivrp);
+    const bool is_fdivrp = (a2->opcode() == kOpcodeName_fdivrp);
     const int depth_dst = a2->operands[0].reg.reg.index();  // ST(i)
     // operands[1] is always ST(0); depth_src == 0 by definition.
 
@@ -1171,7 +1171,7 @@ auto translate_fmul(TranslationResult* a1, IRInstr* a2) -> void {
     auto [Xbase, Wd_top] = x87_begin(*a1, buf);
     const int Xst_base = x87_get_st_base(*a1);
 
-    const bool is_fmulp = (a2->opcode == kOpcodeName_fmulp);
+    const bool is_fmulp = (a2->opcode() == kOpcodeName_fmulp);
 
     const int Wd_tmp = alloc_gpr(*a1, 2);
     const int Dd_dst = alloc_free_fpr(*a1);
@@ -1308,7 +1308,7 @@ auto translate_fmul(TranslationResult* a1, IRInstr* a2) -> void {
 auto translate_fst(TranslationResult* a1, IRInstr* a2) -> void {
     AssemblerBuffer& buf = a1->insn_buf;
 
-    const bool is_fstp = (a2->opcode == kOpcodeName_fstp || a2->opcode == kOpcodeName_fstp_stack);
+    const bool is_fstp = (a2->opcode() == kOpcodeName_fstp || a2->opcode() == kOpcodeName_fstp_stack);
 
     // -------------------------------------------------------------------------
     // FSTP m80fp — DB /7  (inline double → f80 conversion + store + pop)
@@ -1757,9 +1757,9 @@ auto translate_fcom(TranslationResult* a1, IRInstr* a2) -> void {
 
     static constexpr int16_t kX87StatusWordImm12 = kX87StatusWordOff / 2;  // = 1
 
-    const bool is_fcompp = (a2->opcode == kOpcodeName_fcompp || a2->opcode == kOpcodeName_fucompp);
-    const bool is_popping = (a2->opcode == kOpcodeName_fcomp || a2->opcode == kOpcodeName_fcompp ||
-                             a2->opcode == kOpcodeName_fucomp || a2->opcode == kOpcodeName_fucompp);
+    const bool is_fcompp = (a2->opcode() == kOpcodeName_fcompp || a2->opcode() == kOpcodeName_fucompp);
+    const bool is_popping = (a2->opcode() == kOpcodeName_fcomp || a2->opcode() == kOpcodeName_fcompp ||
+                             a2->opcode() == kOpcodeName_fucomp || a2->opcode() == kOpcodeName_fucompp);
 
     const int Wd_tmp = alloc_gpr(*a1, 2);
     const int Wd_tmp2 = alloc_gpr(*a1, 3);
@@ -2713,7 +2713,7 @@ auto translate_fcomi(TranslationResult* a1, IRInstr* a2) -> void {
     auto [Xbase, Wd_top] = x87_begin(*a1, buf);
     const int Xst_base = x87_get_st_base(*a1);
 
-    const bool is_popping = (a2->opcode == kOpcodeName_fcomip || a2->opcode == kOpcodeName_fucomip);
+    const bool is_popping = (a2->opcode() == kOpcodeName_fcomip || a2->opcode() == kOpcodeName_fucomip);
 
     const int Wd_tmp = alloc_gpr(*a1, 2);
     const int Dd_st0 = alloc_free_fpr(*a1);
@@ -3023,7 +3023,7 @@ auto translate_fcmov(TranslationResult* a1, IRInstr* a2) -> void {
 
     // Map opcode to AArch64 condition code.
     int aarch64_cond;
-    switch (a2->opcode) {
+    switch (a2->opcode()) {
         case kOpcodeName_fcmovb:
             aarch64_cond = 3;
             break;  // CC
@@ -3107,7 +3107,7 @@ auto translate_ficom(TranslationResult* a1, IRInstr* a2) -> void {
     auto [Xbase, Wd_top] = x87_begin(*a1, buf);
     const int Xst_base = x87_get_st_base(*a1);
 
-    const bool is_popping = (a2->opcode == kOpcodeName_ficomp);
+    const bool is_popping = (a2->opcode() == kOpcodeName_ficomp);
     const bool is_m16 = (a2->operands[0].mem.size == IROperandSize::S16);
 
     const int Wd_tmp = alloc_gpr(*a1, 2);

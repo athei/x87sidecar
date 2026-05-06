@@ -36,7 +36,7 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                                        IRInstr* instr_array, int64_t num_instrs, int64_t insn_idx)
     -> std::optional<int64_t> {
     auto* const cur_instr = &instr_array[insn_idx];
-    const auto opcode = cur_instr->opcode;
+    const auto opcode = cur_instr->opcode();
     auto& cache = translation_result->x87_cache;
 
     // ── OPT-1: x87 cross-instruction cache management ───────────────────────
@@ -482,7 +482,7 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                                 pre_top_dirty, cache.top_dirty, pre_tag_push_pending,
                                 cache.tag_push_pending, pre_deferred_pop_count,
                                 cache.deferred_pop_count, pre_perm_dirty, cache.perm_dirty,
-                                cur_instr->opcode, cur_instr->pc,
+                                cur_instr->opcode(), cur_instr->pc,
                                 static_cast<unsigned>(cache.profile_bid),
                                 static_cast<unsigned long long>(cache.profile_hash),
                                 static_cast<long long>(insn_idx),

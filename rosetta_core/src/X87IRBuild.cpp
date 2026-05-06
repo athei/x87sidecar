@@ -303,7 +303,7 @@ bool build(Context& ctx, IRInstr* instr_array, int64_t num_instrs, int64_t start
 
     for (int i = 0; i < run_length && (start_idx + i) < num_instrs; i++) {
         auto* instr = &instr_array[start_idx + i];
-        const auto op = instr->opcode;
+        const auto op = instr->opcode();
         bool ok = true;
 
         switch (op) {

@@ -308,7 +308,7 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask, const Translate
     tr.thread_context_offsets = &localTCO;
 
     if (g_rosetta_config != nullptr && g_rosetta_config->loader_log_ops != 0U) {
-        const uint16_t op = localIR[req.insn_idx].opcode;
+        const uint16_t op = localIR[req.insn_idx].opcode();
         const char* name = (op < kOpcodeNames.size()) ? kOpcodeNames[op] : "?";
         fprintf(stdout, "[rosettax87] op %s (0x%x) idx=%lld/%lld\n", name,
                 static_cast<unsigned>(op), static_cast<long long>(req.insn_idx),
@@ -479,7 +479,7 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask, const Translate
             kOpcodeName_fxsave,   // SSE-era extended (8×f80 ST + 16×XMM)
             kOpcodeName_fxrstor,  // SSE-era extended
         };
-        const uint16_t op = localIR[req.insn_idx].opcode;
+        const uint16_t op = localIR[req.insn_idx].opcode();
         const bool deliberate = std::ranges::find(kKnownFallThrough, op) != kKnownFallThrough.end();
         if (!deliberate) {
             const char* name = (op < kOpcodeNames.size()) ? kOpcodeNames[op] : "?";

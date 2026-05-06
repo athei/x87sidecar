@@ -203,7 +203,7 @@ uint32_t X87Cache::pinned_mask() const {
 int X87Cache::lookahead(IRInstr* instr_array, int64_t num_instrs, int64_t insn_idx) {
     int count = 0;
     for (int64_t i = insn_idx; i < num_instrs; i++) {
-        if (!is_handled_x87(instr_array[i].opcode)) {
+        if (!is_handled_x87(instr_array[i].opcode())) {
             break;
         }
         count++;

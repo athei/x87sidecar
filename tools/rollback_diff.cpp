@@ -307,7 +307,7 @@ int main(int argc, char** argv) try {
         }
         ++state_diff_count;
         if (state_diff_count <= 20) {
-            std::printf("  idx=%3zu  op=0x%04x\n", i, static_cast<unsigned>(instrs[i].opcode));
+            std::printf("  idx=%3zu  op=0x%04x\n", i, static_cast<unsigned>(instrs[i].opcode()));
             print_snap("OFF", a);
             print_snap("ON ", b);
         }
@@ -361,7 +361,7 @@ int main(int argc, char** argv) try {
         ++printed;
         const auto& ins = instrs[i];
         std::printf("\n--- suspect #%zu  IR idx=%zu  opcode=0x%04x  num_operands=%u\n", printed, i,
-                    static_cast<unsigned>(ins.opcode), static_cast<unsigned>(ins.num_operands));
+                    static_cast<unsigned>(ins.opcode()), static_cast<unsigned>(ins.num_operands));
         std::printf("  OFF emitted %zu ARM:", a.size());
         for (uint32_t w : a) {
             std::printf(" 0x%08x", w);

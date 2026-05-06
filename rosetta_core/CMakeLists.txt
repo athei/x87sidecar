@@ -19,6 +19,9 @@ add_library(rosetta_core STATIC
     src/X87IRBuild.cpp
     src/X87IRLower.cpp
     src/X87IROptimize.cpp
+    src/IRInstr.cpp
+    src/OpcodeCompatibility.cpp
+    src/RosettaCore.cpp
 )
 
 target_include_directories(rosetta_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)

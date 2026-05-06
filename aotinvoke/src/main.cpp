@@ -15,7 +15,7 @@
 #include "rosetta_core/Config.h"
 #include "rosetta_core/ConfigEnv.h"
 #include "rosetta_core/CoreConfig.h"
-#include "rosetta_core/CustomTranslationHook.h"
+#include "rosetta_core/RosettaCore.h"
 
 namespace {
 
@@ -76,10 +76,10 @@ int main(int argc, char** argv) try {
         return 1;
     }
 
-    init_custom_translation_hook(g_rosetta_aot.translate_insn_addr,
-                                 g_rosetta_aot.transaction_result_size_addr);
-
     auto version = g_rosetta_aot.version();
+    rosetta_core_init(version, g_rosetta_aot.translate_insn_addr,
+                      g_rosetta_aot.transaction_result_size_addr);
+
     int offset_size = version >= kAotVersion ? g_runtime_routine_offsets.size()
                                              : g_runtime_routine_offsets.size() - 2;
 

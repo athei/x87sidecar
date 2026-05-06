@@ -340,7 +340,7 @@ std::string patternKey(const std::vector<IRInstr>& instrs, size_t start, size_t 
             s.push_back('|');
         }
         const IRInstr& ins = instrs[start + i];
-        s += mnemonic(ins.opcode);
+        s += mnemonic(ins.opcode());
         s += opSuffix(ins);
     }
     return s;
@@ -637,11 +637,11 @@ int main(int argc, char** argv) try {
         for (size_t i = 0; i < b.instrs.size(); ++i) {
             const IRInstr& ins = b.instrs[i];
             const char* name =
-                (ins.opcode < kOpcodeNames.size() && kOpcodeNames[ins.opcode] != nullptr)
-                    ? kOpcodeNames[ins.opcode]
+                (ins.opcode() < kOpcodeNames.size() && kOpcodeNames[ins.opcode()] != nullptr)
+                    ? kOpcodeNames[ins.opcode()]
                     : "?";
             std::printf("  [%3zu] pc=0x%08x op=0x%04x %-12s nops=%u", i,
-                        static_cast<unsigned>(ins.pc), static_cast<unsigned>(ins.opcode), name,
+                        static_cast<unsigned>(ins.pc), static_cast<unsigned>(ins.opcode()), name,
                         static_cast<unsigned>(ins.num_operands));
             const int nops = std::min<int>(ins.num_operands, 4);
             for (int op_idx = 0; op_idx < nops; ++op_idx) {
@@ -1099,7 +1099,7 @@ int main(int argc, char** argv) try {
                 if (picked > 0) {
                     row.prefix.push_back('|');
                 }
-                row.prefix += mnemonic(b.instrs[i].opcode);
+                row.prefix += mnemonic(b.instrs[i].opcode());
                 row.prefix += opSuffix(b.instrs[i]);
                 ++picked;
             }

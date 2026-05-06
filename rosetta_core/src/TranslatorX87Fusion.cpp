@@ -48,7 +48,7 @@ struct FldClassification {
 
 static FldClassification classify_fld_source(IRInstr* fld_instr) {
     FldClassification cls;
-    const auto fld_op = fld_instr->opcode;
+    const auto fld_op = fld_instr->opcode();
 
     switch (fld_op) {
         case kOpcodeName_fld:
@@ -205,7 +205,7 @@ static auto try_fuse_fld_arithp(TranslationResult* a1, IRInstr* fld_instr, IRIns
 
     enum ArithOp : std::uint8_t { kAdd, kSub, kSubR, kMul, kDiv, kDivR };
 
-    const auto arith_opcode = arithp_instr->opcode;
+    const auto arith_opcode = arithp_instr->opcode();
     ArithOp arith;
 
     switch (arith_opcode) {
@@ -326,7 +326,7 @@ static auto try_fuse_fld_arith(TranslationResult* a1, IRInstr* fld_instr, IRInst
 
     enum ArithOp : std::uint8_t { kAdd, kSub, kSubR, kMul, kDiv, kDivR };
     ArithOp arith;
-    switch (arith_instr->opcode) {
+    switch (arith_instr->opcode()) {
         case kOpcodeName_fadd:
             arith = kAdd;
             break;
@@ -426,14 +426,14 @@ static auto try_fuse_fld_arith(TranslationResult* a1, IRInstr* fld_instr, IRInst
 
 static auto try_fuse_fxch_arithp(TranslationResult* a1, IRInstr* fxch_instr, IRInstr* next_instr)
     -> std::optional<int> {
-    if (fxch_instr->opcode != kOpcodeName_fxch) {
+    if (fxch_instr->opcode() != kOpcodeName_fxch) {
         return std::nullopt;
     }
     if (fxch_instr->operands[1].reg.reg.index() != 1) {
         return std::nullopt;
     }
 
-    const auto next_op = next_instr->opcode;
+    const auto next_op = next_instr->opcode();
     bool is_popping_arith = false;
     switch (next_op) {
         case kOpcodeName_faddp:
@@ -471,25 +471,25 @@ static auto try_fuse_fxch_arithp(TranslationResult* a1, IRInstr* fxch_instr, IRI
             break;
         case kOpcodeName_fsubp: {
             IRInstr copy = *next_instr;
-            copy.opcode = kOpcodeName_fsubrp;
+            copy.set_opcode(kOpcodeName_fsubrp);
             translate_fsubp(a1, &copy);
             break;
         }
         case kOpcodeName_fsubrp: {
             IRInstr copy = *next_instr;
-            copy.opcode = kOpcodeName_fsubp;
+            copy.set_opcode(kOpcodeName_fsubp);
             translate_fsubp(a1, &copy);
             break;
         }
         case kOpcodeName_fdivp: {
             IRInstr copy = *next_instr;
-            copy.opcode = kOpcodeName_fdivrp;
+            copy.set_opcode(kOpcodeName_fdivrp);
             translate_fdivp(a1, &copy);
             break;
         }
         case kOpcodeName_fdivrp: {
             IRInstr copy = *next_instr;
-            copy.opcode = kOpcodeName_fdivp;
+            copy.set_opcode(kOpcodeName_fdivp);
             translate_fdivp(a1, &copy);
             break;
         }
@@ -514,7 +514,7 @@ static auto try_fuse_fxch_arithp(TranslationResult* a1, IRInstr* fxch_instr, IRI
 
 static auto try_fuse_fld_fstp(TranslationResult* a1, IRInstr* fld_instr, IRInstr* fstp_instr)
     -> std::optional<int> {
-    if (fstp_instr->opcode != kOpcodeName_fstp && fstp_instr->opcode != kOpcodeName_fstp_stack) {
+    if (fstp_instr->opcode() != kOpcodeName_fstp && fstp_instr->opcode() != kOpcodeName_fstp_stack) {
         return std::nullopt;
     }
 
@@ -587,14 +587,14 @@ static auto try_fuse_fld_fstp(TranslationResult* a1, IRInstr* fld_instr, IRInstr
 
 static auto try_fuse_fxch_fstp(TranslationResult* a1, IRInstr* fxch_instr, IRInstr* fstp_instr)
     -> std::optional<int> {
-    if (fxch_instr->opcode != kOpcodeName_fxch) {
+    if (fxch_instr->opcode() != kOpcodeName_fxch) {
         return std::nullopt;
     }
     if (fxch_instr->operands[1].reg.reg.index() != 1) {
         return std::nullopt;
     }
 
-    if (fstp_instr->opcode != kOpcodeName_fstp_stack) {
+    if (fstp_instr->opcode() != kOpcodeName_fstp_stack) {
         return std::nullopt;
     }
     if (fstp_instr->operands[0].kind != IROperandKind::Register) {
@@ -643,14 +643,14 @@ static auto try_fuse_fxch_fstp(TranslationResult* a1, IRInstr* fxch_instr, IRIns
 static auto try_fuse_fcom_fstsw(TranslationResult* a1, IRInstr* fcom_instr, IRInstr* fstsw_instr)
     -> std::optional<int> {
     // The second instruction must be FSTSW with a register (AX) destination.
-    if (fstsw_instr->opcode != kOpcodeName_fstsw) {
+    if (fstsw_instr->opcode() != kOpcodeName_fstsw) {
         return std::nullopt;
     }
     if (fstsw_instr->operands[0].kind != IROperandKind::Register) {
         return std::nullopt;
     }
 
-    const auto fcom_op = fcom_instr->opcode;
+    const auto fcom_op = fcom_instr->opcode();
     const bool is_double_pop = (fcom_op == kOpcodeName_fcompp || fcom_op == kOpcodeName_fucompp);
     const bool is_popping =
         is_double_pop || (fcom_op == kOpcodeName_fcomp || fcom_op == kOpcodeName_fucomp);
@@ -770,7 +770,7 @@ static auto try_fuse_fcom_fstsw(TranslationResult* a1, IRInstr* fcom_instr, IRIn
 static auto try_fuse_fxch_fcom_fstsw(TranslationResult* a1, IRInstr* fxch_instr,
                                      IRInstr* fcom_instr, IRInstr* fstsw_instr)
     -> std::optional<int> {
-    if (fxch_instr->opcode != kOpcodeName_fxch) {
+    if (fxch_instr->opcode() != kOpcodeName_fxch) {
         return std::nullopt;
     }
     const int depth = fxch_instr->operands[1].reg.reg.index();
@@ -778,13 +778,13 @@ static auto try_fuse_fxch_fcom_fstsw(TranslationResult* a1, IRInstr* fxch_instr,
         return std::nullopt;
     }
 
-    const auto fcom_op = fcom_instr->opcode;
+    const auto fcom_op = fcom_instr->opcode();
     if (fcom_op != kOpcodeName_fcom && fcom_op != kOpcodeName_fcomp &&
         fcom_op != kOpcodeName_fucom && fcom_op != kOpcodeName_fucomp &&
         fcom_op != kOpcodeName_fcompp && fcom_op != kOpcodeName_fucompp) {
         return std::nullopt;
     }
-    if (fstsw_instr->opcode != kOpcodeName_fstsw) {
+    if (fstsw_instr->opcode() != kOpcodeName_fstsw) {
         return std::nullopt;
     }
     if (fstsw_instr->operands[0].kind != IROperandKind::Register) {
@@ -828,7 +828,7 @@ static auto try_fuse_fxch_fcom_fstsw(TranslationResult* a1, IRInstr* fxch_instr,
 
 static auto try_fuse_fxch_fcom(TranslationResult* a1, IRInstr* fxch_instr, IRInstr* fcom_instr)
     -> std::optional<int> {
-    if (fxch_instr->opcode != kOpcodeName_fxch) {
+    if (fxch_instr->opcode() != kOpcodeName_fxch) {
         return std::nullopt;
     }
     const int depth = fxch_instr->operands[1].reg.reg.index();
@@ -836,7 +836,7 @@ static auto try_fuse_fxch_fcom(TranslationResult* a1, IRInstr* fxch_instr, IRIns
         return std::nullopt;
     }
 
-    const auto fcom_op = fcom_instr->opcode;
+    const auto fcom_op = fcom_instr->opcode();
     if (fcom_op != kOpcodeName_fcom && fcom_op != kOpcodeName_fcomp &&
         fcom_op != kOpcodeName_fucom && fcom_op != kOpcodeName_fucomp &&
         fcom_op != kOpcodeName_fcompp && fcom_op != kOpcodeName_fucompp) {
@@ -884,7 +884,7 @@ static auto try_fuse_fld_arith_fstp(TranslationResult* a1, IRInstr* fld_instr, I
 
     enum ArithOp : std::uint8_t { kAdd, kSub, kSubR, kMul, kDiv, kDivR };
 
-    const auto arith_opcode = arith_instr->opcode;
+    const auto arith_opcode = arith_instr->opcode();
     ArithOp arith;
 
     switch (arith_opcode) {
@@ -926,7 +926,7 @@ static auto try_fuse_fld_arith_fstp(TranslationResult* a1, IRInstr* fld_instr, I
 
     // ── 3. Validate FSTP ────────────────────────────────────────────────────
 
-    if (fstp_instr->opcode != kOpcodeName_fstp && fstp_instr->opcode != kOpcodeName_fstp_stack) {
+    if (fstp_instr->opcode() != kOpcodeName_fstp && fstp_instr->opcode() != kOpcodeName_fstp_stack) {
         return std::nullopt;
     }
 
@@ -1068,7 +1068,7 @@ static auto try_fuse_fld_arith_arithp(TranslationResult* a1, IRInstr* fld_instr,
     // ── 2. Classify non-popping middle arithmetic ────────────────────────────
     enum ArithOp : std::uint8_t { kAdd, kSub, kSubR, kMul, kDiv, kDivR };
 
-    const auto arith_opcode = arith_instr->opcode;
+    const auto arith_opcode = arith_instr->opcode();
     ArithOp arith1;
     switch (arith_opcode) {
         case kOpcodeName_fadd:
@@ -1105,7 +1105,7 @@ static auto try_fuse_fld_arith_arithp(TranslationResult* a1, IRInstr* fld_instr,
     }
 
     // ── 3. Classify popping final arithmetic ────────────────────────────────
-    const auto arithp_opcode = arithp_instr->opcode;
+    const auto arithp_opcode = arithp_instr->opcode();
     ArithOp arith2;
     switch (arithp_opcode) {
         case kOpcodeName_faddp:
@@ -1332,7 +1332,7 @@ static auto try_fuse_fld_fcomp_fstsw(TranslationResult* a1, IRInstr* fld_instr,
                                      IRInstr* fcomp_instr, IRInstr* fstsw_instr)
     -> std::optional<int> {
     // ── 1. Validate FCOMP/FUCOMP ────────────────────────────────────────────
-    const auto fcomp_op = fcomp_instr->opcode;
+    const auto fcomp_op = fcomp_instr->opcode();
     if (fcomp_op != kOpcodeName_fcomp && fcomp_op != kOpcodeName_fucomp) {
         return std::nullopt;
     }
@@ -1353,7 +1353,7 @@ static auto try_fuse_fld_fcomp_fstsw(TranslationResult* a1, IRInstr* fld_instr,
     }
 
     // ── 2. Validate FNSTSW AX ───────────────────────────────────────────────
-    if (fstsw_instr->opcode != kOpcodeName_fstsw) {
+    if (fstsw_instr->opcode() != kOpcodeName_fstsw) {
         return std::nullopt;
     }
     if (fstsw_instr->operands[0].kind != IROperandKind::Register) {
@@ -1470,7 +1470,7 @@ static auto try_fuse_fld_fcomp_fstsw(TranslationResult* a1, IRInstr* fld_instr,
 static auto try_fuse_fld_fcomp(TranslationResult* a1, IRInstr* fld_instr, IRInstr* fcomp_instr)
     -> std::optional<int> {
     // ── 1. Validate FCOMP/FUCOMP ────────────────────────────────────────────
-    const auto fcomp_op = fcomp_instr->opcode;
+    const auto fcomp_op = fcomp_instr->opcode();
     if (fcomp_op != kOpcodeName_fcomp && fcomp_op != kOpcodeName_fucomp) {
         return std::nullopt;
     }
@@ -1586,14 +1586,14 @@ static auto try_fuse_fld_fcompp_fstsw(TranslationResult* a1, IRInstr* fld_instr,
                                       IRInstr* fcompp_instr, IRInstr* fstsw_instr)
     -> std::optional<int> {
     // ── 1. Validate FCOMPP/FUCOMPP ──────────────────────────────────────────
-    const auto fcompp_op = fcompp_instr->opcode;
+    const auto fcompp_op = fcompp_instr->opcode();
     if (fcompp_op != kOpcodeName_fcompp && fcompp_op != kOpcodeName_fucompp) {
         return std::nullopt;
     }
     // FCOMPP/FUCOMPP always compare ST(0) vs ST(1) — no explicit operands.
 
     // ── 2. Validate FNSTSW AX ───────────────────────────────────────────────
-    if (fstsw_instr->opcode != kOpcodeName_fstsw) {
+    if (fstsw_instr->opcode() != kOpcodeName_fstsw) {
         return std::nullopt;
     }
     if (fstsw_instr->operands[0].kind != IROperandKind::Register) {
@@ -1708,13 +1708,13 @@ static auto try_fuse_fld_fld_fucompp(TranslationResult* a1, IRInstr* fld1_instr,
     }
 
     // ── 2. Validate FCOMPP/FUCOMPP ──────────────────────────────────────────
-    const auto fucompp_op = fucompp_instr->opcode;
+    const auto fucompp_op = fucompp_instr->opcode();
     if (fucompp_op != kOpcodeName_fcompp && fucompp_op != kOpcodeName_fucompp) {
         return std::nullopt;
     }
 
     // ── 3. Optionally validate FSTSW AX (4-instruction form) ────────────────
-    const bool has_fstsw = (fstsw_instr != nullptr && fstsw_instr->opcode == kOpcodeName_fstsw &&
+    const bool has_fstsw = (fstsw_instr != nullptr && fstsw_instr->opcode() == kOpcodeName_fstsw &&
                             fstsw_instr->operands[0].kind == IROperandKind::Register);
 
     // ── 4. Emit fused code ──────────────────────────────────────────────────
@@ -1831,7 +1831,7 @@ static auto try_fuse_arithp_fstp(TranslationResult* a1, IRInstr* arithp_instr, I
     enum ArithOp : std::uint8_t { kAdd, kSub, kSubR, kMul, kDiv, kDivR };
 
     ArithOp arith;
-    switch (arithp_instr->opcode) {
+    switch (arithp_instr->opcode()) {
         case kOpcodeName_faddp:
             arith = kAdd;
             break;
@@ -1863,7 +1863,7 @@ static auto try_fuse_arithp_fstp(TranslationResult* a1, IRInstr* arithp_instr, I
 
     // ── 2. Validate FSTP to memory (m32 or m64, not m80, not register) ──────
 
-    if (fstp_instr->opcode != kOpcodeName_fstp) {
+    if (fstp_instr->opcode() != kOpcodeName_fstp) {
         return std::nullopt;
     }
     if (fstp_instr->operands[0].kind == IROperandKind::Register) {
@@ -1974,7 +1974,7 @@ static auto try_fuse_arith_fstp(TranslationResult* a1, IRInstr* arith_instr, IRI
     enum ArithOp : std::uint8_t { kAdd, kSub, kSubR, kMul, kDiv, kDivR };
 
     ArithOp arith;
-    switch (arith_instr->opcode) {
+    switch (arith_instr->opcode()) {
         case kOpcodeName_fadd:
             arith = kAdd;
             break;
@@ -2020,7 +2020,7 @@ static auto try_fuse_arith_fstp(TranslationResult* a1, IRInstr* arith_instr, IRI
 
     // ── 3. Validate FSTP to memory (m32 or m64, not m80, not register) ──────
 
-    if (fstp_instr->opcode != kOpcodeName_fstp) {
+    if (fstp_instr->opcode() != kOpcodeName_fstp) {
         return std::nullopt;
     }
     if (fstp_instr->operands[0].kind == IROperandKind::Register) {
@@ -2160,7 +2160,7 @@ static auto try_fuse_fstp_arith_fstp(TranslationResult* a1, IRInstr* fstp1_instr
                                      IRInstr* arith_instr, IRInstr* fstp2_instr)
     -> std::optional<int> {
     // ── 1. Validate first FSTP — must be memory, m32 or m64 (not m80, not stack-form) ──
-    if (fstp1_instr->opcode != kOpcodeName_fstp) {
+    if (fstp1_instr->opcode() != kOpcodeName_fstp) {
         return std::nullopt;
     }
     if (fstp1_instr->operands[0].kind == IROperandKind::Register) {
@@ -2173,7 +2173,7 @@ static auto try_fuse_fstp_arith_fstp(TranslationResult* a1, IRInstr* fstp1_instr
     // ── 2. Validate ARITH — non-popping, memory operand ─────────────────────
     enum ArithOp : std::uint8_t { kAdd, kSub, kSubR, kMul, kDiv, kDivR };
     ArithOp arith;
-    switch (arith_instr->opcode) {
+    switch (arith_instr->opcode()) {
         case kOpcodeName_fadd:
             arith = kAdd;
             break;
@@ -2200,7 +2200,7 @@ static auto try_fuse_fstp_arith_fstp(TranslationResult* a1, IRInstr* fstp1_instr
     }
 
     // ── 3. Validate second FSTP — same constraints as first ─────────────────
-    if (fstp2_instr->opcode != kOpcodeName_fstp) {
+    if (fstp2_instr->opcode() != kOpcodeName_fstp) {
         return std::nullopt;
     }
     if (fstp2_instr->operands[0].kind == IROperandKind::Register) {
@@ -2321,7 +2321,7 @@ static auto try_fuse_fstp_arith_fstp(TranslationResult* a1, IRInstr* fstp1_instr
 static auto try_fuse_arith_faddp(TranslationResult* a1, IRInstr* mul_instr, IRInstr* addp_instr)
     -> std::optional<int> {
     // ── 1. Gate on FMUL only — FMA requires multiply as the first op ────────
-    if (mul_instr->opcode != kOpcodeName_fmul) {
+    if (mul_instr->opcode() != kOpcodeName_fmul) {
         return std::nullopt;
     }
 
@@ -2346,7 +2346,7 @@ static auto try_fuse_arith_faddp(TranslationResult* a1, IRInstr* mul_instr, IRIn
     //   FSUBRP → FNMSUB Dd, Dn, Dm, Da   (Dd = Dn*Dm - Da)
     enum FmaKind : std::uint8_t { kFmadd, kFmsub, kFnmsub };
     FmaKind kind;
-    switch (addp_instr->opcode) {
+    switch (addp_instr->opcode()) {
         case kOpcodeName_faddp:
             kind = kFmadd;
             break;
@@ -2765,7 +2765,7 @@ auto try_peephole(TranslationResult* tr, IRInstr* instrs, int64_t num, int64_t i
         return std::nullopt;
     }
 
-    switch (instrs[idx].opcode) {
+    switch (instrs[idx].opcode()) {
         case kOpcodeName_fld:
         case kOpcodeName_fild:
         case kOpcodeName_fldz:

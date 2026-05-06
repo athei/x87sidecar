@@ -884,7 +884,7 @@ StubBlobs build(uint64_t handlerAddr, uint64_t translateInsnAddr, const uint8_t 
     // Uses x9, x10, x11 — caller-saved scratch in AAPCS, so we don't need to
     // preserve them across the filter.
     static_assert(sizeof(IRInstr) == 0x50, "stub filter assumes IRInstr stride 0x50");
-    static_assert(offsetof(IRInstr, opcode) == 0x4, "stub filter assumes IRInstr.opcode at +4");
+    static_assert(offsetof(IRInstr, opcode_) == 0x4, "stub filter assumes IRInstr.opcode_ at +4");
     static_assert(kOpcodeName_fucomip - kOpcodeName_fcmovb == 11,
                   "stub filter assumes fcmovb..fucomip is 12 contiguous opcodes");
     static_assert(kOpcodeName_fyl2xp1 - kOpcodeName_f2xm1 == 79,

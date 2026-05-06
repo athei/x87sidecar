@@ -6,7 +6,7 @@
 
 struct IRInstr {
     uint32_t pc;
-    uint16_t opcode;
+    uint16_t opcode_;
     uint8_t rep_prefix;
     uint8_t flag_liveness;
     uint8_t _pad08;
@@ -17,4 +17,8 @@ struct IRInstr {
     __attribute__((packed)) __attribute__((aligned(1))) uint16_t aux_opcode;
     char field_F;
     IROperand operands[4];
+
+    auto opcode() const -> uint16_t;
+
+    auto set_opcode(uint16_t op) -> void;
 };
