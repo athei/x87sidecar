@@ -1,4 +1,4 @@
-add_executable(rosettax87
+add_executable(x87sidecar
     src/main.cpp
     src/macho_loader.cpp
     src/offset_finder.cpp
@@ -6,12 +6,12 @@ add_executable(rosettax87
     src/stub_asm.cpp
 )
 
-target_link_libraries(rosettax87 PRIVATE rosetta_core)
+target_link_libraries(x87sidecar PRIVATE rosetta_core)
 
-add_custom_command(TARGET rosettax87 POST_BUILD
+add_custom_command(TARGET x87sidecar POST_BUILD
     COMMAND codesign -s - --entitlements
             "${CMAKE_CURRENT_SOURCE_DIR}/entitlements.plist"
-            --force "$<TARGET_FILE:rosettax87>"
-    COMMENT "Signing rosettax87 with entitlements"
+            --force "$<TARGET_FILE:x87sidecar>"
+    COMMENT "Signing x87sidecar with entitlements"
     VERBATIM
 )

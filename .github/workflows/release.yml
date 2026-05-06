@@ -25,11 +25,11 @@ jobs:
       - name: Configure
         run: cmake -B build
 
-      - name: Build rosettax87
-        run: cmake --build build --target rosettax87 --parallel
+      - name: Build x87sidecar
+        run: cmake --build build --target x87sidecar --parallel
 
-      - name: Package rosettax87.tar.xz
-        run: tar --xz -cf rosettax87.tar.xz -C build/bin rosettax87
+      - name: Package x87sidecar.tar.xz
+        run: tar --xz -cf x87sidecar.tar.xz -C build/bin x87sidecar
 
       - name: Generate changelog
         id: changelog
@@ -62,9 +62,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          name: rosettax87_jit ${{ github.ref_name }}
+          name: x87sidecar ${{ github.ref_name }}
           draft: true
           body: ${{ steps.changelog.outputs.body }}
-          files: rosettax87.tar.xz
+          files: x87sidecar.tar.xz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

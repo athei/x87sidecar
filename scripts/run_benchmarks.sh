@@ -5,7 +5,7 @@
 #
 # Configurations:
 #   1. Native Rosetta    — binary run directly (baseline)
-#   2. Loader optimized  — rosettax87 with all JIT optimizations enabled
+#   2. Loader optimized  — x87sidecar with all JIT optimizations enabled
 #
 # Usage:
 #   bash scripts/run_benchmarks.sh              # build + run
@@ -17,7 +17,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 BUILD_DIR="$ROOT_DIR/build"
 BIN="$BUILD_DIR/bin"
-LOADER="$BIN/rosettax87"
+LOADER="$BIN/x87sidecar"
 BENCH_BIN="$BIN/bench"
 
 ALL_BENCHMARKS=(
@@ -162,10 +162,10 @@ echo ""
 
 # ── Legend ────────────────────────────────────────────────────────────────────
 echo -e "${BOLD}Columns:${NC}"
-echo "  baseline  — X87_DISABLE_HOOK=1 rosettax87 (no x87 hook, AOT cache + interpreter"
+echo "  baseline  — X87_DISABLE_HOOK=1 x87sidecar (no x87 hook, AOT cache + interpreter"
 echo "              both disabled — same translation environment as the optimized"
 echo "              column, only without our inline x87 emit)"
-echo "  JIT       — rosettax87 with full JIT optimizations enabled"
+echo "  JIT       — x87sidecar with full JIT optimizations enabled"
 echo "  spd_gain  — speedup of JIT over baseline (apples-to-apples)"
 echo ""
 

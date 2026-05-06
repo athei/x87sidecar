@@ -1,21 +1,21 @@
 #!/usr/bin/env bash
 #
 # run_tests.sh -- run all x87 test binaries under native Rosetta and the
-# custom rosettax87, checking self-reported PASS/FAIL output.
+# custom x87sidecar, checking self-reported PASS/FAIL output.
 #
 # Phases:
 #   1. Native Rosetta (baseline)
-#   2. rosettax87 (IR + fusions enabled, default config)
-#   3. rosettax87 with X87_DISABLE_X87_IR=1 (direct translator only)
-#   4. rosettax87 with X87_DISABLE_X87_IR=1 + X87_DISABLE_ALL_FUSIONS=1
-#   5. rosettax87 with X87_DISABLE_HOOK=1 (stock translate_insn only)
-#   6. rosettax87 with X87_ENABLE_FMA_REDUCE=0 (legacy scalar FMADD path —
+#   2. x87sidecar (IR + fusions enabled, default config)
+#   3. x87sidecar with X87_DISABLE_X87_IR=1 (direct translator only)
+#   4. x87sidecar with X87_DISABLE_X87_IR=1 + X87_DISABLE_ALL_FUSIONS=1
+#   5. x87sidecar with X87_DISABLE_HOOK=1 (stock translate_insn only)
+#   6. x87sidecar with X87_ENABLE_FMA_REDUCE=0 (legacy scalar FMADD path —
 #      regression catch since FMA-reduce now defaults ON)
 #
 # Usage:
 #   bash scripts/run_tests.sh                # build + test (all phases)
 #   bash scripts/run_tests.sh --no-build     # skip build
-#   bash scripts/run_tests.sh --native-only  # Phase 1 only (no rosettax87)
+#   bash scripts/run_tests.sh --native-only  # Phase 1 only (no x87sidecar)
 #   bash scripts/run_tests.sh test_arith     # only run specific test(s)
 
 set -euo pipefail
@@ -24,7 +24,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 BUILD_DIR="$ROOT_DIR/build"
 BIN="$BUILD_DIR/bin"
-LOADER="$BIN/rosettax87"
+LOADER="$BIN/x87sidecar"
 TESTS_BIN="$BIN/tests"
 
 ALL_TESTS=(
@@ -185,13 +185,13 @@ for t in "${TESTS[@]}"; do
     check_output "$t" "$OUT" "$EXIT"
 done
 
-# ── Phase 2: rosettax87 ───────────────────────────────────────────────────
+# ── Phase 2: x87sidecar ───────────────────────────────────────────────────
 # pipefail (set -o pipefail above) makes the pipe inherit the loader's
 # non-zero exit, so a silent loader/test crash propagates through
 # `... | filter_runtime_lines` and we capture it in $EXIT.
 if [[ $NATIVE_ONLY -eq 0 ]]; then
     echo ""
-    echo -e "${BOLD}=== Phase 2: rosettax87 ===${NC}"
+    echo -e "${BOLD}=== Phase 2: x87sidecar ===${NC}"
 
     for t in "${TESTS[@]}"; do
         BINARY="$TESTS_BIN/$t"
@@ -206,10 +206,10 @@ if [[ $NATIVE_ONLY -eq 0 ]]; then
     done
 fi
 
-# ── Phase 3: rosettax87, IR disabled ─────────────────────────────────────
+# ── Phase 3: x87sidecar, IR disabled ─────────────────────────────────────
 if [[ $NATIVE_ONLY -eq 0 ]]; then
     echo ""
-    echo -e "${BOLD}=== Phase 3: rosettax87 (IR disabled) ===${NC}"
+    echo -e "${BOLD}=== Phase 3: x87sidecar (IR disabled) ===${NC}"
 
     for t in "${TESTS[@]}"; do
         BINARY="$TESTS_BIN/$t"
@@ -224,10 +224,10 @@ if [[ $NATIVE_ONLY -eq 0 ]]; then
     done
 fi
 
-# ── Phase 4: rosettax87, IR disabled + all fusions disabled ──────────────
+# ── Phase 4: x87sidecar, IR disabled + all fusions disabled ──────────────
 if [[ $NATIVE_ONLY -eq 0 ]]; then
     echo ""
-    echo -e "${BOLD}=== Phase 4: rosettax87 (IR disabled, fusions disabled) ===${NC}"
+    echo -e "${BOLD}=== Phase 4: x87sidecar (IR disabled, fusions disabled) ===${NC}"
 
     for t in "${TESTS[@]}"; do
         BINARY="$TESTS_BIN/$t"
@@ -242,7 +242,7 @@ if [[ $NATIVE_ONLY -eq 0 ]]; then
     done
 fi
 
-# ── Phase 5: rosettax87 X87_DISABLE_HOOK=1 (stock translate_insn only) ───
+# ── Phase 5: x87sidecar X87_DISABLE_HOOK=1 (stock translate_insn only) ───
 # Validates that the deliberate-fall-through ops (fxsave, fxrstor, and
 # the metadata-only set in kKnownFallThrough) compose correctly with
 # stock's emit.  A FAIL here indicates an m108-style internal-offset
@@ -250,7 +250,7 @@ fi
 # (test_*_compose.c) are the primary target of this phase.
 if [[ $NATIVE_ONLY -eq 0 ]]; then
     echo ""
-    echo -e "${BOLD}=== Phase 5: rosettax87 X87_DISABLE_HOOK=1 (stock emit) ===${NC}"
+    echo -e "${BOLD}=== Phase 5: x87sidecar X87_DISABLE_HOOK=1 (stock emit) ===${NC}"
 
     for t in "${TESTS[@]}"; do
         BINARY="$TESTS_BIN/$t"
@@ -265,7 +265,7 @@ if [[ $NATIVE_ONLY -eq 0 ]]; then
     done
 fi
 
-# ── Phase 6: rosettax87 X87_ENABLE_FMA_REDUCE=0 ──────────────────────────
+# ── Phase 6: x87sidecar X87_ENABLE_FMA_REDUCE=0 ──────────────────────────
 # FMA-reduce defaults ON in production, so Phase 2 already covers the
 # vector-lowered path.  This phase forces the pass OFF to keep the
 # scalar FMADD path under continuous test — protects against regressions
@@ -273,7 +273,7 @@ fi
 # the pass doesn't pre-tag chain heads).
 if [[ $NATIVE_ONLY -eq 0 ]]; then
     echo ""
-    echo -e "${BOLD}=== Phase 6: rosettax87 X87_ENABLE_FMA_REDUCE=0 (scalar FMADD) ===${NC}"
+    echo -e "${BOLD}=== Phase 6: x87sidecar X87_ENABLE_FMA_REDUCE=0 (scalar FMADD) ===${NC}"
 
     for t in "${TESTS[@]}"; do
         BINARY="$TESTS_BIN/$t"

@@ -1,4 +1,4 @@
-# RosettaHack x87 + JIT
+# x87sidecar
 
 ## Overview
 
@@ -25,7 +25,7 @@ Tests and benchmarks are built automatically as part of the CMake build.
 
 Run the test suite:
 ```bash
-bash scripts/run_tests.sh              # build + test (native Rosetta & rosettax87)
+bash scripts/run_tests.sh              # build + test (native Rosetta & x87sidecar)
 bash scripts/run_tests.sh --no-build   # skip build
 bash scripts/run_tests.sh --native-only # native Rosetta only
 bash scripts/run_tests.sh test_arith   # run a specific test
