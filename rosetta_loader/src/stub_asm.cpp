@@ -7,6 +7,7 @@
 
 #include "rosetta_core/IRInstr.h"
 #include "rosetta_core/Opcode.h"
+#include "rosetta_core/OpcodeCompatibility.h"
 
 namespace stub_asm {
 namespace {
@@ -896,6 +897,14 @@ StubBlobs build(uint64_t handlerAddr, uint64_t translateInsnAddr, const uint8_t 
         kOpcodeName_fxrstor >= kOpcodeName_f2xm1 && kOpcodeName_fxrstor <= kOpcodeName_fyl2xp1,
         "stub filter assumes fxrstor sits inside the high x87 range");
 
+    // The IRInstr::opcode_ field carries the runtime's *host* opcode IDs, not
+    // our canonical (kOpcodeName_*) IDs.  Both 26.4 and 26.5 keep the two x87
+    // ranges contiguous and same-sized, so the cmp_imm_w (range size) stays
+    // canonical, but the sub_imm_w (range start) must be host-translated via
+    // the compat layer.  rosetta_core_init must have run before stub injection.
+    const auto host_fcmovb = opcode_internal_to_host(kOpcodeName_fcmovb);
+    const auto host_f2xm1 = opcode_internal_to_host(kOpcodeName_f2xm1);
+
     std::vector<uint8_t> filter;
     filter.reserve(kFilterBytes);
     //  0: movz w9, #0x50              ; sizeof(IRInstr) — fits in 16 bits
@@ -904,14 +913,14 @@ StubBlobs build(uint64_t handlerAddr, uint64_t translateInsnAddr, const uint8_t 
     emit(filter, madd(10, 4, 9, 2));
     //  2: ldrh w9, [x10, #4]          ; w9 = uint16_t opcode
     emit(filter, ldrh_w_offset(9, 10, 4));
-    //  3: sub w11, w9, #fcmovb
-    emit(filter, sub_imm_w(11, 9, kOpcodeName_fcmovb));
+    //  3: sub w11, w9, #host_fcmovb
+    emit(filter, sub_imm_w(11, 9, host_fcmovb));
     //  4: cmp w11, #(fucomip-fcmovb)  ; in-low-range if w11 ≤ this unsigned
     emit(filter, cmp_imm_w(11, kOpcodeName_fucomip - kOpcodeName_fcmovb));
     //  5: b.ls do_ipc                 ; +8 instr → land at do_ipc (instr 13)
     emit(filter, b_cond(COND_LS, 8));
-    //  6: sub w11, w9, #f2xm1
-    emit(filter, sub_imm_w(11, 9, kOpcodeName_f2xm1));
+    //  6: sub w11, w9, #host_f2xm1
+    emit(filter, sub_imm_w(11, 9, host_f2xm1));
     //  7: cmp w11, #(fyl2xp1-f2xm1)   ; in-high-range if w11 ≤ this unsigned
     emit(filter, cmp_imm_w(11, kOpcodeName_fyl2xp1 - kOpcodeName_f2xm1));
     //  8: b.ls do_ipc                 ; +5 instr → land at do_ipc (instr 13)
