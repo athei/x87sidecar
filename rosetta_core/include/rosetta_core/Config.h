@@ -119,7 +119,6 @@ struct RosettaConfig {
 
     // Loader-only knobs (read by rosettax87 main; aotinvoke leaves them 0)
     uint8_t loader_logs;            // X87_LOGS          verbose loader logging
-    uint8_t loader_force_attach;    // X87_FORCE_ATTACH  attach even for x64 PE binaries
     uint8_t loader_disable_hook;    // X87_DISABLE_HOOK  passthrough mode for benchmark
                                     //                  baselines.  Still attaches and writes
                                     //                  g_disable_aot=1, but skips the

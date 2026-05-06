@@ -546,141 +546,6 @@ public:
 // Define the static constant outside the class
 const unsigned int MuhDebugger::AARCH64_BREAKPOINT = 0xD4200000;
 
-// Resolve a Windows-style path (e.g. "C:\foo\bar.exe") to a macOS path
-// using the Wine prefix dosdevices mapping.  WINEPREFIX / HOME are
-// Wine's own conventions (not part of our config surface), so reading
-// them here is fine — the rest of the loader is exclusively CLI-driven.
-static std::string resolveWinePath(const char* winPath) {
-    const char* prefix = getenv("WINEPREFIX");
-    std::string winePrefix = prefix ? prefix : (std::string(getenv("HOME")) + "/.wine");
-
-    // Find drive letter (e.g. "C:")
-    if (strlen(winPath) < 3 || winPath[1] != ':') {
-        return {};
-    }
-
-    char driveLetter = tolower(winPath[0]);
-    std::string dosDevice = winePrefix + "/dosdevices/" + driveLetter + ":";
-
-    // Resolve the symlink to get the real drive root
-    char resolved[PATH_MAX];
-    if (!realpath(dosDevice.c_str(), resolved)) {
-        return {};
-    }
-
-    // Convert the rest of the path: skip "C:", replace backslashes
-    std::string result = resolved;
-    const char* rest = winPath + 2;
-    for (; *rest; rest++) {
-        result += (*rest == '\\') ? '/' : *rest;
-    }
-    return result;
-}
-
-// Classify a file by reading its PE header. Returns X86 / X64 for
-// recognised PE machine fields, NotPE for everything else (unreadable,
-// missing MZ/PE signatures, unknown machine, or e.g. a Mach-O binary).
-enum class PeArch : std::uint8_t { NotPE, X86, X64 };
-
-static PeArch classifyPE(const std::string& path) {
-    FILE* f = fopen(path.c_str(), "rb");
-    if (!f) {
-        return PeArch::NotPE;
-    }
-
-    uint16_t dosMagic;
-    if (fread(&dosMagic, 2, 1, f) != 1 || dosMagic != 0x5A4D) {
-        fclose(f);
-        return PeArch::NotPE;
-    }
-
-    uint32_t peOffset;
-    fseek(f, 0x3C, SEEK_SET);
-    if (fread(&peOffset, 4, 1, f) != 1) {
-        fclose(f);
-        return PeArch::NotPE;
-    }
-
-    fseek(f, peOffset, SEEK_SET);
-    uint32_t peSig;
-    if (fread(&peSig, 4, 1, f) != 1 || peSig != 0x00004550) {
-        fclose(f);
-        return PeArch::NotPE;
-    }
-
-    uint16_t machine;
-    if (fread(&machine, 2, 1, f) != 1) {
-        fclose(f);
-        return PeArch::NotPE;
-    }
-    fclose(f);
-
-    switch (machine) {
-        case 0x014C:
-            return PeArch::X86;  // IMAGE_FILE_MACHINE_I386
-        case 0x8664:
-            return PeArch::X64;  // IMAGE_FILE_MACHINE_AMD64
-        default:
-            return PeArch::NotPE;
-    }
-}
-
-// Outcome of inspecting argv for a Windows PE. The skip flag drives
-// whether the loader attaches; displayPath carries the resolved native
-// .exe path (when found in argv) so the always-on summary line in main()
-// can show what was actually classified — falling back to argv[1] when
-// no .exe was identified (Mach-O test/bench binaries).
-struct AttachDecision {
-    bool skip;                // true → execv passthrough, false → attach
-    std::string displayPath;  // resolved Wine native path if found, else empty
-    const char* reason;       // non-null only when skip=true (e.g. "x64 PE")
-};
-
-// Examine argv for a Windows PE. Skip only when argv positively
-// identifies a 64-bit PE (Wine running an x64 .exe — x87 JIT is
-// unnecessary). Anything else — Mach-O test/bench binaries, unknown
-// inputs — falls through and the loader attaches by default.
-static AttachDecision classifyAttachTarget(int argc, char* argv[]) {
-    // Capture the first .exe-looking argv so the always-on summary line
-    // can identify the actual program being launched, even when classifyPE
-    // can't read it (file resolved relative to a cwd we don't share).
-    // Without this, x86-PE invocations fall through to argv[1] (= wine).
-    std::string fallbackExe;
-    for (int i = 2; i < argc; i++) {
-        // Windows-style path (drive letter + colon)
-        if (strlen(argv[i]) >= 3 && argv[i][1] == ':') {
-            std::string nativePath = resolveWinePath(argv[i]);
-            if (nativePath.empty()) {
-                VERBOSE_LOG("Could not resolve Wine path '%s', attaching.\n", argv[i]);
-                return {.skip = false, .displayPath = std::string(argv[i]), .reason = nullptr};
-            }
-            VERBOSE_LOG("Resolved '%s' -> '%s'\n", argv[i], nativePath.c_str());
-            PeArch arch = classifyPE(nativePath);
-            VERBOSE_LOG("PE architecture: %s\n", arch == PeArch::X86   ? "x86 (32-bit)"
-                                                 : arch == PeArch::X64 ? "x64 (64-bit)"
-                                                                       : "not a PE");
-            return {.skip = arch == PeArch::X64,
-                    .displayPath = std::move(nativePath),
-                    .reason = arch == PeArch::X64 ? "x64 PE" : nullptr};
-        }
-
-        // Bare .exe filename — resolve relative to cwd
-        size_t len = strlen(argv[i]);
-        if (len >= 4 && strcasecmp(argv[i] + len - 4, ".exe") == 0) {
-            if (fallbackExe.empty()) {
-                fallbackExe = argv[i];
-            }
-            PeArch arch = classifyPE(argv[i]);
-            if (arch == PeArch::X64) {
-                VERBOSE_LOG("'%s' is x64 (64-bit), skipping\n", argv[i]);
-                return {.skip = true, .displayPath = std::string(argv[i]), .reason = "x64 PE"};
-            }
-            // x86 PE or non-PE: keep scanning (file may not exist in cwd).
-        }
-    }
-    return {.skip = false, .displayPath = std::move(fallbackExe), .reason = nullptr};
-}
-
 static void print_loader_usage(const char* prog) {
     std::printf(
         "usage: %s <program> [program-args...]\n"
@@ -707,20 +572,6 @@ int main(int argc, char* argv[]) try {
     static RosettaConfig g_cfg = load_config_from_env();
     rosetta_set_config(&g_cfg);
     logsEnabled = g_cfg.loader_logs ? "1" : nullptr;
-
-    AttachDecision decision = classifyAttachTarget(argc, argv);
-    const std::string summaryPath =
-        decision.displayPath.empty() ? std::string(argv[1]) : decision.displayPath;
-
-    // Skip debugger attachment for 64-bit Windows programs (no x87 needed)
-    if (!g_cfg.loader_force_attach && decision.skip) {
-        printf("[rosettax87] skipped: %s (%s)\n", summaryPath.c_str(), decision.reason);
-        fflush(stdout);
-        VERBOSE_LOG("Program is x64 PE, skipping x87 JIT. Passing through.\n");
-        execv(argv[1], &argv[1]);
-        fprintf(stdout, "execv: %s\n", strerror(errno));
-        return 1;
-    }
 
     VERBOSE_LOG("Launching debugger.\n");
 
@@ -798,7 +649,7 @@ int main(int argc, char* argv[]) try {
         fprintf(stdout, "Failed to attach to parent process\n");
         return 1;
     }
-    printf("[rosettax87] attached: %s\n", summaryPath.c_str());
+    printf("[rosettax87] attached: %s\n", argv[1]);
     fflush(stdout);
     // Signal parent to proceed with execv
     write(syncPipe[1], "x", 1);

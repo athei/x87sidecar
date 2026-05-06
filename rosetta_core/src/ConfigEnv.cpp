@@ -182,7 +182,6 @@ RosettaConfig load_config_from_env() {
     // Loader-only knobs (aotinvoke leaves them at 0; harmless because it
     // ignores the loader_* fields anyway).
     cfg.loader_logs = env_truthy("X87_LOGS") ? 1 : 0;
-    cfg.loader_force_attach = env_truthy("X87_FORCE_ATTACH") ? 1 : 0;
     cfg.loader_disable_hook = env_truthy("X87_DISABLE_HOOK") ? 1 : 0;
     cfg.loader_always_none = env_truthy("X87_ALWAYS_NONE") ? 1 : 0;
     cfg.loader_log_ops = env_truthy("X87_LOG_OPS") ? 1 : 0;
@@ -199,8 +198,6 @@ void print_env_help(std::FILE* out) {
     std::fprintf(out,
                  "Environment variables (read once at startup; no later getenv):\n"
                  "  X87_LOGS=1                    verbose loader logging to stdout\n"
-                 "                                (rosettax87 only)\n"
-                 "  X87_FORCE_ATTACH=1            attach even for x64 PE binaries\n"
                  "                                (rosettax87 only)\n"
                  "  X87_DISABLE_HOOK=1            passthrough mode for benchmark baselines\n"
                  "                                (rosettax87 only): still attaches and writes\n"
