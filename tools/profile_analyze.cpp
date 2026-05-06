@@ -348,7 +348,7 @@ std::string patternKey(const std::vector<IRInstr>& instrs, size_t start, size_t 
 // ── JIT emit-quality measurement ──────────────────────────────────────
 // For each unique pattern, run the translator twice (production / IR
 // disabled) and report ARM64-insn emit count.  See the plan for the
-// rationale: production is IR-first, --disable-x87-ir is the meaningful
+// rationale: production is IR-first, X87_DISABLE_X87_IR=1 is the meaningful
 // "without IR" config — three columns would have collapsed into two.
 struct EmitMeasurement {
     uint32_t arm_production = 0;

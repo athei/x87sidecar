@@ -31,27 +31,27 @@ enum class FusionId : int {
 };
 
 // ── Runtime configuration ───────────────────────────────────────────────────
-// Populated by the executable's command-line parser (rosettax87 / aotinvoke)
-// and registered globally via `rosetta_set_config(&cfg)` so the Translator
-// pipeline can read it via `g_rosetta_config`.  See `CoreConfig.h`.
+// Populated from the `X87_*` environment block via `load_config_from_env()`
+// (see `ConfigEnv.h`) and registered globally via `rosetta_set_config(&cfg)`
+// so the Translator pipeline can read it via `g_rosetta_config`.
 //
-// Most fields are translator knobs read by `rosetta_core`.  The two
-// `loader_*` fields are loader-only — `aotinvoke` ignores them.
+// Most fields are translator knobs read by `rosetta_core`.  The `loader_*`
+// fields are loader-only — `aotinvoke` ignores them.
 struct RosettaConfig {
     // Translator knobs (read by rosetta_core's Translator / X87IRLower / etc.)
-    uint8_t disable_x87_cache;       // --disable-cache         drop the cross-instr GPR cache
-    uint8_t fast_round;              // --fast-round            skip RC dispatch (round-to-nearest)
-    uint8_t disable_deferred_fxch;   // --disable-deferred-fxch disable OPT-G
-    uint8_t disable_x87_ir;          // --disable-x87-ir        disable IR optimisation pipeline
-    uint8_t force_x87_ir_gate;       // measurement-only flag for tools/profile_analyze: bypass
-                                     // the IR-eligibility gate's pre-build refusal conditions
-                                     // (run_remaining<3, top_dirty, tag_push_pending,
-                                     // deferred_pop_count, perm_dirty) so compile_run is
-                                     // called regardless.  The emitted code is *not*
-                                     // semantically correct when the dirty conditions hold —
-                                     // do NOT set in production.  Used to answer "what would
-                                     // IR emit for this pattern if the gate were lifted?".
-    uint64_t disabled_fusions_mask;  // --disable-fusions=fld_arithp,...
+    uint8_t disable_x87_cache;      // X87_DISABLE_CACHE         drop the cross-instr GPR cache
+    uint8_t fast_round;             // X87_FAST_ROUND            skip RC dispatch (round-to-nearest)
+    uint8_t disable_deferred_fxch;  // X87_DISABLE_DEFERRED_FXCH disable OPT-G
+    uint8_t disable_x87_ir;         // X87_DISABLE_X87_IR        disable IR optimisation pipeline
+    uint8_t force_x87_ir_gate;      // measurement-only flag for tools/profile_analyze: bypass
+                                    // the IR-eligibility gate's pre-build refusal conditions
+                                    // (run_remaining<3, top_dirty, tag_push_pending,
+                                    // deferred_pop_count, perm_dirty) so compile_run is
+                                    // called regardless.  The emitted code is *not*
+                                    // semantically correct when the dirty conditions hold —
+                                    // do NOT set in production.  Used to answer "what would
+                                    // IR emit for this pattern if the gate were lifted?".
+    uint64_t disabled_fusions_mask;  // X87_DISABLE_FUSIONS=fld_arithp,...
 
     // X87_GATE_FLUSH_THRESHOLD[_DEFERRED_POP|_PERM_DIRTY]
     // Per-branch override of the IR-gate flush-and-proceed minimum
@@ -78,28 +78,34 @@ struct RosettaConfig {
     uint8_t x87_ir_gate_flush_threshold_deferred_pop;
     uint8_t x87_ir_gate_flush_threshold_perm_dirty;
 
-    // Investigation knobs for the open Bug 2 (speculative-flush rollback
-    // corruption).  These are NOT for production — they exist on the
-    // inv/rollback-hyp3 branch only.  When all three are unset, gate +
-    // rollback behavior is bit-exact identical to current ship.  See
-    // ~/.claude/plans/recall-memory-lets-attack-functional-naur.md.
+    // Diagnostic toggles for the IR-gate speculative-flush rollback
+    // machinery (Translator.cpp).  When the gate's top_dirty /
+    // deferred_pop / perm_dirty branch emits a flush and falls through
+    // to compile_run, and compile_run subsequently bails on
+    // FprPressure/GprPressure, the flush ARM is wasted — the next
+    // dispatch path (peephole / single-op) handles the deferred state
+    // itself.  The rollback rewinds the buffer + restores the cleared
+    // cache field so the wasted ARM is dropped.
+    //
+    // perm_dirty rollback is unconditional (always on; it shipped
+    // first).  top_dirty / deferred_pop rollback default off and are
+    // gated by these enables; safety was established 2026-05-06 once
+    // X87IRLower::lower()'s prologue began flushing incoming
+    // tag_push_pending / deferred_pop_count / perm_dirty (`855a424`).
     //
     // X87_LOG_ROLLBACK=1
-    //   Print one stdout line per IR-gate speculative-flush rollback
-    //   firing: which branch, ir_fail reason, buf_end delta, the cache
-    //   fields restored (pre->post), and the cur_instr opcode/pc.
+    //   Print one stdout line per rollback firing: branch, ir_fail
+    //   reason, buf_end delta, restored cache fields (pre->post), and
+    //   the cur_instr opcode/pc.  Useful for offline correlation with
+    //   X87_PROFILE captures via tools/rollback_diff.
     //
     // X87_ENABLE_ROLLBACK_TOP_DIRTY=1
-    //   Re-enables rollback for the top_dirty branch.  Saves
-    //   cache.top_dirty before the flush and restores it on bail.  Sets
-    //   the `flushed` flag so the rollback block fires.  Default off
-    //   because this corrupts WoW weapon vertex transforms via an
-    //   unidentified mechanism (testing Hypothesis 3).
+    //   Enable rollback for the top_dirty gate branch.  Saves
+    //   cache.top_dirty before the flush and restores it on bail.
     //
     // X87_ENABLE_ROLLBACK_DEFERRED_POP=1
-    //   Symmetric for the deferred_pop branch.  Saves
-    //   cache.deferred_pop_count and restores it on bail.  Default off
-    //   for the same reason.
+    //   Symmetric for the deferred_pop gate branch.  Saves
+    //   cache.deferred_pop_count and restores it on bail.
     uint8_t x87_log_rollback;
     uint8_t x87_enable_rollback_top_dirty;
     uint8_t x87_enable_rollback_deferred_pop;
@@ -116,9 +122,9 @@ struct RosettaConfig {
     std::vector<uint64_t> x87_no_rollback_hash_list;  // sorted, binary-searched
 
     // Loader-only knobs (read by rosettax87 main; aotinvoke leaves them 0)
-    uint8_t loader_logs;            // --logs           verbose loader logging
-    uint8_t loader_force_attach;    // --force-attach   attach even for x64 PE binaries
-    uint8_t loader_disable_hook;    // --disable-hook   passthrough mode for benchmark
+    uint8_t loader_logs;            // X87_LOGS          verbose loader logging
+    uint8_t loader_force_attach;    // X87_FORCE_ATTACH  attach even for x64 PE binaries
+    uint8_t loader_disable_hook;    // X87_DISABLE_HOOK  passthrough mode for benchmark
                                     //                  baselines.  Still attaches and writes
                                     //                  g_disable_aot=1, but skips the
                                     //                  translate_insn entry patch.  Apple's

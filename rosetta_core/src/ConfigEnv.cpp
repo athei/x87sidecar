@@ -118,10 +118,11 @@ RosettaConfig load_config_from_env() {
         apply_fusion_list(csv, cfg.disabled_fusions_mask);
     }
 
-    // X87_GATE_FLUSH_THRESHOLD[_TAG_PUSH|_DEFERRED_POP|_PERM_DIRTY]:
+    // X87_GATE_FLUSH_THRESHOLD[_DEFERRED_POP|_PERM_DIRTY]:
     // per-branch override of the IR-gate flush-and-proceed minimum
     // run length.  Clamp to [3, 16]; outside that range fall back to
-    // default (0 = compile-time default of 3 for every branch).  See
+    // default (0 = compile-time default of 3 for every branch).  The
+    // tag_push branch always refuses; no threshold knob exists.  See
     // Config.h.
     auto parse_gate_threshold = [](const char* env_name, const char* label, uint8_t& target) {
         const char* t = std::getenv(env_name);
@@ -145,8 +146,9 @@ RosettaConfig load_config_from_env() {
     parse_gate_threshold("X87_GATE_FLUSH_THRESHOLD_PERM_DIRTY", "perm_dirty",
                          cfg.x87_ir_gate_flush_threshold_perm_dirty);
 
-    // Investigation knobs (inv/rollback-hyp3 only).  When all three unset,
-    // gate + rollback behavior is bit-exact to current ship.
+    // Diagnostic enables for the speculative-flush rollback machinery
+    // (Translator.cpp).  Default off; perm_dirty rollback is
+    // unconditional and not gated by these.
     cfg.x87_log_rollback = env_truthy("X87_LOG_ROLLBACK") ? 1 : 0;
     cfg.x87_enable_rollback_top_dirty = env_truthy("X87_ENABLE_ROLLBACK_TOP_DIRTY") ? 1 : 0;
     cfg.x87_enable_rollback_deferred_pop = env_truthy("X87_ENABLE_ROLLBACK_DEFERRED_POP") ? 1 : 0;
@@ -178,77 +180,71 @@ RosettaConfig load_config_from_env() {
 }
 
 void print_env_help(std::FILE* out) {
-    std::fprintf(
-        out,
-        "Environment variables (read once at startup; no later getenv):\n"
-        "  X87_LOGS=1                    verbose loader logging to stdout\n"
-        "                                (rosettax87 only)\n"
-        "  X87_FORCE_ATTACH=1            attach even for x64 PE binaries\n"
-        "                                (rosettax87 only)\n"
-        "  X87_DISABLE_HOOK=1            passthrough mode for benchmark baselines\n"
-        "                                (rosettax87 only): still attaches and writes\n"
-        "                                g_disable_aot=1, but skips the translate_insn\n"
-        "                                entry patch.  Apple's runtime then translates\n"
-        "                                with stock JIT codegen, providing an\n"
-        "                                apples-to-apples baseline against the\n"
-        "                                optimised path (both have AOT cache +\n"
-        "                                interpreter disabled).\n"
-        "  X87_ALWAYS_NONE=1             diagnostic: sidecar always replies None,\n"
-        "                                so the stub falls through to stock for every\n"
-        "                                request.  Use to A/B whether a freeze is in\n"
-        "                                our JIT output or the IPC marshalling itself.\n"
-        "  X87_LOG_OPS=1                 diagnostic: sidecar prints one line per\n"
-        "                                handled op with mnemonic + insn_idx.  With a\n"
-        "                                deterministic freeze repro, the last few\n"
-        "                                lines name the suspect.  HIGH-VOLUME — only\n"
-        "                                enable when bisecting.\n"
-        "  X87_LOG_THROUGHPUT=1          diagnostic: sidecar reporter thread prints\n"
-        "                                req/s every 2 s + an idle-transition line.\n"
-        "                                Off by default; enable when telling 'stuck'\n"
-        "                                apart from 'just slow' on long workloads.\n"
-        "  X87_DISABLE_CACHE=1           drop the cross-instruction GPR cache\n"
-        "  X87_FAST_ROUND=1              skip RC dispatch; always emit FCVTNS/FRINTN\n"
-        "                                (round-to-nearest only — UNSAFE for code that\n"
-        "                                 uses FLDCW to change rounding mode, e.g. Lua)\n"
-        "  X87_DISABLE_DEFERRED_FXCH=1   disable OPT-G (deferred FXCH permutation)\n"
-        "  X87_DISABLE_X87_IR=1          disable the IR optimisation pipeline\n"
-        "  X87_EXTENDED_FPR_SCRATCH=1    expand FPR scratch pool from 8 (V24-V31)\n"
-        "                                to 16 (V16-V31)\n"
-        "  X87_DISABLE_ALL_FUSIONS=1     disable every peephole fusion\n"
-        "  X87_GATE_FLUSH_THRESHOLD=N             override the IR-gate flush-and-\n"
-        "  X87_GATE_FLUSH_THRESHOLD_TAG_PUSH=N     proceed minimum run length per\n"
-        "  X87_GATE_FLUSH_THRESHOLD_DEFERRED_POP=N branch.  Defaults: top_dirty=3,\n"
-        "  X87_GATE_FLUSH_THRESHOLD_PERM_DIRTY=N   tag_push=8, deferred_pop=3,\n"
-        "                                perm_dirty=3.  Clamp to [3,16].\n"
-        "                                Useful for dialing back a specific branch\n"
-        "                                if a workload regresses (bumps the threshold\n"
-        "                                so the branch flushes only on longer runs).\n"
-        "  X87_LOG_ROLLBACK=1            INVESTIGATION ONLY: print one stdout line\n"
-        "                                per IR-gate speculative-flush rollback firing.\n"
-        "                                Format: [rollback] branch=<name> ir_fail=<reason>\n"
-        "                                buf_end_delta=<bytes> td <pre>-><post> tp <pre>-\n"
-        "                                ><post> dpc <pre>-><post> pd <pre>-><post>\n"
-        "                                opcode=<x87 op> pc=0x<rip>\n"
-        "  X87_ENABLE_ROLLBACK_TOP_DIRTY=1     INVESTIGATION ONLY: re-enable rollback\n"
-        "  X87_ENABLE_ROLLBACK_DEFERRED_POP=1  for the top_dirty / deferred_pop gate\n"
-        "                                branches.  Default off — both corrupt WoW\n"
-        "                                weapon vertex transforms via an unidentified\n"
-        "                                mechanism.  Used to bisect that mechanism.\n"
-        "  X87_ROLLBACK_BLOCK_MIN=N      INVESTIGATION ONLY: bisect rollback by\n"
-        "  X87_ROLLBACK_BLOCK_MAX=N      profile_bid range (within-run only — bid\n"
-        "                                is registration order, not stable across\n"
-        "                                WoW launches).\n"
-        "  X87_NO_ROLLBACK_BLOCK_MIN=N   Exclusion-range counterparts for\n"
-        "  X87_NO_ROLLBACK_BLOCK_MAX=N   subtraction-bisect.\n"
-        "  X87_ROLLBACK_HASH_LIST=0xH,…  INVESTIGATION ONLY: bisect rollback by IR-\n"
-        "  X87_NO_ROLLBACK_HASH_LIST=…   content hash (FNV-1a, PC zeroed); stable\n"
-        "                                across runs.  Comma-separated 64-bit hex\n"
-        "                                values.  Include list non-empty → rollback\n"
-        "                                only for those hashes.  Exclude list non-\n"
-        "                                empty → rollback never for those hashes\n"
-        "                                (exclude wins over include).  Hashes are\n"
-        "                                printed in the [rollback] log line.\n"
-        "  X87_DISABLE_FUSIONS=name1,…   disable specific fusions; names:\n");
+    std::fprintf(out,
+                 "Environment variables (read once at startup; no later getenv):\n"
+                 "  X87_LOGS=1                    verbose loader logging to stdout\n"
+                 "                                (rosettax87 only)\n"
+                 "  X87_FORCE_ATTACH=1            attach even for x64 PE binaries\n"
+                 "                                (rosettax87 only)\n"
+                 "  X87_DISABLE_HOOK=1            passthrough mode for benchmark baselines\n"
+                 "                                (rosettax87 only): still attaches and writes\n"
+                 "                                g_disable_aot=1, but skips the translate_insn\n"
+                 "                                entry patch.  Apple's runtime then translates\n"
+                 "                                with stock JIT codegen, providing an\n"
+                 "                                apples-to-apples baseline against the\n"
+                 "                                optimised path (both have AOT cache +\n"
+                 "                                interpreter disabled).\n"
+                 "  X87_ALWAYS_NONE=1             diagnostic: sidecar always replies None,\n"
+                 "                                so the stub falls through to stock for every\n"
+                 "                                request.  Use to A/B whether a freeze is in\n"
+                 "                                our JIT output or the IPC marshalling itself.\n"
+                 "  X87_LOG_OPS=1                 diagnostic: sidecar prints one line per\n"
+                 "                                handled op with mnemonic + insn_idx.  With a\n"
+                 "                                deterministic freeze repro, the last few\n"
+                 "                                lines name the suspect.  HIGH-VOLUME — only\n"
+                 "                                enable when bisecting.\n"
+                 "  X87_LOG_THROUGHPUT=1          diagnostic: sidecar reporter thread prints\n"
+                 "                                req/s every 2 s + an idle-transition line.\n"
+                 "                                Off by default; enable when telling 'stuck'\n"
+                 "                                apart from 'just slow' on long workloads.\n"
+                 "  X87_DISABLE_CACHE=1           drop the cross-instruction GPR cache\n"
+                 "  X87_FAST_ROUND=1              skip RC dispatch; always emit FCVTNS/FRINTN\n"
+                 "                                (round-to-nearest only — UNSAFE for code that\n"
+                 "                                 uses FLDCW to change rounding mode, e.g. Lua)\n"
+                 "  X87_DISABLE_DEFERRED_FXCH=1   disable OPT-G (deferred FXCH permutation)\n"
+                 "  X87_DISABLE_X87_IR=1          disable the IR optimisation pipeline\n"
+                 "  X87_DISABLE_ALL_FUSIONS=1     disable every peephole fusion\n"
+                 "  X87_GATE_FLUSH_THRESHOLD=N             override the IR-gate flush-and-\n"
+                 "  X87_GATE_FLUSH_THRESHOLD_DEFERRED_POP=N proceed minimum run length per\n"
+                 "  X87_GATE_FLUSH_THRESHOLD_PERM_DIRTY=N   branch.  Defaults: top_dirty=3,\n"
+                 "                                deferred_pop=3, perm_dirty=3.  Clamp to\n"
+                 "                                [3,16].  Useful for dialing back a specific\n"
+                 "                                branch if a workload regresses (bumps the\n"
+                 "                                threshold so the branch flushes only on\n"
+                 "                                longer runs).  The tag_push branch always\n"
+                 "                                refuses; no threshold knob.\n"
+                 "  X87_LOG_ROLLBACK=1            DIAGNOSTIC: print one stdout line per IR-gate\n"
+                 "                                speculative-flush rollback firing.  Format:\n"
+                 "                                [rollback] branch=<name> ir_fail=<reason>\n"
+                 "                                buf_end_delta=<bytes> td <pre>-><post> tp\n"
+                 "                                <pre>-><post> dpc <pre>-><post> pd <pre>-\n"
+                 "                                ><post> opcode=<x87 op> pc=0x<rip>\n"
+                 "                                block_id=<u32> hash=0x<u64> insn_idx=<n>\n"
+                 "                                run_remaining=<n>\n"
+                 "  X87_ENABLE_ROLLBACK_TOP_DIRTY=1     DIAGNOSTIC: enable rollback for the\n"
+                 "  X87_ENABLE_ROLLBACK_DEFERRED_POP=1  top_dirty / deferred_pop gate branches.\n"
+                 "                                Default off as a conservative ship setting;\n"
+                 "                                the perm_dirty branch rolls back\n"
+                 "                                unconditionally.\n"
+                 "  X87_ROLLBACK_HASH_LIST=0xH,…  DIAGNOSTIC: bisect rollback by IR-content\n"
+                 "  X87_NO_ROLLBACK_HASH_LIST=…   hash (FNV-1a, PC zeroed); stable across\n"
+                 "                                runs.  Comma-separated 64-bit hex values.\n"
+                 "                                Include list non-empty → rollback only for\n"
+                 "                                those hashes.  Exclude list non-empty →\n"
+                 "                                rollback never for those hashes (exclude\n"
+                 "                                wins over include).  Hashes are printed in\n"
+                 "                                the [rollback] log line.\n"
+                 "  X87_DISABLE_FUSIONS=name1,…   disable specific fusions; names:\n");
     for (const auto& e : kFusionTable) {
         std::fprintf(out, "                                  %s\n", e.name);
     }

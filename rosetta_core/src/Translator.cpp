@@ -181,44 +181,35 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
             const bool force_gate =
                 g_rosetta_config != nullptr && g_rosetta_config->force_x87_ir_gate != 0;
             bool gate_refused = false;
-            // Speculative-flush rollback state.  The gate-refusal cascade may
-            // emit a small flush (3-14 ARM) and clear a deferred cache flag,
-            // then fall through to compile_run.  If compile_run subsequently
-            // bails on kFprPressure / kGprPressure (the flush passed the gate
-            // but the lower's per-node peak still exceeds the pool), the flush
-            // emit is pure overhead — the next dispatch path (peephole or
-            // single-op) doesn't benefit from the cleared flag because each
-            // single-op handles deferred state itself.  Capture pre-flush
-            // state so we can rewind the buffer + cache flags on IR failure.
+            // Speculative-flush rollback state.  The gate-refusal cascade
+            // may emit a small flush (3-14 ARM) and clear a deferred cache
+            // field, then fall through to compile_run.  If compile_run
+            // subsequently bails on kFprPressure / kGprPressure, the
+            // flush ARM is wasted — the next dispatch path (peephole /
+            // single-op) handles the deferred state itself.  Rollback
+            // rewinds insn_buf.end and restores the cleared cache field.
             //
-            // The tag_push_pending branch is excluded — it was converted to
-            // always-refuse in the WoW character-rotation fix.  No flush, no
-            // rollback needed for that branch.
-            // Speculative-flush rollback state — only the perm_dirty branch
-            // participates by default.  The top_dirty and deferred_pop
-            // branches were also amenable on paper (alloc/free symmetric,
-            // no fixups, the sidecar respects the rewound buf.end), but
-            // enabling rollback for either independently corrupted WoW
-            // weapon transforms in a way that no static-trace analysis
-            // pinned in the 2026-05-04 session.  Only perm_dirty rollback
-            // ships.  See feedback_open_bugs_for_next_session.md.
+            // perm_dirty participates unconditionally.  top_dirty and
+            // deferred_pop are gated by X87_ENABLE_ROLLBACK_TOP_DIRTY /
+            // X87_ENABLE_ROLLBACK_DEFERRED_POP — default off.  Both
+            // became safe on 2026-05-06 once X87IRLower::lower()'s
+            // prologue began flushing incoming tag_push_pending /
+            // deferred_pop_count / perm_dirty (`855a424`); they are
+            // kept opt-in as a conservative ship default plus diagnostic
+            // hook for future cache-cascade work.  X87_LOG_ROLLBACK=1
+            // prints one stdout line per firing.
             //
-            // INVESTIGATION (inv/rollback-hyp3 branch only): the
-            // X87_ENABLE_ROLLBACK_TOP_DIRTY / _DEFERRED_POP env knobs
-            // re-enable rollback for the bisect-corrupting branches so
-            // we can build a deterministic in-test repro.  Saves are
-            // captured unconditionally (cheap); restores fire only when
-            // the matching knob is set.  X87_LOG_ROLLBACK=1 prints one
-            // diagnostic line per rollback firing.
+            // The tag_push_pending branch never flushes (always refuses)
+            // since the WoW character-rotation fix, so no rollback is
+            // needed for it.
             const uint64_t saved_buf_end = translation_result->insn_buf.end;
             const int8_t saved_perm_dirty = cache.perm_dirty;
             int8_t saved_perm[8];
             for (int i = 0; i < 8; i++) {
                 saved_perm[i] = cache.perm[i];
             }
-            // Investigation-only saves (inv/rollback-hyp3): captured
-            // unconditionally (cheap), restored only when the matching
-            // X87_ENABLE_ROLLBACK_* knob is set.
+            // Captured unconditionally (cheap); restored only when the
+            // matching X87_ENABLE_ROLLBACK_* knob is set.
             const int8_t saved_top_dirty = cache.top_dirty;
             const int8_t saved_tag_push_pending = cache.tag_push_pending;
             const int8_t saved_deferred_pop_count = cache.deferred_pop_count;
@@ -262,9 +253,9 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                                                                      cache.prev_x87_opcode);
                         }
                         mirror_gate_counters();
-                        // Investigation knob: enable rollback for this branch.
-                        // Composes hash-list bounds via rollback_allowed().
-                        // With empty hash lists this is equivalent to
+                        // Diagnostic enable knob (default off).  Composes
+                        // hash-list bounds via rollback_allowed(); with
+                        // empty hash lists this is equivalent to
                         // "branch enable knob set?".
                         if (rollback_allowed(g_rosetta_config != nullptr
                                                  ? g_rosetta_config->x87_enable_rollback_top_dirty
@@ -281,25 +272,16 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                     }
                 } else if (cache.tag_push_pending != 0) {
                     // REFUSE the IR run when tag_push_pending is set without
-                    // the top_dirty companion.  The previous design ("flush
-                    // tag and proceed to compile_run") emitted a 6-ARM tag
-                    // clear and fell through.  Diagnostic 2026-05-04 (WoW
-                    // capture, X87_LOG_TAG_PUSH_FLUSH=1) showed every single
-                    // firing of that flush at threshold=3 was followed by
-                    // compile_run bailing on GPR pressure (peak_gpr=9 vs
-                    // pool=8) — the dominant trigger shape was prev=fst →
-                    // next=fld+fcomp+fstsw, where the FCmp's structural 4-wide
-                    // GPR peak forces the bail.  100% wasted ARM, and the
-                    // wasted-flush variant was the suspected culprit for the
-                    // WoW character-rotation corruption that gated the
-                    // threshold at 8 (effectively making the firing rare).
-                    //
-                    // Refusing here matches the threshold=8/no-fire behavior
-                    // for correctness.  The previous threshold knob
-                    // (X87_GATE_FLUSH_THRESHOLD_TAG_PUSH) is now a no-op kept
-                    // only for backward env-var compatibility — it's still
-                    // parsed and clamped at startup but the value is unused
-                    // by this branch.  See feedback_ir_gate_top_dirty_threshold.md.
+                    // the top_dirty companion.  Earlier designs flushed the
+                    // tag (6 ARM) and fell through; a 2026-05-04 diagnostic
+                    // (WoW capture) showed every firing at threshold=3 was
+                    // followed by compile_run bailing on GPR pressure
+                    // (peak_gpr=9 vs pool=8 — the FCmp follow-on shape's
+                    // structural 4-wide GPR peak forces the bail).  100%
+                    // wasted ARM; refusing here matches the no-fire behavior
+                    // for correctness.  No threshold knob exists for this
+                    // branch — it always refuses.  See
+                    // feedback_ir_gate_top_dirty_threshold.md.
                     cache.tally_ir_gate_tag_push =
                         static_cast<uint16_t>(cache.tally_ir_gate_tag_push + 1);
                     bump_max_run(profile::kIRGateReasonTagPush);
@@ -330,8 +312,8 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                         cache.deferred_pop_count = 0;
                         bump_max_run(profile::kIRGateReasonDeferredPop);
                         mirror_gate_counters();
-                        // Investigation knob: enable rollback for this branch.
-                        // Composes hash-list bounds via rollback_allowed().
+                        // Diagnostic enable knob (default off).  Composes
+                        // hash-list bounds via rollback_allowed().
                         if (rollback_allowed(
                                 g_rosetta_config != nullptr
                                     ? g_rosetta_config->x87_enable_rollback_deferred_pop
@@ -422,14 +404,16 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                             break;
                     }
                     mirror_tally();
-                    // Speculative-flush rollback (perm_dirty branch only):
-                    // if the perm_dirty flush emitted ARM and compile_run
-                    // bailed, the flush ARM is wasted — peephole / single-op
-                    // handles the deferred perm via perm_flush_before_stack_change.
-                    // Rewind the buffer and restore cache.perm[] + perm_dirty
-                    // to pre-flush state.  Diagnostic counters (bump_max_run,
-                    // mirror_gate_counters) intentionally stay — they record
-                    // that an attempt was made.
+                    // Speculative-flush rollback: if the gate-cascade flush
+                    // emitted ARM and compile_run bailed, the flush ARM is
+                    // wasted — peephole / single-op handles the deferred
+                    // state itself.  Rewind insn_buf.end and restore the
+                    // cleared cache field(s) to pre-flush state.  The
+                    // perm_dirty branch always restores; top_dirty /
+                    // deferred_pop only when flushed_branch indicates
+                    // the matching opt-in enable knob fired.  Diagnostic
+                    // counters (bump_max_run, mirror_gate_counters) stay
+                    // — they record that an attempt was made.
                     if (flushed) {
                         const uint64_t pre_rewind_end = translation_result->insn_buf.end;
                         const int8_t pre_top_dirty = cache.top_dirty;
@@ -437,15 +421,16 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                         const int8_t pre_deferred_pop_count = cache.deferred_pop_count;
                         const int8_t pre_perm_dirty = cache.perm_dirty;
                         translation_result->insn_buf.end = saved_buf_end;
-                        // perm_dirty branch always restores cache.perm[] + perm_dirty
-                        // (this is the shipped behavior).
+                        // perm_dirty rollback is unconditional (not gated by
+                        // an opt-in enable); restores cache.perm[] + perm_dirty.
                         if (flushed_branch == kRollbackPermDirty) {
                             cache.perm_dirty = saved_perm_dirty;
                             for (int i = 0; i < 8; i++) {
                                 cache.perm[i] = saved_perm[i];
                             }
                         }
-                        // Investigation-only: branch-specific cache restores.
+                        // Branch-specific cache restores for the opt-in
+                        // top_dirty / deferred_pop rollback paths.
                         if (flushed_branch == kRollbackTopDirty) {
                             cache.top_dirty = saved_top_dirty;
                         }

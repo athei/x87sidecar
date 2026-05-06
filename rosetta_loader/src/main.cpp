@@ -842,7 +842,7 @@ int main(int argc, char* argv[]) try {
     dbg.writeMemory(runtimeBase + offsetFinder.offsetDisableAot_, &g_disable_aot_value,
                     sizeof(g_disable_aot_value));
 
-    // --disable-hook — passthrough mode for benchmarks.
+    // X87_DISABLE_HOOK=1 — passthrough mode for benchmarks.
     //
     // We've now disabled Apple's AOT cache + interpreter modes (the
     // single-byte g_disable_aot=1 write does that, see
@@ -854,7 +854,7 @@ int main(int argc, char* argv[]) try {
     // inline emit.  This is the apples-to-apples baseline `run_benchmarks.sh`
     // compares against.
     if (g_cfg.loader_disable_hook) {
-        VERBOSE_LOG("--disable-hook: passthrough mode; detaching after disable_aot write\n");
+        VERBOSE_LOG("X87_DISABLE_HOOK=1: passthrough mode; detaching after disable_aot write\n");
         if (!dbg.detach()) {
             return 1;
         }

@@ -53,7 +53,6 @@ All flags are set via environment variables and read at runtime.
 | Variable | Description |
 |----------|-------------|
 | `X87_FAST_ROUND=1` | Skip rounding mode dispatch (faster but unsafe for FLDCW-heavy code) |
-| `X87_EXTENDED_FPR_SCRATCH=1` | Expand FPR scratch register pool |
 
 ### Debugging & Troubleshooting
 
