@@ -45,12 +45,12 @@ struct RosettaConfig {
     uint8_t disable_x87_ir;         // X87_DISABLE_X87_IR        disable IR optimisation pipeline
     uint8_t force_x87_ir_gate;      // measurement-only flag for tools/profile_analyze: bypass
                                     // the IR-eligibility gate's pre-build refusal conditions
-                                    // (run_remaining<3, top_dirty, tag_push_pending,
-                                    // deferred_pop_count, perm_dirty) so compile_run is
-                                    // called regardless.  The emitted code is *not*
-                                    // semantically correct when the dirty conditions hold —
-                                    // do NOT set in production.  Used to answer "what would
-                                    // IR emit for this pattern if the gate were lifted?".
+                                    // (run_remaining<3, top_dirty, deferred_pop_count,
+                                    // perm_dirty) so compile_run is called regardless.  The
+                                    // emitted code is *not* semantically correct when the
+                                    // dirty conditions hold — do NOT set in production.  Used
+                                    // to answer "what would IR emit for this pattern if the
+                                    // gate were lifted?".
     uint64_t disabled_fusions_mask;  // X87_DISABLE_FUSIONS=fld_arithp,...
 
     // X87_GATE_FLUSH_THRESHOLD[_DEFERRED_POP|_PERM_DIRTY]
@@ -60,20 +60,11 @@ struct RosettaConfig {
     // range is [3, 16] (clamped at parse time).
     //
     // Compile-time defaults: top_dirty=3, deferred_pop=3, perm_dirty=3.
-    // The tag_push_pending branch has no threshold knob: it always
-    // refuses (never flushes).  The previous flush-and-proceed design
-    // was wasted ARM in 100% of WoW firings (compile_run bailed every
-    // time on GPR pressure from the FCmp-heavy follow-on shape) and
-    // was the suspected culprit for character-rotation matrix
-    // corruption when its threshold was lowered to 3.  See
-    // feedback_ir_gate_top_dirty_threshold.md.
-    //
-    // Originally all four had higher defaults (5/8/10/8) under the
-    // suspicion that lowering top_dirty caused WoW vertex-transform
-    // corruption.  That attribution was wrong: the actual culprit was
-    // the speculative-flush rollback in the (since-reverted) commit
-    // 923ad2e, not top_dirty's threshold.  Once 923ad2e was reverted,
-    // top_dirty=3 / deferred_pop=3 / perm_dirty=3 are all clean.
+    // The cascade has no tag_push_pending arm — incoming tag state is
+    // handled by lower()'s prologue (X87IRLower.cpp:343-350), and
+    // cache.tag_push_pending is preserved through compile_run bails by
+    // the pre-lower FPR/GPR pressure check.  See
+    // feedback_ir_gate_top_dirty_threshold.md for history.
     uint8_t x87_ir_gate_flush_threshold_top_dirty;
     uint8_t x87_ir_gate_flush_threshold_deferred_pop;
     uint8_t x87_ir_gate_flush_threshold_perm_dirty;

@@ -198,9 +198,14 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
             // diagnostic work.  X87_LOG_ROLLBACK=1 prints one stdout
             // line per firing.
             //
-            // The tag_push_pending branch never flushes (always refuses)
-            // since the WoW character-rotation fix, so no rollback is
-            // needed for it.
+            // The standalone tag_push_pending refusal arm was removed
+            // 2026-05-06: lower()'s prologue at X87IRLower.cpp:343-350
+            // emits the tag clear when it runs, and compile_run's
+            // FPR/GPR pressure check (X87IRLower.cpp:1536-1564) bails
+            // before lower(), so cache.tag_push_pending is preserved on
+            // bail.  The cascade absorbs the common (top_dirty,
+            // tag_push) co-set case at the top_dirty arm; the rare
+            // tag_push-only case falls through with no gate-side flush.
             const uint64_t saved_buf_end = translation_result->insn_buf.end;
             const int8_t saved_perm_dirty = cache.perm_dirty;
             int8_t saved_perm[8];
@@ -228,11 +233,18 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                     bump_max_run(profile::kIRGateReasonShortRun);
                     gate_refused = true;
                 } else if (cache.top_dirty != 0) {
-                    // FLUSH top_dirty only (3 ARM).  When tag_push_pending is
-                    // also set (common after x87_push), we deliberately leave
-                    // it: if IR consumes all ops the tick() chain clears
-                    // tag_push as a side effect; on partial-consume (rare) the
-                    // tag_push branch below catches it on the next call.
+                    // FLUSH top_dirty only (3 ARM).  tag_push_pending is
+                    // commonly set alongside (x87_push set both); we leave
+                    // it untouched here.  If compile_run consumes the run
+                    // and lower() runs, lower's prologue
+                    // (X87IRLower.cpp:343-350) emits the tag clear.  If
+                    // compile_run bails before lower (FPR / GPR pressure),
+                    // cache.tag_push_pending is still set; the next call
+                    // hits this branch again or the deferred_pop /
+                    // perm_dirty arms.  The standalone tag_push refusal arm
+                    // was removed 2026-05-06: lower()'s prologue makes the
+                    // fall-through correct, and the cascade absorbs the
+                    // common (top_dirty, tag_push) co-set case here.
                     // Override via X87_GATE_FLUSH_THRESHOLD; 0 = default 3.
                     const int kMinRunForFlush =
                         (g_rosetta_config != nullptr &&
@@ -269,22 +281,6 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                         bump_max_run(profile::kIRGateReasonTopDirty);
                         gate_refused = true;
                     }
-                } else if (cache.tag_push_pending != 0) {
-                    // REFUSE the IR run when tag_push_pending is set without
-                    // the top_dirty companion.  Earlier designs flushed the
-                    // tag (6 ARM) and fell through; a 2026-05-04 diagnostic
-                    // (WoW capture) showed every firing at threshold=3 was
-                    // followed by compile_run bailing on GPR pressure
-                    // (peak_gpr=9 vs pool=8 — the FCmp follow-on shape's
-                    // structural 4-wide GPR peak forces the bail).  100%
-                    // wasted ARM; refusing here matches the no-fire behavior
-                    // for correctness.  No threshold knob exists for this
-                    // branch — it always refuses.  See
-                    // feedback_ir_gate_top_dirty_threshold.md.
-                    cache.tally_ir_gate_tag_push =
-                        static_cast<uint16_t>(cache.tally_ir_gate_tag_push + 1);
-                    bump_max_run(profile::kIRGateReasonTagPush);
-                    gate_refused = true;
                 } else if (cache.deferred_pop_count != 0) {
                     // FLUSH deferred_pop_count alone (2 + 6*count ARM).  Reaches
                     // here when top_dirty=0 (the top_dirty branch fired earlier
