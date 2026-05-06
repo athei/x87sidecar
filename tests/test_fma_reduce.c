@@ -60,14 +60,14 @@ static float weight[16] __attribute__((aligned(16)));
 
 static void run_chain_n2(double init, double* out) {
     __asm__ volatile(
-        "fldl %2\n\t"          /* ST(0) = init                                */
-        "flds 0(%0)\n\t"       /* push data[0]: ST(0)=L0, ST(1)=init           */
-        "fmuls 0(%1)\n\t"      /* ST(0) *= weight[0]                          */
+        "fldl %2\n\t"                /* ST(0) = init                                */
+        "flds 0(%0)\n\t"             /* push data[0]: ST(0)=L0, ST(1)=init           */
+        "fmuls 0(%1)\n\t"            /* ST(0) *= weight[0]                          */
         "faddp %%st(0), %%st(1)\n\t" /* ST(1) += ST(0); pop                   */
         "flds 4(%0)\n\t"
         "fmuls 4(%1)\n\t"
         "faddp %%st(0), %%st(1)\n\t"
-        "fstpl %3\n"           /* *out = ST(0); pop                            */
+        "fstpl %3\n" /* *out = ST(0); pop                            */
         :
         : "r"(data), "r"(weight), "m"(init), "m"(*out)
         : "memory");
