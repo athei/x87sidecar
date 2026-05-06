@@ -78,34 +78,32 @@ struct RosettaConfig {
     uint8_t x87_ir_gate_flush_threshold_deferred_pop;
     uint8_t x87_ir_gate_flush_threshold_perm_dirty;
 
-    // Diagnostic toggles for the IR-gate speculative-flush rollback
-    // machinery (Translator.cpp).  When the gate's top_dirty /
-    // deferred_pop / perm_dirty branch emits a flush and falls through
-    // to compile_run, and compile_run subsequently bails on
-    // FprPressure/GprPressure, the flush ARM is wasted — the next
-    // dispatch path (peephole / single-op) handles the deferred state
-    // itself.  The rollback rewinds the buffer + restores the cleared
-    // cache field so the wasted ARM is dropped.
+    // IR-gate speculative-flush rollback machinery (Translator.cpp).
+    // When the gate's top_dirty / deferred_pop / perm_dirty branch
+    // emits a flush and falls through to compile_run, and compile_run
+    // subsequently bails on FprPressure/GprPressure, the flush ARM is
+    // wasted — the next dispatch path (peephole / single-op) handles
+    // the deferred state itself.  The rollback rewinds the buffer +
+    // restores the cleared cache field so the wasted ARM is dropped.
     //
-    // perm_dirty rollback is unconditional (always on; it shipped
-    // first).  top_dirty / deferred_pop rollback default off and are
-    // gated by these enables; safety was established 2026-05-06 once
-    // X87IRLower::lower()'s prologue began flushing incoming
-    // tag_push_pending / deferred_pop_count / perm_dirty (`855a424`).
+    // perm_dirty rollback is unconditional (no knob).  top_dirty and
+    // deferred_pop default ON since 2026-05-06: the X87IRLower::lower()
+    // prologue flush (`855a424`) closed the cascade hole that had
+    // corrupted WoW geom + weapon when these branches rolled back.
+    // The knobs remain as bisect / diagnostic kill-switches — set =0
+    // to disable an individual branch.
     //
-    // X87_LOG_ROLLBACK=1
+    // X87_LOG_ROLLBACK=1   (default off)
     //   Print one stdout line per rollback firing: branch, ir_fail
     //   reason, buf_end delta, restored cache fields (pre->post), and
-    //   the cur_instr opcode/pc.  Useful for offline correlation with
+    //   the cur_instr opcode/pc.  For offline correlation with
     //   X87_PROFILE captures via tools/rollback_diff.
     //
-    // X87_ENABLE_ROLLBACK_TOP_DIRTY=1
-    //   Enable rollback for the top_dirty gate branch.  Saves
-    //   cache.top_dirty before the flush and restores it on bail.
+    // X87_ENABLE_ROLLBACK_TOP_DIRTY=0       (default on)
+    //   Disable rollback for the top_dirty gate branch.
     //
-    // X87_ENABLE_ROLLBACK_DEFERRED_POP=1
-    //   Symmetric for the deferred_pop gate branch.  Saves
-    //   cache.deferred_pop_count and restores it on bail.
+    // X87_ENABLE_ROLLBACK_DEFERRED_POP=0    (default on)
+    //   Disable rollback for the deferred_pop gate branch.
     uint8_t x87_log_rollback;
     uint8_t x87_enable_rollback_top_dirty;
     uint8_t x87_enable_rollback_deferred_pop;

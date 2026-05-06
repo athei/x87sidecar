@@ -49,6 +49,17 @@ bool env_truthy(const char* name) {
     return std::strcmp(v, "0") != 0;
 }
 
+// Inverse of env_truthy for knobs that default ON: returns 1 unless
+// the env var is explicitly set to "0".  Unset / empty / any other
+// value reads as on.
+uint8_t env_default_on(const char* name) {
+    const char* v = std::getenv(name);
+    if (v == nullptr || v[0] == '\0') {
+        return 1;
+    }
+    return std::strcmp(v, "0") == 0 ? 0 : 1;
+}
+
 void apply_fusion_list(const char* csv, uint64_t& mask) {
     char buf[512];
     std::strncpy(buf, csv, sizeof(buf) - 1);
@@ -146,12 +157,16 @@ RosettaConfig load_config_from_env() {
     parse_gate_threshold("X87_GATE_FLUSH_THRESHOLD_PERM_DIRTY", "perm_dirty",
                          cfg.x87_ir_gate_flush_threshold_perm_dirty);
 
-    // Diagnostic enables for the speculative-flush rollback machinery
-    // (Translator.cpp).  Default off; perm_dirty rollback is
-    // unconditional and not gated by these.
+    // Speculative-flush rollback machinery (Translator.cpp).
+    // perm_dirty rollback is unconditional.  top_dirty and deferred_pop
+    // default ON since 2026-05-06: the lower() prologue flush at
+    // X87IRLower.cpp:343-350 (commit 855a424) closed the cascade hole
+    // that previously corrupted WoW geom + weapon when these branches
+    // rolled back.  Set =0 to disable an individual branch (bisect /
+    // diagnostic).  X87_LOG_ROLLBACK stays default-off.
     cfg.x87_log_rollback = env_truthy("X87_LOG_ROLLBACK") ? 1 : 0;
-    cfg.x87_enable_rollback_top_dirty = env_truthy("X87_ENABLE_ROLLBACK_TOP_DIRTY") ? 1 : 0;
-    cfg.x87_enable_rollback_deferred_pop = env_truthy("X87_ENABLE_ROLLBACK_DEFERRED_POP") ? 1 : 0;
+    cfg.x87_enable_rollback_top_dirty = env_default_on("X87_ENABLE_ROLLBACK_TOP_DIRTY");
+    cfg.x87_enable_rollback_deferred_pop = env_default_on("X87_ENABLE_ROLLBACK_DEFERRED_POP");
     if (const char* v = std::getenv("X87_ROLLBACK_HASH_LIST"); v != nullptr && v[0] != '\0') {
         parse_hash_list(v, cfg.x87_rollback_hash_list);
         std::printf("[rosettax87] X87_ROLLBACK_HASH_LIST: %zu unique hashes\n",
@@ -231,11 +246,12 @@ void print_env_help(std::FILE* out) {
                  "                                ><post> opcode=<x87 op> pc=0x<rip>\n"
                  "                                block_id=<u32> hash=0x<u64> insn_idx=<n>\n"
                  "                                run_remaining=<n>\n"
-                 "  X87_ENABLE_ROLLBACK_TOP_DIRTY=1     DIAGNOSTIC: enable rollback for the\n"
-                 "  X87_ENABLE_ROLLBACK_DEFERRED_POP=1  top_dirty / deferred_pop gate branches.\n"
-                 "                                Default off as a conservative ship setting;\n"
-                 "                                the perm_dirty branch rolls back\n"
-                 "                                unconditionally.\n"
+                 "  X87_ENABLE_ROLLBACK_TOP_DIRTY=0     DIAGNOSTIC: disable rollback for the\n"
+                 "  X87_ENABLE_ROLLBACK_DEFERRED_POP=0  top_dirty / deferred_pop gate branches.\n"
+                 "                                Default ON since 2026-05-06 (the lower()\n"
+                 "                                prologue flush at X87IRLower.cpp:343-350\n"
+                 "                                closed the cascade hole).  perm_dirty rolls\n"
+                 "                                back unconditionally and has no knob.\n"
                  "  X87_ROLLBACK_HASH_LIST=0xH,…  DIAGNOSTIC: bisect rollback by IR-content\n"
                  "  X87_NO_ROLLBACK_HASH_LIST=…   hash (FNV-1a, PC zeroed); stable across\n"
                  "                                runs.  Comma-separated 64-bit hex values.\n"

@@ -190,14 +190,13 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
             // rewinds insn_buf.end and restores the cleared cache field.
             //
             // perm_dirty participates unconditionally.  top_dirty and
-            // deferred_pop are gated by X87_ENABLE_ROLLBACK_TOP_DIRTY /
-            // X87_ENABLE_ROLLBACK_DEFERRED_POP — default off.  Both
-            // became safe on 2026-05-06 once X87IRLower::lower()'s
-            // prologue began flushing incoming tag_push_pending /
-            // deferred_pop_count / perm_dirty (`855a424`); they are
-            // kept opt-in as a conservative ship default plus diagnostic
-            // hook for future cache-cascade work.  X87_LOG_ROLLBACK=1
-            // prints one stdout line per firing.
+            // deferred_pop default ON since 2026-05-06: the
+            // X87IRLower::lower() prologue flush (`855a424`) closed the
+            // cascade hole that previously corrupted WoW geom + weapon
+            // when these branches rolled back.  X87_ENABLE_ROLLBACK_*=0
+            // remains as a per-branch kill-switch for bisect / future
+            // diagnostic work.  X87_LOG_ROLLBACK=1 prints one stdout
+            // line per firing.
             //
             // The tag_push_pending branch never flushes (always refuses)
             // since the WoW character-rotation fix, so no rollback is
@@ -253,7 +252,7 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                                                                      cache.prev_x87_opcode);
                         }
                         mirror_gate_counters();
-                        // Diagnostic enable knob (default off).  Composes
+                        // Per-branch kill-switch (default on).  Composes
                         // hash-list bounds via rollback_allowed(); with
                         // empty hash lists this is equivalent to
                         // "branch enable knob set?".
@@ -312,7 +311,7 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                         cache.deferred_pop_count = 0;
                         bump_max_run(profile::kIRGateReasonDeferredPop);
                         mirror_gate_counters();
-                        // Diagnostic enable knob (default off).  Composes
+                        // Per-branch kill-switch (default on).  Composes
                         // hash-list bounds via rollback_allowed().
                         if (rollback_allowed(
                                 g_rosetta_config != nullptr
