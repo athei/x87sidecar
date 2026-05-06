@@ -1,95 +1,105 @@
 # x87sidecar
 
-## Overview
+Faster x87 floating-point for x86 apps running under Apple's Rosetta 2 on Apple Silicon.
 
-An experimental project that hooks into Apple's Rosetta to replace x87 instruction handlers with faster implementations, and patches the translation pipeline to emit AArch64 instructions directly for improved performance.
+This project is a fork of [Lifeisawful/rosettax87_jit](https://github.com/Lifeisawful/rosettax87_jit). It started as a drop-in JIT replacement for stock Rosetta's x87 instruction handlers, but has since diverged enough — both architecturally and in scope — that upstreaming back is no longer realistic, hence the rename.
 
-## Prerequisites
+## Why fork?
 
-- macOS 15 or later
-- C compiler (clang)
-- CMake
+The original `rosettax87` was a **dylib injected into the wine/x86 process**. It mapped its own anonymous pages with `MAP_TRANSLATED_ALLOW_EXECUTE`, dropped hand-rolled ARM64 into them, and patched stock's `translate_insn` to branch into that code.
+
+That works on the happy path. It does not survive signals.
+
+**The constraint:** inside a process running under Rosetta, every ARM64 instruction the CPU executes is supposed to have been produced by Rosetta itself from x86. When a signal fires (or any other event makes the runtime walk the thread's PC), Rosetta does an ARM64-PC → x86-PC reverse lookup against its own translation tables. ARM64 code from an injected dylib is unknown to those tables — the lookup misses, and Rosetta aborts with:
+
+```
+rosetta error: no code fragment associated with the given arm pc
+```
+
+The longer the JIT runs, the more time the thread spends with PC inside the injected dylib's `__TEXT`, and the more likely a signal will arrive at exactly the wrong moment. In real workloads (e.g. World of Warcraft under wine) this surfaced as random crashes proportional to JIT load — un-fixable without leaving the dylib model.
+
+**The fix is structural:** keep all our ARM64 code out of the Rosetta'd process entirely. Run the translator in a separate native arm64 process — the **sidecar**. The only thing we still write *inside* the Rosetta'd process is a tiny IPC stub, and we write it into the same translation-output buffer stock's `translate_insn` would have written into — i.e., into pages stock has already allocated and registered with Rosetta as translated-from-x86. We don't introduce any new executable mappings of our own; we just put different bytes into pages the runtime already considers blessed, so the reverse-lookup tables cover the stub for free.
+
+## Architecture
+
+```
+┌──────────────────── wine + x86 app (under Rosetta) ─────────────────────┐
+│                                                                          │
+│   x86 stream ─► stock translate_insn  ─► is x87?                         │
+│                                              │                           │
+│                                       no ◄───┴───► yes                   │
+│                                       │             │                    │
+│                                       ▼             ▼                    │
+│                              stock writes     we write IPC stub          │
+│                              ARM64 into       into the SAME              │
+│                              its output       output buffer              │
+│                              buffer           (Rosetta-blessed)          │
+│                                                     │                    │
+│                                                     │ mach_msg2          │
+└─────────────────────────────────────────────────────┼────────────────────┘
+                                                      │
+                                                      ▼
+┌──────────────────────── x87sidecar (native arm64) ──────────────────────┐
+│                                                                          │
+│   IR translator  ─►  peephole fusion / FMA / inline transcendentals      │
+│                                       │                                  │
+│                                       ▼                                  │
+│                              ARM64 bytes + fixups                        │
+│                                       │                                  │
+│                                       ▼ reply                            │
+│                           (caller installs into                          │
+│                            stock's translated cache)                     │
+│                                                                          │
+│   per-call: mach_vm_read of source bytes, mach_vm_write of result        │
+│   shared (mach_vm_remap'd, copy=FALSE): per-block exec counters          │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+The cost is real: every cold-translated x87 block now pays a Mach IPC round-trip plus 4–6 `mach_vm_read` / `mach_vm_write` syscalls (for the IR buffer, insn buffer, and translation-result struct) that the in-process dylib didn't pay. Once stock has installed the ARM64 bytes the sidecar is no longer on the hot path, so steady-state execution speed is unaffected, but cold translation is slower than it used to be. Profile counters are already `mach_vm_remap`'d (copy=FALSE) so JIT-emitted `LDADDAL` on a parent VA hits the same backing page the sidecar reads; doing the same for the IR / insn / TR buffers is a planned change to claw back the per-call syscalls.
+
+The upside is that the sidecar is a normal arm64 process, free to use the C++ standard library and any arm64 dependencies. The in-process dylib had to stay close to no-std discipline — every call from our `__TEXT` to a library increased the wall-clock fraction the parent thread spent with its PC inside our pages, and therefore the rate of the reverse-lookup panic. Out of process, that constraint is gone.
+
+The `x87sidecar` binary plays both roles: when invoked with a target x86 program, it launches the target under Rosetta, `PT_ATTACH`es, patches `translate_insn`, then drops into its own receive loop serving IPC requests.
+
+## Status
+
+x87 coverage: arithmetic, memory ops, comparisons, the full transcendental set (fsin, fcos, fsincos, fpatan, f2xm1, fyl2x, fyl2xp1, fptan, fprem, fprem1, fxtract, fscale), state-management ops (fldenv, fstenv, fxsave, fxrstor, fsave, frstor, fclex, finit, fldcw, fstsw), and the typical fusion patterns produced by 3D-game pipelines.
+
+Tested live against TurtleWoW (a x86 World of Warcraft client). Not a general-purpose drop-in for arbitrary x86 software — it's been hardened against the workloads it sees, and may need work on others.
 
 ## Building
 
-### Main Project
-
-```
+```bash
 cmake -B build
 cmake --build build
 ```
 
-### Testing & Benchmarks
+Tests and benchmarks are built automatically.
 
-Tests and benchmarks are built automatically as part of the CMake build.
-
-Run the test suite:
 ```bash
-bash scripts/run_tests.sh              # build + test (native Rosetta & x87sidecar)
-bash scripts/run_tests.sh --no-build   # skip build
-bash scripts/run_tests.sh --native-only # native Rosetta only
-bash scripts/run_tests.sh test_arith   # run a specific test
+bash scripts/run_tests.sh                # build + test (native Rosetta & x87sidecar)
+bash scripts/run_tests.sh --no-build     # skip build
+bash scripts/run_tests.sh --native-only  # baseline only
+bash scripts/run_tests.sh test_arith     # specific test
+bash scripts/run_benchmarks.sh           # build + benchmark
 ```
 
-Run benchmarks (compares native Rosetta, loader with optimizations disabled, and loader with full optimizations):
-```bash
-bash scripts/run_benchmarks.sh            # build + benchmark
-bash scripts/run_benchmarks.sh --no-build # skip build
-```
-
-You will see a popup asking you to authorize debugging. Once approved, the process is granted a debug session.
-Reference: [Debugging tool entitlement](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.security.cs.debugger)
-
-Alternatively (Not Recommended), you can disable `Debugging Restrictions` part of System Integrity Protection (SIP) by running `csrutil enable --without debug` in macOS Recovery.
-
-Warning: This reduces system security. NOT recommended.
+`PT_ATTACH` requires either the [debugger entitlement](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.security.cs.debugger) (granted via the dialog you get on first launch) or `csrutil enable --without debug` (not recommended).
 
 ## Configuration
 
-All flags are set via environment variables and read at runtime.
+Knobs are environment variables read at startup. The most useful ones:
 
-### Optimization & Performance
-
-| Variable | Description |
-|----------|-------------|
-| `X87_FAST_ROUND=1` | Skip rounding mode dispatch (faster but unsafe for FLDCW-heavy code) |
-
-### Debugging & Troubleshooting
-
-These flags are primarily useful for narrowing down bugs by selectively disabling features.
-
-| Variable | Description |
-|----------|-------------|
+| Variable | Effect |
+|---|---|
+| `X87_FAST_ROUND=1` | Skip rounding-mode dispatch (faster but unsafe for FLDCW-heavy code) |
 | `X87_DISABLE_CACHE=1` | Disable x87 translation cache |
-| `X87_DISABLE_DEFERRED_FXCH=1` | Disable deferred FXCH optimization |
-| `X87_DISABLE_X87_IR=1` | Disable IR optimization pipeline |
+| `X87_DISABLE_X87_IR=1` | Disable IR optimization pipeline (direct translator only) |
 | `X87_DISABLE_ALL_FUSIONS=1` | Disable all instruction fusions |
-| `X87_DISABLE_FUSIONS=f1,f2,...` | Disable specific fusions (comma-separated) |
-| `X87_DISABLE_HOOK=1` | Skip the translate_insn entry patch (passthrough — apples-to-apples bench baseline) |
-| `X87_LOGS=1` | Enable verbose logging output from the loader |
-
-## Usage with Wine
-
-> **Deprecated:** `wine@devel` removed support for the `ROSETTA_X87_PATH` environment variable, so the integration described below no longer works. There is no replacement at this time. The section is retained for historical reference.
-
-### ~~Windows Applications~~
-
-~~You can use the brew `wine@devel` cask with RosettaHack x87+JIT. It supports launching Windows applications through Wine with an environment variable `ROSETTA_X87_PATH`.~~
-
-~~1. Install `wine@devel` using [Homebrew](https://brew.sh/)~~
-
-~~`brew install --cask wine@devel`~~
-
-~~2. To permanently set the environment variable, add the following to your `~/.bashrc` or `~/.zshrc` file:~~
-
-~~`export ROSETTA_X87_PATH=/Path/To/rosettax87`~~
-
-3. Run the Windows application
-
-```bash
-wine PATH_TO_BINARY.exe
-```
+| `X87_DISABLE_FUSIONS=f1,f2,…` | Disable specific fusions |
+| `X87_DISABLE_HOOK=1` | Skip the `translate_insn` patch (apples-to-apples baseline against stock Rosetta) |
+| `X87_LOGS=1` | Verbose loader logging |
 
 ## License
 
-This project is licensed under `MIT`.
+MIT.
