@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "rosetta_core/IRInstr.h"
+#include "rosetta_core/Opcode.h"
 
 namespace stub_asm {
 namespace {
@@ -874,21 +875,26 @@ StubBlobs build(uint64_t handlerAddr, uint64_t translateInsnAddr, const uint8_t 
     // The filter dereferences the IRInstr at &instr_array[insn_idx] (parent
     // memory; we run inside parent's address space) and reads its 16-bit
     // opcode field.  If the opcode is outside both x87 ranges
-    //   low:  0x25..0x30 = FCMOVcc + FCOMI variants
-    //   high: 0xBD..0x10C = most x87 ops
+    //   low:  kOpcodeName_fcmovb .. kOpcodeName_fucomip (FCMOVcc + FCOMI variants)
+    //   high: kOpcodeName_f2xm1  .. kOpcodeName_fyl2xp1 (most x87 ops)
     // it abs-jumps straight to STASH so the original translate_insn prologue
     // runs and stock handles the instruction itself — same outcome as an IPC
     // reply of None, but without the round-trip.
     //
     // Uses x9, x10, x11 — caller-saved scratch in AAPCS, so we don't need to
     // preserve them across the filter.
-    constexpr uint32_t kX87LoLo = 0x25;
-    constexpr uint32_t kX87LoHi = 0x30;
-    constexpr uint32_t kX87HiLo = 0xBD;
-    constexpr uint32_t kX87HiHi = 0x10C;
-
     static_assert(sizeof(IRInstr) == 0x50, "stub filter assumes IRInstr stride 0x50");
     static_assert(offsetof(IRInstr, opcode) == 0x4, "stub filter assumes IRInstr.opcode at +4");
+    static_assert(kOpcodeName_fucomip - kOpcodeName_fcmovb == 11,
+                  "stub filter assumes fcmovb..fucomip is 12 contiguous opcodes");
+    static_assert(kOpcodeName_fyl2xp1 - kOpcodeName_f2xm1 == 79,
+                  "stub filter assumes f2xm1..fyl2xp1 is 80 contiguous opcodes");
+    static_assert(
+        kOpcodeName_fxsave >= kOpcodeName_f2xm1 && kOpcodeName_fxsave <= kOpcodeName_fyl2xp1,
+        "stub filter assumes fxsave sits inside the high x87 range");
+    static_assert(
+        kOpcodeName_fxrstor >= kOpcodeName_f2xm1 && kOpcodeName_fxrstor <= kOpcodeName_fyl2xp1,
+        "stub filter assumes fxrstor sits inside the high x87 range");
 
     std::vector<uint8_t> filter;
     filter.reserve(kFilterBytes);
@@ -898,16 +904,16 @@ StubBlobs build(uint64_t handlerAddr, uint64_t translateInsnAddr, const uint8_t 
     emit(filter, madd(10, 4, 9, 2));
     //  2: ldrh w9, [x10, #4]          ; w9 = uint16_t opcode
     emit(filter, ldrh_w_offset(9, 10, 4));
-    //  3: sub w11, w9, #0x25
-    emit(filter, sub_imm_w(11, 9, kX87LoLo));
-    //  4: cmp w11, #0xB               ; in-low-range if w11 ≤ 0xB unsigned
-    emit(filter, cmp_imm_w(11, kX87LoHi - kX87LoLo));
+    //  3: sub w11, w9, #fcmovb
+    emit(filter, sub_imm_w(11, 9, kOpcodeName_fcmovb));
+    //  4: cmp w11, #(fucomip-fcmovb)  ; in-low-range if w11 ≤ this unsigned
+    emit(filter, cmp_imm_w(11, kOpcodeName_fucomip - kOpcodeName_fcmovb));
     //  5: b.ls do_ipc                 ; +8 instr → land at do_ipc (instr 13)
     emit(filter, b_cond(COND_LS, 8));
-    //  6: sub w11, w9, #0xBD
-    emit(filter, sub_imm_w(11, 9, kX87HiLo));
-    //  7: cmp w11, #0x4F              ; in-high-range if w11 ≤ 0x4F unsigned
-    emit(filter, cmp_imm_w(11, kX87HiHi - kX87HiLo));
+    //  6: sub w11, w9, #f2xm1
+    emit(filter, sub_imm_w(11, 9, kOpcodeName_f2xm1));
+    //  7: cmp w11, #(fyl2xp1-f2xm1)   ; in-high-range if w11 ≤ this unsigned
+    emit(filter, cmp_imm_w(11, kOpcodeName_fyl2xp1 - kOpcodeName_f2xm1));
     //  8: b.ls do_ipc                 ; +5 instr → land at do_ipc (instr 13)
     emit(filter, b_cond(COND_LS, 5));
     //  9..12: abs-jump to STASH (movz/movk/movk x16, $stashAddr; br x16)
