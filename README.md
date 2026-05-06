@@ -67,30 +67,25 @@ These flags are primarily useful for narrowing down bugs by selectively disablin
 | `X87_DISABLE_FUSIONS=f1,f2,...` | Disable specific fusions (comma-separated) |
 | `X87_DISABLE_HOOK=1` | Skip the translate_insn entry patch (passthrough — apples-to-apples bench baseline) |
 | `X87_LOGS=1` | Enable verbose logging output from the loader |
-| `X87_FORCE_ATTACH=1` | Force debugger attach even when argv looks like a 64-bit Windows PE |
-
-### Automatic x64 Bypass
-
-When used with Wine, `rosettax87` reads the PE headers of any `.exe` it sees in argv and skips debugger attachment **only** when it positively identifies a 64-bit (x64) PE — those programs do not use x87 instructions. Mach-O binaries (e.g. our own test/bench programs) and anything the loader cannot classify as x64 PE are attached as normal.
 
 ## Usage with Wine
 
-### Windows Applications
+> **Deprecated:** `wine@devel` removed support for the `ROSETTA_X87_PATH` environment variable, so the integration described below no longer works. There is no replacement at this time. The section is retained for historical reference.
 
-You can use the brew `wine@devel` cask with RosettaHack x87+JIT. It supports launching Windows applications through Wine with an environment variable `ROSETTA_X87_PATH`.
+### ~~Windows Applications~~
 
-1. Install `wine@devel` using [Homebrew](https://brew.sh/)
+~~You can use the brew `wine@devel` cask with RosettaHack x87+JIT. It supports launching Windows applications through Wine with an environment variable `ROSETTA_X87_PATH`.~~
 
-```bash
-brew install --cask wine@devel
-```
+~~1. Install `wine@devel` using [Homebrew](https://brew.sh/)~~
 
-2. To permanently set the environment variable, add the following to your `~/.bashrc` or `~/.zshrc` file:
-```bash
-export ROSETTA_X87_PATH=/Path/To/rosettax87
-```
+~~`brew install --cask wine@devel`~~
+
+~~2. To permanently set the environment variable, add the following to your `~/.bashrc` or `~/.zshrc` file:~~
+
+~~`export ROSETTA_X87_PATH=/Path/To/rosettax87`~~
 
 3. Run the Windows application
+
 ```bash
 wine PATH_TO_BINARY.exe
 ```
