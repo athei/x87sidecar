@@ -514,7 +514,8 @@ static auto try_fuse_fxch_arithp(TranslationResult* a1, IRInstr* fxch_instr, IRI
 
 static auto try_fuse_fld_fstp(TranslationResult* a1, IRInstr* fld_instr, IRInstr* fstp_instr)
     -> std::optional<int> {
-    if (fstp_instr->opcode() != kOpcodeName_fstp && fstp_instr->opcode() != kOpcodeName_fstp_stack) {
+    if (fstp_instr->opcode() != kOpcodeName_fstp &&
+        fstp_instr->opcode() != kOpcodeName_fstp_stack) {
         return std::nullopt;
     }
 
@@ -926,7 +927,8 @@ static auto try_fuse_fld_arith_fstp(TranslationResult* a1, IRInstr* fld_instr, I
 
     // ── 3. Validate FSTP ────────────────────────────────────────────────────
 
-    if (fstp_instr->opcode() != kOpcodeName_fstp && fstp_instr->opcode() != kOpcodeName_fstp_stack) {
+    if (fstp_instr->opcode() != kOpcodeName_fstp &&
+        fstp_instr->opcode() != kOpcodeName_fstp_stack) {
         return std::nullopt;
     }
 

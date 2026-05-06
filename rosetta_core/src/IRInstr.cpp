@@ -1,4 +1,7 @@
 #include "rosetta_core/IRInstr.h"
+
+#include <cstdint>
+
 #include "rosetta_core/OpcodeCompatibility.h"
 
 auto IRInstr::opcode() const -> uint16_t {

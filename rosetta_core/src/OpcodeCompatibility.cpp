@@ -1,5 +1,7 @@
 #include "rosetta_core/OpcodeCompatibility.h"
 
+#include <cstdint>
+
 #include "rosetta_core/Opcode.h"
 #include "rosetta_core/Opcode_26_4.h"
 #include "rosetta_core/RosettaCore.h"
@@ -1346,9 +1348,9 @@ auto opcode_host_to_internal(uint16_t opcode) -> uint16_t {
             return kOpcodeName_xsave;
         case kOpcode_26_4_xsetbv:
             return kOpcodeName_xsetbv;
+        default:
+            return 0;
     }
-
-    return 0;
 }
 
 auto opcode_internal_to_host(uint16_t opcode) -> uint16_t {
@@ -2693,6 +2695,7 @@ auto opcode_internal_to_host(uint16_t opcode) -> uint16_t {
             return kOpcode_26_4_xsave;
         case kOpcodeName_xsetbv:
             return kOpcode_26_4_xsetbv;
+        default:
+            return 0;
     }
-    return 0;
 }
