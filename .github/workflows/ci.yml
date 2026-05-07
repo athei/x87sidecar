@@ -20,4 +20,8 @@ jobs:
         run: cmake --build build --parallel
 
       - name: Run tests
-        run: scripts/run_tests.sh --no-build
+        # PT_ATTACH on macOS needs either the debugger entitlement (granted
+        # via an interactive system dialog on first launch — not available
+        # in headless CI, would hang the job) or root.  GitHub's macos-26
+        # runners give passwordless sudo, so just use that.
+        run: sudo scripts/run_tests.sh --no-build
