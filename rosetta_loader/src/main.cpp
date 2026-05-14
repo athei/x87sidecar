@@ -28,6 +28,7 @@
 #include "rosetta_core/ConfigEnv.h"
 #include "rosetta_core/CoreConfig.h"
 #include "rosetta_core/ProfileRuntime.h"
+#include "rosetta_core/RosettaCore.h"
 #include "rosetta_core/TranscendentalHelper.h"
 #include "rosetta_core/TranslationResult.h"
 #include "sidecar.hpp"
@@ -732,6 +733,13 @@ int main(int argc, char* argv[]) try {
     dbg.readMemory(rosettaRuntimeExportsAddress, &exports, sizeof(exports));
 
     VERBOSE_LOG("Rosetta version: %llx\n", exports.version);
+
+    // The OpcodeCompatibility layer (used by both stub_asm::build below and the
+    // sidecar's Translator) gates 26.4↔26.5 opcode translation on this version.
+    // Unlike aotinvoke, the loader never calls rosetta_core_init(), so it must
+    // seed the version itself — otherwise the compat layer assumes a 26.4 host
+    // and mistranslates every x87 opcode on 26.5.
+    rosetta_core_set_runtime_version(exports.version);
 
     // ── M2: Inline IPC stub install ─────────────────────────────────────────
     //
