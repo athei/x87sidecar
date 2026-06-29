@@ -32,9 +32,11 @@
 #include "rosetta_core/IRInstr.h"
 #include "rosetta_core/IROperand.h"
 #include "rosetta_core/Opcode.h"
+#include "rosetta_core/Opcode_26_4.h"
 #include "rosetta_core/ProfileFormat.h"
 #include "rosetta_core/ProfileRuntime.h"
 #include "rosetta_core/Register.h"
+#include "rosetta_core/RosettaCore.h"
 #include "rosetta_core/ThreadContextOffsets.h"
 #include "rosetta_core/TranscendentalHelper.h"
 #include "rosetta_core/TranslationResult.h"
@@ -441,6 +443,19 @@ int main(int argc, char** argv) try {
     uint64_t dump_ir_binary_hash = 0;
     bool dump_ir_binary_set = false;
     std::string dump_ir_binary_path;
+    // Rosetta runtime version the profile was captured under.  The sidecar's
+    // loader seeds rosetta_core with the live Rosetta version (main.cpp), which
+    // drives opcode_host_to_internal(): for versions > 26.4 the host opcode IS
+    // already the internal kOpcodeName_* value (identity), while <= 26.4 host
+    // opcodes are remapped through the 26.4 compat table.  profile_analyze runs
+    // in its own process, so it must seed the same version — otherwise the
+    // identity-encoded opcodes in a modern (.prof captured under > 26.4) file
+    // get wrongly remapped (e.g. internal fld 0xDE is read as 26.4-host
+    // fisubr 0xDE), mis-dispatching and corrupting the whole analysis.  The
+    // .prof carries no version field, so default to the current regime
+    // (> 26.4, identity).  Pass --runtime-version 0 (or any value <= 26.4) to
+    // analyze a legacy profile captured under Rosetta <= 26.4.
+    uint64_t runtime_version = kVersion_26_4 + 1;
 
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -514,6 +529,9 @@ int main(int argc, char** argv) try {
                              v.c_str());
                 return 2;
             }
+        } else if (a == "--runtime-version" && i + 1 < argc) {
+            // Accepts decimal or 0x-prefixed hex (strtoull base 0).
+            runtime_version = std::strtoull(argv[++i], nullptr, 0);
         } else if (a == "--help" || a == "-h") {
             std::printf(
                 "Usage: profile_analyze [--min-exec N] [--max-rows N]\n"
@@ -567,7 +585,14 @@ int main(int argc, char** argv) try {
                 "                          block, and printed in the [rollback] log line.\n"
                 "  --dump-ir-binary 0xH P  Write the matching block's raw IRInstr[] (no\n"
                 "                          header) to path P.  Used by tests that re-feed\n"
-                "                          a captured IR stream into the Translator.\n");
+                "                          a captured IR stream into the Translator.\n"
+                "\n"
+                "  --runtime-version V     Rosetta version the profile was captured under,\n"
+                "                          driving opcode_host_to_internal().  Default is\n"
+                "                          the current regime (> 26.4: host opcodes are\n"
+                "                          already internal).  Pass 0 (or any value <= 26.4)\n"
+                "                          for a legacy profile captured under Rosetta\n"
+                "                          <= 26.4.  Decimal or 0x-hex.\n");
             return 0;
         } else if (!a.empty() && a[0] == '-') {
             std::fprintf(stderr, "unknown flag: %s\n", a.c_str());
@@ -581,6 +606,15 @@ int main(int argc, char** argv) try {
         std::fprintf(stderr, "error: no input files (use --help)\n");
         return 2;
     }
+
+    // Seed the Rosetta runtime version before any IRInstr::opcode() call, so
+    // opcode_host_to_internal() interprets the dumped opcodes the same way the
+    // sidecar did when it captured them (see runtime_version comment above).
+    rosetta_core_set_runtime_version(runtime_version);
+    std::fprintf(stderr, "runtime version: 0x%llx (%s)\n",
+                 static_cast<unsigned long long>(runtime_version),
+                 runtime_version > kVersion_26_4 ? "> 26.4: opcodes identity-mapped"
+                                                 : "<= 26.4: opcodes remapped via compat table");
 
     // Inline transcendentals (fsin/fcos/fpatan/...) materialise an absolute
     // address constant via emit_movz_movk_abs64.  The translator asserts the
