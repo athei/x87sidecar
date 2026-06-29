@@ -71,6 +71,7 @@ ALL_TESTS=(
     test_fstpt_gs
     test_ir_gate_tag_push
     test_fma_reduce
+    test_fma_reduce_strided
     test_fbld
     test_fclex
     test_fdecstp

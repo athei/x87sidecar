@@ -775,6 +775,47 @@ auto emit_faddp_d_from_v2d(AssemblerBuffer& buf, int Dd, int Vn) -> void {
     buf.emit(insn);
 }
 
+auto emit_ld1_lane_s(AssemblerBuffer& buf, int Vt, int Rn, int lane) -> void {
+    // LD1 {Vt.S}[lane], [Rn] — load one 32-bit element into lane `lane`.
+    //
+    // Advanced SIMD load/store single structure, LD1 single (32-bit), no
+    // writeback ([Rn] base, no offset):
+    //   bit[31] 0
+    //   bit[30] Q              // lane index high bit:  index = (Q<<1)|S
+    //   bits[29:23]=0011010
+    //   bit[22] L=1            // load
+    //   bit[21] R=0            // LD1 (single, 1 element)
+    //   bits[20:16]=00000      // no offset register
+    //   bits[15:13]=100        // opcode for word (S)
+    //   bit[12] S              // lane index low bit
+    //   bits[11:10]=00         // size=00 → 32-bit element
+    //   bits[9:5]   Rn
+    //   bits[4:0]   Rt
+    //
+    // {V.S}[0],[X] = 0x0D408000; lane bits are Q (bit30) and S (bit12).
+    uint32_t insn = 0x0D408000U;
+    insn |= static_cast<uint32_t>((lane >> 1) & 0x1) << 30;  // Q
+    insn |= static_cast<uint32_t>(lane & 0x1) << 12;         // S
+    insn |= static_cast<uint32_t>(Rn & 0x1F) << 5;
+    insn |= static_cast<uint32_t>(Vt & 0x1F);
+    buf.emit(insn);
+}
+
+auto emit_ld1_lane_d(AssemblerBuffer& buf, int Vt, int Rn, int lane) -> void {
+    // LD1 {Vt.D}[lane], [Rn] — load one 64-bit element into lane `lane`.
+    //
+    // Same single-structure form as emit_ld1_lane_s but for doublewords:
+    //   bits[15:13]=100 opcode, bit[12] S=0, bits[11:10]=01 size → 64-bit
+    //   element; the lane index is just Q (bit30).
+    //
+    // {V.D}[0],[X] = 0x0D408400; lane is Q (bit30).
+    uint32_t insn = 0x0D408400U;
+    insn |= static_cast<uint32_t>(lane & 0x1) << 30;  // Q = lane index for D
+    insn |= static_cast<uint32_t>(Rn & 0x1F) << 5;
+    insn |= static_cast<uint32_t>(Vt & 0x1F);
+    buf.emit(insn);
+}
+
 auto emit_ldr_literal_f64(AssemblerBuffer& buf, int Dd, uint64_t constant) -> void {
     // OPT-H: LDR Dd, [PC, #8] — load from 2 instructions ahead (the .quad)
     // Encoding (LDR literal, SIMD&FP):
