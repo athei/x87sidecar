@@ -327,38 +327,73 @@ static void emit_rcmode_dispatch(AssemblerBuffer& buf, int Wd_int, int Dd_val, i
 // Emits the body for an FMA reduction chain whose head is at `head_idx`.
 // Pre-conditions (established by pass_fma_reduce in X87IROptimize.cpp):
 //   * Every chain FMAdd has kFmaReduceMember; head additionally kFmaReduceHead
-//   * Every absorbed L_i / W_i LoadF32 has kFmaReduceMember
-//   * For each chain member k, inputs[0]/inputs[1] are LoadF32 with simple
-//     base+disp memrefs; the L stream and W stream are independently
-//     +4-contiguous from a per-stream base register
+//   * Every absorbed L_i / W_i load has kFmaReduceMember
+//   * For each chain member k, inputs[0]/inputs[1] are loads with simple
+//     base+disp memrefs, all the same width (LoadF32 or, chain-wide,
+//     LoadF64); the L and W streams each advance by their own constant
+//     stride from a per-stream base register
 //
-// Body shape (N = chain length):
+// Body shape (N = chain length).  Each pair packs two trios into the two
+// f64 lanes of V_acc.  How the lane pair is loaded depends on element width
+// and stride (derived from the first step, mirroring the pass):
 //   FMOV V_acc, A_init          ; lane 0 = A_init, lane 1 = 0 (NEON write
 //                                 semantics zero the upper 64 bits)
 //   for p in 0..floor(N/2)-1:
-//       LDR D V_data, [base_l + disp_l + 8*p]
-//       LDR D V_w,    [base_w + disp_w + 8*p]
-//       FCVTL V_data.2D, V_data.2S    ; widen 2×f32 → 2×f64
-//       FCVTL V_w.2D,    V_w.2S
-//       FMLA  V_acc.2D, V_data.2D, V_w.2D
+//       load V_data lanes ← L_{2p}, L_{2p+1}   (see load_fma_pair_v2d)
+//       load V_w    lanes ← W_{2p}, W_{2p+1}
+//       FMLA V_acc.2D, V_data.2D, V_w.2D
 //   FADDP D_result, V_acc.2D    ; horizontal sum: D_result = lane0 + lane1
-//   if N odd:
-//       LDR S + FCVT s→d for L_{N-1} into D_l
-//       LDR S + FCVT s→d for W_{N-1} into D_w
-//       FMADD D_result, D_l, D_w, D_result
+//   if N odd: scalar load(+widen) L_{N-1}, W_{N-1}; FMADD into D_result
 //
-// Per-pair cost: 5 ARM ÷ 2 trios = 2.5 ARM/trio.  For comparison the
-// scalar FMADD chain emits ~5 ARM/trio (LDR S + FCVT + LDR S + FCVT +
-// FMADD), so the matched body runs at roughly half the scalar cost.
+// Lane-load strategy per stream (load_fma_pair_v2d):
+//   * f32 contiguous (stride 4): one LDR D loads the adjacent pair, FCVTL .2D
+//   * f64 contiguous (stride 8): one LDR Q loads the adjacent pair (already .2D)
+//   * strided:  LDR S/D lane 0, then LD1 {V.S/D}[1] lane 1 (FCVTL for f32)
 //
 // FP rounding note: the vector path accumulates even-indexed and odd-
 // indexed products into separate lanes, then does a single FADDP combine
 // at the end, plus a leading FMOV that places A_init in lane 0.  This
 // re-associates the additions versus the strict left-to-right scalar
-// chain.  Each individual product is still fused (FMLA per lane mirrors
-// FMADD), but the inter-lane combination is a regular FADD.  Bit-exact
-// equality with the scalar path is therefore not guaranteed; tests use
-// ULP tolerance.
+// chain (the widened products themselves are unchanged, and each is still
+// fused via FMLA).  Bit-exact equality with the scalar path is therefore
+// not guaranteed in general; tests pin inputs that are exactly
+// representable so the re-association is exact.
+
+// Load the f64 lane-pair (lane 0 ← n_lane0, lane 1 ← n_lane1) of one stream
+// into V as a .2D vector, widening from f32 when needed.  `contiguous` means
+// n_lane1 sits exactly element_size bytes after n_lane0, so a single
+// LDR D (f32) / LDR Q (f64) fetches both lanes; otherwise each lane is loaded
+// separately (LDR + LD1-into-lane-1).
+static void load_fma_pair_v2d(AssemblerBuffer& buf, TranslationResult* result, Op elem_op,
+                              bool contiguous, int V, const Node& n_lane0, const Node& n_lane1) {
+    if (contiguous) {
+        const int Xa =
+            compute_operand_address(*result, /*is_64bit=*/true, n_lane0.mem_operand, GPR::XZR);
+        if (elem_op == Op::LoadF64) {
+            emit_ldr_q_imm(buf, V, Xa, /*imm12=*/0);  // 2 adjacent f64 → .2D
+        } else {
+            emit_fldr_imm(buf, /*size=*/3, V, Xa, /*imm12=*/0);  // 2 adjacent f32 → .2S
+        }
+        free_gpr(*result, Xa);
+    } else {
+        const int Xa0 =
+            compute_operand_address(*result, /*is_64bit=*/true, n_lane0.mem_operand, GPR::XZR);
+        emit_fldr_imm(buf, elem_op == Op::LoadF64 ? 3 : 2, V, Xa0, /*imm12=*/0);  // lane 0
+        free_gpr(*result, Xa0);
+        const int Xa1 =
+            compute_operand_address(*result, /*is_64bit=*/true, n_lane1.mem_operand, GPR::XZR);
+        if (elem_op == Op::LoadF64) {
+            emit_ld1_lane_d(buf, V, Xa1, /*lane=*/1);
+        } else {
+            emit_ld1_lane_s(buf, V, Xa1, /*lane=*/1);
+        }
+        free_gpr(*result, Xa1);
+    }
+    if (elem_op == Op::LoadF32) {
+        emit_fcvtl_v2d_from_v2s(buf, V, V);
+    }
+}
+
 static void lower_fma_reduce(AssemblerBuffer& buf, TranslationResult* result, FPRState& fprs,
                              const Context& ctx, int head_idx) {
     // Re-walk the chain (mirror of pass_fma_reduce's extension loop).  No
@@ -397,6 +432,20 @@ static void lower_fma_reduce(AssemblerBuffer& buf, TranslationResult* result, FP
     const int num_pairs = N / 2;
     const bool has_odd = (N & 1) != 0;
 
+    // Element width and per-stream stride (mirrors pass_fma_reduce's
+    // validation; the pass guarantees both streams share one load op and each
+    // advances by a constant stride, and that N >= 2 so chain[1] exists).
+    // stride == element_size is the contiguous fast path; anything else needs
+    // per-lane strided loads.
+    const auto& l0n = ctx.nodes[ctx.nodes[chain[0]].inputs[0]];
+    const auto& w0n = ctx.nodes[ctx.nodes[chain[0]].inputs[1]];
+    const auto& l1n = ctx.nodes[ctx.nodes[chain[1]].inputs[0]];
+    const auto& w1n = ctx.nodes[ctx.nodes[chain[1]].inputs[1]];
+    const Op elem_op = l0n.op;
+    const int elem_size = (elem_op == Op::LoadF64) ? 8 : 4;
+    const bool contig_l = (l1n.mem_operand->mem.disp - l0n.mem_operand->mem.disp) == elem_size;
+    const bool contig_w = (w1n.mem_operand->mem.disp - w0n.mem_operand->mem.disp) == elem_size;
+
     // Capture A_init's FPR (head's input[2]).  Will be FMOV'd into V_acc
     // lane 0 to seed the accumulator.  Auto-freed by free_dead_inputs at
     // the end of the head's iteration since last_use[A_init] == head_idx.
@@ -411,26 +460,13 @@ static void lower_fma_reduce(AssemblerBuffer& buf, TranslationResult* result, FP
     const int V_w = alloc_free_fpr(*result);
 
     for (int p = 0; p < num_pairs; p++) {
-        // Each pair processes two adjacent trios: chain[2p] and chain[2p+1].
-        // Both trios' L and W are at consecutive +4 offsets (validated by
-        // pass), so one LDR D loads the f32-pair and one FCVTL widens it.
-        const int pair_idx = 2 * p;
-        const auto& a_pair = ctx.nodes[chain[pair_idx]];
-        const auto& l_node = ctx.nodes[a_pair.inputs[0]];
-        const auto& w_node = ctx.nodes[a_pair.inputs[1]];
-
-        const int Xaddr_l =
-            compute_operand_address(*result, /*is_64bit=*/true, l_node.mem_operand, GPR::XZR);
-        emit_fldr_imm(buf, /*size=*/3, V_data, Xaddr_l, /*imm12=*/0);
-        free_gpr(*result, Xaddr_l);
-
-        const int Xaddr_w =
-            compute_operand_address(*result, /*is_64bit=*/true, w_node.mem_operand, GPR::XZR);
-        emit_fldr_imm(buf, /*size=*/3, V_w, Xaddr_w, /*imm12=*/0);
-        free_gpr(*result, Xaddr_w);
-
-        emit_fcvtl_v2d_from_v2s(buf, V_data, V_data);
-        emit_fcvtl_v2d_from_v2s(buf, V_w, V_w);
+        // Each pair processes trios chain[2p] (lane 0) and chain[2p+1] (lane 1).
+        const auto& a0 = ctx.nodes[chain[2 * p]];
+        const auto& a1 = ctx.nodes[chain[2 * p + 1]];
+        load_fma_pair_v2d(buf, result, elem_op, contig_l, V_data, ctx.nodes[a0.inputs[0]],
+                          ctx.nodes[a1.inputs[0]]);
+        load_fma_pair_v2d(buf, result, elem_op, contig_w, V_w, ctx.nodes[a0.inputs[1]],
+                          ctx.nodes[a1.inputs[1]]);
         emit_fmla_v2d(buf, V_acc, V_data, V_w);
     }
 
@@ -447,20 +483,25 @@ static void lower_fma_reduce(AssemblerBuffer& buf, TranslationResult* result, FP
         const auto& a_tail = ctx.nodes[chain[N - 1]];
         const auto& l_node = ctx.nodes[a_tail.inputs[0]];
         const auto& w_node = ctx.nodes[a_tail.inputs[1]];
+        const int ld_size = (elem_op == Op::LoadF64) ? 3 : 2;
 
         const int D_l = alloc_free_fpr(*result);
         const int Xaddr_l =
             compute_operand_address(*result, /*is_64bit=*/true, l_node.mem_operand, GPR::XZR);
-        emit_fldr_imm(buf, /*size=*/2, D_l, Xaddr_l, /*imm12=*/0);
+        emit_fldr_imm(buf, ld_size, D_l, Xaddr_l, /*imm12=*/0);
         free_gpr(*result, Xaddr_l);
-        emit_fcvt_s_to_d(buf, D_l, D_l);
+        if (elem_op == Op::LoadF32) {
+            emit_fcvt_s_to_d(buf, D_l, D_l);
+        }
 
         const int D_w = alloc_free_fpr(*result);
         const int Xaddr_w =
             compute_operand_address(*result, /*is_64bit=*/true, w_node.mem_operand, GPR::XZR);
-        emit_fldr_imm(buf, /*size=*/2, D_w, Xaddr_w, /*imm12=*/0);
+        emit_fldr_imm(buf, ld_size, D_w, Xaddr_w, /*imm12=*/0);
         free_gpr(*result, Xaddr_w);
-        emit_fcvt_s_to_d(buf, D_w, D_w);
+        if (elem_op == Op::LoadF32) {
+            emit_fcvt_s_to_d(buf, D_w, D_w);
+        }
 
         emit_fmadd_f64(buf, D_result, D_l, D_w, D_result);
         free_fpr(*result, D_l);
@@ -1603,14 +1644,39 @@ int peak_live_fprs(const Context& ctx) {
             peak = std::max(live, peak);
         }
 
-        // FMA-reduction head: lower_fma_reduce allocates 2 transient vector
-        // FPRs (V_data, V_w) on top of the held accumulator V_acc (counted
-        // by produces_fpr).  Odd-tail D_l/D_w come AFTER V_data/V_w are
-        // freed and after V_acc is freed (D_result already allocated), so
-        // their +2 spike doesn't stack with the pair-body +2; one model
-        // covers both.
-        if (n.flags & kFmaReduceHead && live + 2 > peak) {
-            peak = live + 2;
+        // FMA-reduction head: the whole chain emits as one fused body at the
+        // head.  lower_fma_reduce allocates 2 transient vector FPRs (V_data,
+        // V_w) on top of the held accumulator V_acc (counted by produces_fpr
+        // above); the odd-tail D_l/D_w reuse those freed slots, so one +2
+        // spike covers both.
+        if (n.flags & kFmaReduceHead) {
+            if (live + 2 > peak) {
+                peak = live + 2;
+            }
+            // The chain produces a single result FPR (lower_fma_reduce assigns
+            // it to the *tail* member) that stays live until the tail's
+            // external consumer.  produces_fpr above attributed that FPR to
+            // the head, which the free loop would release at the head's
+            // immediate use (chain[1]) — too early, undercounting `live` for
+            // every node between chain[1] and the real consumer.  Re-attribute
+            // the holding to the tail so it is freed at last_use[tail].
+            int tail_node = i;
+            for (int j = i + 1; j < ctx.num_nodes; j++) {
+                const auto& m = ctx.nodes[j];
+                if (m.flags & kDead) {
+                    continue;
+                }
+                if (m.op != Op::FMAdd || !(m.flags & kFmaReduceMember)) {
+                    continue;
+                }
+                if (m.inputs[2] == tail_node) {
+                    tail_node = j;
+                }
+            }
+            if (tail_node != i && holding[i]) {
+                holding[i] = false;
+                holding[tail_node] = true;
+            }
         }
 
         // StoreF32 allocates a transient Ds_tmp (fcvt d→s narrowing) that is

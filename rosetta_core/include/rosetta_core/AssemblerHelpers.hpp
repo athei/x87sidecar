@@ -280,6 +280,17 @@ auto emit_fmla_v2d(AssemblerBuffer& buf, int Vd, int Vn, int Vm) -> void;
 // end of the reduction body.
 auto emit_faddp_d_from_v2d(AssemblerBuffer& buf, int Dd, int Vn) -> void;
 
+// LD1 {Vt.S}[lane], [Rn] — load one 32-bit element from [Rn] into lane `lane`
+// (0..3) of Vt, leaving the other lanes untouched.  Used by the strided
+// FMA-reduce path to assemble two non-adjacent f32s into a .2S pair (LDR S
+// into lane 0, then this into lane 1) before FCVTL widens to .2D.
+auto emit_ld1_lane_s(AssemblerBuffer& buf, int Vt, int Rn, int lane) -> void;
+
+// LD1 {Vt.D}[lane], [Rn] — load one 64-bit element from [Rn] into lane `lane`
+// (0..1) of Vt.  The f64 strided-FMA-reduce companion to emit_ld1_lane_s (no
+// FCVTL needed — the lanes are already f64).
+auto emit_ld1_lane_d(AssemblerBuffer& buf, int Vt, int Rn, int lane) -> void;
+
 // CSET Wd, cond — set Wd to 1 if condition holds, else 0
 // Encodes as CSINC Rd, XZR, XZR, invert(cond)
 // AArch64 cond codes: EQ=0 NE=1 CS=2 CC=3 MI=4 PL=5 VS=6 VC=7

@@ -323,11 +323,14 @@ static void pass_fcom_fstsw_fusion(Context& ctx) {
 //     ...
 //     AN = FMAdd(L_{N-1}, W_{N-1}, A_{N-1})
 //
-// where every L_i and W_i is a single-use LoadF32 with a simple base+disp
-// MemRef, and the two memory streams are independently +4-byte contiguous
-// (i.e. disp(L_i) = disp(L_0) + 4*i, all sharing the same base register;
-// same for W_i).  This is the matrix-vector dot-product idiom that
-// dominates the WoW workload (rank-1/2/10/12 in /tmp/epoch.prof).
+// where every L_i and W_i is a single-use LoadF32 (or, chain-wide, LoadF64)
+// with a simple base+disp MemRef, and each memory stream advances by its own
+// fixed stride: disp(L_i) = disp(L_0) + stride_L*i, all sharing one base
+// register (same for W_i, with an independent stride_W).  The stride is
+// derived from the first step (i=1) and validated across the chain — the
+// natural +element_size stride is the contiguous case, larger strides are
+// the matrix-vector dot-product idiom (stride-8/16) that dominates the WoW
+// workload (rank-1/2/10/12 in /tmp/epoch.prof).
 //
 // The pass tags the head FMAdd with kFmaReduceHead, and tags every FMAdd
 // in the chain plus their LoadF32 input pair with kFmaReduceMember.  The
@@ -458,10 +461,13 @@ static void pass_fma_reduce(Context& ctx) {
         // mem, and that each stream is +4-contiguous from its first.
         bool ok = true;
         FmaRejectReason reject_reason = FmaRejectReason::Stride;
+        Op elem_op = Op::LoadF32;  // captured at k==0; all loads must match
         uint8_t base_l = 0;
         uint8_t base_w = 0;
         int64_t disp_l_first = 0;
         int64_t disp_w_first = 0;
+        int64_t stride_l = 0;  // derived at k==1
+        int64_t stride_w = 0;
         for (int k = 0; k < chain_len && ok; k++) {
             const auto& a = ctx.nodes[chain[k]];
             const int16_t l_id = a.inputs[0];
@@ -473,7 +479,17 @@ static void pass_fma_reduce(Context& ctx) {
             }
             const auto& ln = ctx.nodes[l_id];
             const auto& wn = ctx.nodes[w_id];
-            if (ln.op != Op::LoadF32 || wn.op != Op::LoadF32) {
+            // Both streams must be the same load width — all LoadF32 (matrix-
+            // vector f32) or all LoadF64 (m64 doubles, e.g. TurtleWoW). The
+            // lowerer vectorises a single element width per chain.
+            if (k == 0) {
+                if ((ln.op != Op::LoadF32 && ln.op != Op::LoadF64) || wn.op != ln.op) {
+                    ok = false;
+                    reject_reason = FmaRejectReason::LoadKind;
+                    break;
+                }
+                elem_op = ln.op;
+            } else if (ln.op != elem_op || wn.op != elem_op) {
                 ok = false;
                 reject_reason = FmaRejectReason::LoadKind;
                 break;
@@ -513,8 +529,22 @@ static void pass_fma_reduce(Context& ctx) {
                 disp_l_first = ldisp;
                 disp_w_first = wdisp;
             } else {
-                const int64_t expected_l = disp_l_first + static_cast<int64_t>(4 * k);
-                const int64_t expected_w = disp_w_first + static_cast<int64_t>(4 * k);
+                if (k == 1) {
+                    // Derive each stream's constant stride from the first
+                    // step. Generalises the original +4-contiguous rule to
+                    // any fixed stride (matrix-vector idioms run stride-8/16)
+                    // and to LoadF64. A zero stride would alias the same
+                    // element into every lane — reject as ill-formed.
+                    stride_l = ldisp - disp_l_first;
+                    stride_w = wdisp - disp_w_first;
+                    if (stride_l == 0 || stride_w == 0) {
+                        ok = false;
+                        reject_reason = FmaRejectReason::Stride;
+                        break;
+                    }
+                }
+                const int64_t expected_l = disp_l_first + stride_l * static_cast<int64_t>(k);
+                const int64_t expected_w = disp_w_first + stride_w * static_cast<int64_t>(k);
                 if (lb != base_l || ldisp != expected_l) {
                     ok = false;
                     reject_reason = FmaRejectReason::Stride;
