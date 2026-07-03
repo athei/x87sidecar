@@ -84,6 +84,11 @@ struct X87Cache {
     // Indexed by kIRGateReason*; surfaces as the max_run column of the
     // IR-gate-refusal histogram.
     uint16_t max_run_at_gate[5] = {0, 0, 0, 0, 0};
+    // 1 = the current block contains a control-word writer (FLDCW/FLDENV/
+    // FRSTOR/FXRSTOR/FINIT/FSAVE).  Scanned once per block transition when
+    // X87_FAST_ROUND=2; consumed by x87_fast_round_active to keep the full
+    // RC dispatch in exactly those blocks.
+    int8_t block_has_cw_write = 0;
     // Last x87 opcode (kOpcodeName_*) translated in this block, or 0xFFFF
     // if none yet.  Used by the IR-gate top_dirty diagnostic to attribute
     // which preceding op left top_dirty=1 — surfaces in the analyzer's

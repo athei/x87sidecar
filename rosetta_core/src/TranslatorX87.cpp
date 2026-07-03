@@ -2147,7 +2147,7 @@ auto translate_fistp(TranslationResult* a1, IRInstr* a2) -> void {
     const int is_64bit_int = (int_size == IROperandSize::S64) ? 1 : 0;
     const int Wd_rc = Wd_tmp;  // free after emit_load_st — reuse as RC scratch
 
-    if (g_rosetta_config && g_rosetta_config->fast_round) {
+    if (x87_fast_round_active(*a1)) {
         // Fast path: assume RC=0 (round-to-nearest). Single instruction.
         // Correct for blocks that contain no FLDCW (fast_round=1: always; =2/smart: per-block).
         emit_fcvt_fp_to_int(buf, is_64bit_int, /*ftype=double*/ 1, /*rmode=FCVTNS*/ 0, Wd_int,
@@ -2613,7 +2613,7 @@ auto translate_frndint(TranslationResult* a1, IRInstr* /*a2*/) -> void {
     // Load ST(0) into Dd; Wd_tmp receives the byte offset of ST(0) for opt-3.
     const int Wk23 = emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Dd, Xst_base);
 
-    if (g_rosetta_config && g_rosetta_config->fast_round) {
+    if (x87_fast_round_active(*a1)) {
         // Fast path: assume RC=0 (round-to-nearest). Single FRINTN instruction.
         emit_fp_dp1(buf, /*type=*/1 /*f64*/, /*opcode=*/8 /*FRINTN*/, Dd, Dd);
     } else {
@@ -2869,7 +2869,7 @@ auto translate_fist(TranslationResult* a1, IRInstr* a2) -> void {
     const int is_64bit_int = (int_size == IROperandSize::S64) ? 1 : 0;
     const int Wd_rc = Wd_tmp;
 
-    if (g_rosetta_config && g_rosetta_config->fast_round) {
+    if (x87_fast_round_active(*a1)) {
         // Fast path: assume RC=0 (round-to-nearest). Single instruction.
         emit_fcvt_fp_to_int(buf, is_64bit_int, /*ftype=double*/ 1, /*rmode=FCVTNS*/ 0, Wd_int,
                             Dd_val);

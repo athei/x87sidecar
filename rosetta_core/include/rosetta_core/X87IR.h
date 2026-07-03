@@ -281,8 +281,11 @@ void fma_reduce_print_stats();
 int peak_live_fprs(const Context& ctx, int budget = 0x7FFFFFFF, int* first_over_node = nullptr);
 
 // GPR-side equivalent of peak_live_fprs (pinned + held + per-node transient
-// demand model; see X87IRLower.cpp for the model notes).
-int peak_live_gprs(const Context& ctx, int budget = 0x7FFFFFFF, int* first_over_node = nullptr);
+// demand model; see X87IRLower.cpp for the model notes).  fast_round must
+// match the effective fast-round decision the lowering will make
+// (x87_fast_round_active) so the RC-cache pinned-GPR prediction agrees.
+int peak_live_gprs(const Context& ctx, int budget = 0x7FFFFFFF, int* first_over_node = nullptr,
+                   bool fast_round = false);
 
 // Lower IR to AArch64 instructions, writing into result->insn_buf.
 void lower(Context& ctx, TranslationResult* result);

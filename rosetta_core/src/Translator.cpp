@@ -67,6 +67,29 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                 v = 0;
             }
             cache.prev_x87_opcode = 0xFFFFU;
+            // X87_FAST_ROUND=2: one scan per block for control-word writers;
+            // x87_fast_round_active keeps the full RC dispatch in blocks
+            // that contain one.
+            cache.block_has_cw_write = 0;
+            if (g_rosetta_config && g_rosetta_config->fast_round == 2) {
+                for (int64_t i = 0; i < num_instrs; i++) {
+                    switch (instr_array[i].opcode()) {
+                        case kOpcodeName_fldcw:
+                        case kOpcodeName_fldenv:
+                        case kOpcodeName_frstor:
+                        case kOpcodeName_fxrstor:
+                        case kOpcodeName_finit:
+                        case kOpcodeName_fsave:
+                            cache.block_has_cw_write = 1;
+                            break;
+                        default:
+                            break;
+                    }
+                    if (cache.block_has_cw_write) {
+                        break;
+                    }
+                }
+            }
             cache.profile_bid = profile::kOverflowId;
             // Compute the IR hash unconditionally so the X87_*_HASH_LIST
             // rollback gate works without X87_PROFILE.  The hash is

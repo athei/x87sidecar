@@ -295,8 +295,8 @@ static void emit_frint_dispatch_cached(AssemblerBuffer& buf, int Dd, int Dn, int
 // FCVTNS under fast_round).  See TranslatorX87.cpp for the detailed layout.
 
 static void emit_rcmode_dispatch(AssemblerBuffer& buf, int Wd_int, int Dd_val, int is_64bit_int,
-                                 int Xbase, int Wd_rc) {
-    if (g_rosetta_config && g_rosetta_config->fast_round) {
+                                 int Xbase, int Wd_rc, bool fast_round) {
+    if (fast_round) {
         // Fast path: assume RC=0 (round-to-nearest).
         emit_fcvt_fp_to_int(buf, is_64bit_int, /*ftype=double*/ 1, /*rmode=FCVTNS*/ 0, Wd_int,
                             Dd_val);
@@ -561,8 +561,9 @@ void lower(Context& ctx, TranslationResult* result) {
     // ── RC caching: hoist LDRH+UBFX when ≥2 RC consumers in a segment ────
     int Wd_rc_cached = -1;
     bool rc_cache_valid = false;
+    const bool fast_round = x87_fast_round_active(*result);
 
-    if (!(g_rosetta_config && g_rosetta_config->fast_round)) {
+    if (!fast_round) {
         int rc_count = 0;
         bool has_fcmp = false;
         for (int i = 0; i < ctx.num_nodes; i++) {
@@ -818,7 +819,7 @@ void lower(Context& ctx, TranslationResult* result) {
                 }
                 fprs.node_fpr[i] = static_cast<int8_t>(Dd);
 
-                if (g_rosetta_config && g_rosetta_config->fast_round) {
+                if (fast_round) {
                     // Fast path: RC=0 → FRINTN
                     emit_fp_dp1(buf, /*type=*/1, /*opcode=*/8 /*FRINTN*/, Dd, Dn);
                 } else if (Wd_rc_cached >= 0) {
@@ -1080,7 +1081,8 @@ void lower(Context& ctx, TranslationResult* result) {
                                                 Wd_tmp);
                 } else {
                     // FISTP/FIST: respect rounding mode from control_word.
-                    emit_rcmode_dispatch(buf, Wd_int, Dd_val, is_64bit_int, Xbase, Wd_tmp);
+                    emit_rcmode_dispatch(buf, Wd_int, Dd_val, is_64bit_int, Xbase, Wd_tmp,
+                                         fast_round);
                 }
 
                 int addr = compute_operand_address(*result, true, n.mem_operand, GPR::XZR);
@@ -1381,7 +1383,7 @@ void lower(Context& ctx, TranslationResult* result) {
 // before node_total would double-count it (predicting peak=9 instead of 8
 // for the common single-fused-FCmp+FStsw pair, gating off real WoW blocks
 // that fit in the 8-slot pool).
-int peak_live_gprs(const Context& ctx, int budget, int* first_over_node) {
+int peak_live_gprs(const Context& ctx, int budget, int* first_over_node, bool fast_round) {
     if (first_over_node) {
         *first_over_node = -1;
     }
@@ -1394,7 +1396,7 @@ int peak_live_gprs(const Context& ctx, int budget, int* first_over_node) {
     // see arm_no_ir 590 → arm_ir_forced 305, ~285 ARM/exec) than rc_cache's
     // per-RC-op micro-saving (~2 ARM × few ops).
     bool rc_cache = false;
-    if (!(g_rosetta_config && g_rosetta_config->fast_round)) {
+    if (!fast_round) {
         int rc_count = 0;
         bool has_fcmp = false;
         for (int i = 0; i < ctx.num_nodes; i++) {
@@ -2138,14 +2140,16 @@ int compile_run(TranslationResult* result, IRInstr* instr_array, int64_t num_ins
                 *out_reason = IRFailReason::kFprPressure;
             }
             if (out_peak_gprs) {
-                *out_peak_gprs = peak_live_gprs(ctx);
+                *out_peak_gprs = peak_live_gprs(ctx, 0x7FFFFFFF, nullptr,
+                                                x87_fast_round_active(*result));
             }
             return 0;
         }
 
         // Gate lowering on GPR pressure vs. available pool.
         int gpr_over_node = -1;
-        const int peak_gprs = peak_live_gprs(ctx, gpr_available, &gpr_over_node);
+        const int peak_gprs =
+            peak_live_gprs(ctx, gpr_available, &gpr_over_node, x87_fast_round_active(*result));
         if (out_peak_gprs) {
             *out_peak_gprs = peak_gprs;
         }

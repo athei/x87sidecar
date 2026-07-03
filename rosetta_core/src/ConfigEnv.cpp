@@ -118,7 +118,17 @@ RosettaConfig load_config_from_env() {
 
     // Translator knobs.
     cfg.disable_x87_cache = env_truthy("X87_DISABLE_CACHE") ? 1 : 0;
-    cfg.fast_round = env_truthy("X87_FAST_ROUND") ? 1 : 0;
+    // X87_FAST_ROUND: 1 (or any legacy truthy value) = always skip the RC
+    // dispatch; 2 = "smart" per-block mode — skip it only in blocks with no
+    // control-word writer (see x87_fast_round_active).  Both are opt-in and
+    // speculative; 2 is strictly safer than 1.
+    if (const char* fr = std::getenv("X87_FAST_ROUND"); fr != nullptr && fr[0] != '\0') {
+        if (std::strcmp(fr, "2") == 0) {
+            cfg.fast_round = 2;
+        } else {
+            cfg.fast_round = env_truthy("X87_FAST_ROUND") ? 1 : 0;
+        }
+    }
     cfg.disable_deferred_fxch = env_truthy("X87_DISABLE_DEFERRED_FXCH") ? 1 : 0;
     cfg.disable_x87_ir = env_truthy("X87_DISABLE_X87_IR") ? 1 : 0;
     cfg.disable_x87_single_fast = env_truthy("X87_DISABLE_SINGLE_FAST") ? 1 : 0;
@@ -250,6 +260,13 @@ void print_env_help(std::FILE* out) {
                  "  X87_FAST_ROUND=1              skip RC dispatch; always emit FCVTNS/FRINTN\n"
                  "                                (round-to-nearest only — UNSAFE for code that\n"
                  "                                 uses FLDCW to change rounding mode, e.g. Lua)\n"
+                 "  X87_FAST_ROUND=2              smart per-block variant: skip RC dispatch only\n"
+                 "                                in blocks with no control-word writer (FLDCW/\n"
+                 "                                FLDENV/FRSTOR/FXRSTOR/FINIT/FSAVE).  Strictly\n"
+                 "                                safer than =1, but STILL SPECULATIVE: RC is\n"
+                 "                                persistent thread state — a program that sets\n"
+                 "                                RC once at startup (_controlfp) is mis-rounded\n"
+                 "                                in CW-clean blocks.  Opt-in only.\n"
                  "  X87_DISABLE_DEFERRED_FXCH=1   disable OPT-G (deferred FXCH permutation)\n"
                  "  X87_DISABLE_X87_IR=1          disable the IR optimisation pipeline\n"
                  "  X87_DISABLE_SINGLE_FAST=1     disable the fused single-op fast path for\n"
