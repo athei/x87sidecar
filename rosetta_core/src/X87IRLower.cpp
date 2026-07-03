@@ -1679,11 +1679,42 @@ int peak_live_fprs(const Context& ctx) {
             }
         }
 
-        // StoreF32 allocates a transient Ds_tmp (fcvt d→s narrowing) that is
-        // freed before the node finishes.  Model as a +1 spike on top of the
-        // current live count.
-        if (n.op == Op::StoreF32 && live + 1 > peak) {
-            peak = live + 1;
+        // StoreF32 lowering coalesces consecutive same-input StoreF32 nodes
+        // into one fcvt + STR Q / STP S / STR S ladder.  Ds_narrow is always
+        // allocated; when at least one 4-wide STR Q group fires, Vq_broadcast
+        // is allocated too and both stay live until the group ends — a +2
+        // spike, not +1.  Mirror the lowering's group scan and greedy window
+        // walk exactly so the model never undercounts (an undercount trips
+        // alloc_free_fpr's assert(mask != 0), UB in release).
+        if (n.op == Op::StoreF32) {
+            int jj = i;
+            while (jj + 1 < ctx.num_nodes) {
+                const auto& nx = ctx.nodes[jj + 1];
+                if ((nx.flags & kDead) != 0) {
+                    break;
+                }
+                if (nx.op != Op::StoreF32 || nx.inputs[0] != n.inputs[0]) {
+                    break;
+                }
+                ++jj;
+            }
+            int spike = 1;  // Ds_narrow
+            int k = i;
+            while (k <= jj) {
+                if (k + 3 <= jj && can_emit_str_q(ctx.nodes[k], ctx.nodes[k + 1],
+                                                  ctx.nodes[k + 2], ctx.nodes[k + 3])) {
+                    spike = 2;  // + Vq_broadcast
+                    break;
+                }
+                if (k + 1 <= jj && can_emit_stp_s(ctx.nodes[k], ctx.nodes[k + 1])) {
+                    k += 2;
+                    continue;
+                }
+                k += 1;
+            }
+            if (live + spike > peak) {
+                peak = live + spike;
+            }
         }
 
         // Transcendentals: the lowering FMOVs inputs to d0/d1 (not in pool),
