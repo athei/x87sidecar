@@ -43,6 +43,8 @@ struct RosettaConfig {
     uint8_t fast_round;             // X87_FAST_ROUND            skip RC dispatch (round-to-nearest)
     uint8_t disable_deferred_fxch;  // X87_DISABLE_DEFERRED_FXCH disable OPT-G
     uint8_t disable_x87_ir;         // X87_DISABLE_X87_IR        disable IR optimisation pipeline
+    uint8_t disable_x87_single_fast;  // X87_DISABLE_SINGLE_FAST fall back to the generic
+                                      // per-op emitters for isolated (run==1) fld/fst/fstp
     uint8_t enable_fma_reduce;      // X87_ENABLE_FMA_REDUCE     NEON FMA-reduction pass
                                     //                           (default ON).  Pays off on
                                     //                           +4-contiguous dot products

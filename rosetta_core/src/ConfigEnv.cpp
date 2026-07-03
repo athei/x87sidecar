@@ -121,6 +121,7 @@ RosettaConfig load_config_from_env() {
     cfg.fast_round = env_truthy("X87_FAST_ROUND") ? 1 : 0;
     cfg.disable_deferred_fxch = env_truthy("X87_DISABLE_DEFERRED_FXCH") ? 1 : 0;
     cfg.disable_x87_ir = env_truthy("X87_DISABLE_X87_IR") ? 1 : 0;
+    cfg.disable_x87_single_fast = env_truthy("X87_DISABLE_SINGLE_FAST") ? 1 : 0;
     cfg.enable_fma_reduce = env_default_on("X87_ENABLE_FMA_REDUCE");
 
     if (env_truthy("X87_DISABLE_ALL_FUSIONS")) {
@@ -226,6 +227,9 @@ void print_env_help(std::FILE* out) {
                  "                                 uses FLDCW to change rounding mode, e.g. Lua)\n"
                  "  X87_DISABLE_DEFERRED_FXCH=1   disable OPT-G (deferred FXCH permutation)\n"
                  "  X87_DISABLE_X87_IR=1          disable the IR optimisation pipeline\n"
+                 "  X87_DISABLE_SINGLE_FAST=1     disable the fused single-op fast path for\n"
+                 "                                isolated (run==1) fld/fst/fstp — fall back\n"
+                 "                                to the generic per-op emitters\n"
                  "  X87_ENABLE_FMA_REDUCE=0       disable NEON FMA-reduction lowering for serial\n"
                  "                                FMADD chains.  Default ON.  Pays off only on\n"
                  "                                workloads with +4-contiguous data/weight\n"
