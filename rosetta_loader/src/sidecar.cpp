@@ -21,6 +21,7 @@
 #include "rosetta_core/CoreConfig.h"
 #include "rosetta_core/Fixup.h"
 #include "rosetta_core/IRInstr.h"
+#include "rosetta_core/IRModuleData.h"
 #include "rosetta_core/Opcode.h"
 #include "rosetta_core/ProfileFormat.h"
 #include "rosetta_core/ProfileRuntime.h"
@@ -65,7 +66,13 @@ struct ProfileState {
 };
 ProfileState g_profile;
 
-void dumpBlockIfNew(uint64_t block_ptr, const IRInstr* ir, uint64_t num_instrs) {
+// Defined below alongside the other parent-memory helpers; forward-declared so
+// the block dumper can read the translation module's record to recover the
+// block's absolute guest VA.
+bool readParent(mach_port_t task, uint64_t addr, void* dst, size_t size);
+
+void dumpBlockIfNew(mach_port_t parentTask, uint64_t module_data_ptr, uint64_t block_ptr,
+                    const IRInstr* ir, uint64_t num_instrs) {
     if (g_profile.file == nullptr) {
         return;
     }
@@ -81,10 +88,26 @@ void dumpBlockIfNew(uint64_t block_ptr, const IRInstr* ir, uint64_t num_instrs) 
         return;  // already wrote this block's IR stream
     }
 
+    // Recover the block's absolute guest x86 VA.  IRInstr::pc (== IRBlock::start_pc)
+    // is only an offset within the current translation module; the module's
+    // absolute base is IRModuleData::text_vmaddr_range.  Read that module record
+    // from the parent here — past the profiler-off and first-seen guards above —
+    // so it costs nothing when profiling is off and runs at most once per block,
+    // on the cold translation path, never in steady state.  (Guest is 32-bit, so
+    // base + offset fits in u32.)
+    uint64_t module_base = 0;
+    if (module_data_ptr != 0) {
+        IRModuleData mod{};
+        if (readParent(parentTask, module_data_ptr, &mod, sizeof(mod))) {
+            module_base = mod.text_vmaddr_range;
+        }
+    }
+    const uint32_t guest_va = static_cast<uint32_t>(module_base + ir[0].pc);
+
     profile::BlockHeader hdr{
         .block_id = bid,
         .num_instrs = static_cast<uint32_t>(num_instrs),
-        .start_pc = ir[0].pc,
+        .start_pc = guest_va,
         ._reserved = 0,
     };
     std::fwrite(&hdr, sizeof(hdr), 1, g_profile.file);
@@ -316,7 +339,8 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask, const Translate
         fflush(stdout);
     }
 
-    dumpBlockIfNew(req.block, localIR.data(), req.num_instrs);
+    dumpBlockIfNew(parentTask, reinterpret_cast<uint64_t>(tr.ir_module_data), req.block,
+                   localIR.data(), req.num_instrs);
 
     auto result = Translator::translate_instruction(
         &tr, reinterpret_cast<IRBlock*>(req.block), localIR.data(),

@@ -435,6 +435,7 @@ EmitMeasurement measurePattern(const IRInstr* instrs, size_t len) {
 int main(int argc, char** argv) try {
     uint64_t min_exec = 1000;
     size_t max_rows = 200;
+    size_t hot_addrs = 100;  // rows in the hot-address section; 0 = suppress
     double max_arm_per_x87 = 0.0;  // 0 = no filter
     enum class RankBy : std::uint8_t { Emit, Exec } rank_by = RankBy::Emit;
     std::vector<std::string> files;
@@ -463,6 +464,8 @@ int main(int argc, char** argv) try {
             min_exec = std::strtoull(argv[++i], nullptr, 10);
         } else if (a == "--max-rows" && i + 1 < argc) {
             max_rows = std::strtoull(argv[++i], nullptr, 10);
+        } else if (a == "--hot-addrs" && i + 1 < argc) {
+            hot_addrs = static_cast<size_t>(std::strtoull(argv[++i], nullptr, 10));
         } else if (a == "--max-arm-per-x87" && i + 1 < argc) {
             max_arm_per_x87 = std::strtod(argv[++i], nullptr);
         } else if (a == "--dump-block" && i + 1 < argc) {
@@ -534,7 +537,7 @@ int main(int argc, char** argv) try {
             runtime_version = std::strtoull(argv[++i], nullptr, 0);
         } else if (a == "--help" || a == "-h") {
             std::printf(
-                "Usage: profile_analyze [--min-exec N] [--max-rows N]\n"
+                "Usage: profile_analyze [--min-exec N] [--max-rows N] [--hot-addrs N]\n"
                 "                       [--max-arm-per-x87 R] [--rank-by exec|emit]\n"
                 "                       file1.prof [file2.prof ...]\n"
                 "\n"
@@ -563,6 +566,18 @@ int main(int argc, char** argv) try {
                 "ARM emit first).  --rank-by exec restores raw exec_count ordering.\n"
                 "--max-arm-per-x87 R hides rows whose ratio is at or below R (already\n"
                 "well-optimized).\n"
+                "\n"
+                "Hot-address section (when a TLY1 section is present):\n"
+                "  --hot-addrs N           Print the top N hottest guest x86 block-entry\n"
+                "                          addresses (start_pc), collapsed by address and\n"
+                "                          ranked by exec-weighted ARM emit (cost).  Each\n"
+                "                          row carries cost, share%%, exec, x87_ops, the\n"
+                "                          number of blocks sharing the address, and the\n"
+                "                          constituent block_ids (for --dump-block).  These\n"
+                "                          are basic-block entries, not functions; map each\n"
+                "                          address to its containing function in a Ghidra\n"
+                "                          disassembly and sum cost per function.  Default\n"
+                "                          100; pass 0 to suppress the section.\n"
                 "\n"
                 "Caveat: the pattern is measured in isolation.  Block context (cache dirty\n"
                 "state, surrounding ops) that determines whether IR's gate refuses in\n"
@@ -1077,6 +1092,8 @@ int main(int argc, char** argv) try {
         // come from the same three configs as measurePattern: production,
         // disable_x87_ir=1, force_x87_ir_gate=1.
         struct BlockEmitRow {
+            uint32_t start_pc;  // guest x86 VA of the block's first instruction
+            uint32_t block_id;  // for --dump-block drill-in
             uint64_t exec;
             uint16_t x87_ops;
             // Longest single consecutive x87 run inside the block.  When this
@@ -1104,6 +1121,8 @@ int main(int argc, char** argv) try {
                 continue;
             }
             BlockEmitRow row{};
+            row.start_pc = b.start_pc;
+            row.block_id = b.id;
             row.exec = exec;
             auto* mut_instrs = const_cast<IRInstr*>(b.instrs.data());
             const auto L = static_cast<int64_t>(b.instrs.size());
@@ -1180,6 +1199,87 @@ int main(int argc, char** argv) try {
                         r.prefix.c_str());
         }
         std::printf("\n");
+
+        // ── Hot guest-x86 addresses (collapsed by start_pc) ──────────────────
+        // Collapse block_rows by start_pc into one row per guest address.  The
+        // list feeds a Ghidra disassembly: map each start_pc to its containing
+        // function (getFunctionContaining) and sum cost per function to rank
+        // functions for wholesale vectorized replacement.  start_pc is a basic-
+        // block entry, not a function; the same address can carry several
+        // block_ids (different IR length/content from the same entry, or code-
+        // cache churn), so costs are summed per address.  Cost is the additive
+        // exec-weighted ARM emit (Σ exec*arm_prod) — comparable to the per-block
+        // table above and the workload-wide total_arm used for share%.
+        if (hot_addrs > 0 && !block_rows.empty()) {
+            struct AddrAgg {
+                long double cost = 0.0L;       // Σ exec * arm_prod over collapsed blocks
+                long double top_cost = 0.0L;   // dominant block's own cost
+                uint64_t exec = 0;             // Σ exec
+                uint32_t x87_ops = 0;          // from the dominant (highest-cost) block
+                uint32_t max_run = 0;          // from the dominant block
+                uint32_t blocks = 0;           // count of block records at this addr
+                std::string prefix;            // dominant block's mnemonic preview
+                std::vector<uint32_t> ids;     // constituent block_ids (cost-desc order)
+            };
+            std::unordered_map<uint32_t, AddrAgg> by_addr;
+            by_addr.reserve(block_rows.size());
+            // block_rows is already sorted by cost desc, so the first block seen
+            // for an address is its dominant one and ids accumulate cost-desc.
+            for (const auto& r : block_rows) {
+                const long double c = static_cast<long double>(r.exec) * r.arm_prod;
+                auto& a = by_addr[r.start_pc];
+                a.cost += c;
+                a.exec += r.exec;
+                a.blocks += 1;
+                a.ids.push_back(r.block_id);
+                if (c >= a.top_cost) {
+                    a.top_cost = c;
+                    a.x87_ops = r.x87_ops;
+                    a.max_run = r.max_run;
+                    a.prefix = r.prefix;
+                }
+            }
+            std::vector<std::pair<uint32_t, AddrAgg>> addr_rows(by_addr.begin(), by_addr.end());
+            std::ranges::sort(addr_rows, [](const auto& a, const auto& b) {
+                if (a.second.cost != b.second.cost) {
+                    return a.second.cost > b.second.cost;
+                }
+                if (a.second.exec != b.second.exec) {
+                    return a.second.exec > b.second.exec;
+                }
+                return a.first < b.first;  // tie-break by address for stable output
+            });
+            const size_t addr_n = std::min(hot_addrs, addr_rows.size());
+            std::printf("# Top %zu hot x86 addresses by exec-weighted ARM emit "
+                        "(collapsed by start_pc) - map to functions in Ghidra\n",
+                        addr_n);
+            std::printf("rank,start_pc,cost,share%%,exec,x87_ops,max_run,blocks,block_ids,prefix\n");
+            for (size_t i = 0; i < addr_n; ++i) {
+                const auto& [pc, a] = addr_rows[i];
+                const double share =
+                    total_arm > 0 ? static_cast<double>(100.0L * a.cost / total_arm) : 0.0;
+                // Cap the printed id list to keep rows narrow; blocks count stays exact.
+                std::string ids;
+                constexpr size_t kMaxIds = 8;
+                const size_t shown = std::min(kMaxIds, a.ids.size());
+                for (size_t k = 0; k < shown; ++k) {
+                    if (k > 0) {
+                        ids.push_back(';');
+                    }
+                    ids += std::to_string(a.ids[k]);
+                }
+                if (a.ids.size() > shown) {
+                    ids += "+";
+                    ids += std::to_string(a.ids.size() - shown);
+                }
+                std::printf("%zu,0x%08x,%llu,%.2f,%llu,%u,%u,%u,%s,%s\n", i + 1, pc,
+                            static_cast<unsigned long long>(a.cost), share,
+                            static_cast<unsigned long long>(a.exec),
+                            static_cast<unsigned>(a.x87_ops), static_cast<unsigned>(a.max_run),
+                            a.blocks, ids.c_str(), a.prefix.c_str());
+            }
+            std::printf("\n");
+        }
     }
 
     if (have_tallies) {
