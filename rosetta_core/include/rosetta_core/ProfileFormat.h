@@ -40,7 +40,7 @@ constexpr uint32_t kCounterSectionMagic = 0x30544E43U;  // 'CNT0'
 struct BlockHeader {
     uint32_t block_id;    // monotonic, from profile::register_block
     uint32_t num_instrs;  // count of IRInstr that follow
-    uint32_t start_pc;    // localIR[0].pc
+    uint32_t start_pc;    // absolute guest x86 VA (module base + IRBlock::start_pc)
     uint32_t _reserved;   // pad to 16 B; must be zero on write
 };
 static_assert(sizeof(BlockHeader) == 16);
