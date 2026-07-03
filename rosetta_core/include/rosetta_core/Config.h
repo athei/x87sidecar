@@ -52,6 +52,22 @@ struct RosettaConfig {
                                     //                           Set =0 to disable.  Diagnostic
                                     //                           counters via fma_reduce_stats()
                                     //                           and X87_LOG_FMA_REDUCE=1.
+    uint8_t enable_ir_split;        // X87_ENABLE_IR_SPLIT       (default ON) when compile_run's
+                                    //                           FPR/GPR pressure gate refuses a
+                                    //                           run, retry with the prefix ending
+                                    //                           just before the overflow point
+                                    //                           instead of refusing outright.
+                                    //                           The suffix re-enters the gate on
+                                    //                           the next dispatch.  Set =0 to
+                                    //                           restore all-or-nothing gating.
+    uint8_t log_ir_split;           // X87_LOG_IR_SPLIT          one stderr line per split retry
+                                    //                           and per rescued run.
+    uint8_t fpr_pool_limit;         // X87_FPR_POOL_LIMIT        test-only [1,16]: clamp the FPR
+                                    //                           count the pressure gate believes
+                                    //                           is available (0 = off).  Makes
+                                    //                           split behavior deterministic in
+                                    //                           tests; allocation is unaffected.
+    uint8_t gpr_pool_limit;         // X87_GPR_POOL_LIMIT        test-only GPR-side equivalent.
     uint8_t force_x87_ir_gate;      // measurement-only flag for tools/profile_analyze: bypass
                                     // the IR-eligibility gate's pre-build refusal conditions
                                     // (run_remaining<3, top_dirty, deferred_pop_count,

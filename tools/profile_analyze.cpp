@@ -412,6 +412,7 @@ uint32_t runOneMode(const IRInstr* instrs, size_t len, const RosettaConfig* cfg)
 RosettaConfig make_production_cfg() {
     RosettaConfig cfg{};
     cfg.enable_fma_reduce = 1;
+    cfg.enable_ir_split = 1;
     // Rollback knobs default ON too but only matter to Translator's gate
     // cascade, which measurePattern doesn't exercise (it builds a fresh
     // x87 cache per call); leave them 0 here.

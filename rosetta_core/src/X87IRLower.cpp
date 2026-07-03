@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <utility>
 
@@ -22,6 +23,18 @@
 namespace TranslatorX87 {
 inline auto x87_begin(TranslationResult& a1, AssemblerBuffer& buf) -> std::pair<int, int> {
     if (a1.x87_cache.run_remaining > 0 && a1.x87_cache.gprs_valid) {
+        // Re-acquire Xst_base if a prior epilogue dropped it (it is freed
+        // before the tag-batch alloc when top_delta != 0).  One ADD here
+        // keeps the rest of the run on the cached 2-3 insn ST access path
+        // instead of the uncached 5-insn path — this is the common shape
+        // after compile_run consumes a run prefix (pressure split or build
+        // early-stop) and the suffix re-enters lowering.
+        if (!a1.x87_cache.st_base_valid) {
+            const int Xst_base = alloc_gpr(a1, 6);
+            emit_add_imm(buf, 1, 0, 0, 0, kX87RegFileOff, a1.x87_cache.base_gpr, Xst_base);
+            a1.x87_cache.st_base_gpr = static_cast<int8_t>(Xst_base);
+            a1.x87_cache.st_base_valid = 1;
+        }
         return {a1.x87_cache.base_gpr, a1.x87_cache.top_gpr};
     }
     const int Xbase = alloc_gpr(a1, 0);
@@ -1368,7 +1381,10 @@ void lower(Context& ctx, TranslationResult* result) {
 // before node_total would double-count it (predicting peak=9 instead of 8
 // for the common single-fused-FCmp+FStsw pair, gating off real WoW blocks
 // that fit in the 8-slot pool).
-int peak_live_gprs(const Context& ctx) {
+int peak_live_gprs(const Context& ctx, int budget, int* first_over_node) {
+    if (first_over_node) {
+        *first_over_node = -1;
+    }
     // Determine if RC caching will be active (same logic as lower()).
     // RC cache is disabled when the run contains FCmp/FTst: emit_fcom_cc_pack
     // has a structurally-unavoidable 4-wide GPR peak (Wd_save + Wd_packed +
@@ -1521,6 +1537,9 @@ int peak_live_gprs(const Context& ctx) {
 
         int node_total = pinned + held + transient;
         peak = std::max(node_total, peak);
+        if (first_over_node && *first_over_node < 0 && node_total > budget) {
+            *first_over_node = i;
+        }
 
         // FCmp/FTst fused: Wd_packed becomes held AFTER the node — counted
         // here so that subsequent nodes see it in `held` but the FCmp's own
@@ -1540,6 +1559,13 @@ int peak_live_gprs(const Context& ctx) {
     if (ctx.top_delta != 0) {
         int epilogue_total = (pinned - 1) + held + 2;
         peak = std::max(epilogue_total, peak);
+        // Attribute an epilogue-only overflow to the last node: a shorter
+        // prefix may have a different (possibly zero) top_delta, so the
+        // split loop still gets a boundary to try.
+        if (first_over_node && *first_over_node < 0 && epilogue_total > budget &&
+            ctx.num_nodes > 0) {
+            *first_over_node = ctx.num_nodes - 1;
+        }
     }
 
     return peak;
@@ -1561,7 +1587,10 @@ int peak_live_gprs(const Context& ctx) {
 //     the node ends.  Model as a +1 spike.
 //   - StoreI*, FCmp, FTst, FStsw produce no FPR output and need no extra FPRs.
 //   - Dead (kDead) nodes are skipped.
-int peak_live_fprs(const Context& ctx) {
+int peak_live_fprs(const Context& ctx, int budget, int* first_over_node) {
+    if (first_over_node) {
+        *first_over_node = -1;
+    }
     // Step 1: compute last_use[] — same as FPRState::compute_last_uses.
     int16_t last_use[kMaxNodes];
     memset(last_use, -1, sizeof(last_use));
@@ -1591,6 +1620,15 @@ int peak_live_fprs(const Context& ctx) {
 
     // Track which nodes are currently holding an FPR (bit vector over kMaxNodes).
     bool holding[kMaxNodes] = {};
+
+    // Raise the running peak, recording the first node whose demand
+    // exceeds the caller's budget (split-boundary query).
+    const auto raise_peak = [&](int candidate, int node_idx) {
+        peak = std::max(candidate, peak);
+        if (first_over_node && *first_over_node < 0 && candidate > budget) {
+            *first_over_node = node_idx;
+        }
+    };
 
     for (int i = 0; i < ctx.num_nodes; i++) {
         const auto& n = ctx.nodes[i];
@@ -1641,7 +1679,7 @@ int peak_live_fprs(const Context& ctx) {
         if (produces_fpr && !absorbed_member) {
             live++;
             holding[i] = true;
-            peak = std::max(live, peak);
+            raise_peak(live, i);
         }
 
         // FMA-reduction head: the whole chain emits as one fused body at the
@@ -1650,9 +1688,7 @@ int peak_live_fprs(const Context& ctx) {
         // above); the odd-tail D_l/D_w reuse those freed slots, so one +2
         // spike covers both.
         if (n.flags & kFmaReduceHead) {
-            if (live + 2 > peak) {
-                peak = live + 2;
-            }
+            raise_peak(live + 2, i);
             // The chain produces a single result FPR (lower_fma_reduce assigns
             // it to the *tail* member) that stays live until the tail's
             // external consumer.  produces_fpr above attributed that FPR to
@@ -1712,9 +1748,7 @@ int peak_live_fprs(const Context& ctx) {
                 }
                 k += 1;
             }
-            if (live + spike > peak) {
-                peak = live + spike;
-            }
+            raise_peak(live + spike, i);
         }
 
         // Transcendentals: the lowering FMOVs inputs to d0/d1 (not in pool),
@@ -1771,7 +1805,7 @@ int peak_live_fprs(const Context& ctx) {
             // during the spike — it's not yet in the scratch pool, so don't
             // count it.  Subtract 1 from `live` to compensate.
             const int spike = (live - 1) - dying_inputs + trans_spike;
-            peak = std::max(spike, peak);
+            raise_peak(spike, i);
         }
 
         // Free inputs whose last use is this node.
@@ -1788,72 +1822,151 @@ int peak_live_fprs(const Context& ctx) {
 
 // ── Entry point ─────────────────────────────────────────────────────────────
 
+// Pick the run length to retry with after a pressure overflow at
+// `first_over_node`: cut just before the instruction that created the
+// overflowing node, and always make progress (strictly shorter than
+// `attempt_len`).  Returns the new run length (may be < 3 = give up).
+static int split_prefix_len(const Context& ctx, int first_over_node, int attempt_len) {
+    int len = attempt_len - 1;
+    if (first_over_node >= 0 && first_over_node < ctx.num_nodes) {
+        const int src = ctx.node_src[first_over_node];
+        if (src >= 0 && src < len) {
+            len = src;
+        }
+    }
+    return len;
+}
+
 int compile_run(TranslationResult* result, IRInstr* instr_array, int64_t num_instrs,
                 int64_t start_idx, int run_length, IRFailReason* out_reason, int* out_peak_gprs,
                 uint16_t* out_fail_opcode) {
-    Context ctx;
-
-    const bool built = build(ctx, instr_array, num_instrs, start_idx, run_length);
-
-    // Surface the bail opcode whenever build observed an unsupported one,
-    // including the success-with-early-stop case (consumed >= 2 but the loop
-    // halted at position N).
-    if (out_fail_opcode && ctx.fail_opcode != 0xFFFFU) {
-        *out_fail_opcode = ctx.fail_opcode;
-    }
-
-    if (!built) {
-        if (out_reason) {
-            *out_reason = IRFailReason::kBuildFail;
-        }
-        if (out_peak_gprs) {
-            *out_peak_gprs = 0;
-        }
-        return 0;
-    }
-
-    optimize(ctx);
-
-    // Gate lowering on actual FPR pressure vs. available pool.
+    // Pool sizes.  The optional pool-limit clamps (X87_FPR_POOL_LIMIT /
+    // X87_GPR_POOL_LIMIT) are test knobs that make pool starvation
+    // deterministic — the real pool depends on stock's dynamic
+    // _unoccupied_temporary_fprs_for_xmm_scalars seeding.  They narrow the
+    // gate only; allocation still draws from the full mask.
     uint32_t fpr_pool = result->free_fpr_mask;
     int available = 0;
     while (fpr_pool) {
         available++;
         fpr_pool &= fpr_pool - 1;
     }
-    if (peak_live_fprs(ctx) > available) {
-        if (out_reason) {
-            *out_reason = IRFailReason::kFprPressure;
+    uint32_t gpr_pool = result->free_gpr_mask;
+    int gpr_available = 0;
+    while (gpr_pool) {
+        gpr_available++;
+        gpr_pool &= gpr_pool - 1;
+    }
+    if (g_rosetta_config) {
+        if (g_rosetta_config->fpr_pool_limit > 0 && available > g_rosetta_config->fpr_pool_limit) {
+            available = g_rosetta_config->fpr_pool_limit;
         }
-        if (out_peak_gprs) {
-            *out_peak_gprs = peak_live_gprs(ctx);
+        if (g_rosetta_config->gpr_pool_limit > 0 &&
+            gpr_available > g_rosetta_config->gpr_pool_limit) {
+            gpr_available = g_rosetta_config->gpr_pool_limit;
         }
-        return 0;
     }
 
-    // Gate lowering on GPR pressure vs. available pool.
-    const int peak_gprs = peak_live_gprs(ctx);
-    if (out_peak_gprs) {
-        *out_peak_gprs = peak_gprs;
-    }
-    {
-        uint32_t gpr_pool = result->free_gpr_mask;
-        int gpr_available = 0;
-        while (gpr_pool) {
-            gpr_available++;
-            gpr_pool &= gpr_pool - 1;
+    // When a run's peak register pressure exceeds the pool, split it: retry
+    // with the prefix that ends just before the instruction whose node first
+    // overflowed the budget.  Every live value at an instruction boundary is
+    // a symbolic-stack value, so the prefix's normal epilogue/ReadSt
+    // machinery IS the spill — no new code shapes.  The dispatcher treats
+    // the partial consumed count exactly like a build early-stop and
+    // re-enters the IR gate at the suffix, which splits recursively if
+    // needed.  Bounded retries: each attempt is strictly shorter.
+    const bool split_enabled = g_rosetta_config == nullptr || g_rosetta_config->enable_ir_split;
+    const bool log_split =
+        g_rosetta_config != nullptr && g_rosetta_config->log_ir_split && split_enabled;
+    constexpr int kMaxSplitRetries = 4;
+
+    int attempt_len = run_length;
+    for (int attempt = 0;; attempt++) {
+        Context ctx;
+
+        const bool built = build(ctx, instr_array, num_instrs, start_idx, attempt_len);
+
+        // Surface the bail opcode whenever build observed an unsupported one,
+        // including the success-with-early-stop case (consumed >= 2 but the
+        // loop halted at position N).  Only the full-length attempt reports:
+        // a shrunk prefix stops at run_length, not at an unsupported opcode.
+        if (attempt == 0 && out_fail_opcode && ctx.fail_opcode != 0xFFFFU) {
+            *out_fail_opcode = ctx.fail_opcode;
+        }
+
+        if (!built) {
+            if (out_reason) {
+                *out_reason = IRFailReason::kBuildFail;
+            }
+            if (out_peak_gprs) {
+                *out_peak_gprs = 0;
+            }
+            return 0;
+        }
+
+        optimize(ctx);
+
+        // Gate lowering on actual FPR pressure vs. available pool.
+        int fpr_over_node = -1;
+        if (peak_live_fprs(ctx, available, &fpr_over_node) > available) {
+            const int next_len = split_prefix_len(ctx, fpr_over_node, attempt_len);
+            if (split_enabled && attempt < kMaxSplitRetries && next_len >= 3) {
+                if (log_split) {
+                    std::fprintf(stderr,
+                                 "[x87ir-split] fpr overflow: run=%d -> retry len=%d "
+                                 "(over_node=%d avail=%d)\n",
+                                 attempt_len, next_len, fpr_over_node, available);
+                }
+                attempt_len = next_len;
+                continue;
+            }
+            if (out_reason) {
+                *out_reason = IRFailReason::kFprPressure;
+            }
+            if (out_peak_gprs) {
+                *out_peak_gprs = peak_live_gprs(ctx);
+            }
+            return 0;
+        }
+
+        // Gate lowering on GPR pressure vs. available pool.
+        int gpr_over_node = -1;
+        const int peak_gprs = peak_live_gprs(ctx, gpr_available, &gpr_over_node);
+        if (out_peak_gprs) {
+            *out_peak_gprs = peak_gprs;
         }
         if (peak_gprs > gpr_available) {
+            const int next_len = split_prefix_len(ctx, gpr_over_node, attempt_len);
+            if (split_enabled && attempt < kMaxSplitRetries && next_len >= 3) {
+                if (log_split) {
+                    std::fprintf(stderr,
+                                 "[x87ir-split] gpr overflow: run=%d -> retry len=%d "
+                                 "(over_node=%d avail=%d)\n",
+                                 attempt_len, next_len, gpr_over_node, gpr_available);
+                }
+                attempt_len = next_len;
+                continue;
+            }
             if (out_reason) {
                 *out_reason = IRFailReason::kGprPressure;
             }
             return 0;
         }
+
+        lower(ctx, result);
+
+        if (attempt > 0) {
+            if (result->x87_cache.tally_ir_split != 0xFFFFU) {
+                result->x87_cache.tally_ir_split++;
+            }
+            if (log_split) {
+                std::fprintf(stderr, "[x87ir-split] split ok: consumed=%d of run=%d\n",
+                             static_cast<int>(ctx.consumed), run_length);
+            }
+        }
+
+        return ctx.consumed;
     }
-
-    lower(ctx, result);
-
-    return ctx.consumed;
 }
 
 }  // namespace X87IR

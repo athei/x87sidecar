@@ -128,6 +128,12 @@ struct Context {
     Node nodes[kMaxNodes];  // 1024 bytes
     int16_t num_nodes;
 
+    // Ordinal (0-based, within the run) of the x87 instruction that created
+    // each node.  Written by build() for every node it appends; lets
+    // compile_run map a pressure-overflow node back to an instruction
+    // boundary when it splits an over-pressure run into a fitting prefix.
+    int16_t node_src[kMaxNodes];
+
     // Symbolic stack.
     //   val >= 0: IR node ID
     //   val < 0:  initial slot; initial_depth = -(val + 1)
@@ -265,9 +271,18 @@ void fma_reduce_print_stats();
 
 // Compute the peak number of simultaneously live FPR-bearing nodes that the
 // lowering pass will require, accounting for transient temporaries (e.g. the
-// +1 FPR spike during StoreF32 narrowing).  Used to gate lowering against the
-// available scratch FPR pool.
-int peak_live_fprs(const Context& ctx);
+// +1/+2 FPR spike during StoreF32 narrowing).  Used to gate lowering against
+// the available scratch FPR pool.
+//
+// budget / first_over_node: when first_over_node is non-null, it is set to
+// the index of the first node whose modeled demand exceeds `budget` (-1 if
+// demand never exceeds it).  compile_run uses ctx.node_src[*first_over_node]
+// to pick the instruction boundary at which to split an over-pressure run.
+int peak_live_fprs(const Context& ctx, int budget = 0x7FFFFFFF, int* first_over_node = nullptr);
+
+// GPR-side equivalent of peak_live_fprs (pinned + held + per-node transient
+// demand model; see X87IRLower.cpp for the model notes).
+int peak_live_gprs(const Context& ctx, int budget = 0x7FFFFFFF, int* first_over_node = nullptr);
 
 // Lower IR to AArch64 instructions, writing into result->insn_buf.
 void lower(Context& ctx, TranslationResult* result);

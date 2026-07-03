@@ -304,6 +304,7 @@ bool build(Context& ctx, IRInstr* instr_array, int64_t num_instrs, int64_t start
     for (int i = 0; i < run_length && (start_idx + i) < num_instrs; i++) {
         auto* instr = &instr_array[start_idx + i];
         const auto op = instr->opcode();
+        const int16_t nodes_before = ctx.num_nodes;
         bool ok = true;
 
         switch (op) {
@@ -878,6 +879,13 @@ bool build(Context& ctx, IRInstr* instr_array, int64_t num_instrs, int64_t start
                 ctx.fail_opcode = static_cast<uint16_t>(op);
                 ok = false;
                 break;
+        }
+
+        // Attribute every node this instruction created (even on a bail —
+        // partially-built nodes stay in ctx.nodes[]) to its ordinal, so
+        // compile_run can map pressure-overflow nodes to a split boundary.
+        for (int16_t nid = nodes_before; nid < ctx.num_nodes; ++nid) {
+            ctx.node_src[nid] = static_cast<int16_t>(i);
         }
 
         if (!ok) {

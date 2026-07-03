@@ -54,6 +54,11 @@ struct X87Cache {
     uint16_t tally_ir_build_fail = 0;
     uint16_t tally_ir_fpr_fail = 0;
     uint16_t tally_ir_gpr_fail = 0;
+    // Runs compile_run rescued by splitting at a register-pressure peak
+    // (i.e. a would-have-been fpr/gpr refusal that lowered as a shorter
+    // prefix instead).  Bumped inside compile_run itself — per-TR, so
+    // per-thread-safe like the rest of the tallies.
+    uint16_t tally_ir_split = 0;
     // Max peak_live_gprs(ctx) observed across compile_run attempts in this
     // block.  Saturating at its u16 upper bound is a sufficient signal — we
     // only care about "was peak high enough to refuse?".

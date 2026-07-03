@@ -55,6 +55,7 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
             cache.tally_ir_build_fail = 0;
             cache.tally_ir_fpr_fail = 0;
             cache.tally_ir_gpr_fail = 0;
+            cache.tally_ir_split = 0;
             cache.tally_max_gpr_peak = 0;
             cache.tally_ir_gate_short_run = 0;
             cache.tally_ir_gate_top_dirty = 0;

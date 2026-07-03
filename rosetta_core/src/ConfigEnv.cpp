@@ -123,6 +123,30 @@ RosettaConfig load_config_from_env() {
     cfg.disable_x87_ir = env_truthy("X87_DISABLE_X87_IR") ? 1 : 0;
     cfg.disable_x87_single_fast = env_truthy("X87_DISABLE_SINGLE_FAST") ? 1 : 0;
     cfg.enable_fma_reduce = env_default_on("X87_ENABLE_FMA_REDUCE");
+    cfg.enable_ir_split = env_default_on("X87_ENABLE_IR_SPLIT");
+    cfg.log_ir_split = env_truthy("X87_LOG_IR_SPLIT") ? 1 : 0;
+
+    // Test-only gate pool clamps: make register-pressure splits
+    // deterministically reproducible regardless of stock's dynamic FPR
+    // seeding.  0 (unset) = no clamp.  Narrow the gate only — allocation
+    // still draws from the real mask.
+    auto parse_pool_limit = [](const char* env_name, uint8_t& target) {
+        const char* t = std::getenv(env_name);
+        if (t == nullptr || t[0] == '\0') {
+            return;
+        }
+        char* end = nullptr;
+        const long v = std::strtol(t, &end, 10);
+        if (end != t && *end == '\0' && v >= 1 && v <= 16) {
+            target = static_cast<uint8_t>(v);
+            std::printf("[rosettax87] %s=%ld (gate pool clamp)\n", env_name, v);
+        } else {
+            std::printf("[rosettax87] %s: '%s' out of range [1,16] or not an integer (ignored)\n",
+                        env_name, t);
+        }
+    };
+    parse_pool_limit("X87_FPR_POOL_LIMIT", cfg.fpr_pool_limit);
+    parse_pool_limit("X87_GPR_POOL_LIMIT", cfg.gpr_pool_limit);
 
     if (env_truthy("X87_DISABLE_ALL_FUSIONS")) {
         cfg.disabled_fusions_mask = ~0ULL;
@@ -238,6 +262,16 @@ void print_env_help(std::FILE* out) {
                  "                                is stride-16, so the pass detects no chains\n"
                  "                                there but is correctness-clean and ships ON\n"
                  "                                so it stays exercised.\n"
+                 "  X87_ENABLE_IR_SPLIT=0         disable pressure splitting: when the FPR/GPR\n"
+                 "                                gate refuses a run, compile_run normally\n"
+                 "                                retries with the prefix ending just before\n"
+                 "                                the overflow point (the suffix re-enters the\n"
+                 "                                gate on the next dispatch).  Default ON.\n"
+                 "  X87_LOG_IR_SPLIT=1            one stderr line per split retry / rescued run\n"
+                 "  X87_FPR_POOL_LIMIT=N          test-only [1,16]: clamp the FPR count the\n"
+                 "                                pressure gate believes is available, making\n"
+                 "                                splits deterministic (allocation unaffected)\n"
+                 "  X87_GPR_POOL_LIMIT=N          test-only GPR-side equivalent\n"
                  "  X87_DISABLE_ALL_FUSIONS=1     disable every peephole fusion\n"
                  "  X87_GATE_FLUSH_THRESHOLD=N             override the IR-gate flush-and-\n"
                  "  X87_GATE_FLUSH_THRESHOLD_DEFERRED_POP=N proceed minimum run length per\n"
