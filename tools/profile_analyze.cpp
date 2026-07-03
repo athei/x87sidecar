@@ -41,6 +41,7 @@
 #include "rosetta_core/TranscendentalHelper.h"
 #include "rosetta_core/TranslationResult.h"
 #include "rosetta_core/Translator.h"
+#include "rosetta_core/X87Bridge.h"
 #include "rosetta_core/X87Cache.h"
 #include "rosetta_core/X87IR.h"
 
@@ -436,6 +437,7 @@ int main(int argc, char** argv) try {
     uint64_t min_exec = 1000;
     size_t max_rows = 200;
     size_t hot_addrs = 100;  // rows in the hot-address section; 0 = suppress
+    size_t frag_rows = 30;   // rows in the FP-run-fragmentation section; 0 = suppress
     double max_arm_per_x87 = 0.0;  // 0 = no filter
     enum class RankBy : std::uint8_t { Emit, Exec } rank_by = RankBy::Emit;
     std::vector<std::string> files;
@@ -466,6 +468,8 @@ int main(int argc, char** argv) try {
             max_rows = std::strtoull(argv[++i], nullptr, 10);
         } else if (a == "--hot-addrs" && i + 1 < argc) {
             hot_addrs = static_cast<size_t>(std::strtoull(argv[++i], nullptr, 10));
+        } else if (a == "--frag-rows" && i + 1 < argc) {
+            frag_rows = static_cast<size_t>(std::strtoull(argv[++i], nullptr, 10));
         } else if (a == "--max-arm-per-x87" && i + 1 < argc) {
             max_arm_per_x87 = std::strtod(argv[++i], nullptr);
         } else if (a == "--dump-block" && i + 1 < argc) {
@@ -578,6 +582,17 @@ int main(int argc, char** argv) try {
                 "                          address to its containing function in a Ghidra\n"
                 "                          disassembly and sum cost per function.  Default\n"
                 "                          100; pass 0 to suppress the section.\n"
+                "\n"
+                "FP-run fragmentation section (when a TLY1 section is present):\n"
+                "  --frag-rows N           Print the top N blocks whose x87 runs are split\n"
+                "                          by short gaps of bridgeable integer instructions\n"
+                "                          (mov/lea = v1; +add/sub/inc/dec/and/or/xor = v2),\n"
+                "                          ranked by the exec-weighted ARM that joining the\n"
+                "                          v1 gaps would save (measured by re-translating\n"
+                "                          the block with eligible gaps spliced out, minus\n"
+                "                          2 ARM per bridged instruction for our own emit).\n"
+                "                          Feeds the go/no-go decision on run bridging.\n"
+                "                          Default 30; pass 0 to suppress the section.\n"
                 "\n"
                 "Caveat: the pattern is measured in isolation.  Block context (cache dirty\n"
                 "state, surrounding ops) that determines whether IR's gate refuses in\n"
@@ -1277,6 +1292,204 @@ int main(int argc, char** argv) try {
                             static_cast<unsigned long long>(a.exec),
                             static_cast<unsigned>(a.x87_ops), static_cast<unsigned>(a.max_run),
                             a.blocks, ids.c_str(), a.prefix.c_str());
+            }
+            std::printf("\n");
+        }
+
+        // ── FP-run fragmentation (run-bridging opportunity sizing) ───────────
+        // For each block, find the x87 runs and the non-x87 gaps that JOIN two
+        // runs (trailing/leading gaps are ignored — bridging them buys
+        // nothing).  Classify each joining gap against the shared predicates
+        // in X87Bridge.h, then estimate what v1 bridging would save by
+        // re-translating the block with every v1-eligible gap (len <=
+        // kMaxGapV1) spliced out: the translator then sees one contiguous run
+        // where production sees two, which is exactly the run-length and
+        // spill/reload effect bridging would have.  Since a real bridge would
+        // also emit the gap instructions ourselves (~1-2 ARM each, replacing
+        // stock's own emit for them), subtract a conservative 2 ARM per
+        // spliced instruction from the delta.
+        if (frag_rows > 0 && !blocks.empty()) {
+            struct FragRow {
+                uint32_t block_id;
+                uint32_t start_pc;
+                uint64_t exec;
+                uint16_t segments;
+                uint16_t joins_v1;
+                uint16_t joins_v2;
+                uint16_t joins_inelig;
+                uint16_t spliced;  // instrs removed by the v1 splice
+                uint32_t arm_orig;
+                uint32_t arm_bridged;
+                long double saved_w;
+                std::string preview;
+            };
+            std::vector<FragRow> frows;
+            long double sum_saved_w = 0.0L;
+            uint64_t gaps_v1_w = 0;       // exec-weighted v1 joining-gap instrs
+            uint64_t gaps_v2only_w = 0;   // exec-weighted v2-only joining-gap instrs
+            uint64_t gaps_inelig_w = 0;   // exec-weighted ineligible joining-gap instrs
+            uint64_t joins_short_side = 0;  // v1 joins whose merged x87 length < 3
+            uint64_t joins_total = 0;
+            std::unordered_map<uint8_t, uint64_t> flag_hist;  // v2-only gap instrs
+
+            for (const auto& b : blocks) {
+                const uint64_t exec = (b.id < counters.size()) ? counters[b.id] : 0;
+                if (exec == 0 || b.instrs.empty()) {
+                    continue;
+                }
+                auto* mut_instrs = const_cast<IRInstr*>(b.instrs.data());
+                const auto L = static_cast<int64_t>(b.instrs.size());
+
+                // Segment walk: [start,len] of each x87 run (run >= 1).
+                struct Seg {
+                    int64_t start;
+                    int64_t len;
+                };
+                std::vector<Seg> segs;
+                int64_t idx = 0;
+                while (idx < L) {
+                    const int run = X87Cache::lookahead(mut_instrs, L, idx);
+                    if (run >= 1) {
+                        segs.push_back(Seg{.start = idx, .len = run});
+                        idx += run;
+                    } else {
+                        idx += 1;
+                    }
+                }
+                if (segs.size() < 2) {
+                    continue;  // nothing to join
+                }
+
+                FragRow row{};
+                row.block_id = b.id;
+                row.start_pc = b.start_pc;
+                row.exec = exec;
+                row.segments = static_cast<uint16_t>(std::min<size_t>(segs.size(), 0xFFFF));
+
+                // Joining gaps + splice plan.
+                std::vector<bool> drop(b.instrs.size(), false);
+                for (size_t s = 0; s + 1 < segs.size(); ++s) {
+                    const int64_t gstart = segs[s].start + segs[s].len;
+                    const int64_t gend = segs[s + 1].start;  // exclusive
+                    const auto glen = static_cast<int>(gend - gstart);
+                    joins_total++;
+                    bool all_v1 = true;
+                    bool all_v2 = true;
+                    for (int64_t g = gstart; g < gend; ++g) {
+                        const IRInstr& ins = b.instrs[static_cast<size_t>(g)];
+                        const bool v1 = x87bridge::is_bridge_v1(ins);
+                        const bool v2 = x87bridge::is_bridge_v2(ins);
+                        all_v1 = all_v1 && v1;
+                        all_v2 = all_v2 && v2;
+                        if (!v1 && v2) {
+                            gaps_v2only_w += exec;
+                            flag_hist[ins.flag_liveness] += exec;
+                        } else if (v1) {
+                            gaps_v1_w += exec;
+                        } else {
+                            gaps_inelig_w += exec;
+                        }
+                    }
+                    if (all_v1 && glen <= x87bridge::kMaxGapV1) {
+                        row.joins_v1++;
+                        if (segs[s].len + segs[s + 1].len < 3) {
+                            joins_short_side++;
+                        }
+                        for (int64_t g = gstart; g < gend; ++g) {
+                            drop[static_cast<size_t>(g)] = true;
+                            row.spliced++;
+                        }
+                    } else if (all_v2) {
+                        row.joins_v2++;
+                    } else {
+                        row.joins_inelig++;
+                    }
+                }
+                if (row.joins_v1 == 0 && row.joins_v2 == 0) {
+                    continue;  // no bridgeable joins; skip measurement and row
+                }
+
+                row.arm_orig = runOneMode(b.instrs.data(), b.instrs.size(), &prod_cfg);
+                if (row.spliced > 0) {
+                    std::vector<IRInstr> spliced;
+                    spliced.reserve(b.instrs.size());
+                    for (size_t k = 0; k < b.instrs.size(); ++k) {
+                        if (!drop[k]) {
+                            spliced.push_back(b.instrs[k]);
+                        }
+                    }
+                    row.arm_bridged = runOneMode(spliced.data(), spliced.size(), &prod_cfg);
+                    const long double delta = static_cast<long double>(row.arm_orig) -
+                                              static_cast<long double>(row.arm_bridged) -
+                                              2.0L * row.spliced;
+                    if (delta > 0) {
+                        row.saved_w = static_cast<long double>(exec) * delta;
+                        sum_saved_w += row.saved_w;
+                    }
+                } else {
+                    row.arm_bridged = row.arm_orig;
+                }
+
+                int picked = 0;
+                for (size_t k = 0; k < b.instrs.size() && picked < 6; ++k) {
+                    if (picked > 0) {
+                        row.preview.push_back('|');
+                    }
+                    row.preview += mnemonic(b.instrs[k].opcode());
+                    ++picked;
+                }
+                frows.push_back(std::move(row));
+            }
+
+            std::ranges::sort(frows, [](const FragRow& a, const FragRow& b) {
+                if (a.saved_w != b.saved_w) {
+                    return a.saved_w > b.saved_w;
+                }
+                return static_cast<long double>(a.exec) * a.arm_orig >
+                       static_cast<long double>(b.exec) * b.arm_orig;
+            });
+
+            const double v1_savings_pct =
+                total_arm > 0 ? static_cast<double>(100.0L * sum_saved_w / total_arm) : 0.0;
+            std::printf("# FP-run fragmentation (run-bridging opportunity, v1 = mov/lea "
+                        "gaps <= %d)\n",
+                        x87bridge::kMaxGapV1);
+            std::printf("bridge_v1_saved_arm_w,%llu\n",
+                        static_cast<unsigned long long>(sum_saved_w));
+            std::printf("bridge_v1_savings_pct,%.3f\n", v1_savings_pct);
+            std::printf("gap_instrs_w_v1,%llu\n", static_cast<unsigned long long>(gaps_v1_w));
+            std::printf("gap_instrs_w_v2only,%llu\n",
+                        static_cast<unsigned long long>(gaps_v2only_w));
+            std::printf("gap_instrs_w_ineligible,%llu\n",
+                        static_cast<unsigned long long>(gaps_inelig_w));
+            std::printf("joins_total,%llu\n", static_cast<unsigned long long>(joins_total));
+            std::printf("joins_v1_merged_below_ir_gate,%llu\n",
+                        static_cast<unsigned long long>(joins_short_side));
+            if (!flag_hist.empty()) {
+                std::vector<std::pair<uint8_t, uint64_t>> fh(flag_hist.begin(), flag_hist.end());
+                std::ranges::sort(fh, [](const auto& a, const auto& b) {
+                    return a.second > b.second;
+                });
+                std::printf("# flag_liveness histogram of v2-only gap instrs "
+                            "(byte=count_w, top 8)\n");
+                const size_t fn = std::min<size_t>(8, fh.size());
+                for (size_t k = 0; k < fn; ++k) {
+                    std::printf("flag_liveness_0x%02x,%llu\n", fh[k].first,
+                                static_cast<unsigned long long>(fh[k].second));
+                }
+            }
+            const size_t fr_n = std::min(frag_rows, frows.size());
+            std::printf("rank,block_id,start_pc,exec,segments,joins_v1,joins_v2,joins_inelig,"
+                        "spliced,arm_orig,arm_bridged,saved_w,preview\n");
+            for (size_t k = 0; k < fr_n; ++k) {
+                const auto& r = frows[k];
+                std::printf("%zu,%u,0x%08x,%llu,%u,%u,%u,%u,%u,%u,%u,%llu,%s\n", k + 1,
+                            r.block_id, r.start_pc, static_cast<unsigned long long>(r.exec),
+                            static_cast<unsigned>(r.segments), static_cast<unsigned>(r.joins_v1),
+                            static_cast<unsigned>(r.joins_v2),
+                            static_cast<unsigned>(r.joins_inelig),
+                            static_cast<unsigned>(r.spliced), r.arm_orig, r.arm_bridged,
+                            static_cast<unsigned long long>(r.saved_w), r.preview.c_str());
             }
             std::printf("\n");
         }
