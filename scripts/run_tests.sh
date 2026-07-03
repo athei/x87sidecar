@@ -45,6 +45,7 @@ ALL_TESTS=(
     test_peephole5
     test_peephole6
     test_deep_stack
+    test_single_op
     test_x87_full
     test_fstpt
     test_fxam

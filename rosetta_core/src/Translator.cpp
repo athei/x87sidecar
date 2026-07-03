@@ -515,7 +515,18 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
     const auto fused = TranslatorX87::try_peephole(translation_result, instr_array, num_instrs,
                                                    insn_idx, fusions_mask);
 
-    if (!fused) {
+    // ── Single-op fast path: fused emitters for isolated fld/fst/fstp ──────
+    // Only when the cache is inactive (run==1, or cache disabled): no pinned
+    // GPRs and no deferred TOP/tag/perm state can exist then — x87_end flushes
+    // everything at run end.  Counts into tally_single so profile_analyze
+    // stays comparable across configs.
+    bool single_fast = false;
+    if (!fused && !cache.active() &&
+        !(g_rosetta_config && g_rosetta_config->disable_x87_single_fast)) {
+        single_fast = TranslatorX87::try_translate_single_fast(translation_result, cur_instr);
+    }
+
+    if (!fused && !single_fast) {
         switch (opcode) {
             case Opcode::kOpcodeName_fldz:
                 TranslatorX87::translate_fldz(translation_result, cur_instr);

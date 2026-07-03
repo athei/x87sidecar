@@ -46,6 +46,13 @@ auto translate_fiadd(TranslationResult* a1, IRInstr* a2) -> void;
 
 auto translate_fst(TranslationResult* a1, IRInstr* a2) -> void;
 
+// Single-op fast path (TranslatorX87Single.cpp): fused low-latency emitters
+// for isolated fld/fst/fstp m32/m64 — the ABI-bridge shape.  Only valid when
+// the cross-instruction cache is inactive (no pinned GPRs / deferred state);
+// the caller gates on that.  Returns false for unhandled shapes (register
+// operands, m80), which then take the generic switch path.
+auto try_translate_single_fast(TranslationResult* a1, IRInstr* a2) -> bool;
+
 auto translate_fstsw(TranslationResult* a1, IRInstr* a2) -> void;
 
 auto translate_fxam(TranslationResult* a1, IRInstr* a2) -> void;

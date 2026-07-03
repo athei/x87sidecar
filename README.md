@@ -99,6 +99,7 @@ Knobs are environment variables read at startup. The most useful ones:
 | `X87_FAST_ROUND=1` | Skip rounding-mode dispatch (faster but unsafe for FLDCW-heavy code) |
 | `X87_DISABLE_CACHE=1` | Disable x87 translation cache |
 | `X87_DISABLE_X87_IR=1` | Disable IR optimization pipeline (direct translator only) |
+| `X87_DISABLE_SINGLE_FAST=1` | Disable the fused single-op fast path for isolated `fld`/`fst`/`fstp` |
 | `X87_DISABLE_ALL_FUSIONS=1` | Disable all instruction fusions |
 | `X87_DISABLE_FUSIONS=f1,f2,…` | Disable specific fusions |
 | `X87_DISABLE_HOOK=1` | Skip the `translate_insn` patch (apples-to-apples baseline against stock Rosetta) |

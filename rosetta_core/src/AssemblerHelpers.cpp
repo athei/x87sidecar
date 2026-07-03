@@ -319,15 +319,15 @@ auto emit_ldr_str_reg(AssemblerBuffer& buf, int size, int is_fp, int opc, int Rm
     buf.emit(insn);
 }
 
-auto emit_ldr_str_imm_ext(AssemblerBuffer& buf, int data_size, int write_back, int extend_mode,
-                          int16_t offset, int Rn, int Rt) -> void {
-    // size | 111 | V=0 | 00 | opc | 0 | imm9 | wb | 0 | Rn | Rt
-    int effective_opc = (data_size == 4) ? (extend_mode | 2) : extend_mode;
+auto emit_ldur_stur(AssemblerBuffer& buf, int size, int opc, int16_t simm9, int Rn, int Rt)
+    -> void {
+    // size | 111 | V=0 | 00 | opc | 0 | imm9 | 00 | Rn | Rt
+    // [31:30]=size [29:27]=111 [26]=V=0 [25:24]=00 [23:22]=opc [21]=0
+    // [20:12]=simm9 [11:10]=00 (unscaled, no writeback) [9:5]=Rn [4:0]=Rt
     uint32_t insn = 0x38000000;
-    insn |= static_cast<uint32_t>(data_size & 0x3) << 30;
-    insn |= static_cast<uint32_t>(effective_opc & 0x3) << 22;
-    insn |= static_cast<uint32_t>(offset & 0x1FF) << 12;
-    insn |= static_cast<uint32_t>(write_back & 0x1) << 11;  // 1=pre, 0=post at [11:10]=01/11
+    insn |= static_cast<uint32_t>(size & 0x3) << 30;
+    insn |= static_cast<uint32_t>(opc & 0x3) << 22;
+    insn |= static_cast<uint32_t>(simm9 & 0x1FF) << 12;
     insn |= static_cast<uint32_t>(Rn & 0x1F) << 5;
     insn |= static_cast<uint32_t>(Rt & 0x1F);
     buf.emit(insn);
