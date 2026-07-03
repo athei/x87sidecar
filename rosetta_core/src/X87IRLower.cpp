@@ -1837,6 +1837,206 @@ static int split_prefix_len(const Context& ctx, int first_over_node, int attempt
     return len;
 }
 
+// ── Pressure-relief rematerialization / load sinking ────────────────────────
+//
+// When the FPR gate would refuse, try shortening live ranges before
+// resorting to a split: a Const* or (alias-clear) LoadF32/F64 whose only
+// remaining use lies beyond the overflow point doesn't need to hold an FPR
+// across the gap — clone it immediately before that use and retarget the
+// use.  When the late use was the value's ONLY use, the original goes dead
+// and the "clone" is just the load sunk to its consumer: zero extra emit.
+// Otherwise the clone costs 1-2 ARM, still far below a ~10-ARM split or a
+// whole-run refusal.
+//
+// Lives here (not X87IROptimize.cpp) because candidate legality and payoff
+// are joined at the hip with the peak_live_fprs model above.
+
+// Insert a copy of nodes[src] at index `pos` (shifting [pos..) up one) and
+// return false if the node budget is exhausted.  All node references —
+// inputs, slot_val, initial_read, last_fcmp/last_fcomi, node_src — are
+// remapped.  The caller retargets the consumer afterwards.
+static bool insert_clone_at(Context& ctx, int src, int pos) {
+    if (ctx.num_nodes >= kMaxNodes || src >= pos) {
+        return false;
+    }
+    const int n = ctx.num_nodes;
+    std::memmove(&ctx.nodes[pos + 1], &ctx.nodes[pos],
+                 static_cast<size_t>(n - pos) * sizeof(Node));
+    std::memmove(&ctx.node_src[pos + 1], &ctx.node_src[pos],
+                 static_cast<size_t>(n - pos) * sizeof(int16_t));
+    ctx.num_nodes = static_cast<int16_t>(n + 1);
+
+    const auto remap = [pos](int16_t& ref) {
+        if (ref >= pos) {
+            ref = static_cast<int16_t>(ref + 1);
+        }
+    };
+    for (int i = 0; i < ctx.num_nodes; i++) {
+        if (i == pos) {
+            continue;  // clone slot, written below
+        }
+        for (auto& in : ctx.nodes[i].inputs) {
+            if (in >= 0) {
+                remap(in);
+            }
+        }
+    }
+    for (auto& v : ctx.slot_val) {
+        if (v >= 0) {
+            remap(v);
+        }
+    }
+    for (auto& v : ctx.initial_read) {
+        if (v >= 0) {
+            remap(v);
+        }
+    }
+    if (ctx.last_fcmp >= 0) {
+        remap(ctx.last_fcmp);
+    }
+    if (ctx.last_fcomi >= 0) {
+        remap(ctx.last_fcomi);
+    }
+
+    ctx.nodes[pos] = ctx.nodes[src];  // src < pos: unshifted
+    ctx.nodes[pos].flags = kNone;
+    ctx.node_src[pos] = ctx.node_src[pos + 1];  // same instruction as the consumer
+    return true;
+}
+
+// Returns true if any clone/sink was performed.  Iterates until the FPR
+// model fits `budget`, no candidate exists, or the clone cap is reached.
+static bool remat_relieve_fpr_pressure(Context& ctx, int budget) {
+    constexpr int kMaxClones = 8;
+    bool changed = false;
+
+    for (int iter = 0; iter < kMaxClones; iter++) {
+        int over = -1;
+        if (peak_live_fprs(ctx, budget, &over) <= budget || over < 0) {
+            return changed;
+        }
+
+        // last_use over non-dead consumers (slot-final values are anchored
+        // at num_nodes and excluded from retargeting below).
+        int16_t last_use[kMaxNodes];
+        std::memset(last_use, -1, sizeof(last_use));
+        for (int i = 0; i < ctx.num_nodes; i++) {
+            if (ctx.nodes[i].flags & kDead) {
+                continue;
+            }
+            for (const short in : ctx.nodes[i].inputs) {
+                if (in >= 0) {
+                    last_use[in] = static_cast<int16_t>(i);
+                }
+            }
+        }
+        bool slot_live[kMaxNodes] = {};
+        for (const short v : ctx.slot_val) {
+            if (v >= 0 && v < ctx.num_nodes) {
+                slot_live[v] = true;
+            }
+        }
+
+        // Pick the candidate whose single post-overflow use is farthest out.
+        int best = -1;
+        int best_use = -1;
+        for (int h = 0; h < over; h++) {
+            const auto& hn = ctx.nodes[h];
+            if (hn.flags != kNone || slot_live[h]) {
+                continue;
+            }
+            const bool is_const = hn.op == Op::ConstZero || hn.op == Op::ConstOne ||
+                                  hn.op == Op::ConstF64;
+            const bool is_load = hn.op == Op::LoadF32 || hn.op == Op::LoadF64;
+            if (!is_const && !is_load) {
+                continue;
+            }
+            if (last_use[h] <= over) {
+                continue;  // not live past the overflow point
+            }
+            // Exactly one use after the overflow point (which is last_use[h]).
+            int uses_after = 0;
+            for (int j = over + 1; j < ctx.num_nodes; j++) {
+                if (ctx.nodes[j].flags & kDead) {
+                    continue;
+                }
+                for (const short in : ctx.nodes[j].inputs) {
+                    if (in == h) {
+                        uses_after++;
+                    }
+                }
+            }
+            if (uses_after != 1) {
+                continue;
+            }
+            const int use = last_use[h];
+            // A load may not cross a memory write or FStsw (writes AX or
+            // memory) between its original position and the sunk position.
+            if (is_load) {
+                bool barrier = false;
+                for (int j = h + 1; j < use && !barrier; j++) {
+                    const auto& m = ctx.nodes[j];
+                    if (m.flags & kDead) {
+                        continue;
+                    }
+                    switch (m.op) {
+                        case Op::StoreF64:
+                        case Op::StoreF32:
+                        case Op::StoreI16:
+                        case Op::StoreI32:
+                        case Op::StoreI64:
+                        case Op::StoreCW:
+                        case Op::FStsw:
+                            barrier = true;
+                            break;
+                        default:
+                            break;
+                    }
+                }
+                if (barrier) {
+                    continue;
+                }
+            }
+            if (use > best_use) {
+                best = h;
+                best_use = use;
+            }
+        }
+        if (best < 0) {
+            return changed;
+        }
+
+        if (!insert_clone_at(ctx, best, best_use)) {
+            return changed;
+        }
+        // Retarget the consumer (shifted to best_use + 1) to the clone.
+        auto& consumer = ctx.nodes[best_use + 1];
+        for (auto& in : consumer.inputs) {
+            if (in == best) {
+                in = static_cast<int16_t>(best_use);
+            }
+        }
+        // If that was the original's only use anywhere, it is now dead —
+        // the clone is a pure sink, not a duplicate.
+        bool any_use = false;
+        for (int j = 0; j < ctx.num_nodes && !any_use; j++) {
+            if (j == best || (ctx.nodes[j].flags & kDead)) {
+                continue;
+            }
+            for (const short in : ctx.nodes[j].inputs) {
+                if (in == best) {
+                    any_use = true;
+                }
+            }
+        }
+        if (!any_use && !slot_live[best]) {
+            ctx.nodes[best].flags |= kDead;
+        }
+        changed = true;
+    }
+    return changed;
+}
+
 int compile_run(TranslationResult* result, IRInstr* instr_array, int64_t num_instrs,
                 int64_t start_idx, int run_length, IRFailReason* out_reason, int* out_peak_gprs,
                 uint16_t* out_fail_opcode) {
@@ -1906,8 +2106,22 @@ int compile_run(TranslationResult* result, IRInstr* instr_array, int64_t num_ins
 
         optimize(ctx);
 
-        // Gate lowering on actual FPR pressure vs. available pool.
+        // Gate lowering on actual FPR pressure vs. available pool.  Before
+        // splitting, try the cheaper relief: sink/clone long-lived consts
+        // and loads past the overflow point (1-2 ARM each vs ~10 per split).
         int fpr_over_node = -1;
+        bool remat_changed = false;
+        if (peak_live_fprs(ctx, available, &fpr_over_node) > available &&
+            (g_rosetta_config == nullptr || g_rosetta_config->enable_ir_remat)) {
+            remat_changed = remat_relieve_fpr_pressure(ctx, available);
+            if (remat_changed) {
+                fpr_over_node = -1;
+                if (log_split) {
+                    std::fprintf(stderr, "[x87ir-remat] relieved run=%d nodes=%d\n", attempt_len,
+                                 static_cast<int>(ctx.num_nodes));
+                }
+            }
+        }
         if (peak_live_fprs(ctx, available, &fpr_over_node) > available) {
             const int next_len = split_prefix_len(ctx, fpr_over_node, attempt_len);
             if (split_enabled && attempt < kMaxSplitRetries && next_len >= 3) {
@@ -1963,6 +2177,9 @@ int compile_run(TranslationResult* result, IRInstr* instr_array, int64_t num_ins
                 std::fprintf(stderr, "[x87ir-split] split ok: consumed=%d of run=%d\n",
                              static_cast<int>(ctx.consumed), run_length);
             }
+        }
+        if (remat_changed && result->x87_cache.tally_ir_remat != 0xFFFFU) {
+            result->x87_cache.tally_ir_remat++;
         }
 
         return ctx.consumed;

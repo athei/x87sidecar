@@ -59,6 +59,9 @@ struct X87Cache {
     // prefix instead).  Bumped inside compile_run itself — per-TR, so
     // per-thread-safe like the rest of the tallies.
     uint16_t tally_ir_split = 0;
+    // Runs where the remat/sink pass changed the IR to relieve FPR
+    // pressure before (or instead of) a split.
+    uint16_t tally_ir_remat = 0;
     // Max peak_live_gprs(ctx) observed across compile_run attempts in this
     // block.  Saturating at its u16 upper bound is a sufficient signal — we
     // only care about "was peak high enough to refuse?".

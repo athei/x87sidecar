@@ -54,6 +54,7 @@ struct ReplayStats {
     uint16_t tally_ir_fpr_fail = 0;
     uint16_t tally_ir_gpr_fail = 0;
     uint16_t tally_ir_split = 0;
+    uint16_t tally_ir_remat = 0;
     uint16_t tally_max_gpr_peak = 0;
 };
 
@@ -98,6 +99,7 @@ ReplayStats runOnce(const std::vector<IRInstr>& instrs, const RosettaConfig& cfg
     s.tally_ir_fpr_fail = result.x87_cache.tally_ir_fpr_fail;
     s.tally_ir_gpr_fail = result.x87_cache.tally_ir_gpr_fail;
     s.tally_ir_split = result.x87_cache.tally_ir_split;
+    s.tally_ir_remat = result.x87_cache.tally_ir_remat;
     s.tally_max_gpr_peak = result.x87_cache.tally_max_gpr_peak;
     std::free(result.insn_buf.data);
     return s;
@@ -165,6 +167,7 @@ int main(int argc, char** argv) try {
     RosettaConfig cfg{};
     cfg.enable_fma_reduce = 1;  // production default
     cfg.enable_ir_split = no_split ? 0 : 1;
+    cfg.enable_ir_remat = no_split ? 0 : 1;
     cfg.log_ir_split = log_split ? 1 : 0;
     cfg.fpr_pool_limit = static_cast<uint8_t>(fpr_pool);
     cfg.gpr_pool_limit = static_cast<uint8_t>(gpr_pool);
@@ -184,6 +187,7 @@ int main(int argc, char** argv) try {
     std::printf("ir_fpr_fail,%u\n", s.tally_ir_fpr_fail);
     std::printf("ir_gpr_fail,%u\n", s.tally_ir_gpr_fail);
     std::printf("ir_split,%u\n", s.tally_ir_split);
+    std::printf("ir_remat,%u\n", s.tally_ir_remat);
     std::printf("max_gpr_peak,%u\n", s.tally_max_gpr_peak);
     return 0;
 } catch (const std::exception& e) {

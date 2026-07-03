@@ -124,6 +124,7 @@ RosettaConfig load_config_from_env() {
     cfg.disable_x87_single_fast = env_truthy("X87_DISABLE_SINGLE_FAST") ? 1 : 0;
     cfg.enable_fma_reduce = env_default_on("X87_ENABLE_FMA_REDUCE");
     cfg.enable_ir_split = env_default_on("X87_ENABLE_IR_SPLIT");
+    cfg.enable_ir_remat = env_default_on("X87_ENABLE_IR_REMAT");
     cfg.log_ir_split = env_truthy("X87_LOG_IR_SPLIT") ? 1 : 0;
 
     // Test-only gate pool clamps: make register-pressure splits
@@ -267,7 +268,12 @@ void print_env_help(std::FILE* out) {
                  "                                retries with the prefix ending just before\n"
                  "                                the overflow point (the suffix re-enters the\n"
                  "                                gate on the next dispatch).  Default ON.\n"
+                 "  X87_ENABLE_IR_REMAT=0         disable pressure rematerialization: before\n"
+                 "                                splitting, compile_run normally sinks/clones\n"
+                 "                                long-lived consts and loads past the pressure\n"
+                 "                                peak (cheaper than a split).  Default ON.\n"
                  "  X87_LOG_IR_SPLIT=1            one stderr line per split retry / rescued run\n"
+                 "                                / remat relief\n"
                  "  X87_FPR_POOL_LIMIT=N          test-only [1,16]: clamp the FPR count the\n"
                  "                                pressure gate believes is available, making\n"
                  "                                splits deterministic (allocation unaffected)\n"

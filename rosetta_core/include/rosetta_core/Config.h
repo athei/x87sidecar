@@ -60,8 +60,15 @@ struct RosettaConfig {
                                     //                           The suffix re-enters the gate on
                                     //                           the next dispatch.  Set =0 to
                                     //                           restore all-or-nothing gating.
-    uint8_t log_ir_split;           // X87_LOG_IR_SPLIT          one stderr line per split retry
-                                    //                           and per rescued run.
+    uint8_t log_ir_split;           // X87_LOG_IR_SPLIT          one stderr line per split retry,
+                                    //                           per rescued run, and per remat
+                                    //                           relief.
+    uint8_t enable_ir_remat;        // X87_ENABLE_IR_REMAT       (default ON) before splitting an
+                                    //                           over-pressure run, sink/clone
+                                    //                           long-lived Const*/Load* values
+                                    //                           past the overflow point to
+                                    //                           shorten their live ranges.
+                                    //                           Set =0 to disable.
     uint8_t fpr_pool_limit;         // X87_FPR_POOL_LIMIT        test-only [1,16]: clamp the FPR
                                     //                           count the pressure gate believes
                                     //                           is available (0 = off).  Makes
