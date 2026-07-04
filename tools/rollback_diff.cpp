@@ -41,7 +41,9 @@
 #include "rosetta_core/CoreConfig.h"
 #include "rosetta_core/IRBlock.h"
 #include "rosetta_core/IRInstr.h"
+#include "rosetta_core/Opcode_26_4.h"
 #include "rosetta_core/ProfileRuntime.h"
+#include "rosetta_core/RosettaCore.h"
 #include "rosetta_core/Register.h"
 #include "rosetta_core/ThreadContextOffsets.h"
 #include "rosetta_core/TranscendentalHelper.h"
@@ -180,6 +182,15 @@ int main(int argc, char** argv) try {
     std::vector<IRInstr> instrs(raw.size() / sizeof(IRInstr));
     std::memcpy(instrs.data(), raw.data(), raw.size());
     std::printf("loaded %zu IRInstr from %s\n", instrs.size(), path);
+
+    // Seed the runtime opcode regime BEFORE any IRInstr::opcode() call.
+    // The shipped geom trigger blob (tests/data/geom_block_874c40.ir) is a
+    // legacy capture whose host opcodes are 26.4-encoded, so this tool
+    // pins the ≤26.4 compat regime — the same value the unseeded global
+    // happened to default to when the tool was written, now explicit.
+    // For a blob captured under modern Rosetta use ir_pressure_replay,
+    // which defaults to the identity regime and takes --runtime-version.
+    rosetta_core_set_runtime_version(0);
 
     // Inline transcendentals materialise an absolute constants address.
     // Any non-zero value satisfies the assertion; the emit count and bytes

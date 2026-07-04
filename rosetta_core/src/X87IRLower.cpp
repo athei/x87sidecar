@@ -1853,6 +1853,17 @@ static int split_prefix_len(const Context& ctx, int first_over_node, int attempt
 // Lives here (not X87IROptimize.cpp) because candidate legality and payoff
 // are joined at the hip with the peak_live_fprs model above.
 
+// FStsw packs payloads into its input slots (inputs[1] = destination
+// register index, inputs[2] = top_delta snapshot — see build()); only
+// inputs[0] (the fused FCmp reference) is a node id.  Every walk below
+// that interprets inputs as node references must skip the payload slots,
+// or a payload value that happens to collide with a node index gets
+// remapped/retargeted and the lowering emits garbage (observed as a WoW
+// guest SIGSEGV when remat rewrote an FStsw's register-index payload).
+static inline int node_ref_input_count(const Node& n) {
+    return n.op == Op::FStsw ? 1 : 3;
+}
+
 // Insert a copy of nodes[src] at index `pos` (shifting [pos..) up one) and
 // return false if the node budget is exhausted.  All node references —
 // inputs, slot_val, initial_read, last_fcmp/last_fcomi, node_src — are
@@ -1877,7 +1888,9 @@ static bool insert_clone_at(Context& ctx, int src, int pos) {
         if (i == pos) {
             continue;  // clone slot, written below
         }
-        for (auto& in : ctx.nodes[i].inputs) {
+        const int nrefs = node_ref_input_count(ctx.nodes[i]);
+        for (int k = 0; k < nrefs; k++) {
+            auto& in = ctx.nodes[i].inputs[k];
             if (in >= 0) {
                 remap(in);
             }
@@ -1919,14 +1932,17 @@ static bool remat_relieve_fpr_pressure(Context& ctx, int budget) {
         }
 
         // last_use over non-dead consumers (slot-final values are anchored
-        // at num_nodes and excluded from retargeting below).
+        // at num_nodes and excluded from retargeting below).  Payload input
+        // slots (FStsw) are not references — see node_ref_input_count.
         int16_t last_use[kMaxNodes];
         std::memset(last_use, -1, sizeof(last_use));
         for (int i = 0; i < ctx.num_nodes; i++) {
             if (ctx.nodes[i].flags & kDead) {
                 continue;
             }
-            for (const short in : ctx.nodes[i].inputs) {
+            const int nrefs = node_ref_input_count(ctx.nodes[i]);
+            for (int k = 0; k < nrefs; k++) {
+                const short in = ctx.nodes[i].inputs[k];
                 if (in >= 0) {
                     last_use[in] = static_cast<int16_t>(i);
                 }
@@ -1962,8 +1978,9 @@ static bool remat_relieve_fpr_pressure(Context& ctx, int budget) {
                 if (ctx.nodes[j].flags & kDead) {
                     continue;
                 }
-                for (const short in : ctx.nodes[j].inputs) {
-                    if (in == h) {
+                const int nrefs = node_ref_input_count(ctx.nodes[j]);
+                for (int k = 0; k < nrefs; k++) {
+                    if (ctx.nodes[j].inputs[k] == h) {
                         uses_after++;
                     }
                 }
@@ -2013,9 +2030,12 @@ static bool remat_relieve_fpr_pressure(Context& ctx, int budget) {
         }
         // Retarget the consumer (shifted to best_use + 1) to the clone.
         auto& consumer = ctx.nodes[best_use + 1];
-        for (auto& in : consumer.inputs) {
-            if (in == best) {
-                in = static_cast<int16_t>(best_use);
+        {
+            const int nrefs = node_ref_input_count(consumer);
+            for (int k = 0; k < nrefs; k++) {
+                if (consumer.inputs[k] == best) {
+                    consumer.inputs[k] = static_cast<int16_t>(best_use);
+                }
             }
         }
         // If that was the original's only use anywhere, it is now dead —
@@ -2025,8 +2045,9 @@ static bool remat_relieve_fpr_pressure(Context& ctx, int budget) {
             if (j == best || (ctx.nodes[j].flags & kDead)) {
                 continue;
             }
-            for (const short in : ctx.nodes[j].inputs) {
-                if (in == best) {
+            const int nrefs = node_ref_input_count(ctx.nodes[j]);
+            for (int k = 0; k < nrefs; k++) {
+                if (ctx.nodes[j].inputs[k] == best) {
                     any_use = true;
                 }
             }
@@ -2119,8 +2140,11 @@ int compile_run(TranslationResult* result, IRInstr* instr_array, int64_t num_ins
             if (remat_changed) {
                 fpr_over_node = -1;
                 if (log_split) {
-                    std::fprintf(stderr, "[x87ir-remat] relieved run=%d nodes=%d\n", attempt_len,
-                                 static_cast<int>(ctx.num_nodes));
+                    std::fprintf(stderr,
+                                 "[x87ir-remat] relieved run=%d nodes=%d hash=0x%016llx idx=%lld\n",
+                                 attempt_len, static_cast<int>(ctx.num_nodes),
+                                 static_cast<unsigned long long>(result->x87_cache.profile_hash),
+                                 static_cast<long long>(start_idx));
                 }
             }
         }

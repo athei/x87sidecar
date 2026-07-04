@@ -34,14 +34,15 @@ uint32_t g_next_id = 0;
 uint64_t g_counter_parent_addr = 0;
 uint64_t g_counter_local_addr = 0;
 
-// Per-block tally storage: 16 B per slot × kMaxBlocks = 16 MiB.  Lazy-
+// Per-block tally storage: 24 B per slot × kMaxBlocks = 24 MiB.  Lazy-
 // allocated on first set_block_tally call; profile-disabled runs never pay
-// the cost.  Stored as two parallel atomic<uint64> arrays (low + high half
-// of the 16-B BlockTally) so concurrent translation can store torn-free
-// per-half.  A torn read at dump time is harmless because the translator
-// writes idempotent partial sums — by exit, both halves have settled.
+// the cost.  Stored as three parallel atomic<uint64> arrays (thirds of the
+// 24-B BlockTally) so concurrent translation can store torn-free per-word.
+// A torn read at dump time is harmless because the translator writes
+// idempotent partial sums — by exit, all words have settled.
 std::unique_ptr<std::atomic<uint64_t>[]> g_block_tally_lo;
 std::unique_ptr<std::atomic<uint64_t>[]> g_block_tally_hi;
+std::unique_ptr<std::atomic<uint64_t>[]> g_block_tally_x3;
 
 // Per-block build-bail opcode side-table.  2 B per slot × kMaxBlocks = 2 MiB
 // when allocated.  Lazy-allocated on first set_block_build_fail_op call.
@@ -62,16 +63,18 @@ std::unique_ptr<std::atomic<uint16_t>[]> g_block_top_dirty_pred;
 // set_block_max_run_at_refuse call.
 std::unique_ptr<std::atomic<uint16_t>[]> g_block_max_run_at_refuse[kIRGateReasonCount];
 
-void pack_tally(BlockTally t, uint64_t& lo, uint64_t& hi) {
-    static_assert(sizeof(BlockTally) == 16);
+void pack_tally(BlockTally t, uint64_t& lo, uint64_t& hi, uint64_t& x3) {
+    static_assert(sizeof(BlockTally) == 24);
     std::memcpy(&lo, reinterpret_cast<const std::byte*>(&t) + 0, 8);
     std::memcpy(&hi, reinterpret_cast<const std::byte*>(&t) + 8, 8);
+    std::memcpy(&x3, reinterpret_cast<const std::byte*>(&t) + 16, 8);
 }
 
-BlockTally unpack_tally(uint64_t lo, uint64_t hi) {
+BlockTally unpack_tally(uint64_t lo, uint64_t hi, uint64_t x3) {
     BlockTally t{};
     std::memcpy(reinterpret_cast<std::byte*>(&t) + 0, &lo, 8);
     std::memcpy(reinterpret_cast<std::byte*>(&t) + 8, &hi, 8);
+    std::memcpy(reinterpret_cast<std::byte*>(&t) + 16, &x3, 8);
     return t;
 }
 
@@ -143,13 +146,16 @@ void set_block_tally(uint32_t bid, BlockTally tally) {
         if (!g_block_tally_lo) {
             g_block_tally_lo = std::make_unique<std::atomic<uint64_t>[]>(kMaxBlocks);
             g_block_tally_hi = std::make_unique<std::atomic<uint64_t>[]>(kMaxBlocks);
+            g_block_tally_x3 = std::make_unique<std::atomic<uint64_t>[]>(kMaxBlocks);
         }
     }
     uint64_t lo = 0;
     uint64_t hi = 0;
-    pack_tally(tally, lo, hi);
+    uint64_t x3 = 0;
+    pack_tally(tally, lo, hi, x3);
     g_block_tally_lo[bid].store(lo, std::memory_order_relaxed);
     g_block_tally_hi[bid].store(hi, std::memory_order_relaxed);
+    g_block_tally_x3[bid].store(x3, std::memory_order_relaxed);
 }
 
 BlockTally get_block_tally(uint32_t bid) {
@@ -158,6 +164,7 @@ BlockTally get_block_tally(uint32_t bid) {
     }
     std::atomic<uint64_t>* lo_arr;
     std::atomic<uint64_t>* hi_arr;
+    std::atomic<uint64_t>* x3_arr;
     {
         std::scoped_lock lock(g_mu);
         if (!g_block_tally_lo) {
@@ -165,10 +172,12 @@ BlockTally get_block_tally(uint32_t bid) {
         }
         lo_arr = g_block_tally_lo.get();
         hi_arr = g_block_tally_hi.get();
+        x3_arr = g_block_tally_x3.get();
     }
     const uint64_t lo = lo_arr[bid].load(std::memory_order_relaxed);
     const uint64_t hi = hi_arr[bid].load(std::memory_order_relaxed);
-    return unpack_tally(lo, hi);
+    const uint64_t x3 = x3_arr[bid].load(std::memory_order_relaxed);
+    return unpack_tally(lo, hi, x3);
 }
 
 void set_block_build_fail_op(uint32_t bid, uint16_t opcode) {

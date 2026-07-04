@@ -62,10 +62,13 @@ static_assert(sizeof(CounterSectionHeader) == 8);
 // exit because path is only known after all of the block's
 // translate_instruction calls have completed; dumpBlockIfNew is called
 // *before* translate_instruction (see sidecar.cpp:~370), so inline per-
-// block tally would race the bumps.  Older .prof files (no tally section
-// or 'TLY0' magic with the smaller 8-byte entry) parse only the counter
-// section in current builds — the failure-reason columns are absent.
-constexpr uint32_t kTallySectionMagic = 0x31594C54U;  // 'TLY1'
+// block tally would race the bumps.  Version history: 'TLY0' (8-byte
+// entry, no failure classifiers) parses counter-section-only; 'TLY1'
+// (16-byte entry) is still parsed by the analyzer with the pressure-
+// relief columns zero-filled; 'TLY2' (current, 20-byte entry) adds the
+// ir_split_runs / ir_remat_runs attribution fields.
+constexpr uint32_t kTallySectionMagic = 0x32594C54U;    // 'TLY2'
+constexpr uint32_t kTallySectionMagicV1 = 0x31594C54U;  // 'TLY1' (legacy)
 
 struct TallySectionHeader {
     uint32_t magic;  // = kTallySectionMagic
@@ -82,8 +85,24 @@ struct BlockTallyEntry {
     uint16_t ir_fpr_fail_ops;    // peak_live_fprs > available
     uint16_t ir_gpr_fail_ops;    // peak_live_gprs > available
     uint16_t max_gpr_peak;       // max peak_live_gprs(ctx) observed (diagnostic)
+    uint16_t ir_split_runs;      // runs rescued by pressure splitting (TLY2+)
+    uint16_t ir_remat_runs;      // runs relieved by remat/sink (TLY2+)
 };
-static_assert(sizeof(BlockTallyEntry) == 16);
+static_assert(sizeof(BlockTallyEntry) == 20);
+
+// Legacy 'TLY1' entry — 16 bytes, no pressure-relief fields.  Kept so the
+// analyzer can parse captures taken before the TLY2 bump.
+struct BlockTallyEntryV1 {
+    uint16_t ir_ops;
+    uint16_t peephole_ops;
+    uint16_t single_ops;
+    uint16_t fallthrough_ops;
+    uint16_t ir_build_fail_ops;
+    uint16_t ir_fpr_fail_ops;
+    uint16_t ir_gpr_fail_ops;
+    uint16_t max_gpr_peak;
+};
+static_assert(sizeof(BlockTallyEntryV1) == 16);
 
 // Build-bail-opcode side-table magic ('BFO0').  Optional section written
 // after the tally section at exit time.  Per block_id (0..count-1) records

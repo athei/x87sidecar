@@ -62,6 +62,8 @@ struct Tally {
     uint16_t ir_fpr_fail = 0;
     uint16_t ir_gpr_fail = 0;
     uint16_t max_gpr_peak = 0;
+    uint16_t ir_split = 0;  // runs rescued by pressure splitting (TLY2+)
+    uint16_t ir_remat = 0;  // runs relieved by remat/sink (TLY2+)
     [[nodiscard]] uint64_t total() const {
         return static_cast<uint64_t>(ir) + peep + single + ft + ir_build_fail + ir_fpr_fail +
                ir_gpr_fail;
@@ -143,6 +145,8 @@ bool readFile(const std::string& path, std::vector<Block>& out, std::vector<uint
         profile::TallySectionHeader thdr;
         std::memcpy(&thdr, buf.data() + off, sizeof(thdr));
         if (thdr.magic == profile::kTallySectionMagic) {
+            // Current 'TLY2' format (20-byte entries with pressure-relief
+            // attribution).
             off += sizeof(thdr);
             const size_t tbytes =
                 static_cast<size_t>(thdr.count) * sizeof(profile::BlockTallyEntry);
@@ -164,6 +168,37 @@ bool readFile(const std::string& path, std::vector<Block>& out, std::vector<uint
                     .ir_fpr_fail = e.ir_fpr_fail_ops,
                     .ir_gpr_fail = e.ir_gpr_fail_ops,
                     .max_gpr_peak = e.max_gpr_peak,
+                    .ir_split = e.ir_split_runs,
+                    .ir_remat = e.ir_remat_runs,
+                };
+            }
+            off += tbytes;
+        } else if (thdr.magic == profile::kTallySectionMagicV1) {
+            // Legacy 'TLY1' capture: 16-byte entries; pressure-relief
+            // columns zero-filled.
+            off += sizeof(thdr);
+            const size_t tbytes =
+                static_cast<size_t>(thdr.count) * sizeof(profile::BlockTallyEntryV1);
+            if (off + tbytes > buf.size()) {
+                std::fprintf(stderr, "error: %s tally section truncated (declared %u entries)\n",
+                             path.c_str(), thdr.count);
+                return false;
+            }
+            tallies.resize(thdr.count);
+            for (uint32_t i = 0; i < thdr.count; ++i) {
+                profile::BlockTallyEntryV1 e;
+                std::memcpy(&e, buf.data() + off + (i * sizeof(e)), sizeof(e));
+                tallies[i] = Tally{
+                    .ir = e.ir_ops,
+                    .peep = e.peephole_ops,
+                    .single = e.single_ops,
+                    .ft = e.fallthrough_ops,
+                    .ir_build_fail = e.ir_build_fail_ops,
+                    .ir_fpr_fail = e.ir_fpr_fail_ops,
+                    .ir_gpr_fail = e.ir_gpr_fail_ops,
+                    .max_gpr_peak = e.max_gpr_peak,
+                    .ir_split = 0,
+                    .ir_remat = 0,
                 };
             }
             off += tbytes;
@@ -1035,6 +1070,8 @@ int main(int argc, char** argv) try {
         long double total_build_fail = 0;
         long double total_fpr_fail = 0;
         long double total_gpr_fail = 0;
+        long double total_ir_split = 0;
+        long double total_ir_remat = 0;
         long double total_irg[profile::kIRGateReasonCount] = {};
         for (const auto& b : blocks) {
             const uint64_t exec = (b.id < counters.size()) ? counters[b.id] : 0;
@@ -1050,6 +1087,8 @@ int main(int argc, char** argv) try {
             total_build_fail += e * t.ir_build_fail;
             total_fpr_fail += e * t.ir_fpr_fail;
             total_gpr_fail += e * t.ir_gpr_fail;
+            total_ir_split += e * t.ir_split;
+            total_ir_remat += e * t.ir_remat;
             if (have_irg && b.id < ir_gate_counters.size()) {
                 for (uint16_t r = 0; r < profile::kIRGateReasonCount; ++r) {
                     total_irg[r] += e * ir_gate_counters[b.id].counts[r];
@@ -1091,6 +1130,9 @@ int main(int argc, char** argv) try {
         std::printf("ir_build_fail,%.2f\n", per_kop(total_build_fail));
         std::printf("ir_fpr_fail,%.2f\n", per_kop(total_fpr_fail));
         std::printf("ir_gpr_fail,%.2f\n", per_kop(total_gpr_fail));
+        // Pressure-relief attribution (run-counts, not ops; TLY2 captures).
+        std::printf("ir_split_runs,%.2f\n", per_kop(total_ir_split));
+        std::printf("ir_remat_runs,%.2f\n", per_kop(total_ir_remat));
         if (have_irg) {
             for (uint16_t r = 0; r < profile::kIRGateReasonCount; ++r) {
                 std::printf("gate_%s,%.2f\n", profile::kIRGateReasonNames[r],

@@ -12,8 +12,11 @@
 // tests/data/geom_block_874c40.ir (169 instrs, WoW geometry; historically
 // 29 FprPressure firings at the 8-slot pool).  A/B example:
 //
-//   ir_pressure_replay tests/data/geom_block_874c40.ir --fpr-pool 8 --no-split
-//   ir_pressure_replay tests/data/geom_block_874c40.ir --fpr-pool 8
+//   ir_pressure_replay tests/data/geom_block_874c40.ir --fpr-pool 8 --runtime-version 0 --no-split
+//   ir_pressure_replay tests/data/geom_block_874c40.ir --fpr-pool 8 --runtime-version 0
+//
+// (--runtime-version 0 because the geom blob is a legacy capture with
+// 26.4-host opcodes; modern captures use the default identity regime.)
 //
 // The first shows the all-or-nothing gate (fpr_fail ops, high ARM); the
 // second shows the split loop converting those refusals into shorter IR
@@ -34,8 +37,10 @@
 #include "rosetta_core/CoreConfig.h"
 #include "rosetta_core/IRBlock.h"
 #include "rosetta_core/IRInstr.h"
+#include "rosetta_core/Opcode_26_4.h"
 #include "rosetta_core/ProfileRuntime.h"
 #include "rosetta_core/Register.h"
+#include "rosetta_core/RosettaCore.h"
 #include "rosetta_core/ThreadContextOffsets.h"
 #include "rosetta_core/TranscendentalHelper.h"
 #include "rosetta_core/TranslationResult.h"
@@ -112,7 +117,10 @@ int main(int argc, char** argv) try {
     int fpr_pool = 0;
     int gpr_pool = 0;
     bool no_split = false;
+    bool no_remat = false;
     bool log_split = false;
+    uint64_t runtime_version_arg = 0;
+    bool runtime_version_arg_set = false;
 
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -122,6 +130,11 @@ int main(int argc, char** argv) try {
             gpr_pool = static_cast<int>(std::strtol(argv[++i], nullptr, 10));
         } else if (a == "--no-split") {
             no_split = true;
+        } else if (a == "--no-remat") {
+            no_remat = true;
+        } else if (a == "--runtime-version" && i + 1 < argc) {
+            runtime_version_arg = std::strtoull(argv[++i], nullptr, 0);
+            runtime_version_arg_set = true;
         } else if (a == "--log") {
             log_split = true;
         } else if (path == nullptr) {
@@ -154,6 +167,18 @@ int main(int argc, char** argv) try {
     std::vector<IRInstr> instrs(raw.size() / sizeof(IRInstr));
     std::memcpy(instrs.data(), raw.data(), raw.size());
 
+    // Seed the runtime opcode regime BEFORE any IRInstr::opcode() call.
+    // The unseeded default (0) selects the ≤26.4 compat table, which
+    // mis-decodes blobs captured under modern Rosetta (e.g. internal fld
+    // 0xDE reads as 26.4-host fisubr) — same gotcha profile_analyze fixed.
+    // Blobs come from profile_analyze --dump-ir-binary of modern captures,
+    // so default to the identity regime; pass --runtime-version 0 for a
+    // legacy ≤26.4 blob.
+    uint64_t runtime_version = kVersion_26_4 + 1;
+    // (parsed above if --runtime-version was given)
+    rosetta_core_set_runtime_version(runtime_version_arg_set ? runtime_version_arg
+                                                             : runtime_version);
+
     // Inline transcendentals materialise an absolute constants address; any
     // non-zero value keeps emit counts stable.
     rosetta_core::set_transcendental_constants_addr(0x1000);
@@ -165,9 +190,11 @@ int main(int argc, char** argv) try {
                                reinterpret_cast<uint64_t>(counter_stub));
 
     RosettaConfig cfg{};
-    cfg.enable_fma_reduce = 1;  // production default
+    cfg.enable_fma_reduce = 1;  // production defaults
+    cfg.x87_enable_rollback_top_dirty = 1;
+    cfg.x87_enable_rollback_deferred_pop = 1;
     cfg.enable_ir_split = no_split ? 0 : 1;
-    cfg.enable_ir_remat = no_split ? 0 : 1;
+    cfg.enable_ir_remat = (no_split || no_remat) ? 0 : 1;
     cfg.log_ir_split = log_split ? 1 : 0;
     cfg.fpr_pool_limit = static_cast<uint8_t>(fpr_pool);
     cfg.gpr_pool_limit = static_cast<uint8_t>(gpr_pool);

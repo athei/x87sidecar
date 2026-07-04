@@ -130,6 +130,8 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                                          .ir_fpr_fail_ops = cache.tally_ir_fpr_fail,
                                          .ir_gpr_fail_ops = cache.tally_ir_gpr_fail,
                                          .max_gpr_peak = cache.tally_max_gpr_peak,
+                                         .ir_split_runs = cache.tally_ir_split,
+                                         .ir_remat_runs = cache.tally_ir_remat,
                                      });
         }
     };
