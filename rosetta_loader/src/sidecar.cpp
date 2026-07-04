@@ -820,6 +820,8 @@ void dumpCountersIfEnabled(mach_port_t /*parentTaskPort*/) {
             .max_gpr_peak = t.max_gpr_peak,
             .ir_split_runs = t.ir_split_runs,
             .ir_remat_runs = t.ir_remat_runs,
+            .bridge_ops = t.bridge_ops,
+            .bridge_fail_runs = t.bridge_fail_runs,
         };
         std::fwrite(&entry, sizeof(entry), 1, g_profile.file);
     }

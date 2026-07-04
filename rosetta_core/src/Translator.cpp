@@ -119,7 +119,25 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                 // attempt when it reaches this index with no deferred state.
                 cache.bridge_pending_total = 0;
                 cache.bridge_pending_idx = -1;
-                if (g_rosetta_config != nullptr && g_rosetta_config->enable_bridge && run >= 1) {
+                // Per-block bisect: include list restricts bridging to the
+                // listed IR-content hashes; exclude list vetoes them
+                // (exclude wins).  cache.profile_hash is populated on block
+                // transition, before any run start in the block.
+                bool bridge_allowed = g_rosetta_config != nullptr &&
+                                      g_rosetta_config->enable_bridge != 0;
+                if (bridge_allowed) {
+                    const auto& cfg = *g_rosetta_config;
+                    if (!cfg.x87_no_bridge_hash_list.empty() &&
+                        std::ranges::binary_search(cfg.x87_no_bridge_hash_list,
+                                                   cache.profile_hash)) {
+                        bridge_allowed = false;
+                    } else if (!cfg.x87_bridge_hash_list.empty() &&
+                               !std::ranges::binary_search(cfg.x87_bridge_hash_list,
+                                                           cache.profile_hash)) {
+                        bridge_allowed = false;
+                    }
+                }
+                if (bridge_allowed && run >= 1) {
                     const auto br = X87Cache::lookahead_bridged(
                         instr_array, num_instrs, insn_idx, g_rosetta_config->bridge_max_gap,
                         g_rosetta_config->bridge_max_total);
@@ -151,6 +169,8 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                                          .max_gpr_peak = cache.tally_max_gpr_peak,
                                          .ir_split_runs = cache.tally_ir_split,
                                          .ir_remat_runs = cache.tally_ir_remat,
+                                         .bridge_ops = cache.tally_bridge,
+                                         .bridge_fail_runs = cache.tally_bridge_fail,
                                      });
         }
     };

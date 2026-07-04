@@ -159,8 +159,10 @@ RosettaConfig load_config_from_env() {
     parse_pool_limit("X87_FPR_POOL_LIMIT", cfg.fpr_pool_limit);
     parse_pool_limit("X87_GPR_POOL_LIMIT", cfg.gpr_pool_limit);
 
-    // Run bridging v1 (default OFF while soaking; flip via env).
-    cfg.enable_bridge = env_truthy("X87_ENABLE_BRIDGE") ? 1 : 0;
+    // Run bridging v1.  Default ON since 2026-07-04 (clean TurtleWoW soak;
+    // measured -6.18% exec-weighted ARM on the capture).  Set =0 to disable;
+    // X87_BRIDGE_HASH_LIST / X87_NO_BRIDGE_HASH_LIST bisect per block.
+    cfg.enable_bridge = env_default_on("X87_ENABLE_BRIDGE");
     cfg.bridge_max_gap = 2;
     cfg.bridge_max_total = 8;
     cfg.log_bridge = env_truthy("X87_LOG_BRIDGE") ? 1 : 0;
@@ -181,6 +183,16 @@ RosettaConfig load_config_from_env() {
     };
     parse_bridge_bound("X87_BRIDGE_MAX_GAP", cfg.bridge_max_gap, 1, 4);
     parse_bridge_bound("X87_BRIDGE_MAX_TOTAL", cfg.bridge_max_total, 1, 16);
+    if (const char* v = std::getenv("X87_BRIDGE_HASH_LIST"); v != nullptr && v[0] != '\0') {
+        parse_hash_list(v, cfg.x87_bridge_hash_list);
+        std::printf("[rosettax87] X87_BRIDGE_HASH_LIST: %zu unique hashes\n",
+                    cfg.x87_bridge_hash_list.size());
+    }
+    if (const char* v = std::getenv("X87_NO_BRIDGE_HASH_LIST"); v != nullptr && v[0] != '\0') {
+        parse_hash_list(v, cfg.x87_no_bridge_hash_list);
+        std::printf("[rosettax87] X87_NO_BRIDGE_HASH_LIST: %zu unique hashes\n",
+                    cfg.x87_no_bridge_hash_list.size());
+    }
 
     if (env_truthy("X87_DISABLE_ALL_FUSIONS")) {
         cfg.disabled_fusions_mask = ~0ULL;
@@ -318,8 +330,8 @@ void print_env_help(std::FILE* out) {
                  "                                pressure gate believes is available, making\n"
                  "                                splits deterministic (allocation unaffected)\n"
                  "  X87_GPR_POOL_LIMIT=N          test-only GPR-side equivalent\n"
-                 "  X87_ENABLE_BRIDGE=1           run bridging v1 (default OFF while soaking):\n"
-                 "                                carry one IR run across short gaps of\n"
+                 "  X87_ENABLE_BRIDGE=0           disable run bridging (default ON): bridging\n"
+                 "                                carries one IR run across short gaps of\n"
                  "                                flag-transparent 32/64-bit mov/lea\n"
                  "                                instructions instead of spilling/reloading\n"
                  "                                the FP stack around them.  All-or-nothing\n"
@@ -329,6 +341,11 @@ void print_env_help(std::FILE* out) {
                  "  X87_BRIDGE_MAX_TOTAL=N        [1,16] default 8: max bridge instructions\n"
                  "                                per bridged region\n"
                  "  X87_LOG_BRIDGE=1              one stderr line per bridged compile/fallback\n"
+                 "  X87_BRIDGE_HASH_LIST=H,...    bridge ONLY blocks whose IR-content hash is\n"
+                 "                                listed (bisect aid; hash from X87_LOG_BRIDGE\n"
+                 "                                or profile_analyze)\n"
+                 "  X87_NO_BRIDGE_HASH_LIST=H,... never bridge the listed blocks (wins over\n"
+                 "                                the include list)\n"
                  "  X87_DISABLE_ALL_FUSIONS=1     disable every peephole fusion\n"
                  "  X87_GATE_FLUSH_THRESHOLD=N             override the IR-gate flush-and-\n"
                  "  X87_GATE_FLUSH_THRESHOLD_DEFERRED_POP=N proceed minimum run length per\n"

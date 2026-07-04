@@ -85,7 +85,10 @@ struct BlockTally {
     // remat-sink pass relieved FPR pressure.
     uint16_t ir_split_runs;
     uint16_t ir_remat_runs;
-    uint16_t _pad[2];  // keep the atomic packing at whole u64 words
+    // Run bridging: bridge instructions consumed inside IR runs / bridged
+    // attempts that fell back to plain dispatch.
+    uint16_t bridge_ops;
+    uint16_t bridge_fail_runs;
 };
 static_assert(sizeof(BlockTally) == 24);
 

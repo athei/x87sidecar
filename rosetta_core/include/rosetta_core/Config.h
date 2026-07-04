@@ -75,13 +75,14 @@ struct RosettaConfig {
                                     //                           split behavior deterministic in
                                     //                           tests; allocation is unaffected.
     uint8_t gpr_pool_limit;         // X87_GPR_POOL_LIMIT        test-only GPR-side equivalent.
-    uint8_t enable_bridge;          // X87_ENABLE_BRIDGE         (default OFF while soaking)
+    uint8_t enable_bridge;          // X87_ENABLE_BRIDGE         (default ON since 2026-07-04)
                                     //                           run bridging v1: carry one IR
                                     //                           run across short gaps of
                                     //                           flag-transparent mov/lea
                                     //                           instructions (X87Bridge.h)
                                     //                           instead of spilling/reloading
                                     //                           the FP stack around them.
+                                    //                           Set =0 to disable.
     uint8_t bridge_max_gap;         // X87_BRIDGE_MAX_GAP        [1,4], default 2: max
                                     //                           consecutive bridge instrs per
                                     //                           gap.
@@ -90,6 +91,15 @@ struct RosettaConfig {
     uint8_t log_bridge;             // X87_LOG_BRIDGE            one stderr line per bridged
                                     //                           compile (hash, counts) and per
                                     //                           fallback.
+
+    // X87_BRIDGE_HASH_LIST / X87_NO_BRIDGE_HASH_LIST — per-block bridging
+    // bisect, same semantics and hash key as the rollback lists above:
+    // include list non-empty → bridge only blocks whose IR-content hash is
+    // in it; exclude list non-empty → never bridge those blocks (exclude
+    // wins).  The go-to tool when hunting a bridging miscompile in a live
+    // workload.
+    std::vector<uint64_t> x87_bridge_hash_list;     // sorted, binary-searched
+    std::vector<uint64_t> x87_no_bridge_hash_list;  // sorted, binary-searched
     uint8_t force_x87_ir_gate;      // measurement-only flag for tools/profile_analyze: bypass
                                     // the IR-eligibility gate's pre-build refusal conditions
                                     // (run_remaining<3, top_dirty, deferred_pop_count,

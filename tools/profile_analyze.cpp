@@ -62,8 +62,10 @@ struct Tally {
     uint16_t ir_fpr_fail = 0;
     uint16_t ir_gpr_fail = 0;
     uint16_t max_gpr_peak = 0;
-    uint16_t ir_split = 0;  // runs rescued by pressure splitting (TLY2+)
-    uint16_t ir_remat = 0;  // runs relieved by remat/sink (TLY2+)
+    uint16_t ir_split = 0;     // runs rescued by pressure splitting (TLY2+)
+    uint16_t ir_remat = 0;     // runs relieved by remat/sink (TLY2+)
+    uint16_t bridge = 0;       // bridge instrs consumed in IR runs (TLY3+)
+    uint16_t bridge_fail = 0;  // bridged attempts that fell back (TLY3+)
     [[nodiscard]] uint64_t total() const {
         return static_cast<uint64_t>(ir) + peep + single + ft + ir_build_fail + ir_fpr_fail +
                ir_gpr_fail;
@@ -145,8 +147,8 @@ bool readFile(const std::string& path, std::vector<Block>& out, std::vector<uint
         profile::TallySectionHeader thdr;
         std::memcpy(&thdr, buf.data() + off, sizeof(thdr));
         if (thdr.magic == profile::kTallySectionMagic) {
-            // Current 'TLY2' format (20-byte entries with pressure-relief
-            // attribution).
+            // Current 'TLY3' format (24-byte entries with pressure-relief
+            // and run-bridging attribution).
             off += sizeof(thdr);
             const size_t tbytes =
                 static_cast<size_t>(thdr.count) * sizeof(profile::BlockTallyEntry);
@@ -158,6 +160,37 @@ bool readFile(const std::string& path, std::vector<Block>& out, std::vector<uint
             tallies.resize(thdr.count);
             for (uint32_t i = 0; i < thdr.count; ++i) {
                 profile::BlockTallyEntry e;
+                std::memcpy(&e, buf.data() + off + (i * sizeof(e)), sizeof(e));
+                tallies[i] = Tally{
+                    .ir = e.ir_ops,
+                    .peep = e.peephole_ops,
+                    .single = e.single_ops,
+                    .ft = e.fallthrough_ops,
+                    .ir_build_fail = e.ir_build_fail_ops,
+                    .ir_fpr_fail = e.ir_fpr_fail_ops,
+                    .ir_gpr_fail = e.ir_gpr_fail_ops,
+                    .max_gpr_peak = e.max_gpr_peak,
+                    .ir_split = e.ir_split_runs,
+                    .ir_remat = e.ir_remat_runs,
+                    .bridge = e.bridge_ops,
+                    .bridge_fail = e.bridge_fail_runs,
+                };
+            }
+            off += tbytes;
+        } else if (thdr.magic == profile::kTallySectionMagicV2) {
+            // Legacy 'TLY2' capture: 20-byte entries; bridging columns
+            // zero-filled.
+            off += sizeof(thdr);
+            const size_t tbytes =
+                static_cast<size_t>(thdr.count) * sizeof(profile::BlockTallyEntryV2);
+            if (off + tbytes > buf.size()) {
+                std::fprintf(stderr, "error: %s tally section truncated (declared %u entries)\n",
+                             path.c_str(), thdr.count);
+                return false;
+            }
+            tallies.resize(thdr.count);
+            for (uint32_t i = 0; i < thdr.count; ++i) {
+                profile::BlockTallyEntryV2 e;
                 std::memcpy(&e, buf.data() + off + (i * sizeof(e)), sizeof(e));
                 tallies[i] = Tally{
                     .ir = e.ir_ops,
@@ -449,6 +482,9 @@ RosettaConfig make_production_cfg() {
     cfg.enable_fma_reduce = 1;
     cfg.enable_ir_split = 1;
     cfg.enable_ir_remat = 1;
+    cfg.enable_bridge = 1;
+    cfg.bridge_max_gap = 2;
+    cfg.bridge_max_total = 8;
     // Rollback knobs default ON too but only matter to Translator's gate
     // cascade, which measurePattern doesn't exercise (it builds a fresh
     // x87 cache per call); leave them 0 here.
@@ -1054,13 +1090,10 @@ int main(int argc, char** argv) try {
         RosettaConfig no_relief_cfg = prod_cfg;
         no_relief_cfg.enable_ir_split = 0;
         no_relief_cfg.enable_ir_remat = 0;
-        // Run bridging is default-OFF while soaking; measure what flipping
-        // it on would do (the fragmentation section estimates this by
-        // splicing — this line measures the real bridged translation).
+        // Run bridging defaults ON; the companion measures what turning it
+        // OFF would cost (mirrors the FMA-reduce/pressure-relief pattern).
         RosettaConfig bridge_cfg = prod_cfg;
-        bridge_cfg.enable_bridge = 1;
-        bridge_cfg.bridge_max_gap = 2;
-        bridge_cfg.bridge_max_total = 8;
+        bridge_cfg.enable_bridge = 0;
         long double total_arm = 0;
         long double total_arm_no_fma_reduce = 0;
         long double total_arm_no_relief = 0;
@@ -1088,6 +1121,8 @@ int main(int argc, char** argv) try {
         long double total_gpr_fail = 0;
         long double total_ir_split = 0;
         long double total_ir_remat = 0;
+        long double total_bridge = 0;
+        long double total_bridge_fail = 0;
         long double total_irg[profile::kIRGateReasonCount] = {};
         for (const auto& b : blocks) {
             const uint64_t exec = (b.id < counters.size()) ? counters[b.id] : 0;
@@ -1105,6 +1140,8 @@ int main(int argc, char** argv) try {
             total_gpr_fail += e * t.ir_gpr_fail;
             total_ir_split += e * t.ir_split;
             total_ir_remat += e * t.ir_remat;
+            total_bridge += e * t.bridge;
+            total_bridge_fail += e * t.bridge_fail;
             if (have_irg && b.id < ir_gate_counters.size()) {
                 for (uint16_t r = 0; r < profile::kIRGateReasonCount; ++r) {
                     total_irg[r] += e * ir_gate_counters[b.id].counts[r];
@@ -1146,14 +1183,16 @@ int main(int argc, char** argv) try {
         std::printf(
             "global_arm_per_x87_without_pressure_relief,%.2f  (split+remat saves %.2f%%)\n",
             arm_per_x87_no_relief, relief_contribution_pct);
-        const double arm_per_x87_bridged =
+        const double arm_per_x87_no_bridge =
             total_ops > 0 ? static_cast<double>(total_arm_bridged / total_ops) : 0.0;
         const double bridge_contribution_pct =
-            arm_per_x87 > 0 ? 100.0 * (arm_per_x87 - arm_per_x87_bridged) / arm_per_x87 : 0.0;
+            arm_per_x87_no_bridge > 0
+                ? 100.0 * (arm_per_x87_no_bridge - arm_per_x87) / arm_per_x87_no_bridge
+                : 0.0;
         std::printf(
-            "global_arm_per_x87_with_bridging,%.2f  (bridging saves %.2f%% — conservative: "
+            "global_arm_per_x87_without_bridging,%.2f  (bridging saves %.2f%% — conservative: "
             "our emission of the bridge instrs is counted, stock's saved emission is not)\n",
-            arm_per_x87_bridged, bridge_contribution_pct);
+            arm_per_x87_no_bridge, bridge_contribution_pct);
         if (std::getenv("X87_LOG_FMA_REDUCE") != nullptr) {
             X87IR::fma_reduce_print_stats();
         }
@@ -1166,6 +1205,10 @@ int main(int argc, char** argv) try {
         // Pressure-relief attribution (run-counts, not ops; TLY2 captures).
         std::printf("ir_split_runs,%.2f\n", per_kop(total_ir_split));
         std::printf("ir_remat_runs,%.2f\n", per_kop(total_ir_remat));
+        // Run-bridging attribution (TLY3 captures; bridge_ops counts bridge
+        // INSTRUCTIONS absorbed into IR runs).
+        std::printf("bridge_ops,%.2f\n", per_kop(total_bridge));
+        std::printf("bridge_fail_runs,%.2f\n", per_kop(total_bridge_fail));
         if (have_irg) {
             for (uint16_t r = 0; r < profile::kIRGateReasonCount; ++r) {
                 std::printf("gate_%s,%.2f\n", profile::kIRGateReasonNames[r],
