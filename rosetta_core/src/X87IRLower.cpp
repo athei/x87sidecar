@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <utility>
 
@@ -22,6 +23,18 @@
 namespace TranslatorX87 {
 inline auto x87_begin(TranslationResult& a1, AssemblerBuffer& buf) -> std::pair<int, int> {
     if (a1.x87_cache.run_remaining > 0 && a1.x87_cache.gprs_valid) {
+        // Re-acquire Xst_base if a prior epilogue dropped it (it is freed
+        // before the tag-batch alloc when top_delta != 0).  One ADD here
+        // keeps the rest of the run on the cached 2-3 insn ST access path
+        // instead of the uncached 5-insn path — this is the common shape
+        // after compile_run consumes a run prefix (pressure split or build
+        // early-stop) and the suffix re-enters lowering.
+        if (!a1.x87_cache.st_base_valid) {
+            const int Xst_base = alloc_gpr(a1, 6);
+            emit_add_imm(buf, 1, 0, 0, 0, kX87RegFileOff, a1.x87_cache.base_gpr, Xst_base);
+            a1.x87_cache.st_base_gpr = static_cast<int8_t>(Xst_base);
+            a1.x87_cache.st_base_valid = 1;
+        }
         return {a1.x87_cache.base_gpr, a1.x87_cache.top_gpr};
     }
     const int Xbase = alloc_gpr(a1, 0);
@@ -282,8 +295,8 @@ static void emit_frint_dispatch_cached(AssemblerBuffer& buf, int Dd, int Dn, int
 // FCVTNS under fast_round).  See TranslatorX87.cpp for the detailed layout.
 
 static void emit_rcmode_dispatch(AssemblerBuffer& buf, int Wd_int, int Dd_val, int is_64bit_int,
-                                 int Xbase, int Wd_rc) {
-    if (g_rosetta_config && g_rosetta_config->fast_round) {
+                                 int Xbase, int Wd_rc, bool fast_round) {
+    if (fast_round) {
         // Fast path: assume RC=0 (round-to-nearest).
         emit_fcvt_fp_to_int(buf, is_64bit_int, /*ftype=double*/ 1, /*rmode=FCVTNS*/ 0, Wd_int,
                             Dd_val);
@@ -364,6 +377,38 @@ static void emit_rcmode_dispatch(AssemblerBuffer& buf, int Wd_int, int Dd_val, i
 // n_lane1 sits exactly element_size bytes after n_lane0, so a single
 // LDR D (f32) / LDR Q (f64) fetches both lanes; otherwise each lane is loaded
 // separately (LDR + LD1-into-lane-1).
+// Non-flag-setting ALU, register form, for BridgeAlu* lowering:
+// Rd = Rn <kind> Rm.  Never ADDS/SUBS/ANDS — bridged runs must not write
+// NZCV (see the BridgeAlu* comment in X87IR.h).
+static void emit_bridge_alu_reg(AssemblerBuffer& buf, int is64, int kind, int Rn, int Rm,
+                                int Rd) {
+    switch (kind) {
+        case kBridgeAluAdd:
+            emit_add_sub_shifted_reg(buf, is64, /*is_sub=*/0, /*is_set_flags=*/0,
+                                     /*shift_type=*/0, Rm, 0, Rn, Rd);
+            break;
+        case kBridgeAluSub:
+            emit_add_sub_shifted_reg(buf, is64, /*is_sub=*/1, /*is_set_flags=*/0,
+                                     /*shift_type=*/0, Rm, 0, Rn, Rd);
+            break;
+        case kBridgeAluAnd:
+            emit_logical_shifted_reg(buf, is64, /*opc=AND*/ 0, /*n=*/0, /*shift_type=*/0, Rm,
+                                     0, Rn, Rd);
+            break;
+        case kBridgeAluOr:
+            emit_logical_shifted_reg(buf, is64, /*opc=ORR*/ 1, /*n=*/0, /*shift_type=*/0, Rm,
+                                     0, Rn, Rd);
+            break;
+        case kBridgeAluXor:
+            emit_logical_shifted_reg(buf, is64, /*opc=EOR*/ 2, /*n=*/0, /*shift_type=*/0, Rm,
+                                     0, Rn, Rd);
+            break;
+        default:
+            assert(false && "BridgeAlu*: invalid kind");
+            break;
+    }
+}
+
 static void load_fma_pair_v2d(AssemblerBuffer& buf, TranslationResult* result, Op elem_op,
                               bool contiguous, int V, const Node& n_lane0, const Node& n_lane1) {
     if (contiguous) {
@@ -548,8 +593,9 @@ void lower(Context& ctx, TranslationResult* result) {
     // ── RC caching: hoist LDRH+UBFX when ≥2 RC consumers in a segment ────
     int Wd_rc_cached = -1;
     bool rc_cache_valid = false;
+    const bool fast_round = x87_fast_round_active(*result);
 
-    if (!(g_rosetta_config && g_rosetta_config->fast_round)) {
+    if (!fast_round) {
         int rc_count = 0;
         bool has_fcmp = false;
         for (int i = 0; i < ctx.num_nodes; i++) {
@@ -805,7 +851,7 @@ void lower(Context& ctx, TranslationResult* result) {
                 }
                 fprs.node_fpr[i] = static_cast<int8_t>(Dd);
 
-                if (g_rosetta_config && g_rosetta_config->fast_round) {
+                if (fast_round) {
                     // Fast path: RC=0 → FRINTN
                     emit_fp_dp1(buf, /*type=*/1, /*opcode=*/8 /*FRINTN*/, Dd, Dn);
                 } else if (Wd_rc_cached >= 0) {
@@ -1067,7 +1113,8 @@ void lower(Context& ctx, TranslationResult* result) {
                                                 Wd_tmp);
                 } else {
                     // FISTP/FIST: respect rounding mode from control_word.
-                    emit_rcmode_dispatch(buf, Wd_int, Dd_val, is_64bit_int, Xbase, Wd_tmp);
+                    emit_rcmode_dispatch(buf, Wd_int, Dd_val, is_64bit_int, Xbase, Wd_tmp,
+                                         fast_round);
                 }
 
                 int addr = compute_operand_address(*result, true, n.mem_operand, GPR::XZR);
@@ -1186,6 +1233,124 @@ void lower(Context& ctx, TranslationResult* result) {
                 emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*STR*/ 0, /*imm12=*/0, addr, Wd_cw);
                 free_gpr(*result, addr);
                 free_gpr(*result, Wd_cw);
+                break;
+            }
+
+            // ── Bridge ops (run bridging v1) ──────────────────────────────
+            // Guest GPRs live 1:1 in ARM x0-x15; register numbers arrive
+            // negatively encoded in inputs[] (bridge_decode_reg).  All are
+            // emitted at their program-order position; W-register writes
+            // zero-extend, matching x86-64 32-bit semantics.  None of these
+            // touches NZCV (v1 eligibility guarantees flag-transparency).
+            case Op::BridgeMovRR: {
+                const int is64 = (n.flags & kBridge64) ? 1 : 0;
+                emit_mov_reg(buf, is64, bridge_decode_reg(n.inputs[0]),
+                             bridge_decode_reg(n.inputs[1]));
+                break;
+            }
+            case Op::BridgeMovRI: {
+                const int is64 = (n.flags & kBridge64) ? 1 : 0;
+                const uint64_t value =
+                    is64 ? n.imm_bits : (n.imm_bits & 0xFFFFFFFFULL);
+                emit_load_immediate_no_xzr(*result, is64, value, bridge_decode_reg(n.inputs[0]));
+                break;
+            }
+            case Op::BridgeLea: {
+                const int is64 = (n.flags & kBridge64) ? 1 : 0;
+                const int dst = bridge_decode_reg(n.inputs[0]);
+                // lea never dereferences: the computed address IS the value.
+                const int addr = compute_operand_address(*result, /*is_64bit=*/true,
+                                                         n.mem_operand, dst);
+                if (addr != dst || !is64) {
+                    // Copy into the guest register; the W-form also performs
+                    // the 32-bit lea's zero-extending truncation.
+                    emit_mov_reg(buf, is64, dst, addr);
+                }
+                if (addr != dst) {
+                    free_gpr(*result, addr);
+                }
+                break;
+            }
+            case Op::BridgeLoadG: {
+                const int is64 = (n.flags & kBridge64) ? 1 : 0;
+                const int addr = compute_operand_address(*result, /*is_64bit=*/true,
+                                                         n.mem_operand, GPR::XZR);
+                emit_ldr_str_imm(buf, /*size=*/is64 ? 3 : 2, /*is_fp=*/0, /*LDR*/ 1,
+                                 /*imm12=*/0, addr, bridge_decode_reg(n.inputs[0]));
+                free_gpr(*result, addr);
+                break;
+            }
+            case Op::BridgeStoreG: {
+                const int is64 = (n.flags & kBridge64) ? 1 : 0;
+                const int addr = compute_operand_address(*result, /*is_64bit=*/true,
+                                                         n.mem_operand, GPR::XZR);
+                emit_ldr_str_imm(buf, /*size=*/is64 ? 3 : 2, /*is_fp=*/0, /*STR*/ 0,
+                                 /*imm12=*/0, addr, bridge_decode_reg(n.inputs[0]));
+                free_gpr(*result, addr);
+                break;
+            }
+
+            // ── Bridge ALU ops (run bridging v2) ──────────────────────────
+            // Written flags are proven dead (flag_liveness == 0), so every
+            // form lowers to the NON-flag-setting ARM instruction; NZCV is
+            // never written, which also keeps any x86 flags passing through
+            // the region (cmp's CF over an inc/dec) intact.
+            case Op::BridgeAluRR: {
+                const int is64 = (n.flags & kBridge64) ? 1 : 0;
+                const int dst = bridge_decode_reg(n.inputs[0]);
+                emit_bridge_alu_reg(buf, is64, bridge_decode_reg(n.inputs[2]), dst,
+                                    bridge_decode_reg(n.inputs[1]), dst);
+                break;
+            }
+            case Op::BridgeAluRI: {
+                const int is64 = (n.flags & kBridge64) ? 1 : 0;
+                const int dst = bridge_decode_reg(n.inputs[0]);
+                const int kind = bridge_decode_reg(n.inputs[2]);
+                const int64_t sv = static_cast<int64_t>(n.imm_bits);
+                if ((kind == kBridgeAluAdd || kind == kBridgeAluSub) && sv > -4096 &&
+                    sv < 4096) {
+                    // Direct imm12 form; a negative immediate flips ADD<->SUB
+                    // (identical mod-2^32 wrapping in the W form).
+                    const int neg = sv < 0;
+                    const int is_sub = (kind == kBridgeAluSub) ? !neg : neg;
+                    emit_add_imm(buf, is64, is_sub, /*is_set_flags=*/0, /*shift=*/0,
+                                 static_cast<int>(neg ? -sv : sv), dst, dst);
+                } else {
+                    const uint64_t value = is64 ? n.imm_bits : (n.imm_bits & 0xFFFFFFFFULL);
+                    const int scratch = alloc_free_gpr(*result);
+                    emit_load_immediate_no_xzr(*result, is64, value, scratch);
+                    emit_bridge_alu_reg(buf, is64, kind, dst, scratch, dst);
+                    free_gpr(*result, scratch);
+                }
+                break;
+            }
+            case Op::BridgeAluRM: {
+                const int is64 = (n.flags & kBridge64) ? 1 : 0;
+                const int dst = bridge_decode_reg(n.inputs[0]);
+                const int addr = compute_operand_address(*result, /*is_64bit=*/true,
+                                                         n.mem_operand, GPR::XZR);
+                const int scratch = alloc_free_gpr(*result);
+                emit_ldr_str_imm(buf, /*size=*/is64 ? 3 : 2, /*is_fp=*/0, /*LDR*/ 1,
+                                 /*imm12=*/0, addr, scratch);
+                emit_bridge_alu_reg(buf, is64, bridge_decode_reg(n.inputs[2]), dst, scratch,
+                                    dst);
+                free_gpr(*result, scratch);
+                free_gpr(*result, addr);
+                break;
+            }
+            case Op::BridgeAluMR: {
+                const int is64 = (n.flags & kBridge64) ? 1 : 0;
+                const int addr = compute_operand_address(*result, /*is_64bit=*/true,
+                                                         n.mem_operand, GPR::XZR);
+                const int scratch = alloc_free_gpr(*result);
+                emit_ldr_str_imm(buf, /*size=*/is64 ? 3 : 2, /*is_fp=*/0, /*LDR*/ 1,
+                                 /*imm12=*/0, addr, scratch);
+                emit_bridge_alu_reg(buf, is64, bridge_decode_reg(n.inputs[2]), scratch,
+                                    bridge_decode_reg(n.inputs[0]), scratch);
+                emit_ldr_str_imm(buf, /*size=*/is64 ? 3 : 2, /*is_fp=*/0, /*STR*/ 0,
+                                 /*imm12=*/0, addr, scratch);
+                free_gpr(*result, scratch);
+                free_gpr(*result, addr);
                 break;
             }
 
@@ -1368,7 +1533,10 @@ void lower(Context& ctx, TranslationResult* result) {
 // before node_total would double-count it (predicting peak=9 instead of 8
 // for the common single-fused-FCmp+FStsw pair, gating off real WoW blocks
 // that fit in the 8-slot pool).
-int peak_live_gprs(const Context& ctx) {
+int peak_live_gprs(const Context& ctx, int budget, int* first_over_node, bool fast_round) {
+    if (first_over_node) {
+        *first_over_node = -1;
+    }
     // Determine if RC caching will be active (same logic as lower()).
     // RC cache is disabled when the run contains FCmp/FTst: emit_fcom_cc_pack
     // has a structurally-unavoidable 4-wide GPR peak (Wd_save + Wd_packed +
@@ -1378,7 +1546,7 @@ int peak_live_gprs(const Context& ctx) {
     // see arm_no_ir 590 → arm_ir_forced 305, ~285 ARM/exec) than rc_cache's
     // per-RC-op micro-saving (~2 ARM × few ops).
     bool rc_cache = false;
-    if (!(g_rosetta_config && g_rosetta_config->fast_round)) {
+    if (!fast_round) {
         int rc_count = 0;
         bool has_fcmp = false;
         for (int i = 0; i < ctx.num_nodes; i++) {
@@ -1517,10 +1685,38 @@ int peak_live_gprs(const Context& ctx) {
             case Op::LoadCW:
                 transient = 2;
                 break;
+
+            // Bridge ops write guest GPRs (x0-x15, architecturally owned,
+            // never allocated); only the address materialization may take
+            // one scratch.  MovRR/MovRI need none.
+            case Op::BridgeMovRR:
+            case Op::BridgeMovRI:
+                break;
+            case Op::BridgeLea:
+            case Op::BridgeLoadG:
+            case Op::BridgeStoreG:
+                transient = 1;
+                break;
+
+            // Bridge ALU: RR is register-to-register (no scratch); RI may
+            // materialize a wide immediate (1); the memory forms hold an
+            // address scratch and a value scratch simultaneously (2).
+            case Op::BridgeAluRR:
+                break;
+            case Op::BridgeAluRI:
+                transient = 1;
+                break;
+            case Op::BridgeAluRM:
+            case Op::BridgeAluMR:
+                transient = 2;
+                break;
         }
 
         int node_total = pinned + held + transient;
         peak = std::max(node_total, peak);
+        if (first_over_node && *first_over_node < 0 && node_total > budget) {
+            *first_over_node = i;
+        }
 
         // FCmp/FTst fused: Wd_packed becomes held AFTER the node — counted
         // here so that subsequent nodes see it in `held` but the FCmp's own
@@ -1540,6 +1736,13 @@ int peak_live_gprs(const Context& ctx) {
     if (ctx.top_delta != 0) {
         int epilogue_total = (pinned - 1) + held + 2;
         peak = std::max(epilogue_total, peak);
+        // Attribute an epilogue-only overflow to the last node: a shorter
+        // prefix may have a different (possibly zero) top_delta, so the
+        // split loop still gets a boundary to try.
+        if (first_over_node && *first_over_node < 0 && epilogue_total > budget &&
+            ctx.num_nodes > 0) {
+            *first_over_node = ctx.num_nodes - 1;
+        }
     }
 
     return peak;
@@ -1561,7 +1764,10 @@ int peak_live_gprs(const Context& ctx) {
 //     the node ends.  Model as a +1 spike.
 //   - StoreI*, FCmp, FTst, FStsw produce no FPR output and need no extra FPRs.
 //   - Dead (kDead) nodes are skipped.
-int peak_live_fprs(const Context& ctx) {
+int peak_live_fprs(const Context& ctx, int budget, int* first_over_node) {
+    if (first_over_node) {
+        *first_over_node = -1;
+    }
     // Step 1: compute last_use[] — same as FPRState::compute_last_uses.
     int16_t last_use[kMaxNodes];
     memset(last_use, -1, sizeof(last_use));
@@ -1591,6 +1797,15 @@ int peak_live_fprs(const Context& ctx) {
 
     // Track which nodes are currently holding an FPR (bit vector over kMaxNodes).
     bool holding[kMaxNodes] = {};
+
+    // Raise the running peak, recording the first node whose demand
+    // exceeds the caller's budget (split-boundary query).
+    const auto raise_peak = [&](int candidate, int node_idx) {
+        peak = std::max(candidate, peak);
+        if (first_over_node && *first_over_node < 0 && candidate > budget) {
+            *first_over_node = node_idx;
+        }
+    };
 
     for (int i = 0; i < ctx.num_nodes; i++) {
         const auto& n = ctx.nodes[i];
@@ -1641,7 +1856,7 @@ int peak_live_fprs(const Context& ctx) {
         if (produces_fpr && !absorbed_member) {
             live++;
             holding[i] = true;
-            peak = std::max(live, peak);
+            raise_peak(live, i);
         }
 
         // FMA-reduction head: the whole chain emits as one fused body at the
@@ -1650,9 +1865,7 @@ int peak_live_fprs(const Context& ctx) {
         // above); the odd-tail D_l/D_w reuse those freed slots, so one +2
         // spike covers both.
         if (n.flags & kFmaReduceHead) {
-            if (live + 2 > peak) {
-                peak = live + 2;
-            }
+            raise_peak(live + 2, i);
             // The chain produces a single result FPR (lower_fma_reduce assigns
             // it to the *tail* member) that stays live until the tail's
             // external consumer.  produces_fpr above attributed that FPR to
@@ -1679,11 +1892,40 @@ int peak_live_fprs(const Context& ctx) {
             }
         }
 
-        // StoreF32 allocates a transient Ds_tmp (fcvt d→s narrowing) that is
-        // freed before the node finishes.  Model as a +1 spike on top of the
-        // current live count.
-        if (n.op == Op::StoreF32 && live + 1 > peak) {
-            peak = live + 1;
+        // StoreF32 lowering coalesces consecutive same-input StoreF32 nodes
+        // into one fcvt + STR Q / STP S / STR S ladder.  Ds_narrow is always
+        // allocated; when at least one 4-wide STR Q group fires, Vq_broadcast
+        // is allocated too and both stay live until the group ends — a +2
+        // spike, not +1.  Mirror the lowering's group scan and greedy window
+        // walk exactly so the model never undercounts (an undercount trips
+        // alloc_free_fpr's assert(mask != 0), UB in release).
+        if (n.op == Op::StoreF32) {
+            int jj = i;
+            while (jj + 1 < ctx.num_nodes) {
+                const auto& nx = ctx.nodes[jj + 1];
+                if ((nx.flags & kDead) != 0) {
+                    break;
+                }
+                if (nx.op != Op::StoreF32 || nx.inputs[0] != n.inputs[0]) {
+                    break;
+                }
+                ++jj;
+            }
+            int spike = 1;  // Ds_narrow
+            int k = i;
+            while (k <= jj) {
+                if (k + 3 <= jj && can_emit_str_q(ctx.nodes[k], ctx.nodes[k + 1],
+                                                  ctx.nodes[k + 2], ctx.nodes[k + 3])) {
+                    spike = 2;  // + Vq_broadcast
+                    break;
+                }
+                if (k + 1 <= jj && can_emit_stp_s(ctx.nodes[k], ctx.nodes[k + 1])) {
+                    k += 2;
+                    continue;
+                }
+                k += 1;
+            }
+            raise_peak(live + spike, i);
         }
 
         // Transcendentals: the lowering FMOVs inputs to d0/d1 (not in pool),
@@ -1740,7 +1982,7 @@ int peak_live_fprs(const Context& ctx) {
             // during the spike — it's not yet in the scratch pool, so don't
             // count it.  Subtract 1 from `live` to compensate.
             const int spike = (live - 1) - dying_inputs + trans_spike;
-            peak = std::max(spike, peak);
+            raise_peak(spike, i);
         }
 
         // Free inputs whose last use is this node.
@@ -1757,72 +1999,422 @@ int peak_live_fprs(const Context& ctx) {
 
 // ── Entry point ─────────────────────────────────────────────────────────────
 
+// Pick the run length to retry with after a pressure overflow at
+// `first_over_node`: cut just before the instruction that created the
+// overflowing node, and always make progress (strictly shorter than
+// `attempt_len`).  Returns the new run length (may be < 3 = give up).
+static int split_prefix_len(const Context& ctx, int first_over_node, int attempt_len) {
+    int len = attempt_len - 1;
+    if (first_over_node >= 0 && first_over_node < ctx.num_nodes) {
+        const int src = ctx.node_src[first_over_node];
+        if (src >= 0 && src < len) {
+            len = src;
+        }
+    }
+    return len;
+}
+
+// ── Pressure-relief rematerialization / load sinking ────────────────────────
+//
+// When the FPR gate would refuse, try shortening live ranges before
+// resorting to a split: a Const* or (alias-clear) LoadF32/F64 whose only
+// remaining use lies beyond the overflow point doesn't need to hold an FPR
+// across the gap — clone it immediately before that use and retarget the
+// use.  When the late use was the value's ONLY use, the original goes dead
+// and the "clone" is just the load sunk to its consumer: zero extra emit.
+// Otherwise the clone costs 1-2 ARM, still far below a ~10-ARM split or a
+// whole-run refusal.
+//
+// Lives here (not X87IROptimize.cpp) because candidate legality and payoff
+// are joined at the hip with the peak_live_fprs model above.
+
+// FStsw packs payloads into its input slots (inputs[1] = destination
+// register index, inputs[2] = top_delta snapshot — see build()); only
+// inputs[0] (the fused FCmp reference) is a node id.  Every walk below
+// that interprets inputs as node references must skip the payload slots,
+// or a payload value that happens to collide with a node index gets
+// remapped/retargeted and the lowering emits garbage (observed as a WoW
+// guest SIGSEGV when remat rewrote an FStsw's register-index payload).
+static inline int node_ref_input_count(const Node& n) {
+    return n.op == Op::FStsw ? 1 : 3;
+}
+
+// Insert a copy of nodes[src] at index `pos` (shifting [pos..) up one) and
+// return false if the node budget is exhausted.  All node references —
+// inputs, slot_val, initial_read, last_fcmp/last_fcomi, node_src — are
+// remapped.  The caller retargets the consumer afterwards.
+static bool insert_clone_at(Context& ctx, int src, int pos) {
+    if (ctx.num_nodes >= kMaxNodes || src >= pos) {
+        return false;
+    }
+    const int n = ctx.num_nodes;
+    std::memmove(&ctx.nodes[pos + 1], &ctx.nodes[pos],
+                 static_cast<size_t>(n - pos) * sizeof(Node));
+    std::memmove(&ctx.node_src[pos + 1], &ctx.node_src[pos],
+                 static_cast<size_t>(n - pos) * sizeof(int16_t));
+    ctx.num_nodes = static_cast<int16_t>(n + 1);
+
+    const auto remap = [pos](int16_t& ref) {
+        if (ref >= pos) {
+            ref = static_cast<int16_t>(ref + 1);
+        }
+    };
+    for (int i = 0; i < ctx.num_nodes; i++) {
+        if (i == pos) {
+            continue;  // clone slot, written below
+        }
+        const int nrefs = node_ref_input_count(ctx.nodes[i]);
+        for (int k = 0; k < nrefs; k++) {
+            auto& in = ctx.nodes[i].inputs[k];
+            if (in >= 0) {
+                remap(in);
+            }
+        }
+    }
+    for (auto& v : ctx.slot_val) {
+        if (v >= 0) {
+            remap(v);
+        }
+    }
+    for (auto& v : ctx.initial_read) {
+        if (v >= 0) {
+            remap(v);
+        }
+    }
+    if (ctx.last_fcmp >= 0) {
+        remap(ctx.last_fcmp);
+    }
+    if (ctx.last_fcomi >= 0) {
+        remap(ctx.last_fcomi);
+    }
+
+    ctx.nodes[pos] = ctx.nodes[src];  // src < pos: unshifted
+    ctx.nodes[pos].flags = kNone;
+    ctx.node_src[pos] = ctx.node_src[pos + 1];  // same instruction as the consumer
+    return true;
+}
+
+// Returns true if any clone/sink was performed.  Iterates until the FPR
+// model fits `budget`, no candidate exists, or the clone cap is reached.
+static bool remat_relieve_fpr_pressure(Context& ctx, int budget) {
+    constexpr int kMaxClones = 8;
+    bool changed = false;
+
+    for (int iter = 0; iter < kMaxClones; iter++) {
+        int over = -1;
+        if (peak_live_fprs(ctx, budget, &over) <= budget || over < 0) {
+            return changed;
+        }
+
+        // last_use over non-dead consumers (slot-final values are anchored
+        // at num_nodes and excluded from retargeting below).  Payload input
+        // slots (FStsw) are not references — see node_ref_input_count.
+        int16_t last_use[kMaxNodes];
+        std::memset(last_use, -1, sizeof(last_use));
+        for (int i = 0; i < ctx.num_nodes; i++) {
+            if (ctx.nodes[i].flags & kDead) {
+                continue;
+            }
+            const int nrefs = node_ref_input_count(ctx.nodes[i]);
+            for (int k = 0; k < nrefs; k++) {
+                const short in = ctx.nodes[i].inputs[k];
+                if (in >= 0) {
+                    last_use[in] = static_cast<int16_t>(i);
+                }
+            }
+        }
+        bool slot_live[kMaxNodes] = {};
+        for (const short v : ctx.slot_val) {
+            if (v >= 0 && v < ctx.num_nodes) {
+                slot_live[v] = true;
+            }
+        }
+
+        // Pick the candidate whose single post-overflow use is farthest out.
+        int best = -1;
+        int best_use = -1;
+        for (int h = 0; h < over; h++) {
+            const auto& hn = ctx.nodes[h];
+            if (hn.flags != kNone || slot_live[h]) {
+                continue;
+            }
+            const bool is_const = hn.op == Op::ConstZero || hn.op == Op::ConstOne ||
+                                  hn.op == Op::ConstF64;
+            const bool is_load = hn.op == Op::LoadF32 || hn.op == Op::LoadF64;
+            if (!is_const && !is_load) {
+                continue;
+            }
+            if (last_use[h] <= over) {
+                continue;  // not live past the overflow point
+            }
+            // Exactly one use after the overflow point (which is last_use[h]).
+            int uses_after = 0;
+            for (int j = over + 1; j < ctx.num_nodes; j++) {
+                if (ctx.nodes[j].flags & kDead) {
+                    continue;
+                }
+                const int nrefs = node_ref_input_count(ctx.nodes[j]);
+                for (int k = 0; k < nrefs; k++) {
+                    if (ctx.nodes[j].inputs[k] == h) {
+                        uses_after++;
+                    }
+                }
+            }
+            if (uses_after != 1) {
+                continue;
+            }
+            const int use = last_use[h];
+            // A load may not cross a memory write or FStsw (writes AX or
+            // memory) between its original position and the sunk position.
+            if (is_load) {
+                bool barrier = false;
+                for (int j = h + 1; j < use && !barrier; j++) {
+                    const auto& m = ctx.nodes[j];
+                    if (m.flags & kDead) {
+                        continue;
+                    }
+                    switch (m.op) {
+                        case Op::StoreF64:
+                        case Op::StoreF32:
+                        case Op::StoreI16:
+                        case Op::StoreI32:
+                        case Op::StoreI64:
+                        case Op::StoreCW:
+                        case Op::FStsw:
+                        // Bridge nodes: a bridge store may alias the load,
+                        // and any bridge register write may redefine the
+                        // load's base register — block sinking across all.
+                        case Op::BridgeMovRR:
+                        case Op::BridgeMovRI:
+                        case Op::BridgeLea:
+                        case Op::BridgeLoadG:
+                        case Op::BridgeStoreG:
+                        case Op::BridgeAluRR:
+                        case Op::BridgeAluRI:
+                        case Op::BridgeAluRM:
+                        case Op::BridgeAluMR:
+                            barrier = true;
+                            break;
+                        default:
+                            break;
+                    }
+                }
+                if (barrier) {
+                    continue;
+                }
+            }
+            if (use > best_use) {
+                best = h;
+                best_use = use;
+            }
+        }
+        if (best < 0) {
+            return changed;
+        }
+
+        if (!insert_clone_at(ctx, best, best_use)) {
+            return changed;
+        }
+        // Retarget the consumer (shifted to best_use + 1) to the clone.
+        auto& consumer = ctx.nodes[best_use + 1];
+        {
+            const int nrefs = node_ref_input_count(consumer);
+            for (int k = 0; k < nrefs; k++) {
+                if (consumer.inputs[k] == best) {
+                    consumer.inputs[k] = static_cast<int16_t>(best_use);
+                }
+            }
+        }
+        // If that was the original's only use anywhere, it is now dead —
+        // the clone is a pure sink, not a duplicate.
+        bool any_use = false;
+        for (int j = 0; j < ctx.num_nodes && !any_use; j++) {
+            if (j == best || (ctx.nodes[j].flags & kDead)) {
+                continue;
+            }
+            const int nrefs = node_ref_input_count(ctx.nodes[j]);
+            for (int k = 0; k < nrefs; k++) {
+                if (ctx.nodes[j].inputs[k] == best) {
+                    any_use = true;
+                }
+            }
+        }
+        if (!any_use && !slot_live[best]) {
+            ctx.nodes[best].flags |= kDead;
+        }
+        changed = true;
+    }
+    return changed;
+}
+
 int compile_run(TranslationResult* result, IRInstr* instr_array, int64_t num_instrs,
                 int64_t start_idx, int run_length, IRFailReason* out_reason, int* out_peak_gprs,
-                uint16_t* out_fail_opcode) {
-    Context ctx;
-
-    const bool built = build(ctx, instr_array, num_instrs, start_idx, run_length);
-
-    // Surface the bail opcode whenever build observed an unsupported one,
-    // including the success-with-early-stop case (consumed >= 2 but the loop
-    // halted at position N).
-    if (out_fail_opcode && ctx.fail_opcode != 0xFFFFU) {
-        *out_fail_opcode = ctx.fail_opcode;
-    }
-
-    if (!built) {
-        if (out_reason) {
-            *out_reason = IRFailReason::kBuildFail;
-        }
-        if (out_peak_gprs) {
-            *out_peak_gprs = 0;
-        }
-        return 0;
-    }
-
-    optimize(ctx);
-
-    // Gate lowering on actual FPR pressure vs. available pool.
+                uint16_t* out_fail_opcode, bool bridged, bool bridges_v2) {
+    // Pool sizes.  The optional pool-limit clamps (X87_FPR_POOL_LIMIT /
+    // X87_GPR_POOL_LIMIT) are test knobs that make pool starvation
+    // deterministic — the real pool depends on stock's dynamic
+    // _unoccupied_temporary_fprs_for_xmm_scalars seeding.  They narrow the
+    // gate only; allocation still draws from the full mask.
     uint32_t fpr_pool = result->free_fpr_mask;
     int available = 0;
     while (fpr_pool) {
         available++;
         fpr_pool &= fpr_pool - 1;
     }
-    if (peak_live_fprs(ctx) > available) {
-        if (out_reason) {
-            *out_reason = IRFailReason::kFprPressure;
+    uint32_t gpr_pool = result->free_gpr_mask;
+    int gpr_available = 0;
+    while (gpr_pool) {
+        gpr_available++;
+        gpr_pool &= gpr_pool - 1;
+    }
+    if (g_rosetta_config) {
+        if (g_rosetta_config->fpr_pool_limit > 0 && available > g_rosetta_config->fpr_pool_limit) {
+            available = g_rosetta_config->fpr_pool_limit;
         }
-        if (out_peak_gprs) {
-            *out_peak_gprs = peak_live_gprs(ctx);
+        if (g_rosetta_config->gpr_pool_limit > 0 &&
+            gpr_available > g_rosetta_config->gpr_pool_limit) {
+            gpr_available = g_rosetta_config->gpr_pool_limit;
         }
-        return 0;
     }
 
-    // Gate lowering on GPR pressure vs. available pool.
-    const int peak_gprs = peak_live_gprs(ctx);
-    if (out_peak_gprs) {
-        *out_peak_gprs = peak_gprs;
-    }
-    {
-        uint32_t gpr_pool = result->free_gpr_mask;
-        int gpr_available = 0;
-        while (gpr_pool) {
-            gpr_available++;
-            gpr_pool &= gpr_pool - 1;
+    // When a run's peak register pressure exceeds the pool, split it: retry
+    // with the prefix that ends just before the instruction whose node first
+    // overflowed the budget.  Every live value at an instruction boundary is
+    // a symbolic-stack value, so the prefix's normal epilogue/ReadSt
+    // machinery IS the spill — no new code shapes.  The dispatcher treats
+    // the partial consumed count exactly like a build early-stop and
+    // re-enters the IR gate at the suffix, which splits recursively if
+    // needed.  Bounded retries: each attempt is strictly shorter.
+    // Bridged (all-or-nothing) mode: a partial consume would hand the run
+    // tail's bridge instructions back to stock mid-run, which may clobber
+    // pinned scratch GPRs — so splitting is disabled and any outcome short
+    // of consuming the whole region fails with kBridgePartial (nothing has
+    // been emitted; every gate runs before lower()).
+    const bool split_enabled =
+        !bridged && (g_rosetta_config == nullptr || g_rosetta_config->enable_ir_split);
+    const bool log_split = g_rosetta_config != nullptr && g_rosetta_config->log_ir_split;
+    constexpr int kMaxSplitRetries = 4;
+
+    int attempt_len = run_length;
+    for (int attempt = 0;; attempt++) {
+        Context ctx;
+
+        const bool built =
+            build(ctx, instr_array, num_instrs, start_idx, attempt_len, bridged, bridges_v2);
+
+        if (bridged && (!built || ctx.consumed != attempt_len)) {
+            if (out_reason) {
+                *out_reason = IRFailReason::kBridgePartial;
+            }
+            if (out_peak_gprs) {
+                *out_peak_gprs = 0;
+            }
+            return 0;
+        }
+
+        // Surface the bail opcode whenever build observed an unsupported one,
+        // including the success-with-early-stop case (consumed >= 2 but the
+        // loop halted at position N).  Only the full-length attempt reports:
+        // a shrunk prefix stops at run_length, not at an unsupported opcode.
+        if (attempt == 0 && out_fail_opcode && ctx.fail_opcode != 0xFFFFU) {
+            *out_fail_opcode = ctx.fail_opcode;
+        }
+
+        if (!built) {
+            if (out_reason) {
+                *out_reason = IRFailReason::kBuildFail;
+            }
+            if (out_peak_gprs) {
+                *out_peak_gprs = 0;
+            }
+            return 0;
+        }
+
+        optimize(ctx);
+
+        // Gate lowering on actual FPR pressure vs. available pool.  Before
+        // splitting, try the cheaper relief: sink/clone long-lived consts
+        // and loads past the overflow point (1-2 ARM each vs ~10 per split).
+        int fpr_over_node = -1;
+        bool remat_changed = false;
+        if (peak_live_fprs(ctx, available, &fpr_over_node) > available &&
+            (g_rosetta_config == nullptr || g_rosetta_config->enable_ir_remat)) {
+            remat_changed = remat_relieve_fpr_pressure(ctx, available);
+            if (remat_changed) {
+                fpr_over_node = -1;
+                if (log_split) {
+                    std::fprintf(stderr,
+                                 "[x87ir-remat] relieved run=%d nodes=%d hash=0x%016llx idx=%lld\n",
+                                 attempt_len, static_cast<int>(ctx.num_nodes),
+                                 static_cast<unsigned long long>(result->x87_cache.profile_hash),
+                                 static_cast<long long>(start_idx));
+                }
+            }
+        }
+        if (peak_live_fprs(ctx, available, &fpr_over_node) > available) {
+            const int next_len = split_prefix_len(ctx, fpr_over_node, attempt_len);
+            if (split_enabled && attempt < kMaxSplitRetries && next_len >= 3) {
+                if (log_split) {
+                    std::fprintf(stderr,
+                                 "[x87ir-split] fpr overflow: run=%d -> retry len=%d "
+                                 "(over_node=%d avail=%d)\n",
+                                 attempt_len, next_len, fpr_over_node, available);
+                }
+                attempt_len = next_len;
+                continue;
+            }
+            if (out_reason) {
+                *out_reason = IRFailReason::kFprPressure;
+            }
+            if (out_peak_gprs) {
+                *out_peak_gprs = peak_live_gprs(ctx, 0x7FFFFFFF, nullptr,
+                                                x87_fast_round_active(*result));
+            }
+            return 0;
+        }
+
+        // Gate lowering on GPR pressure vs. available pool.
+        int gpr_over_node = -1;
+        const int peak_gprs =
+            peak_live_gprs(ctx, gpr_available, &gpr_over_node, x87_fast_round_active(*result));
+        if (out_peak_gprs) {
+            *out_peak_gprs = peak_gprs;
         }
         if (peak_gprs > gpr_available) {
+            const int next_len = split_prefix_len(ctx, gpr_over_node, attempt_len);
+            if (split_enabled && attempt < kMaxSplitRetries && next_len >= 3) {
+                if (log_split) {
+                    std::fprintf(stderr,
+                                 "[x87ir-split] gpr overflow: run=%d -> retry len=%d "
+                                 "(over_node=%d avail=%d)\n",
+                                 attempt_len, next_len, gpr_over_node, gpr_available);
+                }
+                attempt_len = next_len;
+                continue;
+            }
             if (out_reason) {
                 *out_reason = IRFailReason::kGprPressure;
             }
             return 0;
         }
+
+        lower(ctx, result);
+
+        if (attempt > 0) {
+            if (result->x87_cache.tally_ir_split != 0xFFFFU) {
+                result->x87_cache.tally_ir_split++;
+            }
+            if (log_split) {
+                std::fprintf(stderr, "[x87ir-split] split ok: consumed=%d of run=%d\n",
+                             static_cast<int>(ctx.consumed), run_length);
+            }
+        }
+        if (remat_changed && result->x87_cache.tally_ir_remat != 0xFFFFU) {
+            result->x87_cache.tally_ir_remat++;
+        }
+
+        return ctx.consumed;
     }
-
-    lower(ctx, result);
-
-    return ctx.consumed;
 }
 
 }  // namespace X87IR

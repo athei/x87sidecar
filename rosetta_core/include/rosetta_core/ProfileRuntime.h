@@ -80,8 +80,17 @@ struct BlockTally {
     // attempts.  Diagnostic only — not a bumped op counter, so it doesn't
     // contribute to the per-pattern path-mix percentages.
     uint16_t max_gpr_peak;
+    // Pressure-relief attribution (run counts, not op counts): runs
+    // rescued by splitting at the overflow point / runs where the
+    // remat-sink pass relieved FPR pressure.
+    uint16_t ir_split_runs;
+    uint16_t ir_remat_runs;
+    // Run bridging: bridge instructions consumed inside IR runs / bridged
+    // attempts that fell back to plain dispatch.
+    uint16_t bridge_ops;
+    uint16_t bridge_fail_runs;
 };
-static_assert(sizeof(BlockTally) == 16);
+static_assert(sizeof(BlockTally) == 24);
 
 void set_block_tally(uint32_t bid, BlockTally tally);
 BlockTally get_block_tally(uint32_t bid);

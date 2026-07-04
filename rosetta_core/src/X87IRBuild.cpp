@@ -3,6 +3,7 @@
 #include "rosetta_core/IRInstr.h"
 #include "rosetta_core/IROperand.h"
 #include "rosetta_core/Opcode.h"
+#include "rosetta_core/X87Bridge.h"
 #include "rosetta_core/X87IR.h"
 
 namespace X87IR {
@@ -297,13 +298,164 @@ static bool build_fcmov(Context& ctx, IRInstr* instr, int aarch64_cond) {
 
 // ── Main build loop ─────────────────────────────────────────────────────────
 
+// Bridge-node construction for the run-bridging path.  The caller
+// (lookahead_bridged) has already validated eligibility via
+// x87bridge::is_bridge_v1 / is_bridge_v2_proven (the latter includes the
+// flag-deadness proof), so shapes here are trusted; anything unexpected
+// just fails the build (all-or-nothing bridged mode bails).
+static bool build_bridge(Context& ctx, IRInstr* instr) {
+    const uint16_t op = instr->opcode();
+    IROperand& dst = instr->operands[0];
+    IROperand& src = instr->operands[1];
+
+    const auto width_flag = [](const IROperand& reg_op) -> uint8_t {
+        return reg_op.reg.size == IROperandSize::S64 ? kBridge64 : kNone;
+    };
+
+    if (op == kOpcodeName_mov) {
+        if (dst.kind == IROperandKind::Register) {
+            const int16_t dst_enc = bridge_encode_reg(dst.reg.reg.index());
+            if (src.kind == IROperandKind::Register) {
+                auto id = ctx.add_node(Op::BridgeMovRR, dst_enc,
+                                       bridge_encode_reg(src.reg.reg.index()));
+                if (id < 0) {
+                    return false;
+                }
+                ctx.nodes[id].flags |= width_flag(dst);
+                return true;
+            }
+            if (src.kind == IROperandKind::BranchOffset) {
+                auto id = ctx.add_node(Op::BridgeMovRI, dst_enc);
+                if (id < 0) {
+                    return false;
+                }
+                ctx.nodes[id].flags |= width_flag(dst);
+                ctx.nodes[id].imm_bits = static_cast<uint64_t>(src.branch.value);
+                return true;
+            }
+            if (src.kind == IROperandKind::MemRef) {
+                auto id = ctx.add_node(Op::BridgeLoadG, dst_enc);
+                if (id < 0) {
+                    return false;
+                }
+                ctx.nodes[id].flags |= width_flag(dst);
+                ctx.nodes[id].mem_operand = &src;
+                return true;
+            }
+            return false;
+        }
+        if (dst.kind == IROperandKind::MemRef && src.kind == IROperandKind::Register) {
+            auto id = ctx.add_node(Op::BridgeStoreG, bridge_encode_reg(src.reg.reg.index()));
+            if (id < 0) {
+                return false;
+            }
+            ctx.nodes[id].flags |= width_flag(src);
+            ctx.nodes[id].mem_operand = &dst;
+            return true;
+        }
+        return false;
+    }
+    if (op == kOpcodeName_lea) {
+        auto id = ctx.add_node(Op::BridgeLea, bridge_encode_reg(dst.reg.reg.index()));
+        if (id < 0) {
+            return false;
+        }
+        ctx.nodes[id].flags |= width_flag(dst);
+        ctx.nodes[id].mem_operand = &src;
+        return true;
+    }
+
+    // ── v2: flag-dead ALU (caller proved flag_liveness == 0) ────────────────
+    const auto alu_kind = [](uint16_t opc) -> int {
+        switch (opc) {
+            case kOpcodeName_add:
+                return kBridgeAluAdd;
+            case kOpcodeName_sub:
+                return kBridgeAluSub;
+            case kOpcodeName_and:
+                return kBridgeAluAnd;
+            case kOpcodeName_or:
+                return kBridgeAluOr;
+            case kOpcodeName_xor:
+                return kBridgeAluXor;
+            default:
+                return -1;
+        }
+    };
+
+    if (op == kOpcodeName_inc || op == kOpcodeName_dec) {
+        // inc/dec r ≡ add/sub r,1 once flags are out of the picture (the
+        // CF-preservation quirk only matters to flag READERS, and the proof
+        // says there are none for the written flags; untouched NZCV carries
+        // any passing-through flags).
+        auto id = ctx.add_node(Op::BridgeAluRI, bridge_encode_reg(dst.reg.reg.index()), -1,
+                               bridge_encode_reg(op == kOpcodeName_inc ? kBridgeAluAdd
+                                                                       : kBridgeAluSub));
+        if (id < 0) {
+            return false;
+        }
+        ctx.nodes[id].flags |= width_flag(dst);
+        ctx.nodes[id].imm_bits = 1;
+        return true;
+    }
+
+    const int kind = alu_kind(op);
+    if (kind >= 0) {
+        const int16_t kind_enc = bridge_encode_reg(kind);
+        if (dst.kind == IROperandKind::Register) {
+            const int16_t dst_enc = bridge_encode_reg(dst.reg.reg.index());
+            if (src.kind == IROperandKind::Register) {
+                auto id = ctx.add_node(Op::BridgeAluRR, dst_enc,
+                                       bridge_encode_reg(src.reg.reg.index()), kind_enc);
+                if (id < 0) {
+                    return false;
+                }
+                ctx.nodes[id].flags |= width_flag(dst);
+                return true;
+            }
+            if (src.kind == IROperandKind::BranchOffset) {
+                auto id = ctx.add_node(Op::BridgeAluRI, dst_enc, -1, kind_enc);
+                if (id < 0) {
+                    return false;
+                }
+                ctx.nodes[id].flags |= width_flag(dst);
+                ctx.nodes[id].imm_bits = static_cast<uint64_t>(src.branch.value);
+                return true;
+            }
+            if (src.kind == IROperandKind::MemRef) {
+                auto id = ctx.add_node(Op::BridgeAluRM, dst_enc, -1, kind_enc);
+                if (id < 0) {
+                    return false;
+                }
+                ctx.nodes[id].flags |= width_flag(dst);
+                ctx.nodes[id].mem_operand = &src;
+                return true;
+            }
+            return false;
+        }
+        if (dst.kind == IROperandKind::MemRef && src.kind == IROperandKind::Register) {
+            auto id = ctx.add_node(Op::BridgeAluMR, bridge_encode_reg(src.reg.reg.index()), -1,
+                                   kind_enc);
+            if (id < 0) {
+                return false;
+            }
+            ctx.nodes[id].flags |= width_flag(src);
+            ctx.nodes[id].mem_operand = &dst;
+            return true;
+        }
+        return false;
+    }
+    return false;
+}
+
 bool build(Context& ctx, IRInstr* instr_array, int64_t num_instrs, int64_t start_idx,
-           int run_length) {
+           int run_length, bool allow_bridges, bool bridges_v2) {
     ctx.init();
 
     for (int i = 0; i < run_length && (start_idx + i) < num_instrs; i++) {
         auto* instr = &instr_array[start_idx + i];
         const auto op = instr->opcode();
+        const int16_t nodes_before = ctx.num_nodes;
         bool ok = true;
 
         switch (op) {
@@ -875,9 +1027,29 @@ bool build(Context& ctx, IRInstr* instr_array, int64_t num_instrs, int64_t start
 
             // ── Bail on everything else ─────────────────────────────────
             default:
+                // Run bridging: consume an eligible non-x87 instruction as a
+                // Bridge* side-effect node at its program position.  The
+                // bridged lookahead already filtered shapes; re-check the
+                // predicate so a plain (non-bridged) build can never absorb
+                // integer instructions by accident.  In v2 mode the re-check
+                // includes the per-instruction flag-deadness proof.
+                if (allow_bridges && (bridges_v2 ? x87bridge::is_bridge_v2_proven(*instr)
+                                                 : x87bridge::is_bridge_v1(*instr))) {
+                    if (!build_bridge(ctx, instr)) {
+                        ok = false;
+                    }
+                    break;
+                }
                 ctx.fail_opcode = static_cast<uint16_t>(op);
                 ok = false;
                 break;
+        }
+
+        // Attribute every node this instruction created (even on a bail —
+        // partially-built nodes stay in ctx.nodes[]) to its ordinal, so
+        // compile_run can map pressure-overflow nodes to a split boundary.
+        for (int16_t nid = nodes_before; nid < ctx.num_nodes; ++nid) {
+            ctx.node_src[nid] = static_cast<int16_t>(i);
         }
 
         if (!ok) {

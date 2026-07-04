@@ -55,6 +55,10 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
             cache.tally_ir_build_fail = 0;
             cache.tally_ir_fpr_fail = 0;
             cache.tally_ir_gpr_fail = 0;
+            cache.tally_ir_split = 0;
+            cache.tally_ir_remat = 0;
+            cache.tally_bridge = 0;
+            cache.tally_bridge_fail = 0;
             cache.tally_max_gpr_peak = 0;
             cache.tally_ir_gate_short_run = 0;
             cache.tally_ir_gate_top_dirty = 0;
@@ -65,6 +69,29 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                 v = 0;
             }
             cache.prev_x87_opcode = 0xFFFFU;
+            // X87_FAST_ROUND=2: one scan per block for control-word writers;
+            // x87_fast_round_active keeps the full RC dispatch in blocks
+            // that contain one.
+            cache.block_has_cw_write = 0;
+            if (g_rosetta_config && g_rosetta_config->fast_round == 2) {
+                for (int64_t i = 0; i < num_instrs; i++) {
+                    switch (instr_array[i].opcode()) {
+                        case kOpcodeName_fldcw:
+                        case kOpcodeName_fldenv:
+                        case kOpcodeName_frstor:
+                        case kOpcodeName_fxrstor:
+                        case kOpcodeName_finit:
+                        case kOpcodeName_fsave:
+                            cache.block_has_cw_write = 1;
+                            break;
+                        default:
+                            break;
+                    }
+                    if (cache.block_has_cw_write) {
+                        break;
+                    }
+                }
+            }
             cache.profile_bid = profile::kOverflowId;
             // Compute the IR hash unconditionally so the X87_*_HASH_LIST
             // rollback gate works without X87_PROFILE.  The hash is
@@ -86,6 +113,42 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
             if (!cache_disabled) {
                 const int run = X87Cache::lookahead(instr_array, num_instrs, insn_idx);
                 cache.set_run(run);
+                // Run bridging: at a fresh run start, check whether short v1
+                // gaps join this run to following x87 segments.  Stash the
+                // descriptor; the IR dispatch below fires the all-or-nothing
+                // attempt when it reaches this index with no deferred state.
+                cache.bridge_pending_total = 0;
+                cache.bridge_pending_idx = -1;
+                // Per-block bisect: include list restricts bridging to the
+                // listed IR-content hashes; exclude list vetoes them
+                // (exclude wins).  cache.profile_hash is populated on block
+                // transition, before any run start in the block.
+                bool bridge_allowed = g_rosetta_config != nullptr &&
+                                      g_rosetta_config->enable_bridge != 0;
+                if (bridge_allowed) {
+                    const auto& cfg = *g_rosetta_config;
+                    if (!cfg.x87_no_bridge_hash_list.empty() &&
+                        std::ranges::binary_search(cfg.x87_no_bridge_hash_list,
+                                                   cache.profile_hash)) {
+                        bridge_allowed = false;
+                    } else if (!cfg.x87_bridge_hash_list.empty() &&
+                               !std::ranges::binary_search(cfg.x87_bridge_hash_list,
+                                                           cache.profile_hash)) {
+                        bridge_allowed = false;
+                    }
+                }
+                if (bridge_allowed && run >= 1) {
+                    const auto br = X87Cache::lookahead_bridged(
+                        instr_array, num_instrs, insn_idx, g_rosetta_config->bridge_max_gap,
+                        g_rosetta_config->bridge_max_total,
+                        g_rosetta_config->enable_bridge_v2 != 0);
+                    if (br.total > run) {
+                        cache.bridge_pending_total = br.total;
+                        cache.bridge_pending_x87 = br.x87_count;
+                        cache.bridge_pending_plain = static_cast<int16_t>(run);
+                        cache.bridge_pending_idx = static_cast<int16_t>(insn_idx);
+                    }
+                }
             }
         }
     }
@@ -105,6 +168,10 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                                          .ir_fpr_fail_ops = cache.tally_ir_fpr_fail,
                                          .ir_gpr_fail_ops = cache.tally_ir_gpr_fail,
                                          .max_gpr_peak = cache.tally_max_gpr_peak,
+                                         .ir_split_runs = cache.tally_ir_split,
+                                         .ir_remat_runs = cache.tally_ir_remat,
+                                         .bridge_ops = cache.tally_bridge,
+                                         .bridge_fail_runs = cache.tally_bridge_fail,
                                      });
         }
     };
@@ -170,6 +237,78 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
     // Latest-write-wins per block — analyzer aggregates exec-weighted across
     // blocks to surface the dominant refusal cause.  Was previously a single
     // combined &&-chain whose failures were invisible to the profiler.
+    // ── Run bridging: all-or-nothing bridged IR attempt ─────────────────────
+    // Fires exactly once per stashed descriptor, at the region's start
+    // instruction, and only with no deferred cache state (a fresh run start
+    // has none; the guard is belt-and-braces).  On success the whole region
+    // — x87 segments plus the mov/lea bridges joining them — lowers as ONE
+    // IR run, so the FP stack never round-trips through memory at the gaps.
+    // On any failure nothing was emitted (build/gate failures precede
+    // lower()); restore the plain run and fall through to the normal paths.
+    {
+        const bool ir_disabled = g_rosetta_config && g_rosetta_config->disable_x87_ir;
+        if (!ir_disabled && cache.bridge_pending_total > 0 &&
+            cache.bridge_pending_idx == static_cast<int16_t>(insn_idx) && cache.top_dirty == 0 &&
+            cache.tag_push_pending == 0 && cache.deferred_pop_count == 0 &&
+            cache.perm_dirty == 0) {
+            const int total = cache.bridge_pending_total;
+            const int x87_count = cache.bridge_pending_x87;
+            const int plain_run = cache.bridge_pending_plain;
+            cache.bridge_pending_total = 0;
+            cache.bridge_pending_idx = -1;
+
+            cache.set_run(total);  // pin GPRs across the whole region
+            X87IR::IRFailReason bridge_reason = X87IR::IRFailReason::kNone;
+            const int consumed = X87IR::compile_run(
+                translation_result, instr_array, num_instrs, insn_idx, total, &bridge_reason,
+                nullptr, nullptr, /*bridged=*/true,
+                /*bridges_v2=*/g_rosetta_config->enable_bridge_v2 != 0);
+            if (consumed == total) {
+                if (cache.tally_bridge != 0xFFFFU) {
+                    cache.tally_bridge =
+                        static_cast<uint16_t>(cache.tally_bridge + (total - x87_count));
+                }
+                cache.tally_ir = static_cast<uint16_t>(cache.tally_ir + x87_count);
+                mirror_tally();
+                if (g_rosetta_config->log_bridge) {
+                    std::fprintf(stderr,
+                                 "[x87-bridge] joined region: total=%d x87=%d bridges=%d "
+                                 "hash=0x%016llx idx=%lld\n",
+                                 total, x87_count, total - x87_count,
+                                 static_cast<unsigned long long>(cache.profile_hash),
+                                 static_cast<long long>(insn_idx));
+                }
+                for (int i = 0; i < total; i++) {
+                    cache.tick();
+                }
+                if (cache.active()) {
+                    translation_result->free_gpr_mask = kGprScratchMask & ~cache.pinned_mask();
+                } else {
+                    translation_result->free_gpr_mask = kGprScratchMask;
+                }
+                translation_result->free_fpr_mask =
+                    translation_result->_unoccupied_temporary_fprs_for_xmm_scalars;
+                translation_result->_pinned_temporary_scalars = 0;
+                return insn_idx + total;
+            }
+            // Fallback: nothing emitted; restore the plain x87 run.  Direct
+            // field write — set_run() ignores lengths < 2, which would leave
+            // run_remaining at the bridged total and keep the cache active
+            // across the gap's stock-translated instructions.
+            cache.run_remaining = static_cast<int16_t>(plain_run >= 2 ? plain_run : 0);
+            if (cache.tally_bridge_fail != 0xFFFFU) {
+                cache.tally_bridge_fail++;
+            }
+            if (g_rosetta_config->log_bridge) {
+                std::fprintf(stderr,
+                             "[x87-bridge] fallback: total=%d reason=%d hash=0x%016llx idx=%lld\n",
+                             total, static_cast<int>(bridge_reason),
+                             static_cast<unsigned long long>(cache.profile_hash),
+                             static_cast<long long>(insn_idx));
+            }
+        }
+    }
+
     {
         const bool ir_disabled = g_rosetta_config && g_rosetta_config->disable_x87_ir;
         if (!ir_disabled && cache.active()) {
@@ -396,6 +535,10 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                                 static_cast<uint16_t>(cache.tally_ir_gpr_fail + 1);
                             break;
                         case X87IR::IRFailReason::kNone:
+                        case X87IR::IRFailReason::kBridgePartial:
+                            // kBridgePartial never reaches this switch (the
+                            // bridged attempt handles its own fallback), but
+                            // keep -Wswitch exhaustive.
                             break;
                     }
                     mirror_tally();
@@ -458,6 +601,9 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                                     break;
                                 case X87IR::IRFailReason::kGprPressure:
                                     fail_name = "GprPressure";
+                                    break;
+                                case X87IR::IRFailReason::kBridgePartial:
+                                    fail_name = "BridgePartial";
                                     break;
                                 case X87IR::IRFailReason::kNone:
                                     break;

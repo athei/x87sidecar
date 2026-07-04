@@ -88,6 +88,46 @@ enum class Op : uint8_t {
     // Control word
     StoreCW,  // FLDCW: load u16 from memory, write to X87State.control_word
     LoadCW,   // FNSTCW: read X87State.control_word, store u16 to memory
+
+    // ── Bridge ops (run bridging v1) ────────────────────────────────────────
+    // Non-x87 integer instructions carried inside an x87 IR run so the FP
+    // stack stays in FPRs across short mov/lea gaps (see X87Bridge.h for the
+    // eligibility predicate).  All are side-effect nodes (guest register
+    // and/or memory writes) emitted strictly in program order; none touches
+    // NZCV or produces an FPR value.  Guest register numbers are encoded
+    // NEGATIVELY in inputs[] via bridge_encode_reg so no pass walk can
+    // mistake them for SSA node references.  Operand width (32/64-bit) is
+    // carried by the kBridge64 flag; W-register writes zero-extend, which is
+    // exactly x86-64 semantics.
+    BridgeMovRR,   // mov r,r      inputs[0]=enc(dst), inputs[1]=enc(src)
+    BridgeMovRI,   // mov r,imm    inputs[0]=enc(dst), imm_bits=value
+    BridgeLea,     // lea r,[m]    inputs[0]=enc(dst), mem_operand=&src
+    BridgeLoadG,   // mov r,[m]    inputs[0]=enc(dst), mem_operand=&src
+    BridgeStoreG,  // mov [m],r    inputs[0]=enc(src), mem_operand=&dst
+
+    // ── Bridge ALU ops (run bridging v2) ────────────────────────────────────
+    // Flag-writing integer ALU (add/sub/and/or/xor, plus inc/dec folded to
+    // add/sub 1) carried inside a run ONLY when Rosetta's own liveness byte
+    // proves the written flags dead (IRInstr::flag_liveness == 0; see
+    // X87Bridge.h).  Lowered to NON-flag-setting ARM (ADD, not ADDS) so
+    // NZCV — which may carry x86 flags live THROUGH the region, e.g. a
+    // cmp's CF surviving an inc/dec — is never clobbered.  The ALU kind
+    // (BridgeAluKind) rides negatively encoded in inputs[2], same guard as
+    // guest registers.
+    BridgeAluRR,  // alu r,r    inputs[0]=enc(dst), inputs[1]=enc(src), inputs[2]=enc(kind)
+    BridgeAluRI,  // alu r,imm  inputs[0]=enc(dst), inputs[2]=enc(kind), imm_bits=value
+    BridgeAluRM,  // alu r,[m]  inputs[0]=enc(dst), inputs[2]=enc(kind), mem_operand=&src
+    BridgeAluMR,  // alu [m],r  inputs[0]=enc(src), inputs[2]=enc(kind), mem_operand=&dst
+};
+
+// ALU selector for BridgeAlu* nodes; stored in inputs[2] via
+// bridge_encode_reg so pass walks' `input >= 0` guards skip it.
+enum BridgeAluKind : uint8_t {
+    kBridgeAluAdd = 0,
+    kBridgeAluSub,
+    kBridgeAluAnd,
+    kBridgeAluOr,
+    kBridgeAluXor,
 };
 
 enum NodeFlags : uint8_t {
@@ -106,7 +146,19 @@ enum NodeFlags : uint8_t {
     // scalar FADDP horizontal sum.
     kFmaReduceHead = 1 << 4,    // First FMAdd of a chain: lower emits whole body
     kFmaReduceMember = 1 << 5,  // FMAdd / LoadF32 absorbed by a chain (incl. head)
+
+    kBridge64 = 1 << 6,  // Bridge*: 64-bit operand width (default 32-bit)
 };
+
+// Guest GPR numbers inside Bridge* nodes' inputs[] — negative so every pass
+// walk's `input >= 0` guard skips them (they are not node references).
+// -1 stays "unused"; encodings start at -2.
+inline int16_t bridge_encode_reg(int guest_reg) {
+    return static_cast<int16_t>(-(guest_reg + 2));
+}
+inline int bridge_decode_reg(int16_t enc) {
+    return -(enc + 2);
+}
 
 // ── IR node ─────────────────────────────────────────────────────────────────
 
@@ -127,6 +179,12 @@ static_assert(sizeof(Node) == 16, "X87IR::Node should be 16 bytes");
 struct Context {
     Node nodes[kMaxNodes];  // 1024 bytes
     int16_t num_nodes;
+
+    // Ordinal (0-based, within the run) of the x87 instruction that created
+    // each node.  Written by build() for every node it appends; lets
+    // compile_run map a pressure-overflow node back to an instruction
+    // boundary when it splits an over-pressure run into a fitting prefix.
+    int16_t node_src[kMaxNodes];
 
     // Symbolic stack.
     //   val >= 0: IR node ID
@@ -228,8 +286,13 @@ struct Context {
 
 // Build IR from a sequence of x87 instructions.
 // Returns the number of instructions consumed (stored in ctx.consumed).
+// allow_bridges: also consume v1 bridge instructions (X87Bridge.h) between
+// x87 ops, emitting Bridge* side-effect nodes at their program position.
+// bridges_v2: additionally consume flag-dead ALU bridges (proof re-checked
+// per instruction via x87bridge::is_bridge_v2_proven; the block-level
+// flag-liveness-populated gate is the lookahead's job).
 bool build(Context& ctx, IRInstr* instr_array, int64_t num_instrs, int64_t start_idx,
-           int run_length);
+           int run_length, bool allow_bridges = false, bool bridges_v2 = false);
 
 // Run optimization passes on the IR (DSE, FMA detection, FCOM+FSTSW fusion).
 void optimize(Context& ctx);
@@ -265,9 +328,21 @@ void fma_reduce_print_stats();
 
 // Compute the peak number of simultaneously live FPR-bearing nodes that the
 // lowering pass will require, accounting for transient temporaries (e.g. the
-// +1 FPR spike during StoreF32 narrowing).  Used to gate lowering against the
-// available scratch FPR pool.
-int peak_live_fprs(const Context& ctx);
+// +1/+2 FPR spike during StoreF32 narrowing).  Used to gate lowering against
+// the available scratch FPR pool.
+//
+// budget / first_over_node: when first_over_node is non-null, it is set to
+// the index of the first node whose modeled demand exceeds `budget` (-1 if
+// demand never exceeds it).  compile_run uses ctx.node_src[*first_over_node]
+// to pick the instruction boundary at which to split an over-pressure run.
+int peak_live_fprs(const Context& ctx, int budget = 0x7FFFFFFF, int* first_over_node = nullptr);
+
+// GPR-side equivalent of peak_live_fprs (pinned + held + per-node transient
+// demand model; see X87IRLower.cpp for the model notes).  fast_round must
+// match the effective fast-round decision the lowering will make
+// (x87_fast_round_active) so the RC-cache pinned-GPR prediction agrees.
+int peak_live_gprs(const Context& ctx, int budget = 0x7FFFFFFF, int* first_over_node = nullptr,
+                   bool fast_round = false);
 
 // Lower IR to AArch64 instructions, writing into result->insn_buf.
 void lower(Context& ctx, TranslationResult* result);
@@ -277,10 +352,13 @@ void lower(Context& ctx, TranslationResult* result);
 // classify "single-op fall-through because IR failed for reason X" — useful
 // for diagnosing why hot patterns sometimes stay on the slow path.
 enum class IRFailReason : uint8_t {
-    kNone = 0,         // success, or compile_run wasn't called
-    kBuildFail = 1,    // build() returned false (kMaxNodes overflow, unhandled op, …)
-    kFprPressure = 2,  // peak_live_fprs > available
-    kGprPressure = 3,  // peak_live_gprs > available
+    kNone = 0,           // success, or compile_run wasn't called
+    kBuildFail = 1,      // build() returned false (kMaxNodes overflow, unhandled op, …)
+    kFprPressure = 2,    // peak_live_fprs > available
+    kGprPressure = 3,    // peak_live_gprs > available
+    kBridgePartial = 4,  // bridged (require_full) run didn't consume the whole
+                         // region — nothing was emitted; caller falls back to
+                         // the plain (x87-only) dispatch
 };
 
 // Main entry point: build + optimize + lower.
@@ -297,8 +375,16 @@ enum class IRFailReason : uint8_t {
 // when compile_run returned a positive consumed (i.e. build succeeded on the
 // prefix but stopped early at position N).  Untouched (caller-initialized
 // sentinel preserved) when no bail was observed.
+// bridged (optional): all-or-nothing bridged mode — build() accepts v1
+// bridge instructions, pressure splitting is disabled (a partial consume
+// would hand the run tail's bridges back to stock mid-run, which may
+// clobber pinned scratch GPRs), and any outcome other than consuming
+// exactly run_length returns 0 with kBridgePartial (nothing emitted; the
+// gates run before lower()).
+// bridges_v2 (optional): with bridged, also accept flag-dead ALU bridges.
 int compile_run(TranslationResult* result, IRInstr* instr_array, int64_t num_instrs,
                 int64_t start_idx, int run_length, IRFailReason* out_reason = nullptr,
-                int* out_peak_gprs = nullptr, uint16_t* out_fail_opcode = nullptr);
+                int* out_peak_gprs = nullptr, uint16_t* out_fail_opcode = nullptr,
+                bool bridged = false, bool bridges_v2 = false);
 
 }  // namespace X87IR

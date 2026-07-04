@@ -11,6 +11,18 @@
 #   5. x87sidecar with X87_DISABLE_HOOK=1 (stock translate_insn only)
 #   6. x87sidecar with X87_ENABLE_FMA_REDUCE=0 (legacy scalar FMADD path —
 #      regression catch since FMA-reduce now defaults ON)
+#   7. x87sidecar with X87_FPR_POOL_LIMIT=5 (deterministic pressure
+#      splitting / remat-sink exercise on every test)
+#   8. x87sidecar with X87_ENABLE_IR_SPLIT=0 X87_ENABLE_IR_REMAT=0
+#      (legacy all-or-nothing pressure gate)
+#   9. x87sidecar with X87_FAST_ROUND=2 on a curated same-block-FLDCW set
+#      (cross-block RC is mis-rounded by design under =2)
+#  10. x87sidecar with X87_ENABLE_BRIDGE=0 (bridging defaults ON; this
+#      phase keeps the unbridged dispatch under regression test)
+#  11. x87sidecar with X87_BRIDGE_V2=0 (v2 defaults ON; this phase keeps
+#      the v1-only bridged dispatch under regression test)
+#   R. replay tests/data/geom_block_874c40.ir under --fpr-pool 8 and
+#      assert the pressure splits keep it on the IR path (fpr_fail=0)
 #
 # Usage:
 #   bash scripts/run_tests.sh                # build + test (all phases)
@@ -58,6 +70,13 @@ ALL_TESTS=(
     test_fstp_fld
     test_fistt
     test_tag_batch
+    test_ir_split
+    test_ir_remat
+    test_ir_split_trans
+    test_bridge_mov
+    test_bridge_lea
+    test_bridge_flags
+    test_bridge_alu
     test_fld_arith_arithp_fma
     test_readst_elide
     test_fxch
@@ -288,6 +307,147 @@ if [[ $NATIVE_ONLY -eq 0 ]]; then
         OUT=$(X87_ENABLE_FMA_REDUCE=0 "$LOADER" "$BINARY" 2>/dev/null | filter_runtime_lines) || EXIT=$?
         check_output "$t" "$OUT" "$EXIT"
     done
+fi
+
+# ── Phase 7: x87sidecar X87_FPR_POOL_LIMIT=5 (pressure split/remat) ──────
+# Clamp the FPR gate to 5 slots so every test with a run peaking above
+# that exercises the pressure-split and remat/sink rescue paths
+# deterministically (the real pool depends on stock's dynamic FPR
+# seeding).  Values must be identical to the unclamped phases.
+if [[ $NATIVE_ONLY -eq 0 ]]; then
+    echo ""
+    echo -e "${BOLD}=== Phase 7: x87sidecar X87_FPR_POOL_LIMIT=5 (pressure split/remat) ===${NC}"
+
+    for t in "${TESTS[@]}"; do
+        BINARY="$TESTS_BIN/$t"
+        if [[ ! -x "$BINARY" ]]; then
+            echo -e "${YELLOW}SKIP${NC}  $t  (binary not found)"
+            ERRORS=$((ERRORS + 1))
+            continue
+        fi
+        EXIT=0
+        OUT=$(X87_FPR_POOL_LIMIT=5 "$LOADER" "$BINARY" 2>/dev/null | filter_runtime_lines) || EXIT=$?
+        check_output "$t" "$OUT" "$EXIT"
+    done
+fi
+
+# ── Phase 8: x87sidecar split/remat disabled (legacy all-or-nothing gate) ─
+# Kill-switch regression phase: X87_ENABLE_IR_SPLIT=0 X87_ENABLE_IR_REMAT=0
+# restores the pre-split refuse-the-whole-run behavior; results must not
+# change (only codegen quality does).
+if [[ $NATIVE_ONLY -eq 0 ]]; then
+    echo ""
+    echo -e "${BOLD}=== Phase 8: x87sidecar X87_ENABLE_IR_SPLIT=0 X87_ENABLE_IR_REMAT=0 ===${NC}"
+
+    for t in "${TESTS[@]}"; do
+        BINARY="$TESTS_BIN/$t"
+        if [[ ! -x "$BINARY" ]]; then
+            echo -e "${YELLOW}SKIP${NC}  $t  (binary not found)"
+            ERRORS=$((ERRORS + 1))
+            continue
+        fi
+        EXIT=0
+        OUT=$(X87_ENABLE_IR_SPLIT=0 X87_ENABLE_IR_REMAT=0 "$LOADER" "$BINARY" 2>/dev/null | filter_runtime_lines) || EXIT=$?
+        check_output "$t" "$OUT" "$EXIT"
+    done
+fi
+
+# ── Phase 9: x87sidecar X87_FAST_ROUND=2 (smart per-block, curated set) ───
+# =2 keeps the full RC dispatch in blocks containing a control-word
+# writer, so same-block FLDCW idioms must pass.  Cross-block RC (FLDCW in
+# one block, consumer in another) is mis-rounded BY DESIGN under =2 —
+# test_frndint's standalone cases hit exactly that, so this phase runs a
+# curated subset instead of the full suite.
+FAST_ROUND2_TESTS=(
+    test_fldcw
+    test_fistp_multi
+    test_rc_recache
+    test_fistt
+)
+if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then
+    echo ""
+    echo -e "${BOLD}=== Phase 9: x87sidecar X87_FAST_ROUND=2 (same-block FLDCW idioms) ===${NC}"
+
+    for t in "${FAST_ROUND2_TESTS[@]}"; do
+        BINARY="$TESTS_BIN/$t"
+        if [[ ! -x "$BINARY" ]]; then
+            echo -e "${YELLOW}SKIP${NC}  $t  (binary not found)"
+            ERRORS=$((ERRORS + 1))
+            continue
+        fi
+        EXIT=0
+        OUT=$(X87_FAST_ROUND=2 "$LOADER" "$BINARY" 2>/dev/null | filter_runtime_lines) || EXIT=$?
+        check_output "$t" "$OUT" "$EXIT"
+    done
+fi
+
+# ── Phase 10: x87sidecar X87_ENABLE_BRIDGE=0 (bridging kill switch) ───────
+# Bridging defaults ON (phases 2/6/7 exercise the bridged lowering); this
+# phase keeps the unbridged dispatch under continuous regression test.
+if [[ $NATIVE_ONLY -eq 0 ]]; then
+    echo ""
+    echo -e "${BOLD}=== Phase 10: x87sidecar X87_ENABLE_BRIDGE=0 (bridging off) ===${NC}"
+
+    for t in "${TESTS[@]}"; do
+        BINARY="$TESTS_BIN/$t"
+        if [[ ! -x "$BINARY" ]]; then
+            echo -e "${YELLOW}SKIP${NC}  $t  (binary not found)"
+            ERRORS=$((ERRORS + 1))
+            continue
+        fi
+        EXIT=0
+        OUT=$(X87_ENABLE_BRIDGE=0 "$LOADER" "$BINARY" 2>/dev/null | filter_runtime_lines) || EXIT=$?
+        check_output "$t" "$OUT" "$EXIT"
+    done
+fi
+
+# ── Phase 11: x87sidecar X87_BRIDGE_V2=0 (v2 bridging kill switch) ────────
+# v2 bridging defaults ON (phase 2 exercises the flag-dead ALU lowering);
+# this phase keeps the v1-only bridged dispatch under regression test.
+# test_bridge_alu exercises the v2 shapes directly.
+if [[ $NATIVE_ONLY -eq 0 ]]; then
+    echo ""
+    echo -e "${BOLD}=== Phase 11: x87sidecar X87_BRIDGE_V2=0 (v2 bridging off) ===${NC}"
+
+    for t in "${TESTS[@]}"; do
+        BINARY="$TESTS_BIN/$t"
+        if [[ ! -x "$BINARY" ]]; then
+            echo -e "${YELLOW}SKIP${NC}  $t  (binary not found)"
+            ERRORS=$((ERRORS + 1))
+            continue
+        fi
+        EXIT=0
+        OUT=$(X87_BRIDGE_V2=0 "$LOADER" "$BINARY" 2>/dev/null | filter_runtime_lines) || EXIT=$?
+        check_output "$t" "$OUT" "$EXIT"
+    done
+fi
+
+# ── Replay: captured WoW geom block through the clamped pressure gate ────
+# tests/data/geom_block_874c40.ir is the canonical FprPressure reproducer
+# (169 instrs; 48 fpr_fail ops at the 8-slot pool before splitting).
+# Assert the pressure-relief machinery keeps it fully on the IR path.
+if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then
+    echo ""
+    echo -e "${BOLD}=== Replay: geom_block_874c40.ir under --fpr-pool 8 ===${NC}"
+    TOTAL=$((TOTAL + 1))
+    REPLAY_BIN="$BIN/ir_pressure_replay"
+    GEOM_IR="$ROOT_DIR/tests/data/geom_block_874c40.ir"
+    if [[ ! -x "$REPLAY_BIN" || ! -f "$GEOM_IR" ]]; then
+        echo -e "${YELLOW}SKIP${NC}  geom_replay  (tool or blob not found)"
+        ERRORS=$((ERRORS + 1))
+    else
+        # The geom blob is a legacy capture with 26.4-host opcodes.
+        ROUT=$("$REPLAY_BIN" "$GEOM_IR" --fpr-pool 8 --runtime-version 0) || true
+        if echo "$ROUT" | grep -q '^ir_fpr_fail,0$' && \
+           echo "$ROUT" | grep -qE '^ir_split,[1-9]'; then
+            echo -e "${GREEN}PASS${NC}  geom_replay (fpr_fail=0, splits fired)"
+            PASSED=$((PASSED + 1))
+        else
+            echo -e "${RED}FAIL${NC}  geom_replay"
+            echo "$ROUT" | sed 's/^/      /'
+            FAILED=$((FAILED + 1))
+        fi
+    fi
 fi
 
 echo ""

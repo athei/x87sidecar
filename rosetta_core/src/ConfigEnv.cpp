@@ -118,11 +118,87 @@ RosettaConfig load_config_from_env() {
 
     // Translator knobs.
     cfg.disable_x87_cache = env_truthy("X87_DISABLE_CACHE") ? 1 : 0;
-    cfg.fast_round = env_truthy("X87_FAST_ROUND") ? 1 : 0;
+    // X87_FAST_ROUND: 1 (or any legacy truthy value) = always skip the RC
+    // dispatch; 2 = "smart" per-block mode — skip it only in blocks with no
+    // control-word writer (see x87_fast_round_active).  Both are opt-in and
+    // speculative; 2 is strictly safer than 1.
+    if (const char* fr = std::getenv("X87_FAST_ROUND"); fr != nullptr && fr[0] != '\0') {
+        if (std::strcmp(fr, "2") == 0) {
+            cfg.fast_round = 2;
+        } else {
+            cfg.fast_round = env_truthy("X87_FAST_ROUND") ? 1 : 0;
+        }
+    }
     cfg.disable_deferred_fxch = env_truthy("X87_DISABLE_DEFERRED_FXCH") ? 1 : 0;
     cfg.disable_x87_ir = env_truthy("X87_DISABLE_X87_IR") ? 1 : 0;
     cfg.disable_x87_single_fast = env_truthy("X87_DISABLE_SINGLE_FAST") ? 1 : 0;
     cfg.enable_fma_reduce = env_default_on("X87_ENABLE_FMA_REDUCE");
+    cfg.enable_ir_split = env_default_on("X87_ENABLE_IR_SPLIT");
+    cfg.enable_ir_remat = env_default_on("X87_ENABLE_IR_REMAT");
+    cfg.log_ir_split = env_truthy("X87_LOG_IR_SPLIT") ? 1 : 0;
+
+    // Test-only gate pool clamps: make register-pressure splits
+    // deterministically reproducible regardless of stock's dynamic FPR
+    // seeding.  0 (unset) = no clamp.  Narrow the gate only — allocation
+    // still draws from the real mask.
+    auto parse_pool_limit = [](const char* env_name, uint8_t& target) {
+        const char* t = std::getenv(env_name);
+        if (t == nullptr || t[0] == '\0') {
+            return;
+        }
+        char* end = nullptr;
+        const long v = std::strtol(t, &end, 10);
+        if (end != t && *end == '\0' && v >= 1 && v <= 16) {
+            target = static_cast<uint8_t>(v);
+            std::printf("[rosettax87] %s=%ld (gate pool clamp)\n", env_name, v);
+        } else {
+            std::printf("[rosettax87] %s: '%s' out of range [1,16] or not an integer (ignored)\n",
+                        env_name, t);
+        }
+    };
+    parse_pool_limit("X87_FPR_POOL_LIMIT", cfg.fpr_pool_limit);
+    parse_pool_limit("X87_GPR_POOL_LIMIT", cfg.gpr_pool_limit);
+
+    // Run bridging v1.  Default ON since 2026-07-04 (clean TurtleWoW soak;
+    // measured -6.18% exec-weighted ARM on the capture).  Set =0 to disable;
+    // X87_BRIDGE_HASH_LIST / X87_NO_BRIDGE_HASH_LIST bisect per block.
+    cfg.enable_bridge = env_default_on("X87_ENABLE_BRIDGE");
+    // Run bridging v2: flag-dead ALU gaps (X87Bridge.h).  Default ON since
+    // 2026-07-04 (clean TurtleWoW soak; live bridge activity confirmed on
+    // the workload's #3 hottest block).  Set =0 to disable; needs
+    // enable_bridge too, and the bridge hash lists bisect v2 regions the
+    // same as v1.
+    cfg.enable_bridge_v2 = env_default_on("X87_BRIDGE_V2");
+    cfg.bridge_max_gap = 2;
+    cfg.bridge_max_total = 8;
+    cfg.log_bridge = env_truthy("X87_LOG_BRIDGE") ? 1 : 0;
+    auto parse_bridge_bound = [](const char* env_name, uint8_t& target, long lo, long hi) {
+        const char* t = std::getenv(env_name);
+        if (t == nullptr || t[0] == '\0') {
+            return;
+        }
+        char* end = nullptr;
+        const long v = std::strtol(t, &end, 10);
+        if (end != t && *end == '\0' && v >= lo && v <= hi) {
+            target = static_cast<uint8_t>(v);
+            std::printf("[rosettax87] %s=%ld\n", env_name, v);
+        } else {
+            std::printf("[rosettax87] %s: '%s' out of range [%ld,%ld] (ignored)\n", env_name, t,
+                        lo, hi);
+        }
+    };
+    parse_bridge_bound("X87_BRIDGE_MAX_GAP", cfg.bridge_max_gap, 1, 4);
+    parse_bridge_bound("X87_BRIDGE_MAX_TOTAL", cfg.bridge_max_total, 1, 16);
+    if (const char* v = std::getenv("X87_BRIDGE_HASH_LIST"); v != nullptr && v[0] != '\0') {
+        parse_hash_list(v, cfg.x87_bridge_hash_list);
+        std::printf("[rosettax87] X87_BRIDGE_HASH_LIST: %zu unique hashes\n",
+                    cfg.x87_bridge_hash_list.size());
+    }
+    if (const char* v = std::getenv("X87_NO_BRIDGE_HASH_LIST"); v != nullptr && v[0] != '\0') {
+        parse_hash_list(v, cfg.x87_no_bridge_hash_list);
+        std::printf("[rosettax87] X87_NO_BRIDGE_HASH_LIST: %zu unique hashes\n",
+                    cfg.x87_no_bridge_hash_list.size());
+    }
 
     if (env_truthy("X87_DISABLE_ALL_FUSIONS")) {
         cfg.disabled_fusions_mask = ~0ULL;
@@ -225,6 +301,13 @@ void print_env_help(std::FILE* out) {
                  "  X87_FAST_ROUND=1              skip RC dispatch; always emit FCVTNS/FRINTN\n"
                  "                                (round-to-nearest only — UNSAFE for code that\n"
                  "                                 uses FLDCW to change rounding mode, e.g. Lua)\n"
+                 "  X87_FAST_ROUND=2              smart per-block variant: skip RC dispatch only\n"
+                 "                                in blocks with no control-word writer (FLDCW/\n"
+                 "                                FLDENV/FRSTOR/FXRSTOR/FINIT/FSAVE).  Strictly\n"
+                 "                                safer than =1, but STILL SPECULATIVE: RC is\n"
+                 "                                persistent thread state — a program that sets\n"
+                 "                                RC once at startup (_controlfp) is mis-rounded\n"
+                 "                                in CW-clean blocks.  Opt-in only.\n"
                  "  X87_DISABLE_DEFERRED_FXCH=1   disable OPT-G (deferred FXCH permutation)\n"
                  "  X87_DISABLE_X87_IR=1          disable the IR optimisation pipeline\n"
                  "  X87_DISABLE_SINGLE_FAST=1     disable the fused single-op fast path for\n"
@@ -238,6 +321,43 @@ void print_env_help(std::FILE* out) {
                  "                                is stride-16, so the pass detects no chains\n"
                  "                                there but is correctness-clean and ships ON\n"
                  "                                so it stays exercised.\n"
+                 "  X87_ENABLE_IR_SPLIT=0         disable pressure splitting: when the FPR/GPR\n"
+                 "                                gate refuses a run, compile_run normally\n"
+                 "                                retries with the prefix ending just before\n"
+                 "                                the overflow point (the suffix re-enters the\n"
+                 "                                gate on the next dispatch).  Default ON.\n"
+                 "  X87_ENABLE_IR_REMAT=0         disable pressure rematerialization: before\n"
+                 "                                splitting, compile_run normally sinks/clones\n"
+                 "                                long-lived consts and loads past the pressure\n"
+                 "                                peak (cheaper than a split).  Default ON.\n"
+                 "  X87_LOG_IR_SPLIT=1            one stderr line per split retry / rescued run\n"
+                 "                                / remat relief\n"
+                 "  X87_FPR_POOL_LIMIT=N          test-only [1,16]: clamp the FPR count the\n"
+                 "                                pressure gate believes is available, making\n"
+                 "                                splits deterministic (allocation unaffected)\n"
+                 "  X87_GPR_POOL_LIMIT=N          test-only GPR-side equivalent\n"
+                 "  X87_ENABLE_BRIDGE=0           disable run bridging (default ON): bridging\n"
+                 "                                carries one IR run across short gaps of\n"
+                 "                                flag-transparent 32/64-bit mov/lea\n"
+                 "                                instructions instead of spilling/reloading\n"
+                 "                                the FP stack around them.  All-or-nothing\n"
+                 "                                per region; falls back to plain dispatch.\n"
+                 "  X87_BRIDGE_V2=0               disable run bridging v2 (default ON): gaps\n"
+                 "                                may also contain flag-writing ALU\n"
+                 "                                (add/sub/and/or/xor/inc/dec) whose written\n"
+                 "                                flags Rosetta's own flag_liveness byte\n"
+                 "                                proves dead; lowered to non-flag-setting\n"
+                 "                                ARM.  Requires X87_ENABLE_BRIDGE.\n"
+                 "  X87_BRIDGE_MAX_GAP=N          [1,4] default 2: max consecutive bridge\n"
+                 "                                instructions per gap\n"
+                 "  X87_BRIDGE_MAX_TOTAL=N        [1,16] default 8: max bridge instructions\n"
+                 "                                per bridged region\n"
+                 "  X87_LOG_BRIDGE=1              one stderr line per bridged compile/fallback\n"
+                 "  X87_BRIDGE_HASH_LIST=H,...    bridge ONLY blocks whose IR-content hash is\n"
+                 "                                listed (bisect aid; hash from X87_LOG_BRIDGE\n"
+                 "                                or profile_analyze)\n"
+                 "  X87_NO_BRIDGE_HASH_LIST=H,... never bridge the listed blocks (wins over\n"
+                 "                                the include list)\n"
                  "  X87_DISABLE_ALL_FUSIONS=1     disable every peephole fusion\n"
                  "  X87_GATE_FLUSH_THRESHOLD=N             override the IR-gate flush-and-\n"
                  "  X87_GATE_FLUSH_THRESHOLD_DEFERRED_POP=N proceed minimum run length per\n"

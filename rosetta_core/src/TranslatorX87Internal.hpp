@@ -28,6 +28,20 @@ inline int resolve_depth(const TranslationResult& a1, int logical_depth) {
 
 inline auto x87_begin(TranslationResult& a1, AssemblerBuffer& buf) -> std::pair<int, int> {
     if (a1.x87_cache.run_remaining > 0 && a1.x87_cache.gprs_valid) {
+        // Re-acquire Xst_base if a prior epilogue dropped it (it is freed
+        // before the tag-batch alloc when top_delta != 0).  One ADD here
+        // keeps the rest of the run on the cached 2-3 insn ST access path
+        // instead of the uncached 5-insn path — the common shape after
+        // compile_run consumes a run prefix (pressure split or build
+        // early-stop) and the run tail re-enters translation.  Kept
+        // textually in sync with the mirror at the top of X87IRLower.cpp.
+        if (!a1.x87_cache.st_base_valid) {
+            const int Xst_base = alloc_gpr(a1, 6);
+            emit_add_imm(buf, /*is_64bit=*/1, /*is_sub=*/0, /*is_set_flags=*/0,
+                         /*shift=*/0, kX87RegFileOff, a1.x87_cache.base_gpr, Xst_base);
+            a1.x87_cache.st_base_gpr = static_cast<int8_t>(Xst_base);
+            a1.x87_cache.st_base_valid = 1;
+        }
         return {a1.x87_cache.base_gpr, a1.x87_cache.top_gpr};
     }
 

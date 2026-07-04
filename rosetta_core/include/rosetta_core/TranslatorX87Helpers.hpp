@@ -3,10 +3,32 @@
 #include <cstdint>
 
 #include "rosetta_core/AssemblerHelpers.hpp"
+#include "rosetta_core/Config.h"
+#include "rosetta_core/CoreConfig.h"
 #include "rosetta_core/Register.h"
 #include "rosetta_core/TranslationResult.h"
 #include "rosetta_core/TranslatorHelpers.hpp"
 #include "rosetta_core/X87State.h"
+
+// Effective fast-round decision for the current translation.
+//   X87_FAST_ROUND=1: always skip the RC dispatch (round-to-nearest only —
+//     unsafe for code that changes RC via FLDCW, documented opt-in).
+//   X87_FAST_ROUND=2: skip it only in blocks that contain no control-word
+//     writer (FLDCW/FLDENV/FRSTOR/FXRSTOR/FINIT/FSAVE) — scanned on block
+//     transition (Translator.cpp) into x87_cache.block_has_cw_write.
+//     Still speculative: RC is persistent thread state, so a program that
+//     sets RC once at startup and runs FIST in CW-clean blocks is
+//     mis-rounded.  Strictly safer than =1 (the same-block
+//     FLDCW;FISTP;FLDCW floor idiom keeps the full dispatch).
+inline bool x87_fast_round_active(const TranslationResult& a1) {
+    if (g_rosetta_config == nullptr || g_rosetta_config->fast_round == 0) {
+        return false;
+    }
+    if (g_rosetta_config->fast_round == 2) {
+        return a1.x87_cache.block_has_cw_write == 0;
+    }
+    return true;
+}
 
 // =============================================================================
 // X87State layout constants  (all offsets within X87State, relative to Xbase)

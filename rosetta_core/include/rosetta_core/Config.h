@@ -52,6 +52,63 @@ struct RosettaConfig {
                                     //                           Set =0 to disable.  Diagnostic
                                     //                           counters via fma_reduce_stats()
                                     //                           and X87_LOG_FMA_REDUCE=1.
+    uint8_t enable_ir_split;        // X87_ENABLE_IR_SPLIT       (default ON) when compile_run's
+                                    //                           FPR/GPR pressure gate refuses a
+                                    //                           run, retry with the prefix ending
+                                    //                           just before the overflow point
+                                    //                           instead of refusing outright.
+                                    //                           The suffix re-enters the gate on
+                                    //                           the next dispatch.  Set =0 to
+                                    //                           restore all-or-nothing gating.
+    uint8_t log_ir_split;           // X87_LOG_IR_SPLIT          one stderr line per split retry,
+                                    //                           per rescued run, and per remat
+                                    //                           relief.
+    uint8_t enable_ir_remat;        // X87_ENABLE_IR_REMAT       (default ON) before splitting an
+                                    //                           over-pressure run, sink/clone
+                                    //                           long-lived Const*/Load* values
+                                    //                           past the overflow point to
+                                    //                           shorten their live ranges.
+                                    //                           Set =0 to disable.
+    uint8_t fpr_pool_limit;         // X87_FPR_POOL_LIMIT        test-only [1,16]: clamp the FPR
+                                    //                           count the pressure gate believes
+                                    //                           is available (0 = off).  Makes
+                                    //                           split behavior deterministic in
+                                    //                           tests; allocation is unaffected.
+    uint8_t gpr_pool_limit;         // X87_GPR_POOL_LIMIT        test-only GPR-side equivalent.
+    uint8_t enable_bridge;          // X87_ENABLE_BRIDGE         (default ON since 2026-07-04)
+                                    //                           run bridging v1: carry one IR
+                                    //                           run across short gaps of
+                                    //                           flag-transparent mov/lea
+                                    //                           instructions (X87Bridge.h)
+                                    //                           instead of spilling/reloading
+                                    //                           the FP stack around them.
+                                    //                           Set =0 to disable.
+    uint8_t enable_bridge_v2;       // X87_BRIDGE_V2             (default ON since 2026-07-04)
+                                    //                           run bridging v2: gaps may also
+                                    //                           contain flag-writing ALU
+                                    //                           (add/sub/and/or/xor/inc/dec)
+                                    //                           whose written flags Rosetta's
+                                    //                           own flag_liveness byte proves
+                                    //                           dead; lowered to non-flag-
+                                    //                           setting ARM.  Requires
+                                    //                           enable_bridge.
+    uint8_t bridge_max_gap;         // X87_BRIDGE_MAX_GAP        [1,4], default 2: max
+                                    //                           consecutive bridge instrs per
+                                    //                           gap.
+    uint8_t bridge_max_total;       // X87_BRIDGE_MAX_TOTAL      [1,16], default 8: max bridge
+                                    //                           instrs per region.
+    uint8_t log_bridge;             // X87_LOG_BRIDGE            one stderr line per bridged
+                                    //                           compile (hash, counts) and per
+                                    //                           fallback.
+
+    // X87_BRIDGE_HASH_LIST / X87_NO_BRIDGE_HASH_LIST — per-block bridging
+    // bisect, same semantics and hash key as the rollback lists above:
+    // include list non-empty → bridge only blocks whose IR-content hash is
+    // in it; exclude list non-empty → never bridge those blocks (exclude
+    // wins).  The go-to tool when hunting a bridging miscompile in a live
+    // workload.
+    std::vector<uint64_t> x87_bridge_hash_list;     // sorted, binary-searched
+    std::vector<uint64_t> x87_no_bridge_hash_list;  // sorted, binary-searched
     uint8_t force_x87_ir_gate;      // measurement-only flag for tools/profile_analyze: bypass
                                     // the IR-eligibility gate's pre-build refusal conditions
                                     // (run_remaining<3, top_dirty, deferred_pop_count,

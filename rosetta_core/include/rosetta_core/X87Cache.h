@@ -36,6 +36,17 @@ struct X87Cache {
     int8_t perm[8] = {0, 1, 2, 3, 4, 5, 6, 7};
     int8_t perm_dirty = 0;  // 1 = permutation is non-identity
 
+    // Run bridging: descriptor stashed at a fresh run start when
+    // lookahead_bridged found a profitable region.  bridge_pending_idx is
+    // the region's start instruction (the attempt fires only when the IR
+    // dispatch reaches exactly that index with no deferred state);
+    // bridge_pending_plain is the plain x87 run length to restore when the
+    // all-or-nothing attempt falls back.
+    int16_t bridge_pending_total = 0;
+    int16_t bridge_pending_x87 = 0;
+    int16_t bridge_pending_plain = 0;
+    int16_t bridge_pending_idx = -1;
+
     IRBlock* prev_block = nullptr;
 
     // X87_PROFILE — per-block translation-path tally.  Reset on block
@@ -54,6 +65,18 @@ struct X87Cache {
     uint16_t tally_ir_build_fail = 0;
     uint16_t tally_ir_fpr_fail = 0;
     uint16_t tally_ir_gpr_fail = 0;
+    // Runs compile_run rescued by splitting at a register-pressure peak
+    // (i.e. a would-have-been fpr/gpr refusal that lowered as a shorter
+    // prefix instead).  Bumped inside compile_run itself — per-TR, so
+    // per-thread-safe like the rest of the tallies.
+    uint16_t tally_ir_split = 0;
+    // Runs where the remat/sink pass changed the IR to relieve FPR
+    // pressure before (or instead of) a split.
+    uint16_t tally_ir_remat = 0;
+    // Run bridging: bridge instructions consumed inside IR runs / bridged
+    // compile_run attempts that fell back to plain dispatch.
+    uint16_t tally_bridge = 0;
+    uint16_t tally_bridge_fail = 0;
     // Max peak_live_gprs(ctx) observed across compile_run attempts in this
     // block.  Saturating at its u16 upper bound is a sufficient signal — we
     // only care about "was peak high enough to refuse?".
@@ -76,6 +99,11 @@ struct X87Cache {
     // Indexed by kIRGateReason*; surfaces as the max_run column of the
     // IR-gate-refusal histogram.
     uint16_t max_run_at_gate[5] = {0, 0, 0, 0, 0};
+    // 1 = the current block contains a control-word writer (FLDCW/FLDENV/
+    // FRSTOR/FXRSTOR/FINIT/FSAVE).  Scanned once per block transition when
+    // X87_FAST_ROUND=2; consumed by x87_fast_round_active to keep the full
+    // RC dispatch in exactly those blocks.
+    int8_t block_has_cw_write = 0;
     // Last x87 opcode (kOpcodeName_*) translated in this block, or 0xFFFF
     // if none yet.  Used by the IR-gate top_dirty diagnostic to attribute
     // which preceding op left top_dirty=1 — surfaces in the analyzer's
@@ -100,4 +128,25 @@ struct X87Cache {
 
     // Scan forward from insn_idx counting consecutive handled x87 instructions.
     static int lookahead(IRInstr* instr_array, int64_t num_instrs, int64_t insn_idx);
+
+    // Run bridging: a region descriptor for one IR run that spans short gaps
+    // of bridge instructions (X87Bridge.h) between x87 segments.
+    //   total       instructions in the region (x87 + bridges); 0 = no
+    //               profitable bridged region (fall back to plain dispatch)
+    //   x87_count   x87 instructions within it
+    //   bridges     bridge instructions within it (== total - x87_count)
+    // The region always starts and ends on an x87 instruction (trailing
+    // bridges are trimmed — they join nothing), contains at least one join,
+    // and satisfies x87_count >= 3 so the merged run clears the IR gate.
+    // allow_v2: gap instructions may also be flag-dead ALU (v2), accepted
+    // only when the block's flag_liveness field is demonstrably populated
+    // (x87bridge::block_has_flag_liveness).
+    struct BridgedRun {
+        int16_t total = 0;
+        int16_t x87_count = 0;
+        int16_t bridges = 0;
+    };
+    static BridgedRun lookahead_bridged(IRInstr* instr_array, int64_t num_instrs,
+                                        int64_t insn_idx, int max_gap, int max_total_bridges,
+                                        bool allow_v2 = false);
 };
