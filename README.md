@@ -98,7 +98,7 @@ Knobs are environment variables read at startup. The most useful ones:
 |---|---|
 | `X87_FAST_ROUND=1` | Skip rounding-mode dispatch (faster but unsafe for FLDCW-heavy code; `=2` skips it only in blocks with no control-word writer — safer, still speculative) |
 | `X87_ENABLE_BRIDGE=0` | Disable run bridging (default on): carrying one IR run across short `mov`/`lea` gaps between x87 segments |
-| `X87_BRIDGE_V2=1` | Extend bridging to flag-writing ALU gaps (`add`/`sub`/`and`/`or`/`xor`/`inc`/`dec`) whose written flags Rosetta's own liveness analysis proves dead (default off) |
+| `X87_BRIDGE_V2=0` | Disable bridging of flag-writing ALU gaps (`add`/`sub`/`and`/`or`/`xor`/`inc`/`dec`) whose written flags Rosetta's own liveness analysis proves dead (default on) |
 | `X87_ENABLE_IR_SPLIT=0` / `X87_ENABLE_IR_REMAT=0` | Disable register-pressure relief (splitting over-pressure runs / sinking long-lived values) |
 | `X87_DISABLE_CACHE=1` | Disable x87 translation cache |
 | `X87_DISABLE_X87_IR=1` | Disable IR optimization pipeline (direct translator only) |

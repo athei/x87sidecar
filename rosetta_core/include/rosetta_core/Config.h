@@ -83,7 +83,7 @@ struct RosettaConfig {
                                     //                           instead of spilling/reloading
                                     //                           the FP stack around them.
                                     //                           Set =0 to disable.
-    uint8_t enable_bridge_v2;       // X87_BRIDGE_V2             (default OFF while soaking)
+    uint8_t enable_bridge_v2;       // X87_BRIDGE_V2             (default ON since 2026-07-04)
                                     //                           run bridging v2: gaps may also
                                     //                           contain flag-writing ALU
                                     //                           (add/sub/and/or/xor/inc/dec)

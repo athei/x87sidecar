@@ -19,8 +19,8 @@
 #      (cross-block RC is mis-rounded by design under =2)
 #  10. x87sidecar with X87_ENABLE_BRIDGE=0 (bridging defaults ON; this
 #      phase keeps the unbridged dispatch under regression test)
-#  11. x87sidecar with X87_BRIDGE_V2=1 (flag-dead ALU bridging, opt-in
-#      while soaking)
+#  11. x87sidecar with X87_BRIDGE_V2=0 (v2 defaults ON; this phase keeps
+#      the v1-only bridged dispatch under regression test)
 #   R. replay tests/data/geom_block_874c40.ir under --fpr-pool 8 and
 #      assert the pressure splits keep it on the IR path (fpr_fail=0)
 #
@@ -401,13 +401,13 @@ if [[ $NATIVE_ONLY -eq 0 ]]; then
     done
 fi
 
-# ── Phase 11: x87sidecar X87_BRIDGE_V2=1 (flag-dead ALU bridging) ─────────
-# v2 bridging is opt-in while soaking; run the whole suite with it enabled
-# so the flag-dead ALU lowering and the liveness-proof gating stay under
-# regression test.  test_bridge_alu exercises the shapes directly.
+# ── Phase 11: x87sidecar X87_BRIDGE_V2=0 (v2 bridging kill switch) ────────
+# v2 bridging defaults ON (phase 2 exercises the flag-dead ALU lowering);
+# this phase keeps the v1-only bridged dispatch under regression test.
+# test_bridge_alu exercises the v2 shapes directly.
 if [[ $NATIVE_ONLY -eq 0 ]]; then
     echo ""
-    echo -e "${BOLD}=== Phase 11: x87sidecar X87_BRIDGE_V2=1 (v2 bridging on) ===${NC}"
+    echo -e "${BOLD}=== Phase 11: x87sidecar X87_BRIDGE_V2=0 (v2 bridging off) ===${NC}"
 
     for t in "${TESTS[@]}"; do
         BINARY="$TESTS_BIN/$t"
@@ -417,7 +417,7 @@ if [[ $NATIVE_ONLY -eq 0 ]]; then
             continue
         fi
         EXIT=0
-        OUT=$(X87_BRIDGE_V2=1 "$LOADER" "$BINARY" 2>/dev/null | filter_runtime_lines) || EXIT=$?
+        OUT=$(X87_BRIDGE_V2=0 "$LOADER" "$BINARY" 2>/dev/null | filter_runtime_lines) || EXIT=$?
         check_output "$t" "$OUT" "$EXIT"
     done
 fi

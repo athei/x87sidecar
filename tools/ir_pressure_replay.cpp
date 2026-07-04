@@ -194,6 +194,7 @@ int main(int argc, char** argv) try {
     cfg.x87_enable_rollback_top_dirty = 1;
     cfg.x87_enable_rollback_deferred_pop = 1;
     cfg.enable_bridge = 1;
+    cfg.enable_bridge_v2 = 1;
     cfg.bridge_max_gap = 2;
     cfg.bridge_max_total = 8;
     cfg.enable_ir_split = no_split ? 0 : 1;

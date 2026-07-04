@@ -483,6 +483,7 @@ RosettaConfig make_production_cfg() {
     cfg.enable_ir_split = 1;
     cfg.enable_ir_remat = 1;
     cfg.enable_bridge = 1;
+    cfg.enable_bridge_v2 = 1;
     cfg.bridge_max_gap = 2;
     cfg.bridge_max_total = 8;
     // Rollback knobs default ON too but only matter to Translator's gate
@@ -1446,6 +1447,7 @@ int main(int argc, char** argv) try {
                 uint32_t arm_orig;
                 uint32_t arm_bridged;
                 uint32_t arm_bridged_v2;
+                uint16_t bridge_live;  // TLY3: bridge ops per pass that actually ran
                 long double saved_w;
                 long double saved_v2_w;
                 std::string preview;
@@ -1494,6 +1496,9 @@ int main(int argc, char** argv) try {
                 row.start_pc = b.start_pc;
                 row.exec = exec;
                 row.segments = static_cast<uint16_t>(std::min<size_t>(segs.size(), 0xFFFF));
+                if (b.id < tallies.size()) {
+                    row.bridge_live = tallies[b.id].bridge;
+                }
 
                 // Joining gaps + splice plans (v1, and v2-proven = v1 ∪ v2
                 // gaps whose every flag writer carries the flag_liveness==0
@@ -1651,10 +1656,10 @@ int main(int argc, char** argv) try {
             const size_t fr_n = std::min(frag_rows, frows.size());
             std::printf("rank,block_id,start_pc,exec,segments,joins_v1,joins_v2,joins_v2p,"
                         "joins_inelig,spliced,spliced_v2,arm_orig,arm_bridged,arm_bridged_v2,"
-                        "saved_w,saved_v2_w,preview\n");
+                        "bridge_live,saved_w,saved_v2_w,preview\n");
             for (size_t k = 0; k < fr_n; ++k) {
                 const auto& r = frows[k];
-                std::printf("%zu,%u,0x%08x,%llu,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%llu,%llu,%s\n",
+                std::printf("%zu,%u,0x%08x,%llu,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%llu,%llu,%s\n",
                             k + 1, r.block_id, r.start_pc,
                             static_cast<unsigned long long>(r.exec),
                             static_cast<unsigned>(r.segments), static_cast<unsigned>(r.joins_v1),
@@ -1662,6 +1667,7 @@ int main(int argc, char** argv) try {
                             static_cast<unsigned>(r.joins_inelig),
                             static_cast<unsigned>(r.spliced), static_cast<unsigned>(r.spliced_v2),
                             r.arm_orig, r.arm_bridged, r.arm_bridged_v2,
+                            static_cast<unsigned>(r.bridge_live),
                             static_cast<unsigned long long>(r.saved_w),
                             static_cast<unsigned long long>(r.saved_v2_w), r.preview.c_str());
             }
