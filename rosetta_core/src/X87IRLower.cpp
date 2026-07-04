@@ -1204,6 +1204,60 @@ void lower(Context& ctx, TranslationResult* result) {
                 break;
             }
 
+            // ── Bridge ops (run bridging v1) ──────────────────────────────
+            // Guest GPRs live 1:1 in ARM x0-x15; register numbers arrive
+            // negatively encoded in inputs[] (bridge_decode_reg).  All are
+            // emitted at their program-order position; W-register writes
+            // zero-extend, matching x86-64 32-bit semantics.  None of these
+            // touches NZCV (v1 eligibility guarantees flag-transparency).
+            case Op::BridgeMovRR: {
+                const int is64 = (n.flags & kBridge64) ? 1 : 0;
+                emit_mov_reg(buf, is64, bridge_decode_reg(n.inputs[0]),
+                             bridge_decode_reg(n.inputs[1]));
+                break;
+            }
+            case Op::BridgeMovRI: {
+                const int is64 = (n.flags & kBridge64) ? 1 : 0;
+                const uint64_t value =
+                    is64 ? n.imm_bits : (n.imm_bits & 0xFFFFFFFFULL);
+                emit_load_immediate_no_xzr(*result, is64, value, bridge_decode_reg(n.inputs[0]));
+                break;
+            }
+            case Op::BridgeLea: {
+                const int is64 = (n.flags & kBridge64) ? 1 : 0;
+                const int dst = bridge_decode_reg(n.inputs[0]);
+                // lea never dereferences: the computed address IS the value.
+                const int addr = compute_operand_address(*result, /*is_64bit=*/true,
+                                                         n.mem_operand, dst);
+                if (addr != dst || !is64) {
+                    // Copy into the guest register; the W-form also performs
+                    // the 32-bit lea's zero-extending truncation.
+                    emit_mov_reg(buf, is64, dst, addr);
+                }
+                if (addr != dst) {
+                    free_gpr(*result, addr);
+                }
+                break;
+            }
+            case Op::BridgeLoadG: {
+                const int is64 = (n.flags & kBridge64) ? 1 : 0;
+                const int addr = compute_operand_address(*result, /*is_64bit=*/true,
+                                                         n.mem_operand, GPR::XZR);
+                emit_ldr_str_imm(buf, /*size=*/is64 ? 3 : 2, /*is_fp=*/0, /*LDR*/ 1,
+                                 /*imm12=*/0, addr, bridge_decode_reg(n.inputs[0]));
+                free_gpr(*result, addr);
+                break;
+            }
+            case Op::BridgeStoreG: {
+                const int is64 = (n.flags & kBridge64) ? 1 : 0;
+                const int addr = compute_operand_address(*result, /*is_64bit=*/true,
+                                                         n.mem_operand, GPR::XZR);
+                emit_ldr_str_imm(buf, /*size=*/is64 ? 3 : 2, /*is_fp=*/0, /*STR*/ 0,
+                                 /*imm12=*/0, addr, bridge_decode_reg(n.inputs[0]));
+                free_gpr(*result, addr);
+                break;
+            }
+
             // ── FSTSW AX ───────────────────────────────────────────────────
             case Op::FStsw: {
                 static constexpr int16_t kSwImm12 = kX87StatusWordOff / 2;  // = 1
@@ -1534,6 +1588,18 @@ int peak_live_gprs(const Context& ctx, int budget, int* first_over_node, bool fa
             case Op::StoreCW:
             case Op::LoadCW:
                 transient = 2;
+                break;
+
+            // Bridge ops write guest GPRs (x0-x15, architecturally owned,
+            // never allocated); only the address materialization may take
+            // one scratch.  MovRR/MovRI need none.
+            case Op::BridgeMovRR:
+            case Op::BridgeMovRI:
+                break;
+            case Op::BridgeLea:
+            case Op::BridgeLoadG:
+            case Op::BridgeStoreG:
+                transient = 1;
                 break;
         }
 
@@ -2006,6 +2072,14 @@ static bool remat_relieve_fpr_pressure(Context& ctx, int budget) {
                         case Op::StoreI64:
                         case Op::StoreCW:
                         case Op::FStsw:
+                        // Bridge nodes: a bridge store may alias the load,
+                        // and any bridge register write may redefine the
+                        // load's base register — block sinking across all.
+                        case Op::BridgeMovRR:
+                        case Op::BridgeMovRI:
+                        case Op::BridgeLea:
+                        case Op::BridgeLoadG:
+                        case Op::BridgeStoreG:
                             barrier = true;
                             break;
                         default:
@@ -2062,7 +2136,7 @@ static bool remat_relieve_fpr_pressure(Context& ctx, int budget) {
 
 int compile_run(TranslationResult* result, IRInstr* instr_array, int64_t num_instrs,
                 int64_t start_idx, int run_length, IRFailReason* out_reason, int* out_peak_gprs,
-                uint16_t* out_fail_opcode) {
+                uint16_t* out_fail_opcode, bool bridged) {
     // Pool sizes.  The optional pool-limit clamps (X87_FPR_POOL_LIMIT /
     // X87_GPR_POOL_LIMIT) are test knobs that make pool starvation
     // deterministic — the real pool depends on stock's dynamic
@@ -2098,16 +2172,32 @@ int compile_run(TranslationResult* result, IRInstr* instr_array, int64_t num_ins
     // the partial consumed count exactly like a build early-stop and
     // re-enters the IR gate at the suffix, which splits recursively if
     // needed.  Bounded retries: each attempt is strictly shorter.
-    const bool split_enabled = g_rosetta_config == nullptr || g_rosetta_config->enable_ir_split;
-    const bool log_split =
-        g_rosetta_config != nullptr && g_rosetta_config->log_ir_split && split_enabled;
+    // Bridged (all-or-nothing) mode: a partial consume would hand the run
+    // tail's bridge instructions back to stock mid-run, which may clobber
+    // pinned scratch GPRs — so splitting is disabled and any outcome short
+    // of consuming the whole region fails with kBridgePartial (nothing has
+    // been emitted; every gate runs before lower()).
+    const bool split_enabled =
+        !bridged && (g_rosetta_config == nullptr || g_rosetta_config->enable_ir_split);
+    const bool log_split = g_rosetta_config != nullptr && g_rosetta_config->log_ir_split;
     constexpr int kMaxSplitRetries = 4;
 
     int attempt_len = run_length;
     for (int attempt = 0;; attempt++) {
         Context ctx;
 
-        const bool built = build(ctx, instr_array, num_instrs, start_idx, attempt_len);
+        const bool built =
+            build(ctx, instr_array, num_instrs, start_idx, attempt_len, bridged);
+
+        if (bridged && (!built || ctx.consumed != attempt_len)) {
+            if (out_reason) {
+                *out_reason = IRFailReason::kBridgePartial;
+            }
+            if (out_peak_gprs) {
+                *out_peak_gprs = 0;
+            }
+            return 0;
+        }
 
         // Surface the bail opcode whenever build observed an unsupported one,
         // including the success-with-early-stop case (consumed >= 2 but the

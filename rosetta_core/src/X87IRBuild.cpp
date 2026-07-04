@@ -3,6 +3,7 @@
 #include "rosetta_core/IRInstr.h"
 #include "rosetta_core/IROperand.h"
 #include "rosetta_core/Opcode.h"
+#include "rosetta_core/X87Bridge.h"
 #include "rosetta_core/X87IR.h"
 
 namespace X87IR {
@@ -297,8 +298,76 @@ static bool build_fcmov(Context& ctx, IRInstr* instr, int aarch64_cond) {
 
 // ── Main build loop ─────────────────────────────────────────────────────────
 
+// Bridge-node construction for the run-bridging path.  The caller
+// (lookahead_bridged) has already validated eligibility via
+// x87bridge::is_bridge_v1, so shapes here are trusted; anything
+// unexpected just fails the build (all-or-nothing bridged mode bails).
+static bool build_bridge(Context& ctx, IRInstr* instr) {
+    const uint16_t op = instr->opcode();
+    IROperand& dst = instr->operands[0];
+    IROperand& src = instr->operands[1];
+
+    const auto width_flag = [](const IROperand& reg_op) -> uint8_t {
+        return reg_op.reg.size == IROperandSize::S64 ? kBridge64 : kNone;
+    };
+
+    if (op == kOpcodeName_mov) {
+        if (dst.kind == IROperandKind::Register) {
+            const int16_t dst_enc = bridge_encode_reg(dst.reg.reg.index());
+            if (src.kind == IROperandKind::Register) {
+                auto id = ctx.add_node(Op::BridgeMovRR, dst_enc,
+                                       bridge_encode_reg(src.reg.reg.index()));
+                if (id < 0) {
+                    return false;
+                }
+                ctx.nodes[id].flags |= width_flag(dst);
+                return true;
+            }
+            if (src.kind == IROperandKind::BranchOffset) {
+                auto id = ctx.add_node(Op::BridgeMovRI, dst_enc);
+                if (id < 0) {
+                    return false;
+                }
+                ctx.nodes[id].flags |= width_flag(dst);
+                ctx.nodes[id].imm_bits = static_cast<uint64_t>(src.branch.value);
+                return true;
+            }
+            if (src.kind == IROperandKind::MemRef) {
+                auto id = ctx.add_node(Op::BridgeLoadG, dst_enc);
+                if (id < 0) {
+                    return false;
+                }
+                ctx.nodes[id].flags |= width_flag(dst);
+                ctx.nodes[id].mem_operand = &src;
+                return true;
+            }
+            return false;
+        }
+        if (dst.kind == IROperandKind::MemRef && src.kind == IROperandKind::Register) {
+            auto id = ctx.add_node(Op::BridgeStoreG, bridge_encode_reg(src.reg.reg.index()));
+            if (id < 0) {
+                return false;
+            }
+            ctx.nodes[id].flags |= width_flag(src);
+            ctx.nodes[id].mem_operand = &dst;
+            return true;
+        }
+        return false;
+    }
+    if (op == kOpcodeName_lea) {
+        auto id = ctx.add_node(Op::BridgeLea, bridge_encode_reg(dst.reg.reg.index()));
+        if (id < 0) {
+            return false;
+        }
+        ctx.nodes[id].flags |= width_flag(dst);
+        ctx.nodes[id].mem_operand = &src;
+        return true;
+    }
+    return false;
+}
+
 bool build(Context& ctx, IRInstr* instr_array, int64_t num_instrs, int64_t start_idx,
-           int run_length) {
+           int run_length, bool allow_bridges) {
     ctx.init();
 
     for (int i = 0; i < run_length && (start_idx + i) < num_instrs; i++) {
@@ -876,6 +945,17 @@ bool build(Context& ctx, IRInstr* instr_array, int64_t num_instrs, int64_t start
 
             // ── Bail on everything else ─────────────────────────────────
             default:
+                // Run bridging: consume an eligible non-x87 instruction as a
+                // Bridge* side-effect node at its program position.  The
+                // bridged lookahead already filtered shapes; re-check the
+                // predicate so a plain (non-bridged) build can never absorb
+                // integer instructions by accident.
+                if (allow_bridges && x87bridge::is_bridge_v1(*instr)) {
+                    if (!build_bridge(ctx, instr)) {
+                        ok = false;
+                    }
+                    break;
+                }
                 ctx.fail_opcode = static_cast<uint16_t>(op);
                 ok = false;
                 break;

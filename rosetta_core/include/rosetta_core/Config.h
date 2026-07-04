@@ -75,6 +75,21 @@ struct RosettaConfig {
                                     //                           split behavior deterministic in
                                     //                           tests; allocation is unaffected.
     uint8_t gpr_pool_limit;         // X87_GPR_POOL_LIMIT        test-only GPR-side equivalent.
+    uint8_t enable_bridge;          // X87_ENABLE_BRIDGE         (default OFF while soaking)
+                                    //                           run bridging v1: carry one IR
+                                    //                           run across short gaps of
+                                    //                           flag-transparent mov/lea
+                                    //                           instructions (X87Bridge.h)
+                                    //                           instead of spilling/reloading
+                                    //                           the FP stack around them.
+    uint8_t bridge_max_gap;         // X87_BRIDGE_MAX_GAP        [1,4], default 2: max
+                                    //                           consecutive bridge instrs per
+                                    //                           gap.
+    uint8_t bridge_max_total;       // X87_BRIDGE_MAX_TOTAL      [1,16], default 8: max bridge
+                                    //                           instrs per region.
+    uint8_t log_bridge;             // X87_LOG_BRIDGE            one stderr line per bridged
+                                    //                           compile (hash, counts) and per
+                                    //                           fallback.
     uint8_t force_x87_ir_gate;      // measurement-only flag for tools/profile_analyze: bypass
                                     // the IR-eligibility gate's pre-build refusal conditions
                                     // (run_remaining<3, top_dirty, deferred_pop_count,

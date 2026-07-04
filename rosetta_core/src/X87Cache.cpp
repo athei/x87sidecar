@@ -4,6 +4,7 @@
 
 #include "rosetta_core/IRInstr.h"
 #include "rosetta_core/Opcode.h"
+#include "rosetta_core/X87Bridge.h"
 
 // =============================================================================
 // is_handled_x87 — returns true for opcodes that have a translate_* handler.
@@ -209,4 +210,51 @@ int X87Cache::lookahead(IRInstr* instr_array, int64_t num_instrs, int64_t insn_i
         count++;
     }
     return count;
+}
+
+X87Cache::BridgedRun X87Cache::lookahead_bridged(IRInstr* instr_array, int64_t num_instrs,
+                                                 int64_t insn_idx, int max_gap,
+                                                 int max_total_bridges) {
+    // Walk forward from insn_idx (an x87 instruction by contract): x87 ops
+    // extend the region; a v1 bridge instruction extends it tentatively as
+    // long as the consecutive gap stays <= max_gap and the region's bridge
+    // budget holds.  `last_x87_end` tracks the trailing-bridge trim point:
+    // the region is only ever committed up to the last x87 instruction.
+    int total = 0;         // committed region length (ends on x87)
+    int x87_count = 0;     // x87 ops within the committed region
+    int bridges = 0;       // bridges within the committed region
+    int pending_gap = 0;   // bridge instructions since the last x87 op
+    int joins = 0;         // gaps that got x87 on both sides
+
+    for (int64_t i = insn_idx; i < num_instrs; i++) {
+        IRInstr& ins = instr_array[i];
+        if (is_handled_x87(ins.opcode())) {
+            if (pending_gap > 0) {
+                joins++;
+                bridges += pending_gap;
+                pending_gap = 0;
+            }
+            x87_count++;
+            total = static_cast<int>(i - insn_idx) + 1;
+            continue;
+        }
+        if (x87bridge::is_bridge_v1(ins) && pending_gap < max_gap &&
+            bridges + pending_gap < max_total_bridges) {
+            pending_gap++;  // tentative — committed only if x87 follows
+            continue;
+        }
+        break;  // ineligible instruction (or budget exhausted) ends the scan
+    }
+
+    // Worth bridging only if at least one gap was joined and the merged run
+    // clears the IR gate.  (pending_gap > 0 leftovers are trailing bridges,
+    // already excluded from `total` by construction.)
+    if (joins == 0 || x87_count < 3) {
+        return BridgedRun{};
+    }
+    return BridgedRun{
+        .total = static_cast<int16_t>(total),
+        .x87_count = static_cast<int16_t>(x87_count),
+        .bridges = static_cast<int16_t>(bridges),
+    };
 }

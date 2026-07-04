@@ -121,6 +121,11 @@ static void pass_dse(Context& ctx) {
             case Op::FComI:
             case Op::StoreCW:
             case Op::LoadCW:
+            case Op::BridgeMovRR:
+            case Op::BridgeMovRI:
+            case Op::BridgeLea:
+            case Op::BridgeLoadG:
+            case Op::BridgeStoreG:
                 continue;
             default:
                 break;
@@ -155,6 +160,11 @@ static void pass_dse(Context& ctx) {
             case Op::FComI:
             case Op::StoreCW:
             case Op::LoadCW:
+            case Op::BridgeMovRR:
+            case Op::BridgeMovRI:
+            case Op::BridgeLea:
+            case Op::BridgeLoadG:
+            case Op::BridgeStoreG:
                 continue;
             default:
                 break;
@@ -389,6 +399,22 @@ static void count_uses(const Context& ctx, int16_t* use_count) {
 static void pass_fma_reduce(Context& ctx) {
     if (g_rosetta_config == nullptr || !g_rosetta_config->enable_fma_reduce) {
         return;
+    }
+    // Bridged runs: the pass hoists absorbed loads to the chain head, which
+    // is illegal across a bridge store (aliasing) and across a bridge
+    // register write (a hoisted load's base register may change).  Fence the
+    // whole pass off when any bridge node is present.
+    for (int i = 0; i < ctx.num_nodes; i++) {
+        switch (ctx.nodes[i].op) {
+            case Op::BridgeMovRR:
+            case Op::BridgeMovRI:
+            case Op::BridgeLea:
+            case Op::BridgeLoadG:
+            case Op::BridgeStoreG:
+                return;
+            default:
+                break;
+        }
     }
     fma_reduce_counters::invocations.fetch_add(1, std::memory_order_relaxed);
 

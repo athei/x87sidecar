@@ -159,6 +159,29 @@ RosettaConfig load_config_from_env() {
     parse_pool_limit("X87_FPR_POOL_LIMIT", cfg.fpr_pool_limit);
     parse_pool_limit("X87_GPR_POOL_LIMIT", cfg.gpr_pool_limit);
 
+    // Run bridging v1 (default OFF while soaking; flip via env).
+    cfg.enable_bridge = env_truthy("X87_ENABLE_BRIDGE") ? 1 : 0;
+    cfg.bridge_max_gap = 2;
+    cfg.bridge_max_total = 8;
+    cfg.log_bridge = env_truthy("X87_LOG_BRIDGE") ? 1 : 0;
+    auto parse_bridge_bound = [](const char* env_name, uint8_t& target, long lo, long hi) {
+        const char* t = std::getenv(env_name);
+        if (t == nullptr || t[0] == '\0') {
+            return;
+        }
+        char* end = nullptr;
+        const long v = std::strtol(t, &end, 10);
+        if (end != t && *end == '\0' && v >= lo && v <= hi) {
+            target = static_cast<uint8_t>(v);
+            std::printf("[rosettax87] %s=%ld\n", env_name, v);
+        } else {
+            std::printf("[rosettax87] %s: '%s' out of range [%ld,%ld] (ignored)\n", env_name, t,
+                        lo, hi);
+        }
+    };
+    parse_bridge_bound("X87_BRIDGE_MAX_GAP", cfg.bridge_max_gap, 1, 4);
+    parse_bridge_bound("X87_BRIDGE_MAX_TOTAL", cfg.bridge_max_total, 1, 16);
+
     if (env_truthy("X87_DISABLE_ALL_FUSIONS")) {
         cfg.disabled_fusions_mask = ~0ULL;
     }
@@ -295,6 +318,17 @@ void print_env_help(std::FILE* out) {
                  "                                pressure gate believes is available, making\n"
                  "                                splits deterministic (allocation unaffected)\n"
                  "  X87_GPR_POOL_LIMIT=N          test-only GPR-side equivalent\n"
+                 "  X87_ENABLE_BRIDGE=1           run bridging v1 (default OFF while soaking):\n"
+                 "                                carry one IR run across short gaps of\n"
+                 "                                flag-transparent 32/64-bit mov/lea\n"
+                 "                                instructions instead of spilling/reloading\n"
+                 "                                the FP stack around them.  All-or-nothing\n"
+                 "                                per region; falls back to plain dispatch.\n"
+                 "  X87_BRIDGE_MAX_GAP=N          [1,4] default 2: max consecutive bridge\n"
+                 "                                instructions per gap\n"
+                 "  X87_BRIDGE_MAX_TOTAL=N        [1,16] default 8: max bridge instructions\n"
+                 "                                per bridged region\n"
+                 "  X87_LOG_BRIDGE=1              one stderr line per bridged compile/fallback\n"
                  "  X87_DISABLE_ALL_FUSIONS=1     disable every peephole fusion\n"
                  "  X87_GATE_FLUSH_THRESHOLD=N             override the IR-gate flush-and-\n"
                  "  X87_GATE_FLUSH_THRESHOLD_DEFERRED_POP=N proceed minimum run length per\n"

@@ -1054,9 +1054,17 @@ int main(int argc, char** argv) try {
         RosettaConfig no_relief_cfg = prod_cfg;
         no_relief_cfg.enable_ir_split = 0;
         no_relief_cfg.enable_ir_remat = 0;
+        // Run bridging is default-OFF while soaking; measure what flipping
+        // it on would do (the fragmentation section estimates this by
+        // splicing — this line measures the real bridged translation).
+        RosettaConfig bridge_cfg = prod_cfg;
+        bridge_cfg.enable_bridge = 1;
+        bridge_cfg.bridge_max_gap = 2;
+        bridge_cfg.bridge_max_total = 8;
         long double total_arm = 0;
         long double total_arm_no_fma_reduce = 0;
         long double total_arm_no_relief = 0;
+        long double total_arm_bridged = 0;
         for (const auto& b : blocks) {
             const uint64_t exec = (b.id < counters.size()) ? counters[b.id] : 0;
             if (exec == 0 || b.instrs.empty()) {
@@ -1068,6 +1076,8 @@ int main(int argc, char** argv) try {
             total_arm_no_fma_reduce += static_cast<long double>(exec) * arm_no_fma;
             const auto arm_no_relief = runOneMode(b.instrs.data(), b.instrs.size(), &no_relief_cfg);
             total_arm_no_relief += static_cast<long double>(exec) * arm_no_relief;
+            const auto arm_bridged = runOneMode(b.instrs.data(), b.instrs.size(), &bridge_cfg);
+            total_arm_bridged += static_cast<long double>(exec) * arm_bridged;
         }
         long double total_ir = 0;
         long double total_peep = 0;
@@ -1136,6 +1146,14 @@ int main(int argc, char** argv) try {
         std::printf(
             "global_arm_per_x87_without_pressure_relief,%.2f  (split+remat saves %.2f%%)\n",
             arm_per_x87_no_relief, relief_contribution_pct);
+        const double arm_per_x87_bridged =
+            total_ops > 0 ? static_cast<double>(total_arm_bridged / total_ops) : 0.0;
+        const double bridge_contribution_pct =
+            arm_per_x87 > 0 ? 100.0 * (arm_per_x87 - arm_per_x87_bridged) / arm_per_x87 : 0.0;
+        std::printf(
+            "global_arm_per_x87_with_bridging,%.2f  (bridging saves %.2f%% — conservative: "
+            "our emission of the bridge instrs is counted, stock's saved emission is not)\n",
+            arm_per_x87_bridged, bridge_contribution_pct);
         if (std::getenv("X87_LOG_FMA_REDUCE") != nullptr) {
             X87IR::fma_reduce_print_stats();
         }

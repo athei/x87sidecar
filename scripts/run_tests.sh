@@ -17,6 +17,8 @@
 #      (legacy all-or-nothing pressure gate)
 #   9. x87sidecar with X87_FAST_ROUND=2 on a curated same-block-FLDCW set
 #      (cross-block RC is mis-rounded by design under =2)
+#  10. x87sidecar with X87_ENABLE_BRIDGE=1 (run bridging v1 — default OFF
+#      while soaking; the phase keeps the bridged lowering exercised)
 #   R. replay tests/data/geom_block_874c40.ir under --fpr-pool 8 and
 #      assert the pressure splits keep it on the IR path (fpr_fail=0)
 #
@@ -69,6 +71,9 @@ ALL_TESTS=(
     test_ir_split
     test_ir_remat
     test_ir_split_trans
+    test_bridge_mov
+    test_bridge_lea
+    test_bridge_flags
     test_fld_arith_arithp_fma
     test_readst_elide
     test_fxch
@@ -369,6 +374,27 @@ if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then
         fi
         EXIT=0
         OUT=$(X87_FAST_ROUND=2 "$LOADER" "$BINARY" 2>/dev/null | filter_runtime_lines) || EXIT=$?
+        check_output "$t" "$OUT" "$EXIT"
+    done
+fi
+
+# ── Phase 10: x87sidecar X87_ENABLE_BRIDGE=1 (run bridging v1) ────────────
+# Bridging defaults OFF while soaking; this phase keeps the bridged
+# lowering under continuous test across the whole suite (regions form
+# wherever mov/lea gaps join x87 segments, incl. compiler-generated ones).
+if [[ $NATIVE_ONLY -eq 0 ]]; then
+    echo ""
+    echo -e "${BOLD}=== Phase 10: x87sidecar X87_ENABLE_BRIDGE=1 (run bridging) ===${NC}"
+
+    for t in "${TESTS[@]}"; do
+        BINARY="$TESTS_BIN/$t"
+        if [[ ! -x "$BINARY" ]]; then
+            echo -e "${YELLOW}SKIP${NC}  $t  (binary not found)"
+            ERRORS=$((ERRORS + 1))
+            continue
+        fi
+        EXIT=0
+        OUT=$(X87_ENABLE_BRIDGE=1 "$LOADER" "$BINARY" 2>/dev/null | filter_runtime_lines) || EXIT=$?
         check_output "$t" "$OUT" "$EXIT"
     done
 fi
