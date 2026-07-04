@@ -1051,8 +1051,12 @@ int main(int argc, char** argv) try {
         const RosettaConfig prod_cfg = make_production_cfg();
         RosettaConfig no_fma_cfg = prod_cfg;
         no_fma_cfg.enable_fma_reduce = 0;
+        RosettaConfig no_relief_cfg = prod_cfg;
+        no_relief_cfg.enable_ir_split = 0;
+        no_relief_cfg.enable_ir_remat = 0;
         long double total_arm = 0;
         long double total_arm_no_fma_reduce = 0;
+        long double total_arm_no_relief = 0;
         for (const auto& b : blocks) {
             const uint64_t exec = (b.id < counters.size()) ? counters[b.id] : 0;
             if (exec == 0 || b.instrs.empty()) {
@@ -1062,6 +1066,8 @@ int main(int argc, char** argv) try {
             total_arm += static_cast<long double>(exec) * arm;
             const auto arm_no_fma = runOneMode(b.instrs.data(), b.instrs.size(), &no_fma_cfg);
             total_arm_no_fma_reduce += static_cast<long double>(exec) * arm_no_fma;
+            const auto arm_no_relief = runOneMode(b.instrs.data(), b.instrs.size(), &no_relief_cfg);
+            total_arm_no_relief += static_cast<long double>(exec) * arm_no_relief;
         }
         long double total_ir = 0;
         long double total_peep = 0;
@@ -1121,6 +1127,15 @@ int main(int argc, char** argv) try {
                 : 0.0;
         std::printf("global_arm_per_x87_without_fma_reduce,%.2f  (FMA-reduce pass saves %.2f%%)\n",
                     arm_per_x87_no_fma_reduce, fma_contribution_pct);
+        const double arm_per_x87_no_relief =
+            total_ops > 0 ? static_cast<double>(total_arm_no_relief / total_ops) : 0.0;
+        const double relief_contribution_pct =
+            arm_per_x87_no_relief > 0
+                ? 100.0 * (arm_per_x87_no_relief - arm_per_x87) / arm_per_x87_no_relief
+                : 0.0;
+        std::printf(
+            "global_arm_per_x87_without_pressure_relief,%.2f  (split+remat saves %.2f%%)\n",
+            arm_per_x87_no_relief, relief_contribution_pct);
         if (std::getenv("X87_LOG_FMA_REDUCE") != nullptr) {
             X87IR::fma_reduce_print_stats();
         }
