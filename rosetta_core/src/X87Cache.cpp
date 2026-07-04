@@ -214,9 +214,15 @@ int X87Cache::lookahead(IRInstr* instr_array, int64_t num_instrs, int64_t insn_i
 
 X87Cache::BridgedRun X87Cache::lookahead_bridged(IRInstr* instr_array, int64_t num_instrs,
                                                  int64_t insn_idx, int max_gap,
-                                                 int max_total_bridges) {
+                                                 int max_total_bridges, bool allow_v2) {
+    // v2 (flag-dead ALU) gaps are only trusted when the block demonstrably
+    // carries Rosetta's flag-liveness analysis — an unpopulated (all-zero)
+    // field would otherwise read as "every flag dead".  One scan of the
+    // whole block decides this for all gap instructions below.
+    const bool v2 = allow_v2 && x87bridge::block_has_flag_liveness(instr_array, num_instrs);
+
     // Walk forward from insn_idx (an x87 instruction by contract): x87 ops
-    // extend the region; a v1 bridge instruction extends it tentatively as
+    // extend the region; a bridge instruction extends it tentatively as
     // long as the consecutive gap stays <= max_gap and the region's bridge
     // budget holds.  `last_x87_end` tracks the trailing-bridge trim point:
     // the region is only ever committed up to the last x87 instruction.
@@ -238,8 +244,8 @@ X87Cache::BridgedRun X87Cache::lookahead_bridged(IRInstr* instr_array, int64_t n
             total = static_cast<int>(i - insn_idx) + 1;
             continue;
         }
-        if (x87bridge::is_bridge_v1(ins) && pending_gap < max_gap &&
-            bridges + pending_gap < max_total_bridges) {
+        if ((v2 ? x87bridge::is_bridge_v2_proven(ins) : x87bridge::is_bridge_v1(ins)) &&
+            pending_gap < max_gap && bridges + pending_gap < max_total_bridges) {
             pending_gap++;  // tentative — committed only if x87 follows
             continue;
         }

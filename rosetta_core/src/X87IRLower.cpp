@@ -377,6 +377,38 @@ static void emit_rcmode_dispatch(AssemblerBuffer& buf, int Wd_int, int Dd_val, i
 // n_lane1 sits exactly element_size bytes after n_lane0, so a single
 // LDR D (f32) / LDR Q (f64) fetches both lanes; otherwise each lane is loaded
 // separately (LDR + LD1-into-lane-1).
+// Non-flag-setting ALU, register form, for BridgeAlu* lowering:
+// Rd = Rn <kind> Rm.  Never ADDS/SUBS/ANDS — bridged runs must not write
+// NZCV (see the BridgeAlu* comment in X87IR.h).
+static void emit_bridge_alu_reg(AssemblerBuffer& buf, int is64, int kind, int Rn, int Rm,
+                                int Rd) {
+    switch (kind) {
+        case kBridgeAluAdd:
+            emit_add_sub_shifted_reg(buf, is64, /*is_sub=*/0, /*is_set_flags=*/0,
+                                     /*shift_type=*/0, Rm, 0, Rn, Rd);
+            break;
+        case kBridgeAluSub:
+            emit_add_sub_shifted_reg(buf, is64, /*is_sub=*/1, /*is_set_flags=*/0,
+                                     /*shift_type=*/0, Rm, 0, Rn, Rd);
+            break;
+        case kBridgeAluAnd:
+            emit_logical_shifted_reg(buf, is64, /*opc=AND*/ 0, /*n=*/0, /*shift_type=*/0, Rm,
+                                     0, Rn, Rd);
+            break;
+        case kBridgeAluOr:
+            emit_logical_shifted_reg(buf, is64, /*opc=ORR*/ 1, /*n=*/0, /*shift_type=*/0, Rm,
+                                     0, Rn, Rd);
+            break;
+        case kBridgeAluXor:
+            emit_logical_shifted_reg(buf, is64, /*opc=EOR*/ 2, /*n=*/0, /*shift_type=*/0, Rm,
+                                     0, Rn, Rd);
+            break;
+        default:
+            assert(false && "BridgeAlu*: invalid kind");
+            break;
+    }
+}
+
 static void load_fma_pair_v2d(AssemblerBuffer& buf, TranslationResult* result, Op elem_op,
                               bool contiguous, int V, const Node& n_lane0, const Node& n_lane1) {
     if (contiguous) {
@@ -1258,6 +1290,70 @@ void lower(Context& ctx, TranslationResult* result) {
                 break;
             }
 
+            // ── Bridge ALU ops (run bridging v2) ──────────────────────────
+            // Written flags are proven dead (flag_liveness == 0), so every
+            // form lowers to the NON-flag-setting ARM instruction; NZCV is
+            // never written, which also keeps any x86 flags passing through
+            // the region (cmp's CF over an inc/dec) intact.
+            case Op::BridgeAluRR: {
+                const int is64 = (n.flags & kBridge64) ? 1 : 0;
+                const int dst = bridge_decode_reg(n.inputs[0]);
+                emit_bridge_alu_reg(buf, is64, bridge_decode_reg(n.inputs[2]), dst,
+                                    bridge_decode_reg(n.inputs[1]), dst);
+                break;
+            }
+            case Op::BridgeAluRI: {
+                const int is64 = (n.flags & kBridge64) ? 1 : 0;
+                const int dst = bridge_decode_reg(n.inputs[0]);
+                const int kind = bridge_decode_reg(n.inputs[2]);
+                const int64_t sv = static_cast<int64_t>(n.imm_bits);
+                if ((kind == kBridgeAluAdd || kind == kBridgeAluSub) && sv > -4096 &&
+                    sv < 4096) {
+                    // Direct imm12 form; a negative immediate flips ADD<->SUB
+                    // (identical mod-2^32 wrapping in the W form).
+                    const int neg = sv < 0;
+                    const int is_sub = (kind == kBridgeAluSub) ? !neg : neg;
+                    emit_add_imm(buf, is64, is_sub, /*is_set_flags=*/0, /*shift=*/0,
+                                 static_cast<int>(neg ? -sv : sv), dst, dst);
+                } else {
+                    const uint64_t value = is64 ? n.imm_bits : (n.imm_bits & 0xFFFFFFFFULL);
+                    const int scratch = alloc_free_gpr(*result);
+                    emit_load_immediate_no_xzr(*result, is64, value, scratch);
+                    emit_bridge_alu_reg(buf, is64, kind, dst, scratch, dst);
+                    free_gpr(*result, scratch);
+                }
+                break;
+            }
+            case Op::BridgeAluRM: {
+                const int is64 = (n.flags & kBridge64) ? 1 : 0;
+                const int dst = bridge_decode_reg(n.inputs[0]);
+                const int addr = compute_operand_address(*result, /*is_64bit=*/true,
+                                                         n.mem_operand, GPR::XZR);
+                const int scratch = alloc_free_gpr(*result);
+                emit_ldr_str_imm(buf, /*size=*/is64 ? 3 : 2, /*is_fp=*/0, /*LDR*/ 1,
+                                 /*imm12=*/0, addr, scratch);
+                emit_bridge_alu_reg(buf, is64, bridge_decode_reg(n.inputs[2]), dst, scratch,
+                                    dst);
+                free_gpr(*result, scratch);
+                free_gpr(*result, addr);
+                break;
+            }
+            case Op::BridgeAluMR: {
+                const int is64 = (n.flags & kBridge64) ? 1 : 0;
+                const int addr = compute_operand_address(*result, /*is_64bit=*/true,
+                                                         n.mem_operand, GPR::XZR);
+                const int scratch = alloc_free_gpr(*result);
+                emit_ldr_str_imm(buf, /*size=*/is64 ? 3 : 2, /*is_fp=*/0, /*LDR*/ 1,
+                                 /*imm12=*/0, addr, scratch);
+                emit_bridge_alu_reg(buf, is64, bridge_decode_reg(n.inputs[2]), scratch,
+                                    bridge_decode_reg(n.inputs[0]), scratch);
+                emit_ldr_str_imm(buf, /*size=*/is64 ? 3 : 2, /*is_fp=*/0, /*STR*/ 0,
+                                 /*imm12=*/0, addr, scratch);
+                free_gpr(*result, scratch);
+                free_gpr(*result, addr);
+                break;
+            }
+
             // ── FSTSW AX ───────────────────────────────────────────────────
             case Op::FStsw: {
                 static constexpr int16_t kSwImm12 = kX87StatusWordOff / 2;  // = 1
@@ -1600,6 +1696,19 @@ int peak_live_gprs(const Context& ctx, int budget, int* first_over_node, bool fa
             case Op::BridgeLoadG:
             case Op::BridgeStoreG:
                 transient = 1;
+                break;
+
+            // Bridge ALU: RR is register-to-register (no scratch); RI may
+            // materialize a wide immediate (1); the memory forms hold an
+            // address scratch and a value scratch simultaneously (2).
+            case Op::BridgeAluRR:
+                break;
+            case Op::BridgeAluRI:
+                transient = 1;
+                break;
+            case Op::BridgeAluRM:
+            case Op::BridgeAluMR:
+                transient = 2;
                 break;
         }
 
@@ -2080,6 +2189,10 @@ static bool remat_relieve_fpr_pressure(Context& ctx, int budget) {
                         case Op::BridgeLea:
                         case Op::BridgeLoadG:
                         case Op::BridgeStoreG:
+                        case Op::BridgeAluRR:
+                        case Op::BridgeAluRI:
+                        case Op::BridgeAluRM:
+                        case Op::BridgeAluMR:
                             barrier = true;
                             break;
                         default:
@@ -2136,7 +2249,7 @@ static bool remat_relieve_fpr_pressure(Context& ctx, int budget) {
 
 int compile_run(TranslationResult* result, IRInstr* instr_array, int64_t num_instrs,
                 int64_t start_idx, int run_length, IRFailReason* out_reason, int* out_peak_gprs,
-                uint16_t* out_fail_opcode, bool bridged) {
+                uint16_t* out_fail_opcode, bool bridged, bool bridges_v2) {
     // Pool sizes.  The optional pool-limit clamps (X87_FPR_POOL_LIMIT /
     // X87_GPR_POOL_LIMIT) are test knobs that make pool starvation
     // deterministic — the real pool depends on stock's dynamic
@@ -2187,7 +2300,7 @@ int compile_run(TranslationResult* result, IRInstr* instr_array, int64_t num_ins
         Context ctx;
 
         const bool built =
-            build(ctx, instr_array, num_instrs, start_idx, attempt_len, bridged);
+            build(ctx, instr_array, num_instrs, start_idx, attempt_len, bridged, bridges_v2);
 
         if (bridged && (!built || ctx.consumed != attempt_len)) {
             if (out_reason) {

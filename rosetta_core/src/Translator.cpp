@@ -140,7 +140,8 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                 if (bridge_allowed && run >= 1) {
                     const auto br = X87Cache::lookahead_bridged(
                         instr_array, num_instrs, insn_idx, g_rosetta_config->bridge_max_gap,
-                        g_rosetta_config->bridge_max_total);
+                        g_rosetta_config->bridge_max_total,
+                        g_rosetta_config->enable_bridge_v2 != 0);
                     if (br.total > run) {
                         cache.bridge_pending_total = br.total;
                         cache.bridge_pending_x87 = br.x87_count;
@@ -258,9 +259,10 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
 
             cache.set_run(total);  // pin GPRs across the whole region
             X87IR::IRFailReason bridge_reason = X87IR::IRFailReason::kNone;
-            const int consumed =
-                X87IR::compile_run(translation_result, instr_array, num_instrs, insn_idx, total,
-                                   &bridge_reason, nullptr, nullptr, /*bridged=*/true);
+            const int consumed = X87IR::compile_run(
+                translation_result, instr_array, num_instrs, insn_idx, total, &bridge_reason,
+                nullptr, nullptr, /*bridged=*/true,
+                /*bridges_v2=*/g_rosetta_config->enable_bridge_v2 != 0);
             if (consumed == total) {
                 if (cache.tally_bridge != 0xFFFFU) {
                     cache.tally_bridge =

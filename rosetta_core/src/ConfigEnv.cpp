@@ -163,6 +163,9 @@ RosettaConfig load_config_from_env() {
     // measured -6.18% exec-weighted ARM on the capture).  Set =0 to disable;
     // X87_BRIDGE_HASH_LIST / X87_NO_BRIDGE_HASH_LIST bisect per block.
     cfg.enable_bridge = env_default_on("X87_ENABLE_BRIDGE");
+    // Run bridging v2: flag-dead ALU gaps (X87Bridge.h).  Opt-in while
+    // soaking, mirroring the v1 rollout; needs enable_bridge too.
+    cfg.enable_bridge_v2 = env_truthy("X87_BRIDGE_V2") ? 1 : 0;
     cfg.bridge_max_gap = 2;
     cfg.bridge_max_total = 8;
     cfg.log_bridge = env_truthy("X87_LOG_BRIDGE") ? 1 : 0;
@@ -336,6 +339,12 @@ void print_env_help(std::FILE* out) {
                  "                                instructions instead of spilling/reloading\n"
                  "                                the FP stack around them.  All-or-nothing\n"
                  "                                per region; falls back to plain dispatch.\n"
+                 "  X87_BRIDGE_V2=1               enable run bridging v2 (default OFF while\n"
+                 "                                soaking): gaps may also contain flag-writing\n"
+                 "                                ALU (add/sub/and/or/xor/inc/dec) whose\n"
+                 "                                written flags Rosetta's own flag_liveness\n"
+                 "                                byte proves dead; lowered to non-flag-\n"
+                 "                                setting ARM.  Requires X87_ENABLE_BRIDGE.\n"
                  "  X87_BRIDGE_MAX_GAP=N          [1,4] default 2: max consecutive bridge\n"
                  "                                instructions per gap\n"
                  "  X87_BRIDGE_MAX_TOTAL=N        [1,16] default 8: max bridge instructions\n"

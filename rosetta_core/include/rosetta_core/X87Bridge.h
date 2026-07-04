@@ -24,11 +24,21 @@
 // absolute-memory operands (need external fixups), `mov [m],imm`
 // (deferred, easy v1.1).
 //
-// v2 scope (classification only until flag-deadness can be proven, either
-// via Rosetta's IRInstr::flag_liveness byte or a conservative block scan):
-// v1 plus the simple flag-WRITING ALU ops add/sub/inc/dec/and/or/xor in
-// the same 32/64-bit reg/imm/mem forms.  Pure flag producers (cmp, test)
-// are never bridges — their flags are live by construction.
+// v2 scope: v1 plus the simple flag-WRITING ALU ops add/sub/inc/dec/and/
+// or/xor, bridgeable only when their written flags are provably dead.
+// The proof is Rosetta's own per-instruction liveness analysis,
+// IRInstr::flag_liveness — decoded empirically (2026-07): on a flag
+// writer the byte is the set of written flags that are live-out
+// (observed bits: CF=0x20, ZF=0x40, SF=0x80; 0xfe = conservative
+// all-live seeded at jcc terminators and block exits; refined masks
+// appear for intra-block readers like adc/cmovcc).  flag_liveness == 0
+// therefore means "no written flag is ever read" — the same fact stock's
+// own lazy-flags codegen relies on.  Bridged ALU lowers to NON-flag-
+// setting ARM, so NZCV is never touched; flags passing THROUGH a partial
+// writer (a cmp's CF surviving an inc/dec) stay correct for free.
+// Pure flag producers (cmp, test) are never bridges — their flags are
+// live by construction.  Deferred v2 forms: `alu [m],imm` and
+// `inc/dec [m]` (need an imm alongside mem_operand in the 16-byte node).
 // ─────────────────────────────────────────────────────────────────────────────
 
 namespace x87bridge {
@@ -96,8 +106,9 @@ inline bool is_bridge_v1(const IRInstr& ins) {
 }
 
 // v2 = v1 ∪ simple flag-writing ALU.  Eligibility here means "bridgeable
-// IF its written flags are provably dead" — the proof is the runtime's
-// (or a later analyzer pass's) job; this predicate only classifies shape.
+// IF its written flags are provably dead" (see flags_dead below); this
+// predicate only classifies shape, and covers exactly the shapes the
+// runtime can build (X87IRBuild.cpp build_bridge).
 inline bool is_bridge_v2(const IRInstr& ins) {
     if (is_bridge_v1(ins)) {
         return true;
@@ -121,7 +132,7 @@ inline bool is_bridge_v2(const IRInstr& ins) {
                 return gpr_32_or_64(src) || plain_immediate(src) || mem_32_or_64(src);
             }
             if (mem_32_or_64(dst)) {
-                return gpr_32_or_64(src) || plain_immediate(src);
+                return gpr_32_or_64(src);  // [m],imm deferred (node layout)
             }
             return false;
         }
@@ -130,11 +141,42 @@ inline bool is_bridge_v2(const IRInstr& ins) {
             if (ins.num_operands != 1) {
                 return false;
             }
-            return gpr_32_or_64(ins.operands[0]) || mem_32_or_64(ins.operands[0]);
+            return gpr_32_or_64(ins.operands[0]);  // mem forms deferred
         }
         default:
             return false;
     }
+}
+
+// Flag-deadness proof for a v2 (flag-writing) bridge candidate: Rosetta's
+// liveness byte says none of this instruction's written flags is live-out.
+inline bool flags_dead(const IRInstr& ins) {
+    return ins.flag_liveness == 0;
+}
+
+// Guard against a Rosetta build that leaves flag_liveness unpopulated
+// (all-zero would silently read as "everything dead").  Any real block
+// containing a flag writer has at least one nonzero byte: the LAST writer
+// before a jcc terminator / block exit is seeded conservative (0xfe), and
+// flag readers (adc, cmovcc) carry their read mask.  No nonzero byte
+// anywhere in the block ⇒ don't trust the field, no v2 bridging here.
+inline bool block_has_flag_liveness(const IRInstr* instr_array, int64_t num_instrs) {
+    for (int64_t i = 0; i < num_instrs; i++) {
+        if (instr_array[i].flag_liveness != 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Full v2 eligibility for one instruction (caller must separately check
+// block_has_flag_liveness once per block): v1 shapes need no proof; v2-only
+// shapes need their written flags dead.
+inline bool is_bridge_v2_proven(const IRInstr& ins) {
+    if (is_bridge_v1(ins)) {
+        return true;
+    }
+    return is_bridge_v2(ins) && flags_dead(ins);
 }
 
 }  // namespace x87bridge

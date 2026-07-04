@@ -104,6 +104,30 @@ enum class Op : uint8_t {
     BridgeLea,     // lea r,[m]    inputs[0]=enc(dst), mem_operand=&src
     BridgeLoadG,   // mov r,[m]    inputs[0]=enc(dst), mem_operand=&src
     BridgeStoreG,  // mov [m],r    inputs[0]=enc(src), mem_operand=&dst
+
+    // ── Bridge ALU ops (run bridging v2) ────────────────────────────────────
+    // Flag-writing integer ALU (add/sub/and/or/xor, plus inc/dec folded to
+    // add/sub 1) carried inside a run ONLY when Rosetta's own liveness byte
+    // proves the written flags dead (IRInstr::flag_liveness == 0; see
+    // X87Bridge.h).  Lowered to NON-flag-setting ARM (ADD, not ADDS) so
+    // NZCV — which may carry x86 flags live THROUGH the region, e.g. a
+    // cmp's CF surviving an inc/dec — is never clobbered.  The ALU kind
+    // (BridgeAluKind) rides negatively encoded in inputs[2], same guard as
+    // guest registers.
+    BridgeAluRR,  // alu r,r    inputs[0]=enc(dst), inputs[1]=enc(src), inputs[2]=enc(kind)
+    BridgeAluRI,  // alu r,imm  inputs[0]=enc(dst), inputs[2]=enc(kind), imm_bits=value
+    BridgeAluRM,  // alu r,[m]  inputs[0]=enc(dst), inputs[2]=enc(kind), mem_operand=&src
+    BridgeAluMR,  // alu [m],r  inputs[0]=enc(src), inputs[2]=enc(kind), mem_operand=&dst
+};
+
+// ALU selector for BridgeAlu* nodes; stored in inputs[2] via
+// bridge_encode_reg so pass walks' `input >= 0` guards skip it.
+enum BridgeAluKind : uint8_t {
+    kBridgeAluAdd = 0,
+    kBridgeAluSub,
+    kBridgeAluAnd,
+    kBridgeAluOr,
+    kBridgeAluXor,
 };
 
 enum NodeFlags : uint8_t {
@@ -264,8 +288,11 @@ struct Context {
 // Returns the number of instructions consumed (stored in ctx.consumed).
 // allow_bridges: also consume v1 bridge instructions (X87Bridge.h) between
 // x87 ops, emitting Bridge* side-effect nodes at their program position.
+// bridges_v2: additionally consume flag-dead ALU bridges (proof re-checked
+// per instruction via x87bridge::is_bridge_v2_proven; the block-level
+// flag-liveness-populated gate is the lookahead's job).
 bool build(Context& ctx, IRInstr* instr_array, int64_t num_instrs, int64_t start_idx,
-           int run_length, bool allow_bridges = false);
+           int run_length, bool allow_bridges = false, bool bridges_v2 = false);
 
 // Run optimization passes on the IR (DSE, FMA detection, FCOM+FSTSW fusion).
 void optimize(Context& ctx);
@@ -354,9 +381,10 @@ enum class IRFailReason : uint8_t {
 // clobber pinned scratch GPRs), and any outcome other than consuming
 // exactly run_length returns 0 with kBridgePartial (nothing emitted; the
 // gates run before lower()).
+// bridges_v2 (optional): with bridged, also accept flag-dead ALU bridges.
 int compile_run(TranslationResult* result, IRInstr* instr_array, int64_t num_instrs,
                 int64_t start_idx, int run_length, IRFailReason* out_reason = nullptr,
                 int* out_peak_gprs = nullptr, uint16_t* out_fail_opcode = nullptr,
-                bool bridged = false);
+                bool bridged = false, bool bridges_v2 = false);
 
 }  // namespace X87IR

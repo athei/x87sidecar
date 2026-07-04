@@ -659,12 +659,14 @@ int main(int argc, char** argv) try {
                 "FP-run fragmentation section (when a TLY1 section is present):\n"
                 "  --frag-rows N           Print the top N blocks whose x87 runs are split\n"
                 "                          by short gaps of bridgeable integer instructions\n"
-                "                          (mov/lea = v1; +add/sub/inc/dec/and/or/xor = v2),\n"
+                "                          (mov/lea = v1; +add/sub/inc/dec/and/or/xor with\n"
+                "                          the flag_liveness==0 dead-flags proof = v2),\n"
                 "                          ranked by the exec-weighted ARM that joining the\n"
                 "                          v1 gaps would save (measured by re-translating\n"
                 "                          the block with eligible gaps spliced out, minus\n"
                 "                          2 ARM per bridged instruction for our own emit).\n"
-                "                          Feeds the go/no-go decision on run bridging.\n"
+                "                          bridge_v2_savings_pct sizes v1+proven-v2 the\n"
+                "                          same way.  Feeds go/no-go on run bridging.\n"
                 "                          Default 30; pass 0 to suppress the section.\n"
                 "\n"
                 "Caveat: the pattern is measured in isolation.  Block context (cache dirty\n"
@@ -777,8 +779,9 @@ int main(int argc, char** argv) try {
                 (ins.opcode() < kOpcodeNames.size() && kOpcodeNames[ins.opcode()] != nullptr)
                     ? kOpcodeNames[ins.opcode()]
                     : "?";
-            std::printf("  [%3zu] pc=0x%08x op=0x%04x %-12s nops=%u", i,
+            std::printf("  [%3zu] pc=0x%08x op=0x%04x %-12s fl=0x%02x nops=%u", i,
                         static_cast<unsigned>(ins.pc), static_cast<unsigned>(ins.opcode()), name,
+                        static_cast<unsigned>(ins.flag_liveness),
                         static_cast<unsigned>(ins.num_operands));
             const int nops = std::min<int>(ins.num_operands, 4);
             for (int op_idx = 0; op_idx < nops; ++op_idx) {
@@ -1436,18 +1439,24 @@ int main(int argc, char** argv) try {
                 uint16_t segments;
                 uint16_t joins_v1;
                 uint16_t joins_v2;
+                uint16_t joins_v2p;  // v2 joins with the flag-dead proof (subset of joins_v2)
                 uint16_t joins_inelig;
-                uint16_t spliced;  // instrs removed by the v1 splice
+                uint16_t spliced;     // instrs removed by the v1 splice
+                uint16_t spliced_v2;  // instrs removed by the v2-proven splice (v1 ∪ proven v2)
                 uint32_t arm_orig;
                 uint32_t arm_bridged;
+                uint32_t arm_bridged_v2;
                 long double saved_w;
+                long double saved_v2_w;
                 std::string preview;
             };
             std::vector<FragRow> frows;
             long double sum_saved_w = 0.0L;
-            uint64_t gaps_v1_w = 0;       // exec-weighted v1 joining-gap instrs
-            uint64_t gaps_v2only_w = 0;   // exec-weighted v2-only joining-gap instrs
-            uint64_t gaps_inelig_w = 0;   // exec-weighted ineligible joining-gap instrs
+            long double sum_saved_v2_w = 0.0L;
+            uint64_t gaps_v1_w = 0;        // exec-weighted v1 joining-gap instrs
+            uint64_t gaps_v2only_w = 0;    // exec-weighted v2-only joining-gap instrs
+            uint64_t gaps_v2proven_w = 0;  // v2-only with the flag-dead proof
+            uint64_t gaps_inelig_w = 0;    // exec-weighted ineligible joining-gap instrs
             uint64_t joins_short_side = 0;  // v1 joins whose merged x87 length < 3
             uint64_t joins_total = 0;
             std::unordered_map<uint8_t, uint64_t> flag_hist;  // v2-only gap instrs
@@ -1486,8 +1495,13 @@ int main(int argc, char** argv) try {
                 row.exec = exec;
                 row.segments = static_cast<uint16_t>(std::min<size_t>(segs.size(), 0xFFFF));
 
-                // Joining gaps + splice plan.
+                // Joining gaps + splice plans (v1, and v2-proven = v1 ∪ v2
+                // gaps whose every flag writer carries the flag_liveness==0
+                // proof — the exact condition the v2 runtime bridges on,
+                // including the field-populated block gate).
+                const bool has_fl = x87bridge::block_has_flag_liveness(mut_instrs, L);
                 std::vector<bool> drop(b.instrs.size(), false);
+                std::vector<bool> drop_v2(b.instrs.size(), false);
                 for (size_t s = 0; s + 1 < segs.size(); ++s) {
                     const int64_t gstart = segs[s].start + segs[s].len;
                     const int64_t gend = segs[s + 1].start;  // exclusive
@@ -1495,15 +1509,21 @@ int main(int argc, char** argv) try {
                     joins_total++;
                     bool all_v1 = true;
                     bool all_v2 = true;
+                    bool all_proven = true;
                     for (int64_t g = gstart; g < gend; ++g) {
                         const IRInstr& ins = b.instrs[static_cast<size_t>(g)];
                         const bool v1 = x87bridge::is_bridge_v1(ins);
                         const bool v2 = x87bridge::is_bridge_v2(ins);
+                        const bool proven = has_fl && x87bridge::is_bridge_v2_proven(ins);
                         all_v1 = all_v1 && v1;
                         all_v2 = all_v2 && v2;
+                        all_proven = all_proven && proven;
                         if (!v1 && v2) {
                             gaps_v2only_w += exec;
                             flag_hist[ins.flag_liveness] += exec;
+                            if (proven) {
+                                gaps_v2proven_w += exec;
+                            }
                         } else if (v1) {
                             gaps_v1_w += exec;
                         } else {
@@ -1524,31 +1544,54 @@ int main(int argc, char** argv) try {
                     } else {
                         row.joins_inelig++;
                     }
+                    if (all_proven && glen <= x87bridge::kMaxGapV1) {
+                        if (!(all_v1 && glen <= x87bridge::kMaxGapV1)) {
+                            row.joins_v2p++;
+                        }
+                        for (int64_t g = gstart; g < gend; ++g) {
+                            drop_v2[static_cast<size_t>(g)] = true;
+                            row.spliced_v2++;
+                        }
+                    }
                 }
                 if (row.joins_v1 == 0 && row.joins_v2 == 0) {
                     continue;  // no bridgeable joins; skip measurement and row
                 }
 
                 row.arm_orig = runOneMode(b.instrs.data(), b.instrs.size(), &prod_cfg);
-                if (row.spliced > 0) {
+                const auto measure_splice = [&](const std::vector<bool>& dropped,
+                                                uint16_t n_spliced, uint32_t& arm_out,
+                                                long double& saved_out) {
+                    if (n_spliced == 0) {
+                        arm_out = row.arm_orig;
+                        return;
+                    }
                     std::vector<IRInstr> spliced;
                     spliced.reserve(b.instrs.size());
                     for (size_t k = 0; k < b.instrs.size(); ++k) {
-                        if (!drop[k]) {
+                        if (!dropped[k]) {
                             spliced.push_back(b.instrs[k]);
                         }
                     }
-                    row.arm_bridged = runOneMode(spliced.data(), spliced.size(), &prod_cfg);
+                    arm_out = runOneMode(spliced.data(), spliced.size(), &prod_cfg);
                     const long double delta = static_cast<long double>(row.arm_orig) -
-                                              static_cast<long double>(row.arm_bridged) -
-                                              2.0L * row.spliced;
+                                              static_cast<long double>(arm_out) -
+                                              2.0L * n_spliced;
                     if (delta > 0) {
-                        row.saved_w = static_cast<long double>(exec) * delta;
-                        sum_saved_w += row.saved_w;
+                        saved_out = static_cast<long double>(exec) * delta;
                     }
+                };
+                measure_splice(drop, row.spliced, row.arm_bridged, row.saved_w);
+                sum_saved_w += row.saved_w;
+                if (row.spliced_v2 > row.spliced) {
+                    measure_splice(drop_v2, row.spliced_v2, row.arm_bridged_v2, row.saved_v2_w);
                 } else {
-                    row.arm_bridged = row.arm_orig;
+                    // No additional proven-v2 joins: the v2 splice IS the v1
+                    // splice.
+                    row.arm_bridged_v2 = row.arm_bridged;
+                    row.saved_v2_w = row.saved_w;
                 }
+                sum_saved_v2_w += row.saved_v2_w;
 
                 int picked = 0;
                 for (size_t k = 0; k < b.instrs.size() && picked < 6; ++k) {
@@ -1571,15 +1614,22 @@ int main(int argc, char** argv) try {
 
             const double v1_savings_pct =
                 total_arm > 0 ? static_cast<double>(100.0L * sum_saved_w / total_arm) : 0.0;
+            const double v2_savings_pct =
+                total_arm > 0 ? static_cast<double>(100.0L * sum_saved_v2_w / total_arm) : 0.0;
             std::printf("# FP-run fragmentation (run-bridging opportunity, v1 = mov/lea "
-                        "gaps <= %d)\n",
+                        "gaps <= %d; v2 adds flag-dead ALU with the flag_liveness==0 proof)\n",
                         x87bridge::kMaxGapV1);
             std::printf("bridge_v1_saved_arm_w,%llu\n",
                         static_cast<unsigned long long>(sum_saved_w));
             std::printf("bridge_v1_savings_pct,%.3f\n", v1_savings_pct);
+            std::printf("bridge_v2_saved_arm_w,%llu\n",
+                        static_cast<unsigned long long>(sum_saved_v2_w));
+            std::printf("bridge_v2_savings_pct,%.3f\n", v2_savings_pct);
             std::printf("gap_instrs_w_v1,%llu\n", static_cast<unsigned long long>(gaps_v1_w));
             std::printf("gap_instrs_w_v2only,%llu\n",
                         static_cast<unsigned long long>(gaps_v2only_w));
+            std::printf("gap_instrs_w_v2proven,%llu\n",
+                        static_cast<unsigned long long>(gaps_v2proven_w));
             std::printf("gap_instrs_w_ineligible,%llu\n",
                         static_cast<unsigned long long>(gaps_inelig_w));
             std::printf("joins_total,%llu\n", static_cast<unsigned long long>(joins_total));
@@ -1599,17 +1649,21 @@ int main(int argc, char** argv) try {
                 }
             }
             const size_t fr_n = std::min(frag_rows, frows.size());
-            std::printf("rank,block_id,start_pc,exec,segments,joins_v1,joins_v2,joins_inelig,"
-                        "spliced,arm_orig,arm_bridged,saved_w,preview\n");
+            std::printf("rank,block_id,start_pc,exec,segments,joins_v1,joins_v2,joins_v2p,"
+                        "joins_inelig,spliced,spliced_v2,arm_orig,arm_bridged,arm_bridged_v2,"
+                        "saved_w,saved_v2_w,preview\n");
             for (size_t k = 0; k < fr_n; ++k) {
                 const auto& r = frows[k];
-                std::printf("%zu,%u,0x%08x,%llu,%u,%u,%u,%u,%u,%u,%u,%llu,%s\n", k + 1,
-                            r.block_id, r.start_pc, static_cast<unsigned long long>(r.exec),
+                std::printf("%zu,%u,0x%08x,%llu,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%llu,%llu,%s\n",
+                            k + 1, r.block_id, r.start_pc,
+                            static_cast<unsigned long long>(r.exec),
                             static_cast<unsigned>(r.segments), static_cast<unsigned>(r.joins_v1),
-                            static_cast<unsigned>(r.joins_v2),
+                            static_cast<unsigned>(r.joins_v2), static_cast<unsigned>(r.joins_v2p),
                             static_cast<unsigned>(r.joins_inelig),
-                            static_cast<unsigned>(r.spliced), r.arm_orig, r.arm_bridged,
-                            static_cast<unsigned long long>(r.saved_w), r.preview.c_str());
+                            static_cast<unsigned>(r.spliced), static_cast<unsigned>(r.spliced_v2),
+                            r.arm_orig, r.arm_bridged, r.arm_bridged_v2,
+                            static_cast<unsigned long long>(r.saved_w),
+                            static_cast<unsigned long long>(r.saved_v2_w), r.preview.c_str());
             }
             std::printf("\n");
         }

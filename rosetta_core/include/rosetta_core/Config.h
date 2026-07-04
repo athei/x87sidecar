@@ -83,6 +83,15 @@ struct RosettaConfig {
                                     //                           instead of spilling/reloading
                                     //                           the FP stack around them.
                                     //                           Set =0 to disable.
+    uint8_t enable_bridge_v2;       // X87_BRIDGE_V2             (default OFF while soaking)
+                                    //                           run bridging v2: gaps may also
+                                    //                           contain flag-writing ALU
+                                    //                           (add/sub/and/or/xor/inc/dec)
+                                    //                           whose written flags Rosetta's
+                                    //                           own flag_liveness byte proves
+                                    //                           dead; lowered to non-flag-
+                                    //                           setting ARM.  Requires
+                                    //                           enable_bridge.
     uint8_t bridge_max_gap;         // X87_BRIDGE_MAX_GAP        [1,4], default 2: max
                                     //                           consecutive bridge instrs per
                                     //                           gap.

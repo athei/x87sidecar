@@ -130,7 +130,7 @@ struct X87Cache {
     static int lookahead(IRInstr* instr_array, int64_t num_instrs, int64_t insn_idx);
 
     // Run bridging: a region descriptor for one IR run that spans short gaps
-    // of v1 bridge instructions (X87Bridge.h) between x87 segments.
+    // of bridge instructions (X87Bridge.h) between x87 segments.
     //   total       instructions in the region (x87 + bridges); 0 = no
     //               profitable bridged region (fall back to plain dispatch)
     //   x87_count   x87 instructions within it
@@ -138,11 +138,15 @@ struct X87Cache {
     // The region always starts and ends on an x87 instruction (trailing
     // bridges are trimmed — they join nothing), contains at least one join,
     // and satisfies x87_count >= 3 so the merged run clears the IR gate.
+    // allow_v2: gap instructions may also be flag-dead ALU (v2), accepted
+    // only when the block's flag_liveness field is demonstrably populated
+    // (x87bridge::block_has_flag_liveness).
     struct BridgedRun {
         int16_t total = 0;
         int16_t x87_count = 0;
         int16_t bridges = 0;
     };
     static BridgedRun lookahead_bridged(IRInstr* instr_array, int64_t num_instrs,
-                                        int64_t insn_idx, int max_gap, int max_total_bridges);
+                                        int64_t insn_idx, int max_gap, int max_total_bridges,
+                                        bool allow_v2 = false);
 };
