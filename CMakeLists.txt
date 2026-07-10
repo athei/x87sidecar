@@ -4,7 +4,9 @@ cmake_minimum_required(VERSION 3.27)
 set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "Minimum macOS deployment version")
 
 project(x87sidecar
-    LANGUAGES CXX
+    # C is needed for the MIG-generated mach_exc exception server
+    # (rosetta_loader/mach_excServer.c).
+    LANGUAGES C CXX
     DESCRIPTION "Apple Silicon x87 JIT translation hook for Rosetta 2"
 )
 
