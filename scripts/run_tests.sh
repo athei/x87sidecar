@@ -227,6 +227,30 @@ if [[ $NATIVE_ONLY -eq 0 ]]; then
     done
 fi
 
+# ── Phase 2c: x87sidecar --cooperative (handshake smoke) ──────────────────
+# Cooperative attach hands the sidecar the tracee's task port over a bootstrap
+# rendezvous — no task_for_pid / ptrace / get-task-allow / elevated privileges.
+# This phase verifies --cooperative does not break execution. NOTE: cooperative
+# mode does not yet reinstall the x87 JIT hook (the exec-pre-init stop it needs
+# is not reproducible cooperatively — see the cooperative-attach plan), so this
+# checks stock-Rosetta correctness under the handshake, not [ulp] acceleration.
+if [[ $NATIVE_ONLY -eq 0 ]]; then
+    echo ""
+    echo -e "${BOLD}=== Phase 2c: x87sidecar --cooperative (handshake smoke) ===${NC}"
+
+    for t in "${TESTS[@]}"; do
+        BINARY="$TESTS_BIN/$t"
+        if [[ ! -x "$BINARY" ]]; then
+            echo -e "${YELLOW}SKIP${NC}  $t  (binary not found)"
+            ERRORS=$((ERRORS + 1))
+            continue
+        fi
+        EXIT=0
+        OUT=$("$LOADER" --cooperative "$BINARY" 2>/dev/null | filter_runtime_lines) || EXIT=$?
+        check_output "$t" "$OUT" "$EXIT"
+    done
+fi
+
 # ── Phase 3: x87sidecar, IR disabled ─────────────────────────────────────
 if [[ $NATIVE_ONLY -eq 0 ]]; then
     echo ""

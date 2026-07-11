@@ -207,5 +207,11 @@ auto OffsetFinder::determineRuntimeOffsets() -> bool {
         (*reinterpret_cast<uint64_t*>(libRosettaRuntimeLoader.buffer_.data() + x87_exports_rva)) &
         0xFFFFFFFF;
 
+    // Exports.version is a build constant baked into the on-disk __DATA,exports
+    // (not a rebased pointer), so it reads correctly from the file — no need for
+    // the live Exports struct. Used to seed the runtime version in both attach
+    // modes.
+    runtimeVersion_ = exports->version;
+
     return true;
 }

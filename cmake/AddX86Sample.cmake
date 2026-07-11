@@ -15,11 +15,17 @@ function(add_x86_sample name)
     endif()
     set(src "${CMAKE_CURRENT_SOURCE_DIR}/${name}.c")
     set(out "${out_dir}/${name}")
+    # Link the cooperative-attach handshake shim into every sample. Its
+    # constructor is a no-op unless `x87sidecar --cooperative` set the
+    # X87_SIDECAR_BOOTSTRAP env var for THIS pid, so default-mode runs are
+    # unaffected — but it lets the harness exercise --cooperative without wine.
+    set(coop_src "${CMAKE_SOURCE_DIR}/tests/coop_handshake.c")
+    set(coop_inc "${CMAKE_SOURCE_DIR}/rosetta_loader/src")
     add_custom_command(
         OUTPUT  "${out}"
         COMMAND ${CMAKE_COMMAND} -E make_directory "${out_dir}"
-        COMMAND /usr/bin/clang -arch x86_64 -O2 -o "${out}" "${src}"
-        DEPENDS "${src}" ${X86_SAMPLE_EXTRA_DEPS}
+        COMMAND /usr/bin/clang -arch x86_64 -O2 -I "${coop_inc}" -o "${out}" "${src}" "${coop_src}"
+        DEPENDS "${src}" "${coop_src}" ${X86_SAMPLE_EXTRA_DEPS}
         COMMENT "Building x86_64 ${name}"
         VERBATIM
     )

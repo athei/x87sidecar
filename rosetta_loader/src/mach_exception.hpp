@@ -60,6 +60,14 @@ public:
     // pid is the tracee pid (needed for PT_THUPDATE on reply).
     bool install(pid_t pid, task_t task);
 
+    // Cooperative-mode init: allocate our exception receive port + a send right
+    // and remember the (voluntarily handed-over) task port, but do NOT swap any
+    // task-level exception ports. Cooperative mode never ptrace-attaches, so
+    // there are no EXC_SOFT_SIGNAL soft-signal stops to catch — only the one
+    // planted BRK, which is armed per-thread via installThreadBreakpoint(). This
+    // is the ptrace-free analogue of install().
+    bool initPortOnly(pid_t pid, task_t task);
+
     // Re-install on a (possibly new) task port. execve resets a task's
     // exception ports, so this must run after the exec-stop and before the BRK.
     bool reinstall(task_t task);

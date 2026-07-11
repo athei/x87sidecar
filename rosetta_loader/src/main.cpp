@@ -3,6 +3,7 @@
 #include <mach/mach_vm.h>
 #include <mach/vm_attributes.h>
 #include <sched.h>
+#include <servers/bootstrap.h>
 #include <sys/event.h>
 #include <sys/mman.h>
 #include <sys/ptrace.h>
@@ -25,6 +26,7 @@
 #include <utility>
 #include <vector>
 
+#include "coop_proto.h"
 #include "mach_exception.hpp"
 #include "offset_finder.hpp"
 #include "rosetta_core/Config.h"
@@ -56,6 +58,12 @@ extern "C" void _dyld_process_info_for_each_image(DyldProcessInfo info,
                                                                    const uuid_t uuid,
                                                                    const char* path));
 extern "C" void _dyld_process_info_release(DyldProcessInfo info);
+
+// bootstrap_register2 is a private libSystem symbol (the non-deprecated way to
+// publish a dynamic service name). It isn't in <servers/bootstrap.h>, so declare
+// it like wine's server/mach.c does.
+extern "C" kern_return_t bootstrap_register2(mach_port_t bp, name_t service_name, mach_port_t sp,
+                                             uint64_t flags);
 
 class MuhDebugger {
 private:
@@ -156,6 +164,95 @@ public:
     // level keeps us off libRosettaRuntime's task-level EXC_BREAKPOINT port.
     bool armThreadBreakpoint() { return exc_.installThreadBreakpoint(lastEvent_.thread); }
     void disarmThreadBreakpoint() { exc_.removeThreadBreakpoint(); }
+
+    // ── Cooperative mode (no task_for_pid / no ptrace) ──────────────────────
+    // Adopt a task port the tracee voluntarily handed over via the bootstrap
+    // handshake. Takes ownership of the send right (released by ~MuhDebugger).
+    // No ptrace attach, no exec-stop: the tracee is already running and is held
+    // quiescent by blocking in the handshake until we reply.
+    bool adopt(pid_t pid, task_t task) {
+        childPid_ = pid;
+        taskPort_ = task;
+        return exc_.initPortOnly(pid, task);
+    }
+
+    // Like findRuntime(), but disambiguates by content: return the first
+    // executable MH_MAGIC_64 region whose bytes at [matchOff, matchOff+matchLen)
+    // equal `match`. In a fully-initialized process (cooperative mode) there are
+    // several MH_MAGIC regions besides libRosettaRuntime, so the plain
+    // first-match heuristic in findRuntime() picks the wrong one; the
+    // exports_fetch instruction signature uniquely identifies the runtime.
+    [[nodiscard]] auto findRuntimeMatching(uint64_t matchOff, const uint8_t* match,
+                                           size_t matchLen) const -> uintptr_t {
+        if (matchLen == 0 || matchLen > 64) {
+            return 0;
+        }
+        mach_vm_address_t address = 0;
+        mach_vm_size_t size = 0;
+        vm_region_basic_info_data_64_t info;
+        mach_port_t objectName = MACH_PORT_NULL;
+        while (true) {
+            mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+            if (mach_vm_region(taskPort_, &address, &size, VM_REGION_BASIC_INFO_64,
+                               reinterpret_cast<vm_region_info_t>(&info), &count,
+                               &objectName) != KERN_SUCCESS) {
+                break;
+            }
+            if (info.protection & (VM_PROT_EXECUTE | VM_PROT_READ)) {
+                uint32_t magic = 0;
+                if (readMemory(address, &magic, sizeof(magic)) && magic == MH_MAGIC_64) {
+                    uint8_t buf[64];
+                    if (readMemory(address + matchOff, buf, matchLen) &&
+                        memcmp(buf, match, matchLen) == 0) {
+                        return address;
+                    }
+                }
+            }
+            address += size;
+        }
+        return 0;
+    }
+
+    // Scan the tracee's executable memory for a byte pattern; return the live
+    // address of the first match, or 0. Locates translate_insn by its prologue
+    // signature without the Exports struct (X19) — works whether the tracee is
+    // stopped at exec (default) or blocked in the handshake (cooperative).
+    [[nodiscard]] uint64_t scanForPattern(const uint8_t* pat, size_t patLen) const {
+        if (patLen == 0) {
+            return 0;
+        }
+        mach_vm_address_t address = 0;
+        mach_vm_size_t size = 0;
+        vm_region_basic_info_data_64_t info;
+        mach_port_t objectName = MACH_PORT_NULL;
+        std::vector<uint8_t> buf;
+        while (true) {
+            mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+            if (mach_vm_region(taskPort_, &address, &size, VM_REGION_BASIC_INFO_64,
+                               reinterpret_cast<vm_region_info_t>(&info), &count,
+                               &objectName) != KERN_SUCCESS) {
+                break;
+            }
+            const uint64_t regionStart = address;
+            const uint64_t regionSize = size;
+            address += size;  // advance before any continue
+            if ((info.protection & VM_PROT_EXECUTE) == 0) {
+                continue;
+            }
+            if (regionSize == 0 || regionSize > (64ULL << 20)) {
+                continue;  // skip absent/implausibly-large executable regions
+            }
+            buf.resize(regionSize);
+            if (!readMemory(regionStart, buf.data(), regionSize)) {
+                continue;
+            }
+            const auto it = std::search(buf.begin(), buf.end(), pat, pat + patLen);
+            if (it != buf.end()) {
+                return regionStart + static_cast<uint64_t>(std::distance(buf.begin(), it));
+            }
+        }
+        return 0;
+    }
 
     bool attach(pid_t pid) {
         childPid_ = pid;
@@ -644,10 +741,16 @@ const unsigned int MuhDebugger::AARCH64_BREAKPOINT = 0xD4200000;
 
 static void print_loader_usage(const char* prog) {
     std::printf(
-        "usage: %s <program> [program-args...]\n"
+        "usage: %s [--cooperative] <program> [program-args...]\n"
         "\n"
         "Flags:\n"
-        "  --help    print this message and exit\n"
+        "  --cooperative  attach via a voluntary task-port handshake instead of\n"
+        "                 task_for_pid + ptrace. The target must hand over its\n"
+        "                 task port over the bootstrap service named in the\n"
+        "                 " X87_COOP_ENV " env var (set automatically). Needs no\n"
+        "                 get-task-allow entitlement, so the binary is notarizable.\n"
+        "                 Non-cooperative targets keep using the default path.\n"
+        "  --help         print this message and exit\n"
         "\n"
         "All other configuration is via environment variables:\n"
         "\n",
@@ -655,12 +758,24 @@ static void print_loader_usage(const char* prog) {
     print_env_help(stdout);
 }
 
+// Cooperative-mode bootstrap service name: "x87sidecar.<tracee-pid>".
+static std::string coop_service_name(pid_t pid) {
+    return std::string("x87sidecar.") + std::to_string(pid);
+}
+
+
 int main(int argc, char* argv[]) try {
-    if (argc >= 2 && std::string_view(argv[1]) == "--help") {
+    int argi = 1;
+    if (argi < argc && std::string_view(argv[argi]) == "--help") {
         print_loader_usage(argv[0]);
         return 0;
     }
-    if (argc < 2) {
+    bool cooperative = false;
+    if (argi < argc && std::string_view(argv[argi]) == "--cooperative") {
+        cooperative = true;
+        ++argi;
+    }
+    if (argi >= argc) {
         std::fprintf(stderr, "%s: missing <program> argument (try --help)\n", argv[0]);
         return 2;
     }
@@ -671,9 +786,34 @@ int main(int argc, char* argv[]) try {
 
     VERBOSE_LOG("Launching debugger.\n");
 
-    // Reverse fork: parent execs into wine (keeps original PID for macOS
-    // dock/activation tracking), child becomes the debugger.
+    // Both attach modes use the same reverse fork: the ORIGINAL pid execs into
+    // the target (keeps the pid for macOS dock/activation) and a double-forked
+    // grandchild becomes the sidecar. They differ only in how the sidecar
+    // obtains the tracee's task port (below); from "runtime ready" on it is all
+    // shared.
+    char** progArgv = &argv[argi];
     pid_t parentPid = getpid();
+    MuhDebugger dbg;
+    bool needsInitBarrier = true;
+    mach_port_t coopReplyPort = MACH_PORT_NULL;
+
+    // Force Rosetta to JIT (call translate_insn) instead of using its AOT /
+    // interpreter path — libRosettaRuntime reads ROSETTA_DISABLE_AOT at init, so
+    // it MUST be in the environment before the target execs. This is what makes
+    // the JIT hook reachable in cooperative mode (which attaches post-init and
+    // so can't win the race to write the g_disable_aot global in time); it is
+    // harmless for default mode, which also wants AOT off.
+    setenv("ROSETTA_DISABLE_AOT", "1", 1);
+
+    // Cooperative mode publishes its bootstrap service name (derived from the
+    // pid the parent keeps across execv) BEFORE forking, so the target inherits
+    // it via the environment.
+    std::string coopName;
+    if (cooperative) {
+        coopName = coop_service_name(parentPid);
+        setenv(X87_COOP_ENV, coopName.c_str(), 1);
+    }
+
     int syncPipe[2];
     if (pipe(syncPipe) == -1) {
         fprintf(stdout, "pipe: %s\n", strerror(errno));
@@ -688,23 +828,22 @@ int main(int argc, char* argv[]) try {
     }
 
     if (child != 0) {
-        // PARENT: will exec into wine-preloader (keeps original PID)
+        // PARENT → tracee: wait until the sidecar has attached/registered, then
+        // exec the target (keeps the original pid).
         close(syncPipe[1]);
-        // Wait for child debugger to attach to us
         char buf;
         read(syncPipe[0], &buf, 1);
         close(syncPipe[0]);
-        // Child has attached and will catch our exec's SIGTRAP
         waitpid(child, nullptr, WNOHANG);  // reap intermediate double-fork child
-        VERBOSE_LOG("parent: launching into program: %s\n", argv[1]);
-        execv(argv[1], &argv[1]);
+        VERBOSE_LOG("parent: launching into program: %s\n", progArgv[0]);
+        execv(progArgv[0], progArgv);
         fprintf(stdout, "parent: execv: %s\n", strerror(errno));
         return 1;
     }
 
-    // CHILD: double-fork to orphan the debugger process.
-    // This prevents a PID cycle (child->parent->child via ptrace) in the
-    // process table that crashes Terminal.app's recursive process-tree walker.
+    // CHILD: double-fork so the sidecar reparents to launchd. (In default mode
+    // this also breaks the ptrace PID cycle that crashes Terminal's
+    // process-tree walker.)
     close(syncPipe[0]);
     pid_t intermediatePid = getpid();  // valid in C; G inherits via fork copy
     pid_t grandchild = fork();
@@ -713,50 +852,110 @@ int main(int argc, char* argv[]) try {
         _exit(1);
     }
     if (grandchild != 0) {
-        _exit(0);  // intermediate child exits; grandchild reparented to PID 1
+        _exit(0);  // intermediate child exits; grandchild reparented to launchd
     }
 
-    // GRANDCHILD: wait for the intermediate child to exit before PT_ATTACH.
-    // PT_ATTACH would otherwise reparent R under G while C is still alive
-    // with G as its child, briefly creating a children-list cycle (R↔G via
-    // PT_ATTACH plus G's original ppid=C still in C.children) that crashes
-    // Terminal.app's proc_listchildpids walker. NOTE_EXIT fires from xnu's
-    // proc_exit after G has already been reparented to launchd and C has
-    // been removed from R.children — kernel state is then guaranteed
-    // cycle-free.
-    {
-        int kq = kqueue();
-        if (kq >= 0) {
-            struct kevent ev;
-            EV_SET(&ev, intermediatePid, EVFILT_PROC, EV_ADD | EV_ONESHOT, NOTE_EXIT, 0, nullptr);
-            struct kevent out;
-            struct timespec ts = {.tv_sec = 2, .tv_nsec = 0};  // generous; C's path is ~2 insns
-            (void)kevent(kq, &ev, 1, &out, 1, &ts);
-            close(kq);
+    // ── GRANDCHILD == the sidecar ───────────────────────────────────────────
+    if (cooperative) {
+        // Publish a receive port under the pid-based name; the target looks it
+        // up, hands over its task+thread control ports, and blocks for a reply.
+        mach_port_t bootstrapPort = MACH_PORT_NULL;
+        task_get_bootstrap_port(mach_task_self(), &bootstrapPort);
+        mach_port_t servicePort = MACH_PORT_NULL;
+        mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &servicePort);
+        mach_port_insert_right(mach_task_self(), servicePort, servicePort,
+                               MACH_MSG_TYPE_MAKE_SEND);
+        kern_return_t kr =
+            bootstrap_register2(bootstrapPort, const_cast<char*>(coopName.c_str()), servicePort, 0);
+        if (kr != KERN_SUCCESS) {
+            fprintf(stdout, "[rosettax87] bootstrap_register2(%s) failed: 0x%x\n", coopName.c_str(),
+                    kr);
+            return 1;
         }
-        // Cover the case where C exited before kevent could register.
-        while (getppid() != 1) {
-            sched_yield();
+        VERBOSE_LOG("[rosettax87] cooperative service registered: %s\n", coopName.c_str());
+        write(syncPipe[1], "x", 1);
+        close(syncPipe[1]);
+
+        x87_coop_request_rcv_t rcv{};
+        kr = mach_msg(&rcv.req.header, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof(rcv), servicePort,
+                      30000, MACH_PORT_NULL);
+        if (kr != KERN_SUCCESS) {
+            fprintf(stdout, "[rosettax87] cooperative handshake receive failed: 0x%x (%s)\n", kr,
+                    mach_error_string(kr));
+            return 1;
         }
+        task_t traceeTask = rcv.req.task_port.name;
+        coopReplyPort = rcv.req.header.msgh_remote_port;
+        VERBOSE_LOG("[rosettax87] cooperative attach: task=0x%x thread=0x%x reply=0x%x\n",
+                    traceeTask, rcv.req.thread_port.name, coopReplyPort);
+        if (!dbg.adopt(parentPid, traceeTask)) {
+            return 1;
+        }
+        needsInitBarrier = false;  // cooperative attaches post-init; oah already mapped
+    } else {
+        // Default: wait for the intermediate child to exit (so kernel state is
+        // cycle-free — see the process-tree-walker note), then task_for_pid +
+        // ptrace attach + catch the exec SIGTRAP.
+        {
+            int kq = kqueue();
+            if (kq >= 0) {
+                struct kevent ev;
+                EV_SET(&ev, intermediatePid, EVFILT_PROC, EV_ADD | EV_ONESHOT, NOTE_EXIT, 0,
+                       nullptr);
+                struct kevent out;
+                struct timespec ts = {.tv_sec = 2, .tv_nsec = 0};
+                (void)kevent(kq, &ev, 1, &out, 1, &ts);
+                close(kq);
+            }
+            while (getppid() != 1) {
+                sched_yield();
+            }
+        }
+        if (!dbg.attach(parentPid)) {
+            fprintf(stdout, "Failed to attach to parent process\n");
+            return 1;
+        }
+        printf("[rosettax87] attached: %s\n", progArgv[0]);
+        fflush(stdout);
+        write(syncPipe[1], "x", 1);
+        close(syncPipe[1]);
+        if (!dbg.waitForExecStop()) {
+            fprintf(stdout, "Failed to catch parent's exec\n");
+            return 1;
+        }
+        VERBOSE_LOG("Attached successfully\n");
     }
 
-    MuhDebugger dbg;
-    if (!dbg.attach(parentPid)) {
-        fprintf(stdout, "Failed to attach to parent process\n");
-        return 1;
-    }
-    printf("[rosettax87] attached: %s\n", argv[1]);
-    fflush(stdout);
-    // Signal parent to proceed with execv
-    write(syncPipe[1], "x", 1);
-    close(syncPipe[1]);
+    // Code ranges the M2 install patched, for the tracee to i-cache-invalidate
+    // (cooperative mode only — see x87_coop_reply_t). Populated during M2.
+    uint64_t coopIcacheAddr[2] = {0, 0};
+    uint64_t coopIcacheLen[2] = {0, 0};
 
-    // Wait for parent's execv to trigger SIGTRAP
-    if (!dbg.waitForExecStop()) {
-        fprintf(stdout, "Failed to catch parent's exec\n");
-        return 1;
-    }
-    VERBOSE_LOG("Attached successfully\n");
+    // Release the tracee once the hook is installed (default: ptrace detach;
+    // cooperative: reply to the handshake, carrying the patched code ranges so
+    // the tracee flushes its own i-cache, then unblock it).
+    auto releaseTracee = [&]() {
+        if (cooperative) {
+            x87_coop_reply_t reply{};
+            reply.header.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_MOVE_SEND_ONCE, 0);
+            reply.header.msgh_size = sizeof(reply);
+            reply.header.msgh_remote_port = coopReplyPort;
+            reply.header.msgh_local_port = MACH_PORT_NULL;
+            reply.header.msgh_id = X87_COOP_MSGH_ID + 1;
+            reply.icache_addr[0] = coopIcacheAddr[0];
+            reply.icache_addr[1] = coopIcacheAddr[1];
+            reply.icache_len[0] = coopIcacheLen[0];
+            reply.icache_len[1] = coopIcacheLen[1];
+            kern_return_t kr = mach_msg(&reply.header, MACH_SEND_MSG, sizeof(reply), 0,
+                                        MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+            if (kr != KERN_SUCCESS) {
+                fprintf(stdout, "[rosettax87] cooperative reply failed: 0x%x (%s)\n", kr,
+                        mach_error_string(kr));
+            }
+        } else {
+            (void)dbg.detach();
+        }
+    };
 
     // Set up offsets dynamically
     OffsetFinder offsetFinder;
@@ -776,35 +975,34 @@ int main(int argc, char* argv[]) try {
                     offsetFinder.offsetTranslateInsn_, offsetFinder.offsetTransactionResultSize_);
     }
 
-    const auto runtimeBase = dbg.findRuntime();
+    static const uint8_t kExportsFetchPat[8] = {0x62, 0x06, 0x40, 0xF9, 0x63, 0x12, 0x40, 0xB9};
+    const auto runtimeBase = dbg.findRuntimeMatching(offsetFinder.offsetExportsFetch_,
+                                                     kExportsFetchPat, sizeof(kExportsFetchPat));
 
     VERBOSE_LOG("Rosetta runtime base: 0x%lx\n", runtimeBase);
 
     if (runtimeBase == 0) {
-        fprintf(stdout, "Failed to find Rosetta runtime\n");
+        fprintf(stdout, "Failed to find Rosetta runtime by signature\n");
         return 1;
     }
-    uint8_t g_disable_aot_value = 1;
-
-    dbg.writeMemory(runtimeBase + offsetFinder.offsetDisableAot_, &g_disable_aot_value,
-                    sizeof(g_disable_aot_value));
+    // NOTE: Apple's AOT/interpreter path is already disabled — libRosettaRuntime
+    // read ROSETTA_DISABLE_AOT=1 (set unconditionally before fork) at init and
+    // set the g_disable_aot global itself, before deciding AOT-vs-JIT. That is
+    // the single mechanism for both modes: it works pre-init regardless of when
+    // we attach, so we no longer poke the global from here (the old exec-stop
+    // memory write only worked for the default attach and was redundant once the
+    // env var is always set).
 
     // X87_DISABLE_HOOK=1 — passthrough mode for benchmarks.
     //
-    // We've now disabled Apple's AOT cache + interpreter modes (the
-    // single-byte g_disable_aot=1 write does that, see
-    // project_native_runtime_interprets_trivial_loops.md).  Detach now
-    // and let the parent run with stock translate_insn unmodified.
-    // Result: the same translation environment our normal mode produces
-    // for non-x87 instructions, but without our hook landing for x87 —
-    // so x87 emits use stock's JIT codegen instead of our optimised
-    // inline emit.  This is the apples-to-apples baseline `run_benchmarks.sh`
-    // compares against.
+    // AOT/interpreter is already disabled (ROSETTA_DISABLE_AOT env), so the
+    // target runs with stock translate_insn — the same translation environment
+    // our normal mode produces for non-x87 instructions, but without our hook
+    // landing for x87 (stock JIT codegen). This is the apples-to-apples baseline
+    // run_benchmarks.sh compares against. Release without installing the hook.
     if (g_cfg.loader_disable_hook) {
-        VERBOSE_LOG("X87_DISABLE_HOOK=1: passthrough mode; detaching after disable_aot write\n");
-        if (!dbg.detach()) {
-            return 1;
-        }
+        VERBOSE_LOG("X87_DISABLE_HOOK=1: passthrough mode; releasing without hook\n");
+        releaseTracee();
         // Block until parent exits (mirror the post-stub-install path below).
         int kq = kqueue();
         if (kq != -1) {
@@ -817,39 +1015,42 @@ int main(int argc, char* argv[]) try {
         return 0;
     }
 
-    // Catch the one planted BRK at THREAD level on the currently stopped thread
-    // (the single init thread that will execute exports_fetch). Thread-level
-    // exception ports out-rank task-level ones, so we still receive the BRK, but
-    // we never displace libRosettaRuntime's task-level EXC_BREAKPOINT handler —
-    // eliminating the detach-time restore race that leaked a fatal SIGTRAP to
-    // the parent (CI exit=133). Must be armed before continuing into the BRK.
-    if (!dbg.armThreadBreakpoint()) {
-        fprintf(stdout, "Failed to arm thread-level breakpoint catcher\n");
+    // Reach the post-Rosetta-init point: libRosettaRuntime (which contains
+    // translate_insn) is NOT mapped at the default exec-stop, but it is by the
+    // time the runtime calls exports_fetch — and no TranslationResult has been
+    // allocated yet. Plant a thread-level BRK there purely as an "init ready"
+    // barrier (we no longer read X19 from it — translate_insn is found by
+    // signature scan, the version comes from the on-disk runtime). Thread-level
+    // so we never displace libRosettaRuntime's task-level EXC_BREAKPOINT handler
+    // (the detach-time race that leaked a fatal SIGTRAP, CI exit=133).
+    // Cooperative mode attaches post-init, so it skips the barrier entirely.
+    if (needsInitBarrier) {
+        if (!dbg.armThreadBreakpoint()) {
+            fprintf(stdout, "Failed to arm thread-level breakpoint catcher\n");
+            return 1;
+        }
+        dbg.setBreakpoint(runtimeBase + offsetFinder.offsetExportsFetch_);
+        dbg.continueExecution();
+        dbg.removeBreakpoint(runtimeBase + offsetFinder.offsetExportsFetch_);
+        dbg.disarmThreadBreakpoint();
+    }
+
+    // Seed the runtime version (OpcodeCompatibility gates 26.4↔26.5 on it) from
+    // the on-disk Exports.version — no live Exports struct (X19) needed. The
+    // loader never calls rosetta_core_init(), so it must seed this itself.
+    VERBOSE_LOG("Rosetta version: %llx\n", offsetFinder.runtimeVersion_);
+    rosetta_core_set_runtime_version(offsetFinder.runtimeVersion_);
+
+    // Locate translate_insn by its 36-byte prologue signature (both modes; no
+    // X19 / initLibrary offset math). Valid because the barrier above (default)
+    // or the post-init handshake (cooperative) guarantees oah is mapped.
+    uint64_t translateInsnAddr = dbg.scanForPattern(OffsetFinder::kTranslateInsnPattern.data(),
+                                                    OffsetFinder::kTranslateInsnPattern.size());
+    if (translateInsnAddr == 0) {
+        fprintf(stdout, "Failed to locate translate_insn by signature scan\n");
         return 1;
     }
-    dbg.setBreakpoint(runtimeBase + offsetFinder.offsetExportsFetch_);
-    dbg.continueExecution();
-    // Read X19 (Exports struct addr) from the thread that hit the BRK, then
-    // restore the original instruction and drop the thread-level catcher. The
-    // process stays stopped (we hold the breakpoint exception reply) through the
-    // M2 stub install below until detach.
-    auto rosettaRuntimeExportsAddress =
-        dbg.readRegister(dbg.stoppedThread(), MuhDebugger::Register::X19);
-    dbg.removeBreakpoint(runtimeBase + offsetFinder.offsetExportsFetch_);
-    dbg.disarmThreadBreakpoint();
-    VERBOSE_LOG("Rosetta runtime exports: 0x%llx\n", rosettaRuntimeExportsAddress);
-
-    Exports exports;
-    dbg.readMemory(rosettaRuntimeExportsAddress, &exports, sizeof(exports));
-
-    VERBOSE_LOG("Rosetta version: %llx\n", exports.version);
-
-    // The OpcodeCompatibility layer (used by both stub_asm::build below and the
-    // sidecar's Translator) gates 26.4↔26.5 opcode translation on this version.
-    // Unlike aotinvoke, the loader never calls rosetta_core_init(), so it must
-    // seed the version itself — otherwise the compat layer assumes a 26.4 host
-    // and mistranslates every x87 opcode on 26.5.
-    rosetta_core_set_runtime_version(exports.version);
+    VERBOSE_LOG("translate_insn (scanned) = 0x%llx\n", translateInsnAddr);
 
     // ── M2: Inline IPC stub install ─────────────────────────────────────────
     //
@@ -863,152 +1064,12 @@ int main(int argc, char* argv[]) try {
     // 4. COW + mach_vm_write the bytes; restore RX.
     // 5. After detach, run the receive loop alongside kqueue parent-exit.
     {
-        // ── Read live Mach-O headers from parent's address space ────────────
-        // The on-disk libRosettaRuntime at /Library/Apple/usr/libexec/oah is a
-        // shared-cache STUB whose segment sizes (and the byte-pattern offsets
-        // computed against it) do NOT match what's actually mapped in the
-        // parent — the dyld_shared_cache version is repacked. Everything we
-        // need (translate_insn address, __TEXT bounds) we discover from the
-        // live process memory instead.
-        mach_header_64 mh{};
-        if (!dbg.readMemory(runtimeBase, &mh, sizeof(mh))) {
-            fprintf(stdout, "M2: failed to read parent's mach_header_64\n");
-            return 1;
-        }
-        if (mh.magic != MH_MAGIC_64) {
-            fprintf(stdout, "M2: parent's mach_header magic mismatch (0x%x)\n", mh.magic);
-            return 1;
-        }
-
-        // Read the load-commands region following the header.
-        std::vector<uint8_t> lcBuf(mh.sizeofcmds, 0);
-        if (!dbg.readMemory(runtimeBase + sizeof(mh), lcBuf.data(), mh.sizeofcmds)) {
-            fprintf(stdout, "M2: failed to read parent's load commands\n");
-            return 1;
-        }
-
-        // Walk to find __TEXT segment.
-        uint64_t textVmAddr = 0;  // link-time vmaddr (offset basis for dyld
-                                  // shared-cache; runtimeBase corresponds
-                                  // to this)
-        uint64_t textVmSize = 0;
-        const uint8_t* p = lcBuf.data();
-        for (uint32_t i = 0; i < mh.ncmds; i++) {
-            const auto* lc = reinterpret_cast<const load_command*>(p);
-            if (lc->cmd == LC_SEGMENT_64) {
-                const auto* seg = reinterpret_cast<const segment_command_64*>(p);
-                if (memcmp(seg->segname, "__TEXT", sizeof("__TEXT")) == 0) {
-                    textVmAddr = seg->vmaddr;
-                    textVmSize = seg->vmsize;
-                    break;
-                }
-            }
-            p += lc->cmdsize;
-        }
-        if (textVmSize == 0) {
-            fprintf(stdout, "M2: parent has no __TEXT segment\n");
-            return 1;
-        }
-        const uint64_t textEndAddr = runtimeBase + textVmSize;
-        VERBOSE_LOG("__TEXT range (live): [0x%lx, 0x%lx) (vmaddr=0x%llx vmsize=0x%llx)\n",
-                    (unsigned long)runtimeBase, (unsigned long)textEndAddr, textVmAddr, textVmSize);
-
-        // ── Compute translate_insn's live address from a known function ──
-        // pointer plus the file-offset delta. dyld_shared_cache may remap
-        // libRosettaRuntime's segments to different addresses, so we cannot
-        // just do `runtimeBase + translate_insn_rva`. Within a single
-        // segment, however, function-to-function offsets are preserved, so:
-        //   translate_insn_addr  =  init_library_runtime_addr
-        //                         + (translate_insn_rva - init_library_rva)
-        // init_library's runtime address is the first entry in
-        // libRosettaRuntime's x87Exports[] array (X19 points at the
-        // Exports struct; first export is init_library).
-        Export initLibraryExport{};
-        if (!dbg.readMemory(exports.x87Exports, &initLibraryExport, sizeof(initLibraryExport))) {
-            fprintf(stdout, "M2: failed to read init_library export entry\n");
-            return 1;
-        }
-        uint64_t initLibraryAddr = initLibraryExport.address & 0xFFFFFFFFFFFFULL;
-        if (initLibraryAddr == 0) {
-            fprintf(stdout, "M2: init_library export address is null\n");
-            return 1;
-        }
-        if (offsetFinder.offsetInitLibrary_ == 0 || offsetFinder.offsetTranslateInsn_ == 0) {
-            fprintf(stdout,
-                    "M2: missing init_library_rva or translate_insn_rva from "
-                    "offset_finder\n");
-            return 1;
-        }
-        uint64_t translateInsnAddr =
-            initLibraryAddr + (static_cast<uint64_t>(offsetFinder.offsetTranslateInsn_) -
-                               static_cast<uint64_t>(offsetFinder.offsetInitLibrary_));
-        VERBOSE_LOG(
-            "M2: init_library live=0x%llx rva=0x%llx | translate_insn rva=0x%llx → "
-            "live=0x%llx\n",
-            initLibraryAddr, (uint64_t)offsetFinder.offsetInitLibrary_,
-            (uint64_t)offsetFinder.offsetTranslateInsn_, translateInsnAddr);
-
-        // ── Patch stock's TR-size MOVZ so each TR holds our X87Cache ────────
-        // libRosettaRuntime allocates per-thread TranslationResults sized by
-        // a `MOV W0, #0x288` immediate that aotinvoke's pattern search located
-        // (offsetTransactionResultSize_). We've extended TranslationResult
-        // with `x87_cache` (OPT-1) appended at the end — see
-        // TranslationResult.h. Patch the MOVZ in stock's __TEXT to allocate
-        // sizeof(TranslationResult) bytes per TR so the cache field lives
-        // inside parent's allocation and our write-back at the end of every
-        // translate_insn call can persist it across calls (no heap overflow).
-        //
-        // Patch must run BEFORE any TR is allocated. We're paused at
-        // offsetExportsFetch_ — early in libRosettaRuntime's init, before
-        // any thread has called translate_insn — so we're safe.
-        {
-            if (offsetFinder.offsetTransactionResultSize_ == 0) {
-                fprintf(stdout, "M2: missing offsetTransactionResultSize_\n");
-                return 1;
-            }
-            const uint64_t trSizeAddr =
-                initLibraryAddr +
-                (static_cast<uint64_t>(offsetFinder.offsetTransactionResultSize_) -
-                 static_cast<uint64_t>(offsetFinder.offsetInitLibrary_));
-
-            constexpr uint32_t kNewTrSize = sizeof(TranslationResult);
-            static_assert(kNewTrSize <= 0xFFFFU, "TranslationResult must fit in MOVZ imm16");
-
-            uint32_t origInsn = 0;
-            if (!dbg.readMemory(trSizeAddr, &origInsn, sizeof(origInsn))) {
-                fprintf(stdout, "M2: failed to read TR-size MOVZ at 0x%llx\n", trSizeAddr);
-                return 1;
-            }
-            // MOVZ Wd, #imm16, lsl #0 — sf=0, opc=10, hw=00.
-            //   fixed bits mask 0xFFE00000, value 0x52800000
-            //   imm16 lives in bits [20:5]
-            if ((origInsn & 0xFFE00000U) != 0x52800000U) {
-                fprintf(stdout,
-                        "M2: TR-size patch site at 0x%llx is not MOVZ "
-                        "Wd,#imm (got 0x%08x)\n",
-                        trSizeAddr, origInsn);
-                return 1;
-            }
-            const uint32_t origImm = (origInsn >> 5) & 0xFFFFU;
-            const uint32_t newInsn = (origInsn & ~0x001FFFE0U) | (kNewTrSize << 5);
-
-            if (!dbg.adjustMemoryProtection(trSizeAddr, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY,
-                                            sizeof(newInsn))) {
-                fprintf(stdout, "M2: TR-size patch protect-RW failed\n");
-                return 1;
-            }
-            if (!dbg.writeMemory(trSizeAddr, &newInsn, sizeof(newInsn))) {
-                fprintf(stdout, "M2: TR-size patch write failed\n");
-                return 1;
-            }
-            if (!dbg.adjustMemoryProtection(trSizeAddr, VM_PROT_READ | VM_PROT_EXECUTE,
-                                            sizeof(newInsn))) {
-                fprintf(stdout, "M2: TR-size patch protect-RX failed\n");
-                return 1;
-            }
-            VERBOSE_LOG("M2: TR-size MOVZ at 0x%llx patched: 0x%x → 0x%x\n", trSizeAddr, origImm,
-                        kNewTrSize);
-        }
+        // translate_insn's live address came from the signature scan above.
+        // No live Mach-O header walk, no Exports/init_library math, and no
+        // TR-size patch: x87_cache no longer lives in the tracee's TR (the
+        // sidecar keeps it in its own per-thread map), so stock's TR allocation
+        // size is left untouched — which is what lets this install work
+        // post-init in cooperative mode.
 
         // Snapshot the original prologue.
         uint8_t origPrologue[16];
@@ -1532,14 +1593,23 @@ int main(int argc, char* argv[]) try {
         }
         VERBOSE_LOG("M2: translate_insn entry patched (abs-jump to 0x%llx)\n", padStartAddr);
 
-        // Capture the parent's task port BEFORE detach. The send-right is
-        // held in MuhDebugger::taskPort_ and stays valid past dbg.detach()
-        // (only ~MuhDebugger releases it). The receive thread will use it
-        // for mach_vm_read on TranslationResult / IRInstr structs.
+        // Record the patched code ranges so the tracee can invalidate its own
+        // i-cache (cooperative mode). The entry (hot in the i-cache post-init)
+        // is the one that MUST be flushed; the handler lives in never-executed
+        // padding, but flush it too for safety. Default mode ignores these (it
+        // patches pre-init, so no stale lines exist and it detaches instead).
+        coopIcacheAddr[0] = translateInsnAddr;
+        coopIcacheLen[0] = blobs.entry.size();
+        coopIcacheAddr[1] = padStartAddr;
+        coopIcacheLen[1] = blobs.handler.size();
+
+        // Capture the tracee's task port BEFORE releasing it. The send-right is
+        // held in MuhDebugger::taskPort_ and stays valid past release (default's
+        // ptrace detach or cooperative's handshake reply); only ~MuhDebugger
+        // releases it. The receive thread uses it for mach_vm_read on
+        // TranslationResult / IRInstr structs.
         mach_port_t parentTaskPort = dbg.taskPort();
-        if (!dbg.detach()) {
-            return 1;
-        }
+        releaseTracee();
 
         // Spawn the Mach receive thread BEFORE the kqueue wait below so
         // any in-flight tickle messages from the parent get drained while

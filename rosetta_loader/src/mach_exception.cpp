@@ -116,6 +116,28 @@ bool MachExceptionSession::install(pid_t pid, task_t task) {
     return swapPorts(task);
 }
 
+bool MachExceptionSession::initPortOnly(pid_t pid, task_t task) {
+    pid_ = pid;
+    task_ = task;
+
+    mach_port_t self = mach_task_self();
+    kern_return_t kr = mach_port_allocate(self, MACH_PORT_RIGHT_RECEIVE, &exceptionPort_);
+    if (kr != KERN_SUCCESS) {
+        fprintf(stdout, "MachExc: mach_port_allocate failed (0x%x: %s)\n", kr,
+                mach_error_string(kr));
+        return false;
+    }
+    kr = mach_port_insert_right(self, exceptionPort_, exceptionPort_, MACH_MSG_TYPE_MAKE_SEND);
+    if (kr != KERN_SUCCESS) {
+        fprintf(stdout, "MachExc: mach_port_insert_right failed (0x%x: %s)\n", kr,
+                mach_error_string(kr));
+        return false;
+    }
+    // No swapPorts(): we never take the task-level EXC_SOFTWARE handler in
+    // cooperative mode. The BRK is armed at thread level (installThreadBreakpoint).
+    return true;
+}
+
 bool MachExceptionSession::reinstall(task_t task) {
     if (exceptionPort_ == MACH_PORT_NULL) {
         fprintf(stdout, "MachExc: reinstall before install\n");
