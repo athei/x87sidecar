@@ -36,7 +36,10 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 BUILD_DIR="$ROOT_DIR/build"
 BIN="$BUILD_DIR/bin"
-LOADER="$BIN/x87sidecar"
+# Default-attach phases use task_for_pid + ptrace, which need the entitled
+# build (cs.debugger + get-task-allow).  The flat `x87sidecar` ships without
+# entitlements and only works in cooperative mode.
+LOADER="$BIN/x87sidecar_entitled"
 TESTS_BIN="$BIN/tests"
 
 ALL_TESTS=(

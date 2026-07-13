@@ -17,7 +17,9 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 BUILD_DIR="$ROOT_DIR/build"
 BIN="$BUILD_DIR/bin"
-LOADER="$BIN/x87sidecar"
+# Default-attach (task_for_pid + ptrace) needs the entitled build; the flat
+# `x87sidecar` ships without entitlements and is cooperative-only.
+LOADER="$BIN/x87sidecar_entitled"
 BENCH_BIN="$BIN/bench"
 
 ALL_BENCHMARKS=(
