@@ -77,14 +77,14 @@ Both modes converge on the same install and IPC loop once the port is in hand.
 
 ## Binaries
 
-The build emits two signed artifacts from one link:
+The build emits two signed artifacts from one link. Both are published as `.tar.xz` assets on each GitHub release; pick whichever fits how you intend to attach.
 
-| Artifact | Signing | Use |
+| Artifact | Signing | Trade-off |
 |---|---|---|
-| `x87sidecar` | ad-hoc, **no entitlements** | Cooperative attach only. Goes in the app bundle — re-signed Developer ID + hardened runtime, then notarized. |
-| `x87sidecar_entitled` | same Mach-O + `cs.debugger` + `get-task-allow` | Default (`task_for_pid`) attach unprivileged — e.g. the test/benchmark harness. Can't be notarized (`get-task-allow` is rejected), so it never goes in the bundle. |
+| `x87sidecar` | ad-hoc, **no entitlements** | Can be notarized. The default (`task_for_pid`) attach then only works as root (`sudo`); cooperative attach works without it. |
+| `x87sidecar_entitled` | same Mach-O + `cs.debugger` + `get-task-allow` | Default attach works against any target without `sudo` — the first attach just triggers a one-time macOS developer-tools authorization dialog. Not notarizable (`get-task-allow` is rejected). |
 
-The two are byte-identical except for the signature. Both are published (ad-hoc) as `.tar.xz` assets on each GitHub release; downloaded copies carry the quarantine attribute, so clear it with `xattr -d com.apple.quarantine <file>` before running. The test scripts point at `x87sidecar_entitled`; under CI's `sudo` either would work.
+The two are byte-identical except for the signature. Downloaded copies carry the quarantine attribute, so clear it with `xattr -d com.apple.quarantine <file>` before running. The test scripts point at `x87sidecar_entitled`; under CI's `sudo` either would work.
 
 ## Status
 
