@@ -350,9 +350,12 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask, const Translate
     if (g_rosetta_config != nullptr && g_rosetta_config->loader_log_ops != 0U) {
         const uint16_t op = localIR[req.insn_idx].opcode();
         const char* name = (op < kOpcodeNames.size()) ? kOpcodeNames[op] : "?";
-        fprintf(stdout, "[rosettax87] op %s (0x%x) idx=%lld/%lld\n", name,
-                static_cast<unsigned>(op), static_cast<long long>(req.insn_idx),
-                static_cast<long long>(req.num_instrs));
+        fprintf(stdout,
+                "[rosettax87] op %s (0x%x) idx=%lld/%lld gpr=%08x fpr=%08x "
+                "unocc=%08x pinned=%08x\n",
+                name, static_cast<unsigned>(op), static_cast<long long>(req.insn_idx),
+                static_cast<long long>(req.num_instrs), tr.free_gpr_mask, tr.free_fpr_mask,
+                tr._unoccupied_temporary_fprs_for_xmm_scalars, tr._pinned_temporary_scalars);
         fflush(stdout);
     }
 

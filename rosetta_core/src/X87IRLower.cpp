@@ -890,11 +890,14 @@ void lower(Context& ctx, TranslationResult* result) {
             }
 
             // ── Transcendentals ─────────────────────────────────────────────
-            // Inputs are FMOVed into d0 (and d1 for 2-input ops) before the
-            // *_core helpers run.  d0/d1 are NOT in kFprScratchPool, so once
-            // we release dying inputs the polynomial body has the full
-            // 8-slot pool for internal scratch.  Result is FMOVed from d0
-            // back into a freshly-allocated scratch FPR.
+            // Each input is copied into a freshly-allocated scratch-pool FPR
+            // that the *_core helper takes ownership of (it frees the copy
+            // after its last read, before the polynomial's peak-pressure
+            // window).  The core returns a pool FPR holding the result,
+            // which becomes the node's FPR directly — no shim moves.
+            // Guest registers (v0–v15) and stock temporaries (v16–v23) are
+            // live x86 state and are never touched (the previous d0/d1/d2
+            // convention corrupted guest xmm values live across the op).
             //
             // The mid-case free_dead_inputs() lets pool slots that were
             // holding the ReadSt / Load / prior-arith outputs be reclaimed
@@ -903,86 +906,82 @@ void lower(Context& ctx, TranslationResult* result) {
             case Op::FSin:
             case Op::FCos: {
                 int Dn = fprs.get(n.inputs[0]);
-                emit_fmov_f64(buf, /*Dd=*/0, Dn);
+                int Dio = alloc_free_fpr(*result);
+                emit_fmov_f64(buf, Dio, Dn);
                 fprs.free_dead_inputs(*result, n, i);
                 int Xconst = alloc_free_gpr(*result);
                 emit_movz_movk_abs64(buf, Xconst,
                                      rosetta_core::get_transcendental_constants_addr());
-                TranslatorX87::emit_inline_trig_body(*result, buf, /*Dx=*/0, Xconst, /*Dd_out=*/0,
-                                                     n.op == Op::FSin
-                                                         ? TranslatorX87::TrigReduceMode::Sin
-                                                         : TranslatorX87::TrigReduceMode::Cos);
+                int Dres = TranslatorX87::emit_inline_trig_body(
+                    *result, buf, Dio, Xconst,
+                    n.op == Op::FSin ? TranslatorX87::TrigReduceMode::Sin
+                                     : TranslatorX87::TrigReduceMode::Cos);
                 free_gpr(*result, Xconst);
                 TranslatorX87::emit_clear_x87_cc_bits(*result, buf, Xbase);
-                int Dd = alloc_free_fpr(*result);
-                fprs.node_fpr[i] = static_cast<int8_t>(Dd);
-                emit_fmov_f64(buf, Dd, /*Dn=*/0);
+                fprs.node_fpr[i] = static_cast<int8_t>(Dres);
                 break;
             }
             case Op::FPtan: {
                 int Dn = fprs.get(n.inputs[0]);
-                emit_fmov_f64(buf, /*Dd=*/0, Dn);
+                int Dio = alloc_free_fpr(*result);
+                emit_fmov_f64(buf, Dio, Dn);
                 fprs.free_dead_inputs(*result, n, i);
                 int Xconst = alloc_free_gpr(*result);
                 emit_movz_movk_abs64(buf, Xconst,
                                      rosetta_core::get_transcendental_constants_addr());
-                TranslatorX87::emit_inline_fptan_core(*result, buf, /*Dx_in=*/0, /*Dd_out=*/0,
-                                                      Xconst);
+                int Dres = TranslatorX87::emit_inline_fptan_core(*result, buf, Dio, Xconst);
                 free_gpr(*result, Xconst);
                 TranslatorX87::emit_clear_x87_cc_bits(*result, buf, Xbase);
-                int Dd = alloc_free_fpr(*result);
-                fprs.node_fpr[i] = static_cast<int8_t>(Dd);
-                emit_fmov_f64(buf, Dd, /*Dn=*/0);
+                fprs.node_fpr[i] = static_cast<int8_t>(Dres);
                 break;
             }
             case Op::FPatan: {
                 int Dy = fprs.get(n.inputs[0]);
                 int Dx = fprs.get(n.inputs[1]);
-                emit_fmov_f64(buf, /*Dd=*/0, Dx);
-                emit_fmov_f64(buf, /*Dd=*/1, Dy);
+                int Dio_x = alloc_free_fpr(*result);
+                emit_fmov_f64(buf, Dio_x, Dx);
+                int Dio_y = alloc_free_fpr(*result);
+                emit_fmov_f64(buf, Dio_y, Dy);
                 fprs.free_dead_inputs(*result, n, i);
                 int Xconst = alloc_free_gpr(*result);
                 emit_movz_movk_abs64(buf, Xconst,
                                      rosetta_core::get_transcendental_constants_addr());
-                TranslatorX87::emit_inline_fpatan_core(*result, buf, /*Dy_in=*/1, /*Dx_in=*/0,
-                                                       /*Dd_out=*/0, Xconst);
+                int Dres =
+                    TranslatorX87::emit_inline_fpatan_core(*result, buf, Dio_y, Dio_x, Xconst);
                 free_gpr(*result, Xconst);
                 // fpatan's spec leaves C0..C3 undefined — no clear.
-                int Dd = alloc_free_fpr(*result);
-                fprs.node_fpr[i] = static_cast<int8_t>(Dd);
-                emit_fmov_f64(buf, Dd, /*Dn=*/0);
+                fprs.node_fpr[i] = static_cast<int8_t>(Dres);
                 break;
             }
             case Op::FYl2x: {
                 int Dy = fprs.get(n.inputs[0]);
                 int Dx = fprs.get(n.inputs[1]);
-                emit_fmov_f64(buf, /*Dd=*/0, Dx);
-                emit_fmov_f64(buf, /*Dd=*/1, Dy);
+                int Dio_x = alloc_free_fpr(*result);
+                emit_fmov_f64(buf, Dio_x, Dx);
+                int Dio_y = alloc_free_fpr(*result);
+                emit_fmov_f64(buf, Dio_y, Dy);
                 fprs.free_dead_inputs(*result, n, i);
                 int Xconst = alloc_free_gpr(*result);
                 emit_movz_movk_abs64(buf, Xconst,
                                      rosetta_core::get_transcendental_constants_addr());
-                TranslatorX87::emit_inline_fyl2x_core(*result, buf, /*Dy_in=*/1, /*Dx_in=*/0,
-                                                      /*Dd_out=*/0, Xconst);
+                int Dres =
+                    TranslatorX87::emit_inline_fyl2x_core(*result, buf, Dio_y, Dio_x, Xconst);
                 free_gpr(*result, Xconst);
                 // fyl2x's spec leaves C0..C3 undefined — no clear.
-                int Dd = alloc_free_fpr(*result);
-                fprs.node_fpr[i] = static_cast<int8_t>(Dd);
-                emit_fmov_f64(buf, Dd, /*Dn=*/0);
+                fprs.node_fpr[i] = static_cast<int8_t>(Dres);
                 break;
             }
             case Op::FScale: {
                 int Dx = fprs.get(n.inputs[0]);
                 int Dy = fprs.get(n.inputs[1]);
-                emit_fmov_f64(buf, /*Dd=*/0, Dx);
-                emit_fmov_f64(buf, /*Dd=*/1, Dy);
+                int Dio_x = alloc_free_fpr(*result);
+                emit_fmov_f64(buf, Dio_x, Dx);
+                int Dio_y = alloc_free_fpr(*result);
+                emit_fmov_f64(buf, Dio_y, Dy);
                 fprs.free_dead_inputs(*result, n, i);
-                TranslatorX87::emit_inline_fscale_core(*result, buf, /*Dx_in=*/0, /*Dy_in=*/1,
-                                                       /*Dd_out=*/0);
+                int Dres = TranslatorX87::emit_inline_fscale_core(*result, buf, Dio_x, Dio_y);
                 // fscale's spec leaves C0..C3 undefined — no clear.
-                int Dd = alloc_free_fpr(*result);
-                fprs.node_fpr[i] = static_cast<int8_t>(Dd);
-                emit_fmov_f64(buf, Dd, /*Dn=*/0);
+                fprs.node_fpr[i] = static_cast<int8_t>(Dres);
                 break;
             }
 
@@ -1608,21 +1607,23 @@ int peak_live_gprs(const Context& ctx, int budget, int* first_over_node, bool fa
             case Op::FCSel:
                 break;
 
-            // Transcendentals — peak GPR demand inside emit_inline_<op>_core:
+            // Transcendentals — peak GPR demand inside emit_inline_<op>_core
+            // (the NZCV save GPR that guards guest EFLAGS in the flag-
+            // clobbering cores is included in each count):
             //   sin/cos: Xconst held + ~2 internal in trig_range_reduce/poly = 3
-            //   fptan:   Xconst + Xqi held + ~1 brief = 3
-            //   fpatan:  Xconst + Xsign_xy held + ~1 brief = 3
+            //   fptan:   Xconst + Xqi held + brief Xnzcv at the TST = 3
+            //   fpatan:  Xconst + Xsign_xy held + Xnzcv over steps 3-5 = 3
             //   fyl2x:   Xconst + ~3 inside log2 (Xu, Xu_off, Xidx peak) = 4
-            //   fscale:  Wd_k + Wd_e + brief Xtemp during overflow CSEL = 3
+            //   fscale:  Wd_k + Wd_e + Xnzcv + brief Xtemp at overflow CSEL = 4
             // Conservative bound across the family.
             case Op::FSin:
             case Op::FCos:
             case Op::FPtan:
             case Op::FPatan:
-            case Op::FScale:
                 transient = 3;
                 break;
             case Op::FYl2x:
+            case Op::FScale:
                 transient = 4;
                 break;
 
@@ -1928,28 +1929,38 @@ int peak_live_fprs(const Context& ctx, int budget, int* first_over_node) {
             raise_peak(live + spike, i);
         }
 
-        // Transcendentals: the lowering FMOVs inputs to d0/d1 (not in pool),
-        // calls free_dead_inputs() mid-case, then runs the polynomial body
-        // which allocates many transient FPRs from the pool.  Model the
-        // peak as (live - dying_inputs + transient_spike), where dying
-        // inputs have already been released by the time the spike happens.
-        // Output is allocated AFTER the core, so it's not part of the spike.
+        // Transcendentals: the lowering copies each input into a freshly
+        // allocated pool FPR that the *_core takes ownership of, calls
+        // free_dead_inputs() mid-case, then runs the polynomial body which
+        // allocates many transient FPRs from the pool.  Model the peak as
+        // (live - 1 - dying_inputs + transient_spike): dying inputs have
+        // already been released by the time the spike happens, and the
+        // node's output is one of the core's transients (the core returns
+        // the result in a pool reg it allocated) — it's counted inside
+        // trans_spike, so subtract the produces_fpr slot from `live`.
         //
-        // Peak transient FPRs inside each *_core (re-verified by inspection,
-        // 2026-05-03 — earlier estimates were too low and the gate let real
-        // WoW blocks through that overflowed the 8-slot pool):
-        //   trig_body (sin/cos): range_reduce holds Dn + Dr + Dtmp = 3,
-        //     then frees Dn/Dtmp; sin_poly_estrin then allocs Dr2 + Dr4 +
-        //     Dp2 + Dp3 + Dtmp = 5 internal while Dr + Dy_out (held by
-        //     trig_body) are still live → peak 7
-        //   fptan:   step 6 inner peaks at Dr + Dr2 + Dr4 + Dr8 + Dp_acc +
-        //     Dtmp + Dp_b + Dp_c = 8 simultaneously
-        //   fpatan:  step 7 peaks at Dz + Dshift + Dz2 + Dz3 + Dpoly +
-        //     Dtmp = 6
-        //   fyl2x:   log2 step 8 polynomial holds Dr + Dr2 + Dhi + Dy + Dp +
-        //     Dtmp + Dlog2c (still live) = 7 simultaneous; the +Dy_in fmul
-        //     at end is after log2's scratch is freed
-        //   fscale:  Dd_m + Dd_norm = 2
+        // Peak pool FPRs inside each *_core, INCLUDING input copies still
+        // live at the peak and the result reg (re-verified by inspection,
+        // 2026-07-13 for the ownership-contract rework — earlier estimates
+        // were too low and the gate let real WoW blocks through that
+        // overflowed the 8-slot pool):
+        //   trig_body (sin/cos): input copy freed at end of range_reduce;
+        //     sin_poly_estrin allocs Dr2 + Dr4 + Dp2 + Dp3 + Dtmp = 5
+        //     internal while Dr + Dy (the result reg) are still live
+        //     → peak 7
+        //   fptan:   input copy freed after step 4; step 6 inner peaks at
+        //     Dr + Dr2 + Dr4 + Dr8 + Dp_acc + Dtmp + Dp_b + Dp_c = 8
+        //     simultaneously (result reuses Dnum_final later, ≤ 8)
+        //   fpatan:  Dy copy freed at step 2, Dx copy at step 5; peak 6 at
+        //     both step 3 (Dx + Dax + Day + Dneg_ax + Dnum + Dden) and
+        //     step 7 (Dz + Dshift + Dz2 + Dz3 + Dpoly + Dtmp); result
+        //     reuses Dz
+        //   fyl2x:   Dy copy lives to the final fmul and Dx copy doubles as
+        //     log2's output slot (= result reg), so both ride across log2's
+        //     6-deep internal peak (step 9: Dr + Dr2 + Dhi + Dy + Dp +
+        //     Dtmp) → peak 8, exactly the pool size
+        //   fscale:  both input copies live across Dd_m + Dd_norm at the
+        //     FMUL → peak 4 (result reuses Dd_norm)
         int trans_spike = 0;
         switch (n.op) {
             case Op::FSin:
@@ -1963,10 +1974,10 @@ int peak_live_fprs(const Context& ctx, int budget, int* first_over_node) {
                 trans_spike = 6;
                 break;
             case Op::FYl2x:
-                trans_spike = 7;
+                trans_spike = 8;
                 break;
             case Op::FScale:
-                trans_spike = 2;
+                trans_spike = 4;
                 break;
             default:
                 break;
@@ -1978,9 +1989,9 @@ int peak_live_fprs(const Context& ctx, int budget, int* first_over_node) {
                     dying_inputs++;
                 }
             }
-            // The output (just allocated above via produces_fpr=true) is in d0
-            // during the spike — it's not yet in the scratch pool, so don't
-            // count it.  Subtract 1 from `live` to compensate.
+            // The output (just counted above via produces_fpr=true) is the
+            // pool reg the core returns — already inside trans_spike, so
+            // subtract 1 from `live` to avoid double-counting it.
             const int spike = (live - 1) - dying_inputs + trans_spike;
             raise_peak(spike, i);
         }

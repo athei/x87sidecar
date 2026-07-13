@@ -49,6 +49,16 @@ struct X87Cache {
 
     IRBlock* prev_block = nullptr;
 
+    // Stock's free_gpr_mask word as it arrived at the current x87 entry
+    // (run start or isolated op).  Stock's translate_insn carries its
+    // register-allocator state across a block in this TR field; every
+    // exit path must write this captured word back (minus pinned_mask()
+    // while a run is active) instead of a scratch-pool constant —
+    // overwriting it with kGprScratchMask poisoned stock's allocator for
+    // the rest of the block.  Defaults to the full pool so offline tools
+    // that seed their TR with kGprScratchMask behave identically.
+    uint32_t stock_free_gpr_mask = 0x3FC00000U;  // = kGprScratchMask
+
     // X87_PROFILE — per-block translation-path tally.  Reset on block
     // transition.  Each increment is mirrored to profile::set_block_tally
     // so the dumped value at exit reflects the final count, even though
@@ -117,7 +127,6 @@ struct X87Cache {
 
     bool active() const;
     void invalidate();
-    void invalidate(uint32_t& free_gpr_mask, uint32_t scratch_mask);
     void set_run(int run_length);
     void tick();
     uint32_t pinned_mask() const;

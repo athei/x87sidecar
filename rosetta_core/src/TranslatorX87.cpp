@@ -3288,8 +3288,7 @@ auto translate_fnop(TranslationResult* a1, IRInstr* /*a2*/) -> void {
 // FMUL handles the remaining special-case fall-out automatically:
 //   ST(0) NaN → result NaN; 0·∞ → NaN; ∞·finite → ±∞ etc.
 // =============================================================================
-void emit_inline_fscale_core(TranslationResult& a1, AssemblerBuffer& buf, int Dx_in, int Dy_in,
-                             int Dd_out) {
+int emit_inline_fscale_core(TranslationResult& a1, AssemblerBuffer& buf, int Dx_in, int Dy_in) {
     // ── k = trunc(Dy_in) as 32-bit signed (saturating) ──
     const int Wd_k = alloc_free_gpr(a1);
     emit_fcvtzs(buf, /*ftype=*/1 /*f64*/, /*is_64bit_int=*/0, Wd_k, Dy_in);
@@ -3319,6 +3318,13 @@ void emit_inline_fscale_core(TranslationResult& a1, AssemblerBuffer& buf, int Dx
     constexpr int kLT = 0xB;  // signed less-than
     constexpr int kVS = 0x6;  // overflow set (FP unordered)
 
+    // Guest EFLAGS may be live in NZCV across this op (stock's own fscale
+    // lowering preserves them) — save across the CMP/CMN/FCMP region,
+    // which runs to the final FCSEL.  Peak GPR concurrency with the save
+    // is 4 (Wd_k + Wd_e + Xtemp + Xnzcv), the in-run scratch budget.
+    const int Xnzcv = alloc_free_gpr(a1);
+    emit_mrs_nzcv(buf, Xnzcv);
+
     // CMP Wd_k, #1023.  GT (signed) → k > 1023 → overflow.
     emit_add_imm(buf, /*is_64bit=*/0, /*is_sub=*/1, /*is_set_flags=*/1,
                  /*shift=*/0, /*imm12=*/1023, Wd_k, /*Rd=*/31);
@@ -3344,16 +3350,23 @@ void emit_inline_fscale_core(TranslationResult& a1, AssemblerBuffer& buf, int Dx
     emit_fmov_x_to_d(buf, Dd_m, Wd_e);
     free_gpr(a1, Wd_e);
 
-    // result_norm = Dx_in * Dd_m
+    // result_norm = Dx_in * Dd_m.  The FMUL is the last read of Dx_in —
+    // free it right after.
     const int Dd_norm = alloc_free_fpr(a1);
     emit_fmul_f64(buf, Dd_norm, Dx_in, Dd_m);
+    free_fpr(a1, Dx_in);
     free_fpr(a1, Dd_m);
 
     // FCMP Dy_in, Dy_in → V=1 iff Dy_in is NaN.
-    // FCSEL Dd_out = (NaN) ? Dy_in : Dd_norm
+    // FCSEL result = (NaN) ? Dy_in : Dd_norm — written back over Dd_norm's
+    // slot (the select reads it first), which becomes the returned result
+    // reg.  The FCSEL is also Dy_in's last read.
     emit_fcmp_f64(buf, Dy_in, Dy_in);
-    emit_fcsel_f64(buf, Dd_out, Dy_in, Dd_norm, kVS);
-    free_fpr(a1, Dd_norm);
+    emit_fcsel_f64(buf, Dd_norm, Dy_in, Dd_norm, kVS);
+    emit_msr_nzcv(buf, Xnzcv);  // NaN select done — restore guest flags
+    free_gpr(a1, Xnzcv);
+    free_fpr(a1, Dy_in);
+    return Dd_norm;
 }
 
 auto translate_fscale(TranslationResult* a1, IRInstr* /*a2*/) -> void {
@@ -3363,14 +3376,17 @@ auto translate_fscale(TranslationResult* a1, IRInstr* /*a2*/) -> void {
     const int Xst_base = x87_get_st_base(*a1);
     const int Wd_tmp = alloc_gpr(*a1, 2);
 
-    // Inputs loaded directly into d0 / d1 (not in scratch pool — frees the
-    // pool for the core's internal scratch).  Output lands in d0.
-    emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, /*Dd=*/0, Xst_base);
-    emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, 1), Wd_tmp, /*Dd=*/1, Xst_base);
+    // Inputs loaded into scratch-pool FPRs the core takes ownership of;
+    // the returned pool FPR holds the result.
+    const int Dx = alloc_free_fpr(*a1);
+    emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Dx, Xst_base);
+    const int Dy = alloc_free_fpr(*a1);
+    emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, 1), Wd_tmp, Dy, Xst_base);
 
-    emit_inline_fscale_core(*a1, buf, /*Dx_in=*/0, /*Dy_in=*/1, /*Dd_out=*/0);
+    const int Dres = emit_inline_fscale_core(*a1, buf, Dx, Dy);
 
-    emit_store_st(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, /*Dd=*/0, Xst_base);
+    emit_store_st(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Dres, Xst_base);
+    free_fpr(*a1, Dres);
 
     x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp);
     free_gpr(*a1, Wd_tmp);
@@ -4284,12 +4300,13 @@ auto translate_fsin(TranslationResult* a1, IRInstr* /*a2*/) -> void {
     auto [Xbase, Wd_top] = x87_begin(*a1, buf);
     const int Wd_tmp = alloc_gpr(*a1, 2);
 
-    emit_inline_fsin(*a1, buf, Xbase, Wd_top, Wd_tmp);
+    const int Dres = emit_inline_fsin(*a1, buf, Xbase, Wd_top, Wd_tmp);
 
-    // d0 holds sin(input).  Replace ST(0) at its current physical depth.
+    // Dres holds sin(input).  Replace ST(0) at its current physical depth.
     const int Xst_base = x87_get_st_base(*a1);
     const int depth_st0 = resolve_depth(*a1, 0);
-    emit_store_st(buf, Xbase, Wd_top, depth_st0, Wd_tmp, /*Dd=*/0, Xst_base);
+    emit_store_st(buf, Xbase, Wd_top, depth_st0, Wd_tmp, Dres, Xst_base);
+    free_fpr(*a1, Dres);
 
     x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp);
     free_gpr(*a1, Wd_tmp);
@@ -4310,12 +4327,13 @@ auto translate_fcos(TranslationResult* a1, IRInstr* /*a2*/) -> void {
     auto [Xbase, Wd_top] = x87_begin(*a1, buf);
     const int Wd_tmp = alloc_gpr(*a1, 2);
 
-    emit_inline_fcos(*a1, buf, Xbase, Wd_top, Wd_tmp);
+    const int Dres = emit_inline_fcos(*a1, buf, Xbase, Wd_top, Wd_tmp);
 
-    // d0 holds cos(input).  Replace ST(0) at its current physical depth.
+    // Dres holds cos(input).  Replace ST(0) at its current physical depth.
     const int Xst_base = x87_get_st_base(*a1);
     const int depth_st0 = resolve_depth(*a1, 0);
-    emit_store_st(buf, Xbase, Wd_top, depth_st0, Wd_tmp, /*Dd=*/0, Xst_base);
+    emit_store_st(buf, Xbase, Wd_top, depth_st0, Wd_tmp, Dres, Xst_base);
+    free_fpr(*a1, Dres);
 
     x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp);
     free_gpr(*a1, Wd_tmp);
@@ -4324,8 +4342,9 @@ auto translate_fcos(TranslationResult* a1, IRInstr* /*a2*/) -> void {
 // =============================================================================
 // FPTAN — replace ST(0) with tan(ST(0)); push 1.0.
 //
-// JIT: load ST(0)→d0, IPC returns d0=tan, store d0 at depth=0 (replace
-// ST(0)), then x87_push and store FMOV-immediate 1.0 at new ST(0).
+// JIT: emit_inline_fptan returns the pool FPR holding tan; store it at
+// depth=0 (replace ST(0)), then x87_push and store FMOV-immediate 1.0
+// at new ST(0).
 // =============================================================================
 auto translate_fptan(TranslationResult* a1, IRInstr* /*a2*/) -> void {
     AssemblerBuffer& buf = a1->insn_buf;
@@ -4333,12 +4352,13 @@ auto translate_fptan(TranslationResult* a1, IRInstr* /*a2*/) -> void {
     const int Wd_tmp = alloc_gpr(*a1, 2);
     const int Wd_tmp2 = alloc_free_gpr(*a1);
 
-    emit_inline_fptan(*a1, buf, Xbase, Wd_top, Wd_tmp);
+    const int Dres = emit_inline_fptan(*a1, buf, Xbase, Wd_top, Wd_tmp);
 
     const int Xst_base = x87_get_st_base(*a1);
     const int depth_st0 = resolve_depth(*a1, 0);
-    // Replace old ST(0) with tan (d0).
-    emit_store_st(buf, Xbase, Wd_top, depth_st0, Wd_tmp, /*Dd=*/0, Xst_base);
+    // Replace old ST(0) with tan.
+    emit_store_st(buf, Xbase, Wd_top, depth_st0, Wd_tmp, Dres, Xst_base);
+    free_fpr(*a1, Dres);
     // Push and write 1.0 at new ST(0).
     x87_push(buf, *a1, Xbase, Wd_top, Wd_tmp, Wd_tmp2);
     const int Dd_one = alloc_free_fpr(*a1);
@@ -4354,10 +4374,10 @@ auto translate_fptan(TranslationResult* a1, IRInstr* /*a2*/) -> void {
 // =============================================================================
 // FSINCOS — replace ST(0) with sin(ST(0)); push cos(ST(0)).
 //
-// JIT: emit_inline_fsincos returns (d0=sin, d1=cos).  Store d0 at
-// depth=0 (replace ST(0) with sin), then x87_push so TOP decrements
-// and the tag of the new ST(0) becomes valid, then store d1 at the
-// (new) depth=0 (= cos at new top).
+// JIT: emit_inline_fsincos returns the pool FPR pair (sin, cos).  Store
+// sin at depth=0 (replace ST(0)), then x87_push so TOP decrements and
+// the tag of the new ST(0) becomes valid, then store cos at the (new)
+// depth=0 (= cos at new top).
 // =============================================================================
 auto translate_fsincos(TranslationResult* a1, IRInstr* /*a2*/) -> void {
     AssemblerBuffer& buf = a1->insn_buf;
@@ -4365,16 +4385,18 @@ auto translate_fsincos(TranslationResult* a1, IRInstr* /*a2*/) -> void {
     const int Wd_tmp = alloc_gpr(*a1, 2);
     const int Wd_tmp2 = alloc_free_gpr(*a1);
 
-    emit_inline_fsincos(*a1, buf, Xbase, Wd_top, Wd_tmp);
+    const auto [Dsin, Dcos] = emit_inline_fsincos(*a1, buf, Xbase, Wd_top, Wd_tmp);
 
     const int Xst_base = x87_get_st_base(*a1);
     const int depth_st0 = resolve_depth(*a1, 0);
-    // Replace old ST(0) with sin (d0).
-    emit_store_st(buf, Xbase, Wd_top, depth_st0, Wd_tmp, /*Dd=*/0, Xst_base);
-    // Push and write cos (d1) at new ST(0).  perm_flush_before_stack_change
+    // Replace old ST(0) with sin.
+    emit_store_st(buf, Xbase, Wd_top, depth_st0, Wd_tmp, Dsin, Xst_base);
+    free_fpr(*a1, Dsin);
+    // Push and write cos at new ST(0).  perm_flush_before_stack_change
     // is handled inside x87_push.
     x87_push(buf, *a1, Xbase, Wd_top, Wd_tmp, Wd_tmp2);
-    emit_store_st(buf, Xbase, Wd_top, /*stack_depth=*/0, Wd_tmp, /*Dd=*/1, Xst_base);
+    emit_store_st(buf, Xbase, Wd_top, /*stack_depth=*/0, Wd_tmp, Dcos, Xst_base);
+    free_fpr(*a1, Dcos);
 
     free_gpr(*a1, Wd_tmp2);
     x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp);
@@ -4386,11 +4408,12 @@ auto translate_fpatan(TranslationResult* a1, IRInstr* /*a2*/) -> void {
     auto [Xbase, Wd_top] = x87_begin(*a1, buf);
     const int Wd_tmp = alloc_gpr(*a1, 2);
 
-    emit_inline_fpatan(*a1, buf, Xbase, Wd_top, Wd_tmp);
+    const int Dres = emit_inline_fpatan(*a1, buf, Xbase, Wd_top, Wd_tmp);
 
     const int Xst_base = x87_get_st_base(*a1);
     const int depth_st1 = resolve_depth(*a1, 1);
-    emit_store_st(buf, Xbase, Wd_top, depth_st1, Wd_tmp, /*Dd=*/0, Xst_base);
+    emit_store_st(buf, Xbase, Wd_top, depth_st1, Wd_tmp, Dres, Xst_base);
+    free_fpr(*a1, Dres);
 
     x87_pop(buf, *a1, Xbase, Wd_top, Wd_tmp);
 
@@ -4403,11 +4426,12 @@ auto translate_fyl2x(TranslationResult* a1, IRInstr* /*a2*/) -> void {
     auto [Xbase, Wd_top] = x87_begin(*a1, buf);
     const int Wd_tmp = alloc_gpr(*a1, 2);
 
-    emit_inline_fyl2x(*a1, buf, Xbase, Wd_top, Wd_tmp);
+    const int Dres = emit_inline_fyl2x(*a1, buf, Xbase, Wd_top, Wd_tmp);
 
     const int Xst_base = x87_get_st_base(*a1);
     const int depth_st1 = resolve_depth(*a1, 1);
-    emit_store_st(buf, Xbase, Wd_top, depth_st1, Wd_tmp, /*Dd=*/0, Xst_base);
+    emit_store_st(buf, Xbase, Wd_top, depth_st1, Wd_tmp, Dres, Xst_base);
+    free_fpr(*a1, Dres);
 
     x87_pop(buf, *a1, Xbase, Wd_top, Wd_tmp);
 
@@ -4420,11 +4444,12 @@ auto translate_fyl2xp1(TranslationResult* a1, IRInstr* /*a2*/) -> void {
     auto [Xbase, Wd_top] = x87_begin(*a1, buf);
     const int Wd_tmp = alloc_gpr(*a1, 2);
 
-    emit_inline_fyl2xp1(*a1, buf, Xbase, Wd_top, Wd_tmp);
+    const int Dres = emit_inline_fyl2xp1(*a1, buf, Xbase, Wd_top, Wd_tmp);
 
     const int Xst_base = x87_get_st_base(*a1);
     const int depth_st1 = resolve_depth(*a1, 1);
-    emit_store_st(buf, Xbase, Wd_top, depth_st1, Wd_tmp, /*Dd=*/0, Xst_base);
+    emit_store_st(buf, Xbase, Wd_top, depth_st1, Wd_tmp, Dres, Xst_base);
+    free_fpr(*a1, Dres);
 
     x87_pop(buf, *a1, Xbase, Wd_top, Wd_tmp);
 
@@ -4448,11 +4473,12 @@ auto translate_fprem(TranslationResult* a1, IRInstr* /*a2*/) -> void {
     auto [Xbase, Wd_top] = x87_begin(*a1, buf);
     const int Wd_tmp = alloc_gpr(*a1, 2);
 
-    emit_inline_fprem(*a1, buf, Xbase, Wd_top, Wd_tmp);
+    const int Dres = emit_inline_fprem(*a1, buf, Xbase, Wd_top, Wd_tmp);
 
     const int Xst_base = x87_get_st_base(*a1);
     const int depth_st0 = resolve_depth(*a1, 0);
-    emit_store_st(buf, Xbase, Wd_top, depth_st0, Wd_tmp, /*Dd=*/0, Xst_base);
+    emit_store_st(buf, Xbase, Wd_top, depth_st0, Wd_tmp, Dres, Xst_base);
+    free_fpr(*a1, Dres);
 
     x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp);
     free_gpr(*a1, Wd_tmp);
@@ -4469,11 +4495,12 @@ auto translate_fprem1(TranslationResult* a1, IRInstr* /*a2*/) -> void {
     auto [Xbase, Wd_top] = x87_begin(*a1, buf);
     const int Wd_tmp = alloc_gpr(*a1, 2);
 
-    emit_inline_fprem1(*a1, buf, Xbase, Wd_top, Wd_tmp);
+    const int Dres = emit_inline_fprem1(*a1, buf, Xbase, Wd_top, Wd_tmp);
 
     const int Xst_base = x87_get_st_base(*a1);
     const int depth_st0 = resolve_depth(*a1, 0);
-    emit_store_st(buf, Xbase, Wd_top, depth_st0, Wd_tmp, /*Dd=*/0, Xst_base);
+    emit_store_st(buf, Xbase, Wd_top, depth_st0, Wd_tmp, Dres, Xst_base);
+    free_fpr(*a1, Dres);
 
     x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp);
     free_gpr(*a1, Wd_tmp);
@@ -4490,11 +4517,12 @@ auto translate_f2xm1(TranslationResult* a1, IRInstr* /*a2*/) -> void {
     auto [Xbase, Wd_top] = x87_begin(*a1, buf);
     const int Wd_tmp = alloc_gpr(*a1, 2);
 
-    emit_inline_f2xm1(*a1, buf, Xbase, Wd_top, Wd_tmp);
+    const int Dres = emit_inline_f2xm1(*a1, buf, Xbase, Wd_top, Wd_tmp);
 
     const int Xst_base = x87_get_st_base(*a1);
     const int depth_st0 = resolve_depth(*a1, 0);
-    emit_store_st(buf, Xbase, Wd_top, depth_st0, Wd_tmp, /*Dd=*/0, Xst_base);
+    emit_store_st(buf, Xbase, Wd_top, depth_st0, Wd_tmp, Dres, Xst_base);
+    free_fpr(*a1, Dres);
 
     x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp);
     free_gpr(*a1, Wd_tmp);

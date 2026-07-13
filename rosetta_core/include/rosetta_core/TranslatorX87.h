@@ -109,14 +109,17 @@ auto translate_fxtract(TranslationResult* a1, IRInstr* a2) -> void;
 
 auto translate_fscale(TranslationResult* a1, IRInstr* a2) -> void;
 
-// FPR-level core of fscale: produces (Dx_in * 2^trunc(Dy_in)) in Dd_out,
-// with NaN-on-NaN(Dy_in) propagation matching the x87 spec.  Caller owns
-// Dx_in / Dy_in (read-only).  Internal scratch: 2 transient GPRs (Wd_k,
-// Wd_e + a brief Xtemp during overflow CSEL) and 2 transient FPRs (Dd_m,
-// Dd_norm).  No Xconst needed (multiplier built from raw bitfield ops).
-// fscale's spec leaves C0..C3 undefined, so the core does not clear them.
-void emit_inline_fscale_core(TranslationResult& a1, AssemblerBuffer& buf, int Dx_in, int Dy_in,
-                             int Dd_out);
+// FPR-level core of fscale: returns a freshly-owned pool FPR holding
+// (Dx_in * 2^trunc(Dy_in)), with NaN-on-NaN(Dy_in) propagation matching
+// the x87 spec.  Both inputs must be scratch-pool FPRs; the core takes
+// ownership (Dx_in is freed after the FMUL, Dy_in after the final FCSEL
+// — Dy_in stays live across the whole body).  Internal scratch: 2
+// transient GPRs (Wd_k, Wd_e + a brief Xtemp during overflow CSEL) and
+// 2 transient FPRs (Dd_m, Dd_norm; Dd_norm doubles as the result reg) —
+// peak pool-FPR usage is 4 including both inputs.  No Xconst needed
+// (multiplier built from raw bitfield ops).  fscale's spec leaves C0..C3
+// undefined, so the core does not clear them.
+int emit_inline_fscale_core(TranslationResult& a1, AssemblerBuffer& buf, int Dx_in, int Dy_in);
 
 auto translate_fbstp(TranslationResult* a1, IRInstr* a2) -> void;
 

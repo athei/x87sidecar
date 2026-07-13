@@ -149,11 +149,6 @@ void X87Cache::invalidate() {
     reset_perm();
 }
 
-void X87Cache::invalidate(uint32_t& free_gpr_mask, uint32_t scratch_mask) {
-    invalidate();
-    free_gpr_mask = scratch_mask;
-}
-
 void X87Cache::set_run(int run_length) {
     if (run_length >= 2) {
         run_remaining = static_cast<int16_t>(run_length);
