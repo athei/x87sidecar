@@ -81,10 +81,10 @@ The build emits two signed artifacts from one link:
 
 | Artifact | Signing | Use |
 |---|---|---|
-| `x87sidecar` | ad-hoc, **no entitlements** | Ships in the bundle; cooperative attach only. Re-sign with Developer ID + hardened runtime for distribution, then notarize. |
-| `x87sidecar_entitled` | same Mach-O + `cs.debugger` + `get-task-allow` | Local default-attach (unprivileged) for the test/benchmark harness. Never shipped. |
+| `x87sidecar` | ad-hoc, **no entitlements** | Cooperative attach only. Goes in the app bundle — re-signed Developer ID + hardened runtime, then notarized. |
+| `x87sidecar_entitled` | same Mach-O + `cs.debugger` + `get-task-allow` | Default (`task_for_pid`) attach unprivileged — e.g. the test/benchmark harness. Can't be notarized (`get-task-allow` is rejected), so it never goes in the bundle. |
 
-The two are byte-identical except for the signature. The test scripts point at `x87sidecar_entitled`; under CI's `sudo` either would work.
+The two are byte-identical except for the signature. Both are published (ad-hoc) as `.tar.xz` assets on each GitHub release; downloaded copies carry the quarantine attribute, so clear it with `xattr -d com.apple.quarantine <file>` before running. The test scripts point at `x87sidecar_entitled`; under CI's `sudo` either would work.
 
 ## Status
 
