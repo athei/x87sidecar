@@ -170,7 +170,21 @@ constexpr size_t kListCount = 6;
 // stock-sized and no TR-size patch is needed. This is what lets the JIT-hook
 // install work identically for default (task_for_pid+ptrace, stopped pre-init)
 // and cooperative (task-port handshake, attached post-init) attach.
-constexpr size_t kStockTRSize = offsetof(TranslationResult, x87_cache);
+// Stock's real TranslationResult is 0x268 bytes — the size stock's own
+// allocator MOVZ passes (offset_finder's translation_result_size_pattern; the
+// AOT path patches this same MOVZ to 0x400 to make room for the appended
+// x87_cache).  Our struct definition carries reverse-engineered tail fields
+// past that (segments_*, field_280) up to offsetof(x87_cache)=0x288 — fields
+// stock never allocates.  We read/write back exactly stock's real size: stock
+// places each block's code buffer in the adjacent heap chunk (observed at
+// tr+0x280), so writing even the extra bytes past 0x268 overran into and
+// zeroed the block's first emitted ARM word — a 0x00000000 UDF that crashed
+// WoW on nearly every fld block.  The translator only ever touches fields well
+// below 0x268 (insn_buf, fixup lists, free_gpr/fpr masks, thread_context_
+// offsets), so trimming to the real size loses no state.
+constexpr size_t kStockTRSize = 0x268;
+static_assert(kStockTRSize <= offsetof(TranslationResult, x87_cache),
+              "stock TR size must not exceed our struct's pre-x87_cache prefix");
 std::mutex g_x87CacheMu;
 std::unordered_map<uint64_t, X87Cache> g_x87Cache;
 
@@ -259,10 +273,13 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask, const Translate
         return out;
     }
 
-    // Read parent's TR. Default-constructed local; we sterilise its list
+    // Read parent's TR. Value-initialised local; we sterilise its list
     // pointers before scope end so `~TransactionalList` runs `::operator
     // delete(nullptr)` (a no-op) instead of freeing arbitrary parent VAs.
-    TranslationResult tr;
+    // Value-init (not plain default-init) so the reverse-engineered tail past
+    // stock's real 0x268 size — which we deliberately do NOT read from the
+    // tracee — is deterministic zero rather than uninitialised.
+    TranslationResult tr{};
     // Read only the stock-sized TR from the tracee; x87_cache lives in our own
     // per-thread map (keyed by TR address), not in the tracee's heap.
     if (!readParent(parentTask, req.tr_addr, &tr, kStockTRSize)) {
@@ -394,6 +411,26 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask, const Translate
     } _cleanup{.insn_buf = insnGrew ? localInsnData : nullptr,
                .lists = {localPushed[0], localPushed[1], localPushed[2], localPushed[3],
                          localPushed[4], localPushed[5]}};
+
+    if (g_rosetta_config != nullptr && g_rosetta_config->loader_dump_emit != 0U &&
+        result.has_value() && insnEmitted > 0) {
+        // Hexdump the emitted AArch64 words of this request (guest pc +
+        // opcode + tracee buffer VA), so a bad encoding can be found by
+        // disassembling the dump offline.  EXTREMELY high volume.
+        const uint16_t op = localIR[req.insn_idx].opcode();
+        const char* name = (op < kOpcodeNames.size()) ? kOpcodeNames[op] : "?";
+        fprintf(stdout, "[rosettax87] EMIT pc=%08x op=%s idx=%lld/%lld at=%llx words=%llu:",
+                localIR[req.insn_idx].pc, name, static_cast<long long>(req.insn_idx),
+                static_cast<long long>(req.num_instrs),
+                reinterpret_cast<unsigned long long>(origInsnData) + origInsnEnd,
+                static_cast<unsigned long long>(insnEmitted / 4));
+        const auto* words = reinterpret_cast<const uint32_t*>(localInsnData + origInsnEnd);
+        for (uint64_t w = 0; w < insnEmitted / 4; w++) {
+            fprintf(stdout, " %08x", words[w]);
+        }
+        fprintf(stdout, "\n");
+        fflush(stdout);
+    }
 
     // We always write the TR back, even on None — Translator's default case
     // (and other unhandled paths) calls cache.invalidate() and resets the
