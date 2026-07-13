@@ -46,8 +46,18 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
     // consecutive x87 run.  x87_cache_set_run only activates if run >= 2.
     {
         if (block != cache.prev_block) {
-            cache.invalidate(translation_result->free_gpr_mask, kGprScratchMask);
+            cache.invalidate();
             cache.prev_block = block;
+            // Stock carries its register-allocator state across the block
+            // in free_gpr_mask (TR+0x210) — capture the incoming word (the
+            // exit paths below write it back) and restrict our working
+            // mask to the scratch pool.  Done before the block-counter
+            // bump so its scratch allocation draws from the restricted
+            // mask.  Never overwrite the field with kGprScratchMask: stock
+            // would then reuse regs it still holds live (miscompiles), and
+            // our emits would clobber stock-live values at runtime.
+            cache.stock_free_gpr_mask = translation_result->free_gpr_mask;
+            translation_result->free_gpr_mask &= kGprScratchMask;
             cache.tally_ir = 0;
             cache.tally_peep = 0;
             cache.tally_single = 0;
@@ -107,6 +117,17 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                     cache.profile_bid = bid;
                 }
             }
+        } else {
+            // Same block, new x87 entry.  Off-run the incoming word is
+            // stock's current allocator state (possibly advanced by stock
+            // since our last writeback) — recapture it.  Mid-run it is our
+            // own previous writeback (captured & ~pins); keep the earlier
+            // capture, which still holds the pinned bits.  Either way the
+            // working mask is pool-restricted.
+            if (!cache.active()) {
+                cache.stock_free_gpr_mask = translation_result->free_gpr_mask;
+            }
+            translation_result->free_gpr_mask &= kGprScratchMask;
         }
         if (!cache.active()) {
             const bool cache_disabled = g_rosetta_config && g_rosetta_config->disable_x87_cache;
@@ -282,9 +303,10 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                     cache.tick();
                 }
                 if (cache.active()) {
-                    translation_result->free_gpr_mask = kGprScratchMask & ~cache.pinned_mask();
+                    translation_result->free_gpr_mask =
+                        cache.stock_free_gpr_mask & ~cache.pinned_mask();
                 } else {
-                    translation_result->free_gpr_mask = kGprScratchMask;
+                    translation_result->free_gpr_mask = cache.stock_free_gpr_mask;
                 }
                 translation_result->free_fpr_mask =
                     translation_result->_unoccupied_temporary_fprs_for_xmm_scalars;
@@ -643,9 +665,10 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                         cache.tick();
                     }
                     if (cache.active()) {
-                        translation_result->free_gpr_mask = kGprScratchMask & ~cache.pinned_mask();
+                        translation_result->free_gpr_mask =
+                            cache.stock_free_gpr_mask & ~cache.pinned_mask();
                     } else {
-                        translation_result->free_gpr_mask = kGprScratchMask;
+                        translation_result->free_gpr_mask = cache.stock_free_gpr_mask;
                     }
                     translation_result->free_fpr_mask =
                         translation_result->_unoccupied_temporary_fprs_for_xmm_scalars;
@@ -970,6 +993,9 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
             case Opcode::kOpcodeName_fxrstor:
                 cache.tally_ft = static_cast<uint16_t>(cache.tally_ft + 1);
                 mirror_tally();
+                // The entry prologue pool-restricted the working mask —
+                // hand stock back its own word before falling through.
+                translation_result->free_gpr_mask = cache.stock_free_gpr_mask;
                 return std::nullopt;
 
             default:
@@ -986,15 +1012,15 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                 // stock translate_insn unchanged.  is_x87_opcode gates the
                 // log so the AOT path isn't spammed for non-x87 ops.
                 //
-                // Critical: do NOT mutate free_gpr_mask / free_fpr_mask
-                // before returning nullopt.  Stock's translate_insn (run
-                // by the stub's STASH abs-jump in JIT mode, or by
-                // original_translate_insn in AOT mode) carries its own
-                // register-allocation state across instructions in a
-                // basic block.  Overwriting those masks with our scratch
-                // values forces stock to redo allocation as if every
-                // instruction starts a fresh block, costing several extra
-                // ARM instructions per instruction.  Pass-through clean.
+                // Critical: hand stock back its own free_gpr_mask word
+                // (the entry prologue pool-restricted the working copy).
+                // Stock's translate_insn (run by the stub's STASH abs-jump
+                // in JIT mode, or by original_translate_insn in AOT mode)
+                // carries its register-allocation state across the basic
+                // block in that field — overwriting it with our scratch
+                // values makes stock reuse registers it still holds live
+                // (miscompiles), on top of redoing allocation as if every
+                // instruction started a fresh block.
                 if (is_x87_opcode(opcode)) {
                     const char* name = (opcode < kOpcodeNames.size()) ? kOpcodeNames[opcode] : "?";
                     fprintf(stdout,
@@ -1006,13 +1032,14 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                 }
                 cache.tally_ft = static_cast<uint16_t>(cache.tally_ft + 1);
                 mirror_tally();
+                translation_result->free_gpr_mask = cache.stock_free_gpr_mask;
                 return std::nullopt;
         }
     }
 
     // OPT-1: Tick the cache (decrements run counter; releases on expiry).
-    // Then reset the mask, excluding any GPRs still pinned by the cache.
-    // Fused pairs consumed 2 instructions — tick twice.
+    // Then write stock's captured mask word back, excluding any GPRs still
+    // pinned by the cache.  Fused pairs consumed 2 instructions — tick twice.
     const int consumed = fused.value_or(1);
     if (fused.has_value()) {
         cache.tally_peep = static_cast<uint16_t>(cache.tally_peep + consumed);
@@ -1025,9 +1052,9 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
     }
 
     if (cache.active()) {
-        translation_result->free_gpr_mask = kGprScratchMask & ~cache.pinned_mask();
+        translation_result->free_gpr_mask = cache.stock_free_gpr_mask & ~cache.pinned_mask();
     } else {
-        translation_result->free_gpr_mask = kGprScratchMask;
+        translation_result->free_gpr_mask = cache.stock_free_gpr_mask;
     }
     translation_result->free_fpr_mask =
         translation_result->_unoccupied_temporary_fprs_for_xmm_scalars;

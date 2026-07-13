@@ -41,10 +41,30 @@ target_include_directories(x87sidecar PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 
 target_link_libraries(x87sidecar PRIVATE rosetta_core)
 
+# Two signed artifacts from the one build:
+#
+#   x87sidecar           — ad-hoc signed, NO entitlements.  Cooperative attach
+#                          (the only mode wine uses) receives the task+thread
+#                          ports via a voluntary Mach handshake, so it needs
+#                          neither com.apple.security.cs.debugger nor
+#                          com.apple.security.get-task-allow.  This is the
+#                          binary that ships in the bundle and gets notarized.
+#
+#   x87sidecar_entitled  — same Mach-O, ad-hoc signed WITH entitlements.plist
+#                          (cs.debugger + get-task-allow).  Only the local
+#                          default-attach path needs these: the debugger fork
+#                          calls task_for_pid (cs.debugger) on the still-
+#                          x87sidecar parent before it execs the target, and
+#                          that pre-exec parent must itself be debuggable
+#                          (get-task-allow).  Used by the test/benchmark
+#                          harness; never shipped.
 add_custom_command(TARGET x87sidecar POST_BUILD
+    COMMAND codesign -s - --force "$<TARGET_FILE:x87sidecar>"
+    COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:x87sidecar>"
+            "$<TARGET_FILE_DIR:x87sidecar>/x87sidecar_entitled"
     COMMAND codesign -s - --entitlements
             "${CMAKE_CURRENT_SOURCE_DIR}/entitlements.plist"
-            --force "$<TARGET_FILE:x87sidecar>"
-    COMMENT "Signing x87sidecar with entitlements"
+            --force "$<TARGET_FILE_DIR:x87sidecar>/x87sidecar_entitled"
+    COMMENT "Signing x87sidecar (flat) + x87sidecar_entitled (dev entitlements)"
     VERBATIM
 )

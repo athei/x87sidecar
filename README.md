@@ -63,7 +63,28 @@ There are two genuine upsides relative to the dylib approach. First, the sidecar
 
 Second, we no longer hijack Rosetta's export table to install the hook. The dylib version rewrote `X19` mid-init so that Rosetta's loader called *our* exports instead of its own; that worked but was brittle, because it depended on undocumented loader semantics that drift between Rosetta versions. The sidecar version simply overwrites the prologue of `translate_insn` with a branch — a much smaller, more stable surface to maintain.
 
-The `x87sidecar` binary plays both roles: when invoked with a target x86 program, it launches the target under Rosetta, `PT_ATTACH`es, patches `translate_insn`, then drops into its own receive loop serving IPC requests.
+The `x87sidecar` binary plays both roles: when invoked with a target x86 program, it launches the target under Rosetta, attaches, patches `translate_insn`, then drops into its own receive loop serving IPC requests.
+
+## Attach modes
+
+The sidecar has to obtain the tracee's Mach task port (to read/write its memory and plant the stub). There are two ways it does this, and they have very different deployment consequences.
+
+**Default — `task_for_pid` + ptrace.** The sidecar forks; the parent execs the target while a grandchild acts as the debugger, calls `task_for_pid`, and attaches via `PT_ATTACHEXC`. Unprivileged, this requires the [debugger entitlement](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.security.cs.debugger) (`com.apple.security.cs.debugger`) on the caller *and* `com.apple.security.get-task-allow` on the target — and because the port is grabbed just before the parent execs, the still-`x87sidecar` parent must itself carry `get-task-allow`. Running as root (e.g. CI under `sudo`) bypasses both. This path is used by the local test/benchmark harness against the x86-64 Mach-O sample binaries.
+
+**Cooperative — `--cooperative`.** The sidecar `bootstrap_check_in`s a per-pid service, passes its name to the target via the `X87_SIDECAR_BOOTSTRAP` env var, and the target voluntarily hands over its task *and* thread control ports over that Mach service, then blocks on a handshake reply. No `task_for_pid`, no ptrace, and **no entitlements** — so a hardened, Developer ID-signed, cooperative binary is notarizable. This is the mode the shipping wine build uses: its Rosetta re-exec always inserts `--cooperative`, and wine's startup performs the target side of the handshake.
+
+Both modes converge on the same install and IPC loop once the port is in hand.
+
+## Binaries
+
+The build emits two signed artifacts from one link. Both are published as `.tar.xz` assets on each GitHub release; pick whichever fits how you intend to attach.
+
+| Artifact | Signing | Trade-off |
+|---|---|---|
+| `x87sidecar` | ad-hoc, **no entitlements** | Can be notarized. The default (`task_for_pid`) attach then only works as root (`sudo`); cooperative attach works without it. |
+| `x87sidecar_entitled` | same Mach-O + `cs.debugger` + `get-task-allow` | Default attach works against any target without `sudo` — the first attach just triggers a one-time macOS developer-tools authorization dialog. Not notarizable (`get-task-allow` is rejected). |
+
+The two are byte-identical except for the signature. Downloaded copies carry the quarantine attribute, so clear it with `xattr -d com.apple.quarantine <file>` before running. The test scripts point at `x87sidecar_entitled`; under CI's `sudo` either would work.
 
 ## Status
 
@@ -78,7 +99,7 @@ cmake -B build
 cmake --build build
 ```
 
-Tests and benchmarks are built automatically.
+This produces both `build/bin/x87sidecar` (flat) and `build/bin/x87sidecar_entitled` (see [Binaries](#binaries)). Tests and benchmarks are built automatically.
 
 ```bash
 bash scripts/run_tests.sh                # build + test (native Rosetta & x87sidecar)
@@ -88,7 +109,7 @@ bash scripts/run_tests.sh test_arith     # specific test
 bash scripts/run_benchmarks.sh           # build + benchmark
 ```
 
-`PT_ATTACH` requires either the [debugger entitlement](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.security.cs.debugger) (granted via the dialog you get on first launch) or `csrutil enable --without debug` (not recommended).
+The harness uses the default (`task_for_pid` + ptrace) attach path, so it runs `x87sidecar_entitled` — which needs the debugger entitlements when unprivileged (see [Attach modes](#attach-modes)), or root via `sudo`. Cooperative attach (`--cooperative`, the mode the shipping bundle uses) needs no entitlements at all.
 
 ## Configuration
 

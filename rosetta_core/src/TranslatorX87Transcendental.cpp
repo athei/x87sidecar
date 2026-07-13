@@ -285,13 +285,21 @@ void emit_apply_qn_sign(TranslationResult& a1, AssemblerBuffer& buf, int Dy_in, 
 
 // Body of fsin/fcos given a pre-loaded Dx and a pre-materialised Xconst.
 // Runs Cody-Waite reduction in `mode`, evaluates the sin polynomial,
-// applies the qn sign flip.  Result lands in Dd_out (caller-specified,
-// must not overlap Dx or any FPR in kFprScratchPool that's currently
-// live in the cache).  Caller still owns Dx and Xconst — this function
-// neither frees nor clobbers them (other than Dx surviving the read).
-void emit_inline_trig_body(TranslationResult& a1, AssemblerBuffer& buf, int Dx, int Xconst,
-                           int Dd_out, TrigReduceMode mode) {
-    // 1. Range reduction → Dr, Xqn.
+// applies the qn sign flip.
+//
+// Ownership contract (shared by every *_core in this file): the body
+// TAKES OWNERSHIP of Dx — it frees it right after its last read (end of
+// range reduction), BEFORE the polynomial's peak-pressure window — and
+// returns a freshly-owned scratch-pool FPR holding the result, which the
+// caller must free.  Dx MUST be a scratch-pool FPR the caller allocated;
+// guest-visible registers (v0–v15 = x86 XMM state, v16–v23 = stock
+// temporaries) are live x86 state and must never be touched — using d0
+// here clobbered guest xmm0 and corrupted any loop accumulating across
+// the op.  Peak concurrent pool FPRs: 4 during reduction (Dx,Dn,Dr,Dtmp),
+// 7 during the polynomial (Dr,Dy + 5) — matches peak_live_fprs().
+int emit_inline_trig_body(TranslationResult& a1, AssemblerBuffer& buf, int Dx, int Xconst,
+                          TrigReduceMode mode) {
+    // 1. Range reduction → Dr, Xqn.  Last read of Dx.
     const int Dn = alloc_free_fpr(a1);
     const int Xqn = alloc_free_gpr(a1);
     const int Dr = alloc_free_fpr(a1);
@@ -299,30 +307,31 @@ void emit_inline_trig_body(TranslationResult& a1, AssemblerBuffer& buf, int Dx, 
     emit_trig_range_reduce(buf, Xconst, Dx, Dn, Xqn, Dr, Dtmp, mode);
     free_fpr(a1, Dtmp);
     free_fpr(a1, Dn);
+    free_fpr(a1, Dx);
 
     // 2. y = r + r³ · P(r²).
     const int Dy = alloc_free_fpr(a1);
     emit_sin_poly_estrin(a1, buf, Dy, Dr, Xconst);
     free_fpr(a1, Dr);
 
-    // 3. Sign flip: y ^= qn << 63;  result lands in Dd_out.
-    emit_apply_qn_sign(a1, buf, Dy, Xqn, Dd_out);
+    // 3. Sign flip in place: y ^= qn << 63 (routes through a GPR, so
+    // reading and writing Dy is safe).
+    emit_apply_qn_sign(a1, buf, Dy, Xqn, /*Dd_out=*/Dy);
     free_gpr(a1, Xqn);
-    free_fpr(a1, Dy);
+    return Dy;
 }
 
-// Single-output wrapper used by fsin / fcos.  Loads ST(0) into d0 (NOT a
-// scratch-pool FPR — that gives the trig body the full 8-slot pool for
-// internal scratch), materialises Xconst, runs one trig body, then frees.
-// Result lands in d0 (matching the existing post-wrapper convention so the
-// caller's emit_store_st(..., Dd=0, ...) Just Works).  File-static — only
-// callers are emit_inline_fsin/fcos below.
-static void emit_inline_sin_or_cos(TranslationResult& a1, AssemblerBuffer& buf, int Xbase,
-                                   int Wd_top, int Wd_tmp, TrigReduceMode mode) {
+// Single-output wrapper used by fsin / fcos.  Loads ST(0) into a scratch-
+// pool FPR, materialises Xconst, runs one trig body, and returns the
+// body's result FPR (caller stores it back and frees it).  File-static —
+// only callers are emit_inline_fsin/fcos below.
+static int emit_inline_sin_or_cos(TranslationResult& a1, AssemblerBuffer& buf, int Xbase,
+                                  int Wd_top, int Wd_tmp, TrigReduceMode mode) {
     const int Xst_base = x87_get_st_base(a1);
     const int depth_st0 = resolve_depth(a1, 0);
 
-    emit_load_st(buf, Xbase, Wd_top, depth_st0, Wd_tmp, /*Dd=*/0, Xst_base);
+    const int Dx = alloc_free_fpr(a1);
+    emit_load_st(buf, Xbase, Wd_top, depth_st0, Wd_tmp, Dx, Xst_base);
 
     const int Xconst = alloc_free_gpr(a1);
     const uint64_t consts_addr = rosetta_core::get_transcendental_constants_addr();
@@ -330,9 +339,10 @@ static void emit_inline_sin_or_cos(TranslationResult& a1, AssemblerBuffer& buf, 
            "transcendental constants not installed; loader should have set address");
     emit_movz_movk_abs64(buf, Xconst, consts_addr);
 
-    emit_inline_trig_body(a1, buf, /*Dx=*/0, Xconst, /*Dd_out=*/0, mode);
+    const int Dres = emit_inline_trig_body(a1, buf, Dx, Xconst, mode);
 
     free_gpr(a1, Xconst);
+    return Dres;
 }
 
 // Clear C0/C1/C2/C3 (status_word bits 8/9/10/14) in the X87State.
@@ -364,16 +374,18 @@ void emit_clear_x87_cc_bits(TranslationResult& a1, AssemblerBuffer& buf, int Xba
     free_gpr(a1, Wd_sw);
 }
 
-void emit_inline_fsin(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, int Wd_top,
-                      int Wd_tmp) {
-    emit_inline_sin_or_cos(a1, buf, Xbase, Wd_top, Wd_tmp, TrigReduceMode::Sin);
+int emit_inline_fsin(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, int Wd_top,
+                     int Wd_tmp) {
+    const int Dres = emit_inline_sin_or_cos(a1, buf, Xbase, Wd_top, Wd_tmp, TrigReduceMode::Sin);
     emit_clear_x87_cc_bits(a1, buf, Xbase);
+    return Dres;
 }
 
-void emit_inline_fcos(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, int Wd_top,
-                      int Wd_tmp) {
-    emit_inline_sin_or_cos(a1, buf, Xbase, Wd_top, Wd_tmp, TrigReduceMode::Cos);
+int emit_inline_fcos(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, int Wd_top,
+                     int Wd_tmp) {
+    const int Dres = emit_inline_sin_or_cos(a1, buf, Xbase, Wd_top, Wd_tmp, TrigReduceMode::Cos);
     emit_clear_x87_cc_bits(a1, buf, Xbase);
+    return Dres;
 }
 
 // f2xm1 — replace ST(0) with 2^ST(0) - 1.  Port of optimized-routines'
@@ -394,8 +406,12 @@ void emit_inline_fcos(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, in
 //
 // Spec input is |x| <= 1; out-of-range special-case (|x| > ~1023) is
 // not emitted because x87 leaves that range undefined.
-void emit_inline_f2xm1(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, int Wd_top,
-                       int Wd_tmp) {
+//
+// Returns the pool FPR holding 2^x - 1 (caller stores + frees it).  All
+// working registers come from the scratch pools; internal FPR pressure
+// peaks at 6 (step 10: Dx, Dp_a, Dscale, Dscalem1_a, Dscalem1_b, Dabs).
+int emit_inline_f2xm1(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, int Wd_top,
+                      int Wd_tmp) {
     const int Xst_base = x87_get_st_base(a1);
     const int depth_st0 = resolve_depth(a1, 0);
 
@@ -520,7 +536,13 @@ void emit_inline_f2xm1(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, i
         // (Dtmp2 reused below for FCMP.)
 
         // 8. is_neg = x < rnd2zero
+        // Guest EFLAGS may be live in NZCV across this op (stock's own
+        // f2xm1 lowering preserves them).  Two short save/restore spans
+        // rather than one long hold: GPR pressure peaks at 4 concurrent
+        // in step 8b, which is the whole in-run scratch budget already.
         emit_fldr_imm(buf, 3, Dtmp2, Xconst, ConstOff::Exp2m1Rnd2Zero);
+        const int Xnzcv1 = alloc_free_gpr(a1);
+        emit_mrs_nzcv(buf, Xnzcv1);
         emit_fcmp_f64(buf, Dx, Dtmp2);
         free_fpr(a1, Dtmp2);
 
@@ -532,6 +554,8 @@ void emit_inline_f2xm1(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, i
 
         const int Xneg = alloc_free_gpr(a1);
         emit_cset(buf, /*is_64bit=*/1, /*cond=LT*/ 11, Xneg);  // Xneg = (x < rnd2zero) ? 1 : 0
+        emit_msr_nzcv(buf, Xnzcv1);  // predicate materialised — restore guest flags
+        free_gpr(a1, Xnzcv1);
         emit_add_sub_shifted_reg(buf, 1, 0, 0, /*LSL*/ 0, Xneg, /*shift_amount=*/4, Xidx,
                                  Xidx);  // Xidx += 16·neg
         emit_add_sub_shifted_reg(buf, 1, 0, 0, /*LSL*/ 0, Xneg, /*shift_amount=*/3, Xidx,
@@ -548,29 +572,34 @@ void emit_inline_f2xm1(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, i
         free_gpr(a1, Xidx);
 
         // 10. is_small = |x| < TableBound;  scalem1 = is_small ? Dscalem1_b : Dscalem1_a
+        //     The FABS is the last read of Dx — free it right after.
         const int Dabs = alloc_free_fpr(a1);
         emit_fabs_f64(buf, Dabs, Dx);
+        free_fpr(a1, Dx);
         const int Dbound = alloc_free_fpr(a1);
         emit_fldr_imm(buf, 3, Dbound, Xconst, ConstOff::Exp2m1TableBound);
+        const int Xnzcv2 = alloc_free_gpr(a1);
+        emit_mrs_nzcv(buf, Xnzcv2);
         emit_fcmp_f64(buf, Dabs, Dbound);
+        free_gpr(a1, Xconst);  // the TableBound load was Xconst's last use
         free_fpr(a1, Dbound);
         free_fpr(a1, Dabs);
 
         const int Dscalem1 = alloc_free_fpr(a1);
         emit_fcsel_f64(buf, Dscalem1, Dscalem1_b, Dscalem1_a, /*cond=LT*/ 11);
+        emit_msr_nzcv(buf, Xnzcv2);  // select done — restore guest flags
+        free_gpr(a1, Xnzcv2);
         free_fpr(a1, Dscalem1_b);
         free_fpr(a1, Dscalem1_a);
 
-        // 11. y = scalem1 + poly·scale  →  d0
-        emit_fmadd_f64(buf, /*Dd=*/0, /*Dn=*/Dp_a, /*Dm=*/Dscale, /*Da=*/Dscalem1);
+        // 11. y = scalem1 + poly·scale  (write over Dscalem1's slot — the
+        //     FMADD reads it as the addend first; Dscalem1 is the result)
+        emit_fmadd_f64(buf, Dscalem1, /*Dn=*/Dp_a, /*Dm=*/Dscale, /*Da=*/Dscalem1);
 
-        free_fpr(a1, Dscalem1);
         free_fpr(a1, Dscale);
         free_fpr(a1, Dp_a);
+        return Dscalem1;
     }
-
-    free_gpr(a1, Xconst);
-    free_fpr(a1, Dx);
 }
 
 // Body of inline_log2: given Din (a positive double, 0/inf/NaN excluded
@@ -593,7 +622,12 @@ void emit_inline_log2(TranslationResult& a1, AssemblerBuffer& buf, int Din, int 
     {
         const int Xtmp = alloc_free_gpr(a1);
         emit_ldr_imm(buf, /*size=*/3, Xtmp, Xconst, ConstOff::Log2Off);
-        emit_subs_reg(buf, /*is_64bit=*/1, Xu, Xtmp, Xu_off);  // Xu_off = Xu - off
+        // Plain SUB, not SUBS — guest EFLAGS may be live in NZCV across
+        // this op (stock's own fyl2x lowering preserves them).
+        emit_add_sub_shifted_reg(buf, /*is_64bit=*/1, /*is_sub=*/1, /*is_set_flags=*/0,
+                                 /*shift_type=LSL*/ 0, /*Rm=*/Xtmp,
+                                 /*shift_amount=*/0, /*Rn=*/Xu,
+                                 /*Rd=*/Xu_off);  // Xu_off = Xu - off
         free_gpr(a1, Xtmp);
     }
 
@@ -618,8 +652,12 @@ void emit_inline_log2(TranslationResult& a1, AssemblerBuffer& buf, int Din, int 
         emit_logical_shifted_reg(buf, /*is_64bit=*/1, /*opc=*/0 /*AND*/, /*n=*/0,
                                  /*shift_type=LSL*/ 0, /*Rm=*/Xtmp,
                                  /*shift_amount=*/0, /*Rn=*/Xu_off,
-                                 /*Rd=*/Xtmp);             // Xtmp = u_off & mask
-        emit_subs_reg(buf, /*is_64bit=*/1, Xu, Xtmp, Xu);  // Xu = Xu - Xtmp = iz
+                                 /*Rd=*/Xtmp);  // Xtmp = u_off & mask
+        // Plain SUB, not SUBS — see the NZCV note above.
+        emit_add_sub_shifted_reg(buf, /*is_64bit=*/1, /*is_sub=*/1, /*is_set_flags=*/0,
+                                 /*shift_type=LSL*/ 0, /*Rm=*/Xtmp,
+                                 /*shift_amount=*/0, /*Rn=*/Xu,
+                                 /*Rd=*/Xu);  // Xu = Xu - Xtmp = iz
         free_gpr(a1, Xtmp);
     }
     const int Dz = alloc_free_fpr(a1);
@@ -713,38 +751,46 @@ void emit_inline_log2(TranslationResult& a1, AssemblerBuffer& buf, int Din, int 
     free_fpr(a1, Dhi);
 }
 
-// FPR-level core of fyl2x: produces Dy_in * log2(Dx_in) in Dd_out.  Caller
-// owns inputs + Xconst.  Note: emit_inline_log2 reads its `Din` only in the
-// first instruction (FMOV Xu, Din) — passing Dx_in == Dd_out is safe because
-// the input is consumed before Dd_out is written at the end.
-void emit_inline_fyl2x_core(TranslationResult& a1, AssemblerBuffer& buf, int Dy_in, int Dx_in,
-                            int Dd_out, int Xconst) {
-    emit_inline_log2(a1, buf, Dx_in, Xconst, Dd_out);  // Dd_out = log2(Dx_in)
-    emit_fmul_f64(buf, Dd_out, Dd_out, Dy_in);         // Dd_out *= Dy_in
+// FPR-level core of fyl2x: returns a freshly-owned pool FPR holding
+// Dy_in * log2(Dx_in).  Both inputs must be scratch-pool FPRs; the core
+// takes ownership.  emit_inline_log2 reads its `Din` only in the first
+// instruction (FMOV Xu, Din), so Dx_in doubles as log2's output slot —
+// no extra register, and Dx_in becomes the returned result reg.  Dy_in
+// is live across the whole log2 body (its only read is the final fmul),
+// so the peak here is log2's 6 internal scratch + Dx_in + Dy_in = 8 —
+// exactly the pool.  Caller keeps ownership of Xconst.
+int emit_inline_fyl2x_core(TranslationResult& a1, AssemblerBuffer& buf, int Dy_in, int Dx_in,
+                           int Xconst) {
+    emit_inline_log2(a1, buf, Dx_in, Xconst, /*Dd_out=*/Dx_in);  // Dx_in := log2(Dx_in)
+    emit_fmul_f64(buf, Dx_in, Dx_in, Dy_in);                     // Dx_in *= Dy_in
+    free_fpr(a1, Dy_in);
+    return Dx_in;
 }
 
-void emit_inline_fyl2x(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, int Wd_top,
-                       int Wd_tmp) {
+int emit_inline_fyl2x(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, int Wd_top,
+                      int Wd_tmp) {
     // x86 fyl2x: ST(0) := ST(1) * log2(ST(0)); pop.
-    // Inputs loaded directly into d0 (Dx) / d1 (Dy) — neither is in the
-    // scratch pool, so the polynomial body has the full 8-slot pool for
-    // its internal scratch.  Output lands in d0.  Caller (translate_fyl2x)
-    // stores d0 to ST(1) and pops.
+    // Load both operands into scratch-pool FPRs that the core consumes;
+    // the returned pool FPR holds the product.  Caller (translate_fyl2x)
+    // stores it to ST(1), frees it, and pops.
     const int Xst_base = x87_get_st_base(a1);
     const int depth_st0 = resolve_depth(a1, 0);
     const int depth_st1 = resolve_depth(a1, 1);
 
-    emit_load_st(buf, Xbase, Wd_top, depth_st0, Wd_tmp, /*Dd=*/0, Xst_base);
-    emit_load_st(buf, Xbase, Wd_top, depth_st1, Wd_tmp, /*Dd=*/1, Xst_base);
+    const int Dx = alloc_free_fpr(a1);
+    emit_load_st(buf, Xbase, Wd_top, depth_st0, Wd_tmp, Dx, Xst_base);
+    const int Dy = alloc_free_fpr(a1);
+    emit_load_st(buf, Xbase, Wd_top, depth_st1, Wd_tmp, Dy, Xst_base);
 
     const int Xconst = alloc_free_gpr(a1);
     const uint64_t consts_addr = rosetta_core::get_transcendental_constants_addr();
     assert(consts_addr != 0 && "transcendental constants not installed");
     emit_movz_movk_abs64(buf, Xconst, consts_addr);
 
-    emit_inline_fyl2x_core(a1, buf, /*Dy_in=*/1, /*Dx_in=*/0, /*Dd_out=*/0, Xconst);
+    const int Dres = emit_inline_fyl2x_core(a1, buf, Dy, Dx, Xconst);
 
     free_gpr(a1, Xconst);
+    return Dres;
 }
 
 // fpatan: replace ST(1) with atan2(ST(1), ST(0)); pop.  Port of
@@ -767,12 +813,13 @@ void emit_inline_fyl2x(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, i
 // Special cases (zero/inf/NaN) follow whatever IEEE FP arithmetic does;
 // no scalar fallback as in the AdvSIMD source (real game workloads
 // don't feed degenerate inputs to fpatan).
-// FPR-level core of fpatan: produces atan2(Dy_in, Dx_in) in Dd_out.  Caller
-// owns Dy_in / Dx_in / Xconst — this function does not free them.  Inputs
-// are read-only (the body uses FMOV-d-to-x copies and FABS to derived
-// scratch FPRs, never mutating Dy_in/Dx_in).
-void emit_inline_fpatan_core(TranslationResult& a1, AssemblerBuffer& buf, int Dy_in, int Dx_in,
-                             int Dd_out, int Xconst) {
+// FPR-level core of fpatan: returns a freshly-owned pool FPR holding
+// atan2(Dy_in, Dx_in).  Both inputs must be scratch-pool FPRs; the core
+// takes ownership (Dy_in is freed after the step-2 FABS, Dx_in after the
+// step-5 FCMP-zero — each the input's last read, both before the step-7
+// polynomial peak).  Caller keeps ownership of Xconst.
+int emit_inline_fpatan_core(TranslationResult& a1, AssemblerBuffer& buf, int Dy_in, int Dx_in,
+                            int Xconst) {
     // 1. sign_xy = (bits(x) ^ bits(y)) & 0x8000000000000000
     const int Xsign_xy = alloc_free_gpr(a1);
     {
@@ -788,11 +835,20 @@ void emit_inline_fpatan_core(TranslationResult& a1, AssemblerBuffer& buf, int Dy
         free_gpr(a1, Xtmp);
     }
 
-    // 2. ax = |x|, ay = |y|  (in fresh scratch FPRs; inputs untouched)
+    // 2. ax = |x|, ay = |y|.  The FABS is the last read of Dy_in — free it
+    //    here (Dx_in stays live until the step-5 sign test).
     const int Dax = alloc_free_fpr(a1);
     const int Day = alloc_free_fpr(a1);
     emit_fabs_f64(buf, Dax, Dx_in);
     emit_fabs_f64(buf, Day, Dy_in);
+    free_fpr(a1, Dy_in);
+
+    // Guest EFLAGS may be live in NZCV across this op (stock's own fpatan
+    // lowering preserves them — verified empirically: cmp;fpatan;setcc
+    // works on stock, broke here).  Save around the FCMP/FCSEL region
+    // (steps 3-5) and restore before the polynomial.
+    const int Xnzcv = alloc_free_gpr(a1);
+    emit_mrs_nzcv(buf, Xnzcv);
 
     // 3. pred_aygtax = (ay > ax).  FCMP Day, Dax sets NZCV.
     //    Then build num, den, shift_b via FCSEL on the same flags.
@@ -825,7 +881,10 @@ void emit_inline_fpatan_core(TranslationResult& a1, AssemblerBuffer& buf, int Dy
     free_fpr(a1, Dden);
 
     // 5. shift_a = (x < 0) ? -2.0 : 0.0;  shift = shift_a + shift_b
+    //    The FCMP-zero is the last read of Dx_in — free it before the
+    //    polynomial's peak-pressure window.
     emit_fcmp_zero_f64(buf, Dx_in);
+    free_fpr(a1, Dx_in);
     const int Dshift = alloc_free_fpr(a1);
     {
         const int Dneg_two = alloc_free_fpr(a1);
@@ -836,6 +895,11 @@ void emit_inline_fpatan_core(TranslationResult& a1, AssemblerBuffer& buf, int Dy
         free_fpr(a1, Dneg_two);
         free_fpr(a1, Dzero);
     }
+
+    // Last flag consumer done — restore the guest's NZCV.
+    emit_msr_nzcv(buf, Xnzcv);
+    free_gpr(a1, Xnzcv);
+
     emit_fadd_f64(buf, Dshift, Dshift, Dshift_b);
     free_fpr(a1, Dshift_b);
 
@@ -870,39 +934,44 @@ void emit_inline_fpatan_core(TranslationResult& a1, AssemblerBuffer& buf, int Dy
     free_fpr(a1, Dz3);
     free_fpr(a1, Dshift);
 
-    // 9. Dd_out = bits_to_double(bits(ret) ^ sign_xy)
+    // 9. result = bits_to_double(bits(ret) ^ sign_xy) — routed through a
+    //    GPR, so the write can land back in Dz's slot (its FMOV read
+    //    happens first); Dz becomes the returned result reg.
     {
         const int Xret = alloc_free_gpr(a1);
         emit_fmov_d_to_x(buf, Xret, Dz);
         emit_logical_shifted_reg(buf, /*is_64bit=*/1, /*opc=*/2 /*EOR*/, /*n=*/0,
                                  /*shift_type=LSL*/ 0, /*Rm=*/Xsign_xy,
                                  /*shift_amount=*/0, /*Rn=*/Xret, /*Rd=*/Xret);
-        emit_fmov_x_to_d(buf, Dd_out, Xret);
+        emit_fmov_x_to_d(buf, Dz, Xret);
         free_gpr(a1, Xret);
     }
     free_gpr(a1, Xsign_xy);
-    free_fpr(a1, Dz);
+    return Dz;
 }
 
-void emit_inline_fpatan(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, int Wd_top,
-                        int Wd_tmp) {
-    // Inputs loaded directly into d0 (Dx) / d1 (Dy) — neither is in the
-    // scratch pool, so the polynomial body has the full 8-slot pool.
+int emit_inline_fpatan(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, int Wd_top,
+                       int Wd_tmp) {
+    // Load both operands into scratch-pool FPRs that the core consumes;
+    // the returned pool FPR holds atan2 (caller stores + frees it).
     const int Xst_base = x87_get_st_base(a1);
     const int depth_st0 = resolve_depth(a1, 0);
     const int depth_st1 = resolve_depth(a1, 1);
 
-    emit_load_st(buf, Xbase, Wd_top, depth_st0, Wd_tmp, /*Dd=*/0, Xst_base);
-    emit_load_st(buf, Xbase, Wd_top, depth_st1, Wd_tmp, /*Dd=*/1, Xst_base);
+    const int Dx = alloc_free_fpr(a1);
+    emit_load_st(buf, Xbase, Wd_top, depth_st0, Wd_tmp, Dx, Xst_base);
+    const int Dy = alloc_free_fpr(a1);
+    emit_load_st(buf, Xbase, Wd_top, depth_st1, Wd_tmp, Dy, Xst_base);
 
     const int Xconst = alloc_free_gpr(a1);
     const uint64_t consts_addr = rosetta_core::get_transcendental_constants_addr();
     assert(consts_addr != 0 && "transcendental constants not installed");
     emit_movz_movk_abs64(buf, Xconst, consts_addr);
 
-    emit_inline_fpatan_core(a1, buf, /*Dy_in=*/1, /*Dx_in=*/0, /*Dd_out=*/0, Xconst);
+    const int Dres = emit_inline_fpatan_core(a1, buf, Dy, Dx, Xconst);
 
     free_gpr(a1, Xconst);
+    return Dres;
 }
 
 // fptan: replace ST(0) with tan(ST(0)); push 1.0.  Port of
@@ -926,10 +995,12 @@ void emit_inline_fpatan(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, 
 //     odd  qi (qi&1 == 1): result =  n / d  ((p²-1)/(2p) = -cot(2r))
 //
 // Caller (translate_fptan) then pushes 1.0 onto the stack post-tan.
-// FPR-level core of fptan: produces tan(Dx_in) in Dd_out.  Caller owns
-// Dx_in (read-only) and Xconst.  Does NOT clear C0..C3; the wrapper does.
-void emit_inline_fptan_core(TranslationResult& a1, AssemblerBuffer& buf, int Dx_in, int Dd_out,
-                            int Xconst) {
+// FPR-level core of fptan: returns a freshly-owned pool FPR holding
+// tan(Dx_in).  Dx_in must be a scratch-pool FPR; the core takes
+// ownership (frees it after its last read in step 4, before the step-6
+// peak-pressure window).  Caller keeps ownership of Xconst.  Does NOT
+// clear C0..C3; the wrapper does.
+int emit_inline_fptan_core(TranslationResult& a1, AssemblerBuffer& buf, int Dx_in, int Xconst) {
     // 1. q = round(x · 2/π) via FMA shift trick
     const int Dq = alloc_free_fpr(a1);
     {
@@ -961,6 +1032,9 @@ void emit_inline_fptan_core(TranslationResult& a1, AssemblerBuffer& buf, int Dx_
         free_fpr(a1, Dtmp);
     }
     free_fpr(a1, Dq);
+    // Step 4's fmsub was the last read of the input — release it before
+    // the step-6 peak (8 transients fill the pool exactly).
+    free_fpr(a1, Dx_in);
 
     // 5. r2, r4, r8
     const int Dr2 = alloc_free_fpr(a1);
@@ -1052,6 +1126,11 @@ void emit_inline_fptan_core(TranslationResult& a1, AssemblerBuffer& buf, int Dx_
     const int Dneg_d = alloc_free_fpr(a1);
     emit_fneg_f64(buf, Dneg_d, Dd);
 
+    // Guest EFLAGS may be live in NZCV across this op (stock's own fptan
+    // lowering preserves them) — save around the TST/FCSEL span.
+    const int Xnzcv = alloc_free_gpr(a1);
+    emit_mrs_nzcv(buf, Xnzcv);
+
     // TST Xqi, #1   (encoded as ANDS XZR, Xqi, #1)
     emit_logical_imm(buf, /*is_64bit=*/1, /*opc=ANDS*/ 3, /*N=*/1,
                      /*immr=*/0, /*imms=*/0, /*Rn=*/Xqi, /*Rd=*/31);
@@ -1063,36 +1142,41 @@ void emit_inline_fptan_core(TranslationResult& a1, AssemblerBuffer& buf, int Dx_
     const int Dden_final = alloc_free_fpr(a1);
     emit_fcsel_f64(buf, Dnum_final, Dn, Dneg_d, /*cond=NE*/ 1);
     emit_fcsel_f64(buf, Dden_final, Dd, Dn, /*cond=NE*/ 1);
+    emit_msr_nzcv(buf, Xnzcv);  // selects done — restore guest flags
+    free_gpr(a1, Xnzcv);
     free_fpr(a1, Dneg_d);
     free_fpr(a1, Dn);
     free_fpr(a1, Dd);
 
-    // 12. result = num / den → Dd_out
-    emit_fdiv_f64(buf, Dd_out, Dnum_final, Dden_final);
-
-    free_fpr(a1, Dnum_final);
+    // 12. result = num / den   (reuse Dnum_final's slot — the division is
+    // the last read of both, so writing the quotient over the numerator
+    // keeps the peak identical and hands the caller a fresh result reg)
+    emit_fdiv_f64(buf, Dnum_final, Dnum_final, Dden_final);
     free_fpr(a1, Dden_final);
+    return Dnum_final;
 }
 
-void emit_inline_fptan(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, int Wd_top,
-                       int Wd_tmp) {
-    // Input loaded directly into d0 (not in scratch pool), so the polynomial
-    // body has the full 8-slot pool for internal scratch.  Output lands in d0.
+int emit_inline_fptan(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, int Wd_top,
+                      int Wd_tmp) {
+    // Load ST(0) into a scratch-pool FPR that the core consumes; the
+    // returned pool FPR holds tan (caller stores + frees it).
     const int Xst_base = x87_get_st_base(a1);
     const int depth_st0 = resolve_depth(a1, 0);
 
-    emit_load_st(buf, Xbase, Wd_top, depth_st0, Wd_tmp, /*Dd=*/0, Xst_base);
+    const int Dx = alloc_free_fpr(a1);
+    emit_load_st(buf, Xbase, Wd_top, depth_st0, Wd_tmp, Dx, Xst_base);
 
     const int Xconst = alloc_free_gpr(a1);
     const uint64_t consts_addr = rosetta_core::get_transcendental_constants_addr();
     assert(consts_addr != 0 && "transcendental constants not installed");
     emit_movz_movk_abs64(buf, Xconst, consts_addr);
 
-    emit_inline_fptan_core(a1, buf, /*Dx_in=*/0, /*Dd_out=*/0, Xconst);
+    const int Dres = emit_inline_fptan_core(a1, buf, Dx, Xconst);
 
     free_gpr(a1, Xconst);
 
     emit_clear_x87_cc_bits(a1, buf, Xbase);
+    return Dres;
 }
 
 // fprem: ST(0) := fmod(ST(0), ST(1)).  No pop.  Single-shot impl
@@ -1112,7 +1196,37 @@ void emit_inline_fptan(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, i
 //   q = trunc(a / b)        (FDIV + FRINTZ)
 //   result = a - q · b      (FMSUB)
 //   status_word &= ~0x4700  (clear C0/C1/C2/C3)
-void emit_inline_fprem(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, int Wd_top,
+int emit_inline_fprem(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, int Wd_top,
+                      int Wd_tmp) {
+    const int Xst_base = x87_get_st_base(a1);
+    const int depth_st0 = resolve_depth(a1, 0);
+    const int depth_st1 = resolve_depth(a1, 1);
+
+    const int Da = alloc_free_fpr(a1);
+    emit_load_st(buf, Xbase, Wd_top, depth_st0, Wd_tmp, Da, Xst_base);
+    const int Db = alloc_free_fpr(a1);
+    emit_load_st(buf, Xbase, Wd_top, depth_st1, Wd_tmp, Db, Xst_base);
+
+    const int Dq = alloc_free_fpr(a1);
+    emit_fdiv_f64(buf, Dq, Da, Db);       // q = a / b
+    emit_frintz_f64(buf, Dq, Dq);         // q = trunc(q)
+    emit_fmsub_f64(buf, Dq, Dq, Db, Da);  // Dq := a - q · b   (result reg)
+
+    free_fpr(a1, Db);
+    free_fpr(a1, Da);
+
+    emit_clear_x87_cc_bits(a1, buf, Xbase);
+    return Dq;
+}
+
+// fprem1: ST(0) := IEEE-remainder(ST(0), ST(1)).  Same emit shape as
+// fprem; differs only in FRINTN (round-to-nearest-even) instead of
+// FRINTZ.  std::remainder uses round-to-nearest-even rounding for the
+// quotient, which FRINTN gives directly.
+//
+// Same C0/C1/C2/C3-clearing as fprem (see comment there) — fprem1
+// shares the iterative-completion contract.
+int emit_inline_fprem1(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, int Wd_top,
                        int Wd_tmp) {
     const int Xst_base = x87_get_st_base(a1);
     const int depth_st0 = resolve_depth(a1, 0);
@@ -1124,49 +1238,19 @@ void emit_inline_fprem(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, i
     emit_load_st(buf, Xbase, Wd_top, depth_st1, Wd_tmp, Db, Xst_base);
 
     const int Dq = alloc_free_fpr(a1);
-    emit_fdiv_f64(buf, Dq, Da, Db);             // q = a / b
-    emit_frintz_f64(buf, Dq, Dq);               // q = trunc(q)
-    emit_fmsub_f64(buf, /*Dd=*/0, Dq, Db, Da);  // d0 = a - q · b
+    emit_fdiv_f64(buf, Dq, Da, Db);       // q = a / b
+    emit_frintn_f64(buf, Dq, Dq);         // q = round(q) (ties-to-even)
+    emit_fmsub_f64(buf, Dq, Dq, Db, Da);  // Dq := a - q · b   (result reg)
 
-    free_fpr(a1, Dq);
     free_fpr(a1, Db);
     free_fpr(a1, Da);
 
     emit_clear_x87_cc_bits(a1, buf, Xbase);
+    return Dq;
 }
 
-// fprem1: ST(0) := IEEE-remainder(ST(0), ST(1)).  Same emit shape as
-// fprem; differs only in FRINTN (round-to-nearest-even) instead of
-// FRINTZ.  std::remainder uses round-to-nearest-even rounding for the
-// quotient, which FRINTN gives directly.
-//
-// Same C0/C1/C2/C3-clearing as fprem (see comment there) — fprem1
-// shares the iterative-completion contract.
-void emit_inline_fprem1(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, int Wd_top,
+int emit_inline_fyl2xp1(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, int Wd_top,
                         int Wd_tmp) {
-    const int Xst_base = x87_get_st_base(a1);
-    const int depth_st0 = resolve_depth(a1, 0);
-    const int depth_st1 = resolve_depth(a1, 1);
-
-    const int Da = alloc_free_fpr(a1);
-    emit_load_st(buf, Xbase, Wd_top, depth_st0, Wd_tmp, Da, Xst_base);
-    const int Db = alloc_free_fpr(a1);
-    emit_load_st(buf, Xbase, Wd_top, depth_st1, Wd_tmp, Db, Xst_base);
-
-    const int Dq = alloc_free_fpr(a1);
-    emit_fdiv_f64(buf, Dq, Da, Db);             // q = a / b
-    emit_frintn_f64(buf, Dq, Dq);               // q = round(q) (ties-to-even)
-    emit_fmsub_f64(buf, /*Dd=*/0, Dq, Db, Da);  // d0 = a - q · b
-
-    free_fpr(a1, Dq);
-    free_fpr(a1, Db);
-    free_fpr(a1, Da);
-
-    emit_clear_x87_cc_bits(a1, buf, Xbase);
-}
-
-void emit_inline_fyl2xp1(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, int Wd_top,
-                         int Wd_tmp) {
     // x86 fyl2xp1: ST(1) := ST(1) * log2(ST(0) + 1); pop.  x87 spec
     // restricts the input to -1+ε ≤ ST(0) ≤ 1-√2/2 ≈ 0.293; in that
     // range, simple add-then-log2 is accurate enough (no need for
@@ -1194,25 +1278,29 @@ void emit_inline_fyl2xp1(TranslationResult& a1, AssemblerBuffer& buf, int Xbase,
     assert(consts_addr != 0 && "transcendental constants not installed");
     emit_movz_movk_abs64(buf, Xconst, consts_addr);
 
-    emit_inline_log2(a1, buf, Dx, Xconst, /*Dd_out=*/0);
-    free_fpr(a1, Dx);
+    // log2 reads Din only in its first instruction, so Dx doubles as the
+    // output slot (same trick as emit_inline_fyl2x_core) and becomes the
+    // returned result reg.
+    emit_inline_log2(a1, buf, Dx, Xconst, /*Dd_out=*/Dx);
     free_gpr(a1, Xconst);
 
-    emit_fmul_f64(buf, /*Dd=*/0, /*Dn=*/0, /*Dm=*/Dy);
+    emit_fmul_f64(buf, Dx, Dx, Dy);
     free_fpr(a1, Dy);
+    return Dx;
 }
 
-void emit_inline_fsincos(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, int Wd_top,
-                         int Wd_tmp) {
+auto emit_inline_fsincos(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, int Wd_top,
+                         int Wd_tmp) -> std::pair<int, int> {
     // fsincos: replace ST(0) with sin(ST(0)) and push cos(ST(0)).
-    // Convention matches the prior IPC path — d0 = sin, d1 = cos.
-    // Input x is loaded into d2 (not in the scratch pool, so trig_body has
-    // the full 8-slot pool); d2 is preserved across both calls (trig_body
-    // only reads Dx, never writes it).  d0/d1 receive sin/cos results.
+    // Input x is loaded into a scratch-pool FPR and copied once, since
+    // each trig body consumes its input.  Peak pool pressure: 8 during
+    // the sin polynomial (7 + the held cos input copy) and 8 during the
+    // cos polynomial (7 + the held sin result) — exactly the pool size.
     const int Xst_base = x87_get_st_base(a1);
     const int depth_st0 = resolve_depth(a1, 0);
 
-    emit_load_st(buf, Xbase, Wd_top, depth_st0, Wd_tmp, /*Dd=*/2, Xst_base);
+    const int Dx_sin = alloc_free_fpr(a1);
+    emit_load_st(buf, Xbase, Wd_top, depth_st0, Wd_tmp, Dx_sin, Xst_base);
 
     const int Xconst = alloc_free_gpr(a1);
     const uint64_t consts_addr = rosetta_core::get_transcendental_constants_addr();
@@ -1220,12 +1308,16 @@ void emit_inline_fsincos(TranslationResult& a1, AssemblerBuffer& buf, int Xbase,
            "transcendental constants not installed; loader should have set address");
     emit_movz_movk_abs64(buf, Xconst, consts_addr);
 
-    emit_inline_trig_body(a1, buf, /*Dx=*/2, Xconst, /*Dd_out=*/0, TrigReduceMode::Sin);
-    emit_inline_trig_body(a1, buf, /*Dx=*/2, Xconst, /*Dd_out=*/1, TrigReduceMode::Cos);
+    const int Dx_cos = alloc_free_fpr(a1);
+    emit_fmov_f64(buf, Dx_cos, Dx_sin);
+
+    const int Dsin = emit_inline_trig_body(a1, buf, Dx_sin, Xconst, TrigReduceMode::Sin);
+    const int Dcos = emit_inline_trig_body(a1, buf, Dx_cos, Xconst, TrigReduceMode::Cos);
 
     free_gpr(a1, Xconst);
 
     emit_clear_x87_cc_bits(a1, buf, Xbase);
+    return {Dsin, Dcos};
 }
 
 }  // namespace TranslatorX87

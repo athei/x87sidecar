@@ -263,6 +263,7 @@ RosettaConfig load_config_from_env() {
     cfg.loader_always_none = env_truthy("X87_ALWAYS_NONE") ? 1 : 0;
     cfg.loader_log_ops = env_truthy("X87_LOG_OPS") ? 1 : 0;
     cfg.loader_log_throughput = env_truthy("X87_LOG_THROUGHPUT") ? 1 : 0;
+    cfg.loader_dump_emit = env_truthy("X87_DUMP_EMIT") ? 1 : 0;
 
     if (const char* p = std::getenv("X87_PROFILE"); p != nullptr && p[0] != '\0') {
         cfg.profile_path = p;

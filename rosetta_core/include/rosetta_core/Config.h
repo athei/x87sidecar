@@ -205,6 +205,12 @@ struct RosettaConfig {
                                     //                     every 2 s and an idle-transition line.
                                     //                     Useful to tell "stuck" from "just slow"
                                     //                     during long workloads (WoW world-load).
+    uint8_t loader_dump_emit;       // X87_DUMP_EMIT    diagnostic: sidecar hexdumps the
+                                    //                  emitted AArch64 words of every handled
+                                    //                  request (with guest pc + opcode), so a
+                                    //                  bad encoding can be found by
+                                    //                  disassembling the dump offline.
+                                    //                  EXTREMELY high volume.
 
     // X87_PROFILE=<path>  When non-empty, sidecar appends a binary
     // record per first-seen IRBlock to this file (full IR stream).

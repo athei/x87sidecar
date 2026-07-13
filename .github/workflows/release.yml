@@ -26,10 +26,14 @@ jobs:
         run: cmake -B build
 
       - name: Build x87sidecar
+        # Builds both signed artifacts: x87sidecar (flat, no entitlements) and
+        # x87sidecar_entitled (cs.debugger + get-task-allow), via POST_BUILD.
         run: cmake --build build --target x87sidecar --parallel
 
-      - name: Package x87sidecar.tar.xz
-        run: tar --xz -cf x87sidecar.tar.xz -C build/bin x87sidecar
+      - name: Package artifacts
+        run: |
+          tar --xz -cf x87sidecar.tar.xz -C build/bin x87sidecar
+          tar --xz -cf x87sidecar_entitled.tar.xz -C build/bin x87sidecar_entitled
 
       - name: Generate changelog
         id: changelog
@@ -65,6 +69,8 @@ jobs:
           name: x87sidecar ${{ github.ref_name }}
           draft: true
           body: ${{ steps.changelog.outputs.body }}
-          files: x87sidecar.tar.xz
+          files: |
+            x87sidecar.tar.xz
+            x87sidecar_entitled.tar.xz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

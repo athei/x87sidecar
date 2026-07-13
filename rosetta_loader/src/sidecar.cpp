@@ -14,6 +14,7 @@
 #include <cstring>
 #include <ctime>
 #include <mutex>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -159,6 +160,34 @@ void dumpBlockIfNew(mach_port_t parentTask, uint64_t module_data_ptr, uint64_t b
 
 constexpr size_t kListCount = 6;
 
+// ── OPT-1 cache storage (mode-independent) ──────────────────────────────────
+// x87_cache is per-thread, cross-instruction Translator state. It used to be
+// appended to the tracee's TranslationResult and round-tripped through the
+// tracee's heap — which forced the M2 install to enlarge every TR (the TR-size
+// MOVZ patch), and that patch is only safe before the first TR is allocated
+// (pre-Rosetta-init). We now keep the cache HERE, keyed by the per-thread TR
+// address the tracee passes in each request, so the tracee's TR stays
+// stock-sized and no TR-size patch is needed. This is what lets the JIT-hook
+// install work identically for default (task_for_pid+ptrace, stopped pre-init)
+// and cooperative (task-port handshake, attached post-init) attach.
+// Stock's real TranslationResult is 0x268 bytes — the size stock's own
+// allocator MOVZ passes (offset_finder's translation_result_size_pattern; the
+// AOT path patches this same MOVZ to 0x400 to make room for the appended
+// x87_cache).  Our struct definition carries reverse-engineered tail fields
+// past that (segments_*, field_280) up to offsetof(x87_cache)=0x288 — fields
+// stock never allocates.  We read/write back exactly stock's real size: stock
+// places each block's code buffer in the adjacent heap chunk (observed at
+// tr+0x280), so writing even the extra bytes past 0x268 overran into and
+// zeroed the block's first emitted ARM word — a 0x00000000 UDF that crashed
+// WoW on nearly every fld block.  The translator only ever touches fields well
+// below 0x268 (insn_buf, fixup lists, free_gpr/fpr masks, thread_context_
+// offsets), so trimming to the real size loses no state.
+constexpr size_t kStockTRSize = 0x268;
+static_assert(kStockTRSize <= offsetof(TranslationResult, x87_cache),
+              "stock TR size must not exceed our struct's pre-x87_cache prefix");
+std::mutex g_x87CacheMu;
+std::unordered_map<uint64_t, X87Cache> g_x87Cache;
+
 struct TranslateRequest {
     uint64_t tr_addr;
     uint64_t block;  // opaque IRBlock* — Translator only compares as ptr
@@ -244,12 +273,21 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask, const Translate
         return out;
     }
 
-    // Read parent's TR. Default-constructed local; we sterilise its list
+    // Read parent's TR. Value-initialised local; we sterilise its list
     // pointers before scope end so `~TransactionalList` runs `::operator
     // delete(nullptr)` (a no-op) instead of freeing arbitrary parent VAs.
-    TranslationResult tr;
-    if (!readParent(parentTask, req.tr_addr, &tr, sizeof(tr))) {
+    // Value-init (not plain default-init) so the reverse-engineered tail past
+    // stock's real 0x268 size — which we deliberately do NOT read from the
+    // tracee — is deterministic zero rather than uninitialised.
+    TranslationResult tr{};
+    // Read only the stock-sized TR from the tracee; x87_cache lives in our own
+    // per-thread map (keyed by TR address), not in the tracee's heap.
+    if (!readParent(parentTask, req.tr_addr, &tr, kStockTRSize)) {
         return out;
+    }
+    {
+        std::scoped_lock lk(g_x87CacheMu);
+        tr.x87_cache = g_x87Cache[req.tr_addr];  // default-constructs on first use
     }
 
     TransactionalList<Fixup>* lists[kListCount] = {
@@ -302,13 +340,9 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask, const Translate
         return out;
     }
 
-    // x87_cache is OUR addition (OPT-1) — see comment in TranslationResult.h.
-    // The loader's M2 init patched stock's TR allocator to allocate
-    // sizeof(TranslationResult) bytes per TR, so the cache field lives
-    // inside parent's TR allocation and persists across calls. Trust
-    // parent's bytes. (`cache.invalidate()` will fire automatically on
-    // first call when prev_block doesn't match the just-passed block,
-    // converging junk-initialised cache state to a sane baseline.)
+    // x87_cache (OPT-1) was loaded from g_x87Cache above, not from the tracee.
+    // On the first request for a TR address it default-constructs; Translator's
+    // cache.invalidate() converges it on the first block mismatch.
 
     // Set up local insn_buf with capacity ≥ parent's. Critical: end starts at
     // origInsnEnd so Translator's emit/fixup offsets count in the SAME
@@ -333,9 +367,12 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask, const Translate
     if (g_rosetta_config != nullptr && g_rosetta_config->loader_log_ops != 0U) {
         const uint16_t op = localIR[req.insn_idx].opcode();
         const char* name = (op < kOpcodeNames.size()) ? kOpcodeNames[op] : "?";
-        fprintf(stdout, "[rosettax87] op %s (0x%x) idx=%lld/%lld\n", name,
-                static_cast<unsigned>(op), static_cast<long long>(req.insn_idx),
-                static_cast<long long>(req.num_instrs));
+        fprintf(stdout,
+                "[rosettax87] op %s (0x%x) idx=%lld/%lld gpr=%08x fpr=%08x "
+                "unocc=%08x pinned=%08x\n",
+                name, static_cast<unsigned>(op), static_cast<long long>(req.insn_idx),
+                static_cast<long long>(req.num_instrs), tr.free_gpr_mask, tr.free_fpr_mask,
+                tr._unoccupied_temporary_fprs_for_xmm_scalars, tr._pinned_temporary_scalars);
         fflush(stdout);
     }
 
@@ -374,6 +411,26 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask, const Translate
     } _cleanup{.insn_buf = insnGrew ? localInsnData : nullptr,
                .lists = {localPushed[0], localPushed[1], localPushed[2], localPushed[3],
                          localPushed[4], localPushed[5]}};
+
+    if (g_rosetta_config != nullptr && g_rosetta_config->loader_dump_emit != 0U &&
+        result.has_value() && insnEmitted > 0) {
+        // Hexdump the emitted AArch64 words of this request (guest pc +
+        // opcode + tracee buffer VA), so a bad encoding can be found by
+        // disassembling the dump offline.  EXTREMELY high volume.
+        const uint16_t op = localIR[req.insn_idx].opcode();
+        const char* name = (op < kOpcodeNames.size()) ? kOpcodeNames[op] : "?";
+        fprintf(stdout, "[rosettax87] EMIT pc=%08x op=%s idx=%lld/%lld at=%llx words=%llu:",
+                localIR[req.insn_idx].pc, name, static_cast<long long>(req.insn_idx),
+                static_cast<long long>(req.num_instrs),
+                reinterpret_cast<unsigned long long>(origInsnData) + origInsnEnd,
+                static_cast<unsigned long long>(insnEmitted / 4));
+        const auto* words = reinterpret_cast<const uint32_t*>(localInsnData + origInsnEnd);
+        for (uint64_t w = 0; w < insnEmitted / 4; w++) {
+            fprintf(stdout, " %08x", words[w]);
+        }
+        fprintf(stdout, "\n");
+        fflush(stdout);
+    }
 
     // We always write the TR back, even on None — Translator's default case
     // (and other unhandled paths) calls cache.invalidate() and resets the
@@ -468,13 +525,20 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask, const Translate
         }
     }
 
-    // Write back the full TR (always — propagates cache + scratch-mask
-    // updates from Translator's run, plus any pivoted buffer pointers from
-    // the Some path above). The loader's M2 init patched stock's TR
-    // allocator to sizeof(TranslationResult), so parent's allocation has
-    // room for our appended x87_cache field — persisting it across calls
-    // is what restores OPT-1's cross-instruction reuse.
-    if (!writeParent(parentTask, req.tr_addr, &tr, sizeof(tr))) {
+    // Persist OPT-1's cross-instruction cache in our own per-thread map (not the
+    // tracee's TR). Always — even on None, Translator's default case calls
+    // cache.invalidate() and resets scratch masks; dropping that would leave the
+    // next call trusting stale gprs_valid state.
+    {
+        std::scoped_lock lk(g_x87CacheMu);
+        g_x87Cache[req.tr_addr] = tr.x87_cache;
+    }
+
+    // Write back only the stock-sized TR (propagates scratch-mask updates and
+    // any pivoted buffer pointers from the Some path above). x87_cache is NOT
+    // written to the tracee — it lives in g_x87Cache — so the tracee's TR needs
+    // no enlargement and the M2 install needs no TR-size patch.
+    if (!writeParent(parentTask, req.tr_addr, &tr, kStockTRSize)) {
         return out;
     }
 
