@@ -172,10 +172,12 @@ run_one_test() {
         return
     fi
 
-    if echo "$OUT" | grep -qE 'FAIL'; then
+    # Herestring + awk instead of `echo | grep [-q] | head`: see the EPIPE /
+    # pipefail note in run_tests.sh check_output().
+    if grep -qE 'FAIL' <<<"$OUT"; then
         echo -e "  ${RED}FAIL${NC}  $binary_name  [$config_name]"
         FAILED=$(( FAILED + 1 ))
-        echo "$OUT" | grep -E 'FAIL' | head -10 | sed 's/^/        /'
+        awk '/FAIL/ && ++n <= 10 { print "        " $0 }' <<<"$OUT"
     else
         echo -e "  ${GREEN}PASS${NC}  $binary_name"
         PASSED=$(( PASSED + 1 ))

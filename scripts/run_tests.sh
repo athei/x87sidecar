@@ -176,16 +176,21 @@ check_output() {
     local out="$2"
     local exit_code="$3"
     TOTAL=$((TOTAL + 1))
-    if echo "$out" | grep -qE 'FAIL'; then
+    # Herestrings, not `echo "$out" | grep`: when $out exceeds the pipe
+    # buffer, `grep -q` exits at the first match and echo takes EPIPE, which
+    # pipefail turns into a failed pipeline — a passing test then gets
+    # reported NO-PASS (seen as the flaky CI failure). Same reason the FAIL
+    # excerpt uses awk instead of `grep | head`.
+    if grep -qE 'FAIL' <<<"$out"; then
         echo -e "${RED}FAIL${NC}  $name"
         FAILED=$((FAILED + 1))
-        echo "$out" | grep -E 'FAIL' | head -10 | sed 's/^/      /'
+        awk '/FAIL/ && ++n <= 10 { print "      " $0 }' <<<"$out"
     elif [[ "$exit_code" -ne 0 ]]; then
         # Silent crash — test exited non-zero with no FAIL line.
         echo -e "${RED}CRASH${NC} $name  (exit=$exit_code)"
         FAILED=$((FAILED + 1))
-        echo "$out" | tail -5 | sed 's/^/      /'
-    elif ! echo "$out" | grep -qE '(PASS|[0-9]+ failure)'; then
+        tail -5 <<<"$out" | sed 's/^/      /'
+    elif ! grep -qE '(PASS|[0-9]+ failure)' <<<"$out"; then
         # No PASS lines and no "N failure(s)" summary — test produced
         # nothing useful, treat as broken.
         echo -e "${RED}NO-PASS${NC} $name  (no PASS / failure summary line)"
@@ -467,8 +472,8 @@ if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then
     else
         # The geom blob is a legacy capture with 26.4-host opcodes.
         ROUT=$("$REPLAY_BIN" "$GEOM_IR" --fpr-pool 8 --runtime-version 0) || true
-        if echo "$ROUT" | grep -q '^ir_fpr_fail,0$' && \
-           echo "$ROUT" | grep -qE '^ir_split,[1-9]'; then
+        if grep -q '^ir_fpr_fail,0$' <<<"$ROUT" && \
+           grep -qE '^ir_split,[1-9]' <<<"$ROUT"; then
             echo -e "${GREEN}PASS${NC}  geom_replay (fpr_fail=0, splits fired)"
             PASSED=$((PASSED + 1))
         else
