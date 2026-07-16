@@ -2,23 +2,21 @@
 
 Faster x87 floating-point for x86 apps running under Apple's Rosetta 2 on Apple Silicon.
 
-This project is a fork of [Lifeisawful/rosettax87_jit](https://github.com/Lifeisawful/rosettax87_jit). It started as a drop-in JIT replacement for stock Rosetta's x87 instruction handlers, but has since diverged enough — both architecturally and in scope — that upstreaming back is no longer realistic, hence the rename.
+This project is a fork of [Lifeisawful/rosettax87_jit](https://github.com/Lifeisawful/rosettax87_jit). It started as a drop-in JIT replacement for stock Rosetta's x87 instruction handlers, but has since diverged so far in architecture and scope that upstreaming is no longer realistic, hence the rename.
 
 ## Why fork?
 
-The original `rosettax87` was a **dylib injected into the wine/x86 process**. It mapped its own anonymous pages with `MAP_TRANSLATED_ALLOW_EXECUTE`, dropped hand-rolled ARM64 into them, and patched stock's `translate_insn` to branch into that code.
+The original `rosettax87` was a dylib injected into the wine/x86 process. It mapped its own anonymous pages with `MAP_TRANSLATED_ALLOW_EXECUTE`, dropped hand-rolled ARM64 into them, and patched stock's `translate_insn` to branch into that code.
 
-That works on the happy path. It does not survive signals.
-
-**The constraint:** inside a process running under Rosetta, every ARM64 instruction the CPU executes is supposed to have been produced by Rosetta itself from x86. When a signal fires (or any other event makes the runtime walk the thread's PC), Rosetta does an ARM64-PC → x86-PC reverse lookup against its own translation tables. ARM64 code from an injected dylib is unknown to those tables — the lookup misses, and Rosetta aborts with:
+That approach has a fundamental problem with signals. Inside a process running under Rosetta, every ARM64 instruction the CPU executes is supposed to have been produced by Rosetta itself from x86. When a signal fires (or any other event makes the runtime walk the thread's PC), Rosetta does an ARM64-PC to x86-PC reverse lookup against its own translation tables. ARM64 code from an injected dylib is unknown to those tables, so the lookup misses and Rosetta aborts with:
 
 ```
 rosetta error: no code fragment associated with the given arm pc
 ```
 
-The longer the JIT runs, the more time the thread spends with PC inside the injected dylib's `__TEXT`, and the more likely a signal will arrive at exactly the wrong moment. In real workloads (e.g. World of Warcraft under wine) this surfaced as random crashes proportional to JIT load — un-fixable without leaving the dylib model.
+The longer the JIT runs, the more time the thread spends with its PC inside the injected dylib's `__TEXT`, and the more likely a signal arrives at exactly the wrong moment. In real workloads (World of Warcraft under wine, for example) this surfaced as random crashes proportional to JIT load. There is no way to fix that without leaving the dylib model.
 
-**The fix is structural:** keep all our ARM64 code out of the Rosetta'd process entirely. Run the translator in a separate native arm64 process — the **sidecar**. The only ARM64 we still need *inside* the Rosetta'd process is a tiny IPC stub, written **once at install time** into the **page padding** at the tail of stock's translation-output buffer. We don't allocate any new executable mappings of our own; the stub sits on pages stock has already allocated and registered with Rosetta as translated-from-x86, so the reverse-lookup tables cover it for free. The one place we do touch stock code is the prologue of `translate_insn` itself: we overwrite the first few bytes with a branch into the stub, and we preserve the displaced bytes inside the stub so they can run unchanged on the fall-through path. The stub is intentionally minimal — its only runtime work is two bounds checks against the contiguous x87 opcode ranges in Rosetta's enum. If the opcode is in range, the stub sends a Mach message to the sidecar; if not, it executes the preserved prologue bytes and branches back into stock. On the IPC reply, the stub either returns to translate_insn's caller with the sidecar's result (handled) or falls through to stock (the sidecar reported unhandled).
+So the fix is to keep all of our ARM64 code out of the Rosetta'd process entirely. The translator runs in a separate native arm64 process, the sidecar. The only ARM64 still needed inside the Rosetta'd process is a tiny IPC stub, written once at install time into the page padding at the tail of stock's translation-output buffer. We don't allocate any new executable mappings of our own; the stub sits on pages stock has already allocated and registered with Rosetta as translated-from-x86, so the reverse-lookup tables cover it for free. The one place we do touch stock code is the prologue of `translate_insn` itself: we overwrite the first few bytes with a branch into the stub, and preserve the displaced bytes inside the stub so they can run unchanged on the fall-through path. The stub's only runtime work is two bounds checks against the contiguous x87 opcode ranges in Rosetta's enum. If the opcode is in range, the stub sends a Mach message to the sidecar; if not, it executes the preserved prologue bytes and branches back into stock. On the IPC reply, the stub either returns to translate_insn's caller with the sidecar's result (handled) or falls through to stock (the sidecar reported unhandled).
 
 ## Architecture
 
@@ -57,32 +55,38 @@ The longer the JIT runs, the more time the thread spends with PC inside the inje
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
-The cost is real: every cold-translated x87 block now pays a Mach IPC round-trip plus 4–6 `mach_vm_read` / `mach_vm_write` syscalls (for the IR buffer, insn buffer, and translation-result struct) that the in-process dylib didn't pay. Once stock has installed the ARM64 bytes the sidecar is no longer on the hot path, so steady-state execution speed is unaffected, but cold translation is slower than it used to be. Profile counters are already `mach_vm_remap`'d (copy=FALSE) so JIT-emitted `LDADDAL` on a parent VA hits the same backing page the sidecar reads; doing the same for the IR / insn / TR buffers is a planned change to claw back the per-call syscalls.
+This is not free. Every cold-translated x87 block now pays a Mach IPC round-trip plus 4-6 `mach_vm_read` / `mach_vm_write` syscalls (for the IR buffer, insn buffer, and translation-result struct) that the in-process dylib didn't pay. Once stock has installed the ARM64 bytes the sidecar is off the hot path, so steady-state execution speed is unaffected, but cold translation is slower than it used to be. Profile counters are already `mach_vm_remap`'d (copy=FALSE) so JIT-emitted `LDADDAL` on a parent VA hits the same backing page the sidecar reads; doing the same for the IR / insn / TR buffers is a planned change to claw back the per-call syscalls.
 
-There are two genuine upsides relative to the dylib approach. First, the sidecar is a normal arm64 process, free to use the C++ standard library and any arm64 dependencies. The in-process dylib had to stay close to no-std discipline — every call from our `__TEXT` to a library increased the wall-clock fraction the parent thread spent with its PC inside our pages, and therefore the rate of the reverse-lookup panic. Out of process, that constraint is gone.
+In exchange, the sidecar is a normal arm64 process, free to use the C++ standard library and any arm64 dependencies. The in-process dylib had to stay close to no-std discipline: every call from our `__TEXT` into a library increased the wall-clock fraction the parent thread spent with its PC inside our pages, and with it the rate of the reverse-lookup panic. Out of process, that constraint is gone.
 
-Second, we no longer hijack Rosetta's export table to install the hook. The dylib version rewrote `X19` mid-init so that Rosetta's loader called *our* exports instead of its own; that worked but was brittle, because it depended on undocumented loader semantics that drift between Rosetta versions. The sidecar version simply overwrites the prologue of `translate_insn` with a branch — a much smaller, more stable surface to maintain.
+The hook install also got simpler. The dylib version rewrote `X19` mid-init so that Rosetta's loader called *our* exports instead of its own. That worked but was brittle, because it depended on undocumented loader semantics that drift between Rosetta versions. The sidecar just overwrites the prologue of `translate_insn` with a branch, a much smaller surface to maintain.
 
 The `x87sidecar` binary plays both roles: when invoked with a target x86 program, it launches the target under Rosetta, attaches, patches `translate_insn`, then drops into its own receive loop serving IPC requests.
 
 ## Attach modes
 
-The sidecar has to obtain the tracee's Mach task port (to read/write its memory and plant the stub). There are two ways it does this, and they have very different deployment consequences.
+The sidecar has to obtain the tracee's Mach task port to read/write its memory and plant the stub. There are two ways it does this, with different deployment consequences.
 
-**Default — `task_for_pid` + ptrace.** The sidecar forks; the parent execs the target while a grandchild acts as the debugger, calls `task_for_pid`, and attaches via `PT_ATTACHEXC`. Unprivileged, this requires the [debugger entitlement](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.security.cs.debugger) (`com.apple.security.cs.debugger`) on the caller *and* `com.apple.security.get-task-allow` on the target — and because the port is grabbed just before the parent execs, the still-`x87sidecar` parent must itself carry `get-task-allow`. Running as root (e.g. CI under `sudo`) bypasses both. This path is used by the local test/benchmark harness against the x86-64 Mach-O sample binaries.
+The default is `task_for_pid` + ptrace. The sidecar forks; the parent execs the target while a grandchild acts as the debugger, calls `task_for_pid`, and attaches via `PT_ATTACHEXC`. Unprivileged, this requires the [debugger entitlement](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.security.cs.debugger) (`com.apple.security.cs.debugger`) on the caller *and* `com.apple.security.get-task-allow` on the target. Because the port is grabbed just before the parent execs, the still-`x87sidecar` parent must itself carry `get-task-allow`. Running as root (CI under `sudo`, for example) bypasses both. This path is used by the local test/benchmark harness against the x86-64 Mach-O sample binaries.
 
-**Cooperative — `--cooperative`.** The sidecar `bootstrap_check_in`s a per-pid service, passes its name to the target via the `X87_SIDECAR_BOOTSTRAP` env var, and the target voluntarily hands over its task *and* thread control ports over that Mach service, then blocks on a handshake reply. No `task_for_pid`, no ptrace, and **no entitlements** — so a hardened, Developer ID-signed, cooperative binary is notarizable. This is the mode the shipping wine build uses: its Rosetta re-exec always inserts `--cooperative`, and wine's startup performs the target side of the handshake.
+With `--cooperative` the direction flips: the sidecar `bootstrap_check_in`s a per-pid Mach service, passes its name to the target via the `X87_SIDECAR_BOOTSTRAP` env var, and the target voluntarily hands over its task *and* thread control ports over that service, then blocks on a handshake reply. No `task_for_pid`, no ptrace, and no entitlements. That last point matters for distribution: a hardened, Developer ID-signed cooperative binary passes notarization, so the sidecar can ship inside notarized third-party bundles. Bundling it with CrossOver, for instance, is now technically possible; CrossOver's wine would need the handshake patch described below, which already applies to its tree since [athei/wine](https://github.com/athei/wine) is CrossOver-based. Cooperative mode is what the [prebuilt wine](https://github.com/athei/wine-build) uses: its Rosetta re-exec always inserts `--cooperative`, and its startup performs the target side of the handshake.
 
 Both modes converge on the same install and IPC loop once the port is in hand.
 
+## Running under wine
+
+Most x87-heavy x86 software is Windows software, so in practice x87sidecar is usually wrapped around wine. [athei/wine-build](https://github.com/athei/wine-build) publishes a prebuilt, relocatable x86_64 wine for macOS (CrossOver-based, WoW64) as `wine-cx-*-macos-x86_64.tar.xz` release assets. It carries both pieces x87sidecar needs: a Rosetta re-exec that inserts `--cooperative`, and the wine-side half of the cooperative handshake.
+
+Stock wine does not work in cooperative mode out of the box. Its unix loader needs a small patch to perform the tracee side of the handshake: look up the Mach service named by `X87_SIDECAR_BOOTSTRAP`, send the process's task and thread control ports, block for the reply, and invalidate the instruction cache for the code ranges the reply carries. That last step is required because a cooperative attach happens after Rosetta init, when `translate_insn` is already hot in the i-cache and a cross-process flush is not reliable; `sys_icache_invalidate` on the tracee's own thread is. The wire format is defined in [`rosetta_loader/src/coop_proto.h`](rosetta_loader/src/coop_proto.h), which is plain C so wine's unix loader can include it directly. The patch used by the prebuilt wine lives on the `cx-*-patched` branches of [athei/wine](https://github.com/athei/wine).
+
 ## Binaries
 
-The build emits two signed artifacts from one link. Both are published as `.tar.xz` assets on each GitHub release; pick whichever fits how you intend to attach.
+The build emits two signed artifacts from one link. Both are published as `.tar.xz` assets on each GitHub release; which one you want depends on how you intend to attach.
 
 | Artifact | Signing | Trade-off |
 |---|---|---|
 | `x87sidecar` | ad-hoc, **no entitlements** | Can be notarized. The default (`task_for_pid`) attach then only works as root (`sudo`); cooperative attach works without it. |
-| `x87sidecar_entitled` | same Mach-O + `cs.debugger` + `get-task-allow` | Default attach works against any target without `sudo` — the first attach just triggers a one-time macOS developer-tools authorization dialog. Not notarizable (`get-task-allow` is rejected). |
+| `x87sidecar_entitled` | same Mach-O + `cs.debugger` + `get-task-allow` | Default attach works against any target without `sudo`; the first attach just triggers a one-time macOS developer-tools authorization dialog. Not notarizable (`get-task-allow` is rejected). |
 
 The two are byte-identical except for the signature. Downloaded copies carry the quarantine attribute, so clear it with `xattr -d com.apple.quarantine <file>` before running. The test scripts point at `x87sidecar_entitled`; under CI's `sudo` either would work.
 
@@ -90,7 +94,7 @@ The two are byte-identical except for the signature. Downloaded copies carry the
 
 x87 coverage: arithmetic, memory ops, comparisons, the full transcendental set (fsin, fcos, fsincos, fpatan, f2xm1, fyl2x, fyl2xp1, fptan, fprem, fprem1, fxtract, fscale), state-management ops (fldenv, fstenv, fxsave, fxrstor, fsave, frstor, fclex, finit, fldcw, fstsw), and the typical fusion patterns produced by 3D-game pipelines.
 
-Tested live against TurtleWoW (a x86 World of Warcraft client). Not a general-purpose drop-in for arbitrary x86 software — it's been hardened against the workloads it sees, and may need work on others.
+Tested live against TurtleWoW (an x86 World of Warcraft client). Not a general-purpose drop-in for arbitrary x86 software: it has been hardened against the workloads it sees, and may need work on others.
 
 ## Building
 
@@ -109,7 +113,7 @@ bash scripts/run_tests.sh test_arith     # specific test
 bash scripts/run_benchmarks.sh           # build + benchmark
 ```
 
-The harness uses the default (`task_for_pid` + ptrace) attach path, so it runs `x87sidecar_entitled` — which needs the debugger entitlements when unprivileged (see [Attach modes](#attach-modes)), or root via `sudo`. Cooperative attach (`--cooperative`, the mode the shipping bundle uses) needs no entitlements at all.
+The harness uses the default (`task_for_pid` + ptrace) attach path, so it runs `x87sidecar_entitled`, which needs the debugger entitlements when unprivileged (see [Attach modes](#attach-modes)) or root via `sudo`. Cooperative attach (`--cooperative`, the mode the prebuilt wine uses) needs no entitlements at all.
 
 ## Configuration
 
@@ -117,7 +121,7 @@ Knobs are environment variables read at startup. The most useful ones:
 
 | Variable | Effect |
 |---|---|
-| `X87_FAST_ROUND=1` | Skip rounding-mode dispatch (faster but unsafe for FLDCW-heavy code; `=2` skips it only in blocks with no control-word writer — safer, still speculative) |
+| `X87_FAST_ROUND=1` | Skip rounding-mode dispatch (faster but unsafe for FLDCW-heavy code; `=2` skips it only in blocks with no control-word writer, which is safer but still speculative) |
 | `X87_ENABLE_BRIDGE=0` | Disable run bridging (default on): carrying one IR run across short `mov`/`lea` gaps between x87 segments |
 | `X87_BRIDGE_V2=0` | Disable bridging of flag-writing ALU gaps (`add`/`sub`/`and`/`or`/`xor`/`inc`/`dec`) whose written flags Rosetta's own liveness analysis proves dead (default on) |
 | `X87_ENABLE_IR_SPLIT=0` / `X87_ENABLE_IR_REMAT=0` | Disable register-pressure relief (splitting over-pressure runs / sinking long-lived values) |
