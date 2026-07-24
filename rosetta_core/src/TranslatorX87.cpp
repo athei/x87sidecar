@@ -2070,11 +2070,13 @@ auto translate_fsqrt(TranslationResult* a1, IRInstr* /*a2*/) -> void {
 //   5. free addr_reg
 //   6. emit_x87_pop                   (TOP++, updates status_word)
 //
-// For S16: FCVTZS to W (32-bit), STRH stores low 16 bits.
-// For S32: FCVTZS to W (32-bit), STR stores 32 bits.
-// For S64: FCVTZS to X (64-bit, is_64bit_int=1), STR stores 64 bits.
-// The register number for Wd_int and Xd_int is the same; only the instruction
-// width differs via the size and is_64bit_int parameters.
+// The FCVT*S always converts at X width regardless of destination size, so
+// the rounded value is exact and emit_fist_indefinite_guard can range-check
+// it against the true destination width (x86 stores the integer indefinite
+// INT_MIN-of-width for NaN and any out-of-range value; AArch64 saturation
+// bounds are the X ones and NaN converts to 0).  The store width (STRH /
+// STR W / STR X) still matches the operand; in range, the low bits of the
+// X result are the value.
 //
 // Register allocation:
 //   Xbase   (gpr pool 0) — X87State base
@@ -2144,7 +2146,8 @@ auto translate_fistp(TranslationResult* a1, IRInstr* a2) -> void {
     //   sf=0 for 32-bit int result, sf=1 for 64-bit.  ftype=1 for f64 source.
     //   rmode field: NS=0, PS=1, MS=2, ZS=3.
 
-    const int is_64bit_int = (int_size == IROperandSize::S64) ? 1 : 0;
+    // X-width conversion for every size — see the indefinite-guard note above.
+    const int is_64bit_int = 1;
     const int Wd_rc = Wd_tmp;  // free after emit_load_st — reuse as RC scratch
 
     if (x87_fast_round_active(*a1)) {
@@ -2216,6 +2219,9 @@ auto translate_fistp(TranslationResult* a1, IRInstr* a2) -> void {
         // [14] done — Wd_int now holds the correctly rounded integer.
     }
 
+    // NaN / out-of-range → integer indefinite (x86 semantics).
+    emit_fist_indefinite_guard(*a1, buf, Wd_int, Dd_val, int_size);
+
     // Step 3: compute destination address
     const int addr_reg =
         compute_operand_address(*a1, /*is_64bit=*/true, &a2->operands[0], GPR::XZR);
@@ -2266,9 +2272,13 @@ auto translate_fisttp(TranslationResult* a1, IRInstr* a2) -> void {
     // Step 1: load ST(0) mantissa → Dd_val
     emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Dd_val, Xst_base);
 
-    // Step 2: FISTT always truncates — single FCVTZS, no RC dispatch needed
-    const int is_64bit_int = (int_size == IROperandSize::S64) ? 1 : 0;
-    emit_fcvt_fp_to_int(buf, is_64bit_int, /*ftype=double*/ 1, /*rmode=FCVTZS*/ 3, Wd_int, Dd_val);
+    // Step 2: FISTT always truncates — single FCVTZS, no RC dispatch needed.
+    // X-width conversion for every size (see translate_fistp).
+    emit_fcvt_fp_to_int(buf, /*is_64bit_int=*/1, /*ftype=double*/ 1, /*rmode=FCVTZS*/ 3, Wd_int,
+                        Dd_val);
+
+    // NaN / out-of-range → integer indefinite (x86 semantics).
+    emit_fist_indefinite_guard(*a1, buf, Wd_int, Dd_val, int_size);
 
     // Step 3: compute destination address
     const int addr_reg =
@@ -2866,7 +2876,8 @@ auto translate_fist(TranslationResult* a1, IRInstr* a2) -> void {
     emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Dd_val, Xst_base);
 
     // Rounding mode dispatch — same CBZ/SUB chain as translate_fistp.
-    const int is_64bit_int = (int_size == IROperandSize::S64) ? 1 : 0;
+    // X-width conversion for every size (see translate_fistp).
+    const int is_64bit_int = 1;
     const int Wd_rc = Wd_tmp;
 
     if (x87_fast_round_active(*a1)) {
@@ -2905,6 +2916,9 @@ auto translate_fist(TranslationResult* a1, IRInstr* a2) -> void {
                             Dd_val);  // [13] FCVTPS (RC=2)
         // [14] done
     }
+
+    // NaN / out-of-range → integer indefinite (x86 semantics).
+    emit_fist_indefinite_guard(*a1, buf, Wd_int, Dd_val, int_size);
 
     // Store integer to memory
     const int addr_reg =

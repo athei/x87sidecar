@@ -116,5 +116,14 @@ auto compute_operand_address(TranslationResult& result, int is_64bit, IROperand*
 auto translate_gpr(TranslationResult* result, int is_64bit, uint8_t reg, unsigned int extend_mode,
                    int hint_reg) -> int;
 
+// ---------------------------------------------------------------------------
+// emit_fist_indefinite_guard — force the x86 integer indefinite (INT_MIN of
+// the destination width) into Xd_int when Dd_val is NaN or the rounded value
+// is out of range.  Emitted after the FCVT*S dispatch of FIST/FISTP/FISTTP,
+// which must convert at X width for all sizes.  Preserves NZCV.
+// ---------------------------------------------------------------------------
+auto emit_fist_indefinite_guard(TranslationResult& result, AssemblerBuffer& buf, int Xd_int,
+                                int Dd_val, IROperandSize size) -> void;
+
 auto read_operand_to_gpr(TranslationResult& result, bool is_64bit, IROperand* operand,
                          int extend_mode, int hint_reg) -> int;

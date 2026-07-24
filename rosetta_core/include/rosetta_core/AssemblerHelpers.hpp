@@ -87,6 +87,12 @@ auto emit_subs_reg(AssemblerBuffer& buf, int is_64bit, int Rn, int Rm, int Rd) -
 auto emit_add_sub_shifted_reg(AssemblerBuffer& buf, int is_64bit, int is_sub, int is_set_flags,
                               int shift_type, int Rm, int8_t shift_amount, int Rn, int Rd) -> void;
 
+// ADD / SUB / ADDS / SUBS extended register
+// option: 0=UXTB 1=UXTH 2=UXTW 3=UXTX 4=SXTB 5=SXTH 6=SXTW 7=SXTX
+// imm3: left shift 0-4 applied after the extend
+auto emit_add_sub_ext_reg(AssemblerBuffer& buf, int is_64bit, int is_sub, int is_set_flags,
+                          int option, int imm3, int Rm, int Rn, int Rd) -> void;
+
 // AND / ORR / EOR / ANDS shifted register
 // opc: 0=AND  1=ORR  2=EOR  3=ANDS
 // n=1 inverts Rm  →  BIC / ORN / EON / BICS
@@ -296,6 +302,13 @@ auto emit_ld1_lane_d(AssemblerBuffer& buf, int Vt, int Rn, int lane) -> void;
 // AArch64 cond codes: EQ=0 NE=1 CS=2 CC=3 MI=4 PL=5 VS=6 VC=7
 //                     HI=8 LS=9 GE=10 LT=11 GT=12 LE=13
 auto emit_cset(AssemblerBuffer& buf, int is_64bit, int cond, int Rd) -> void;
+
+// CSEL Rd, Rn, Rm, cond — Rd = cond ? Rn : Rm
+// AArch64 cond codes same as above
+auto emit_csel_gpr(AssemblerBuffer& buf, int is_64bit, int Rd, int Rn, int Rm, int cond) -> void;
+
+// FCMEQ Dd, Dn, Dm — scalar f64 compare-equal, mask into Dd (no NZCV write)
+auto emit_fcmeq_f64(AssemblerBuffer& buf, int Dd, int Dn, int Dm) -> void;
 
 // FCSEL Dd, Dn, Dm, cond — conditional FP select (f64)
 // Dd = cond ? Dn : Dm

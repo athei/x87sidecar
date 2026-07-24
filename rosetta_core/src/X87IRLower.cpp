@@ -1090,12 +1090,18 @@ void lower(Context& ctx, TranslationResult* result) {
             case Op::StoreI64: {
                 int Dd_val = fprs.get(n.inputs[0]);
                 int Wd_int = alloc_free_gpr(*result);
-                int is_64bit_int = (n.op == Op::StoreI64) ? 1 : 0;
+                // X-width conversion for every size — emit_fist_indefinite_guard
+                // range-checks the rounded 64-bit result against the true
+                // destination width (see translate_fistp).
+                int is_64bit_int = 1;
                 int store_size = 3;
+                IROperandSize int_size = IROperandSize::S64;
                 if (n.op == Op::StoreI16) {
                     store_size = 1;
+                    int_size = IROperandSize::S16;
                 } else if (n.op == Op::StoreI32) {
                     store_size = 2;
+                    int_size = IROperandSize::S32;
                 }
 
                 if (n.flags & kTruncate) {
@@ -1115,6 +1121,9 @@ void lower(Context& ctx, TranslationResult* result) {
                     emit_rcmode_dispatch(buf, Wd_int, Dd_val, is_64bit_int, Xbase, Wd_tmp,
                                          fast_round);
                 }
+
+                // NaN / out-of-range → integer indefinite (x86 semantics).
+                emit_fist_indefinite_guard(*result, buf, Wd_int, Dd_val, int_size);
 
                 int addr = compute_operand_address(*result, true, n.mem_operand, GPR::XZR);
                 emit_str_imm(buf, store_size, Wd_int, addr, /*imm12=*/0);
