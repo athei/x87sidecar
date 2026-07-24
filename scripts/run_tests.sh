@@ -89,6 +89,7 @@ ALL_TESTS=(
     test_fcomi
     test_frndint
     test_fistp_multi
+    test_fist_indefinite
     test_fcmov
     test_ficom
     test_rc_recache

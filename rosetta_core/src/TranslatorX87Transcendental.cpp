@@ -1252,9 +1252,25 @@ int emit_inline_fprem1(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, i
 int emit_inline_fyl2xp1(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, int Wd_top,
                         int Wd_tmp) {
     // x86 fyl2xp1: ST(1) := ST(1) * log2(ST(0) + 1); pop.  x87 spec
-    // restricts the input to -1+ε ≤ ST(0) ≤ 1-√2/2 ≈ 0.293; in that
-    // range, simple add-then-log2 is accurate enough (no need for
-    // log1p's special-case for cancellation).
+    // restricts the input to -1+ε ≤ ST(0) ≤ 1-√2/2 ≈ 0.293.
+    //
+    // Plain add-then-log2 loses x entirely for |x| < 2^-52 (fl(1+x) == 1,
+    // so the result flushed to 0 where stock returns y·x/ln2).  Fixed with
+    // a log1p-style correction term:
+    //
+    //   u = fl(1 + x);  c = x - (u - 1)        ; c is the exact rounding
+    //   log2(1+x) = log2(u) + (c/u)·(1/ln2)    ;   error of the add
+    //
+    // c is exact by Sterbenz over the legal input range, the correction is
+    // O(2^-53) relative in mid-range, and for tiny x it IS the result
+    // (u == 1, log2(1) == 0 — the table forces that exactly).
+    //
+    // Register pressure: log2's body already peaks at the full FPR pool
+    // (6 internal + Dx-as-in/out + Dy), so u/c cannot be held across it.
+    // Instead x is reloaded afterwards from the ST(0) stack slot — still
+    // intact, the caller only stores to ST(1) and pops — and u is
+    // recomputed (deterministic FADD, bit-identical), keeping the peak
+    // after log2 at 5.
     const int Xst_base = x87_get_st_base(a1);
     const int depth_st0 = resolve_depth(a1, 0);
     const int depth_st1 = resolve_depth(a1, 1);
@@ -1282,6 +1298,24 @@ int emit_inline_fyl2xp1(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, 
     // output slot (same trick as emit_inline_fyl2x_core) and becomes the
     // returned result reg.
     emit_inline_log2(a1, buf, Dx, Xconst, /*Dd_out=*/Dx);
+
+    // Correction term (see header comment).  Reload x, recompute u.
+    const int Dx2 = alloc_free_fpr(a1);
+    emit_load_st(buf, Xbase, Wd_top, depth_st0, Wd_tmp, Dx2, Xst_base);
+    const int Du = alloc_free_fpr(a1);
+    const int Dt = alloc_free_fpr(a1);
+    emit_fmov_d_one(buf, Dt);
+    emit_fadd_f64(buf, Du, Dx2, Dt);  // u = x + 1  (same rounding as above)
+    emit_fsub_f64(buf, Dt, Du, Dt);   // t = u - 1
+    emit_fsub_f64(buf, Dt, Dx2, Dt);  // c = x - (u - 1)
+    free_fpr(a1, Dx2);
+    emit_fdiv_f64(buf, Dt, Dt, Du);   // t = c / u
+    free_fpr(a1, Du);
+    const int Dinv = alloc_free_fpr(a1);
+    emit_fldr_imm(buf, 3, Dinv, Xconst, ConstOff::Log2InvLn2);
+    emit_fmadd_f64(buf, Dx, Dt, Dinv, Dx);  // log2(1+x) = log2u + t·invln2
+    free_fpr(a1, Dinv);
+    free_fpr(a1, Dt);
     free_gpr(a1, Xconst);
 
     emit_fmul_f64(buf, Dx, Dx, Dy);

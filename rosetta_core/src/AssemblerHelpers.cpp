@@ -264,6 +264,27 @@ auto emit_add_sub_shifted_reg(AssemblerBuffer& buf, int is_64bit, int is_sub, in
     buf.emit(insn);
 }
 
+auto emit_add_sub_ext_reg(AssemblerBuffer& buf, int is_64bit, int is_sub, int is_set_flags,
+                          int option, int imm3, int Rm, int Rn, int Rd) -> void {
+    // ADD/SUB (extended register):
+    // sf | op | S | 01011 | 00 | 1 | Rm | option | imm3 | Rn | Rd
+    // [31]=sf [30]=op [29]=S [28:24]=01011 [23:22]=00 [21]=1
+    // [20:16]=Rm [15:13]=option [12:10]=imm3 [9:5]=Rn [4:0]=Rd
+    // option: 000 UXTB, 001 UXTH, 010 UXTW, 011 UXTX,
+    //         100 SXTB, 101 SXTH, 110 SXTW, 111 SXTX
+    // Rn=31 is SP; Rd=31 is XZR when S=1 (CMP/CMN form).
+    uint32_t insn = 0x0B200000;
+    insn |= static_cast<uint32_t>(is_64bit != 0) << 31;
+    insn |= static_cast<uint32_t>(is_sub != 0) << 30;
+    insn |= static_cast<uint32_t>(is_set_flags != 0) << 29;
+    insn |= static_cast<uint32_t>(Rm & 0x1F) << 16;
+    insn |= static_cast<uint32_t>(option & 0x7) << 13;
+    insn |= static_cast<uint32_t>(imm3 & 0x7) << 10;
+    insn |= static_cast<uint32_t>(Rn & 0x1F) << 5;
+    insn |= static_cast<uint32_t>(Rd & 0x1F);
+    buf.emit(insn);
+}
+
 auto emit_logical_shifted_reg(AssemblerBuffer& buf, int is_64bit, int opc, int n, int shift_type,
                               int Rm, int8_t shift_amount, int Rn, int Rd) -> void {
     // sf | opc | 01010 | shift | N | Rm | imm6 | Rn | Rd
@@ -490,6 +511,22 @@ auto emit_cset(AssemblerBuffer& buf, int is_64bit, int cond, int Rd) -> void {
 }
 
 // =============================================================================
+// CSEL Rd, Rn, Rm, cond — conditional GPR select (Rd = cond ? Rn : Rm)
+//
+// Encoding: sf | 0 | 0 | 11010100 | Rm | cond | 0 | 0 | Rn | Rd
+// Previously rolled as local lambdas at each call site.
+// =============================================================================
+auto emit_csel_gpr(AssemblerBuffer& buf, int is_64bit, int Rd, int Rn, int Rm, int cond) -> void {
+    uint32_t insn = 0x1A800000U;
+    insn |= static_cast<uint32_t>(is_64bit != 0) << 31;
+    insn |= static_cast<uint32_t>(Rm & 0x1F) << 16;
+    insn |= static_cast<uint32_t>(cond & 0xF) << 12;
+    insn |= static_cast<uint32_t>(Rn & 0x1F) << 5;
+    insn |= static_cast<uint32_t>(Rd & 0x1F);
+    buf.emit(insn);
+}
+
+// =============================================================================
 // FCSEL Dd, Dn, Dm, cond — conditional FP select (f64)
 //
 // Encoding: M=0, S=0, 11110, type=01(f64), 1, Rm, cond, 11, Rn, Rd
@@ -499,6 +536,23 @@ auto emit_fcsel_f64(AssemblerBuffer& buf, int Dd, int Dn, int Dm, int cond) -> v
     uint32_t insn = 0x1E600C00U;
     insn |= static_cast<uint32_t>(Dm & 0x1F) << 16;
     insn |= static_cast<uint32_t>(cond & 0xF) << 12;
+    insn |= static_cast<uint32_t>(Dn & 0x1F) << 5;
+    insn |= static_cast<uint32_t>(Dd & 0x1F);
+    buf.emit(insn);
+}
+
+// =============================================================================
+// FCMEQ Dd, Dn, Dm — scalar f64 compare-equal into an FPR mask
+//
+// Dd = (Dn == Dm) ? all-ones : 0.  Unordered (NaN operand) compares false.
+// Writes an FPR, NOT NZCV — usable where guest EFLAGS must stay untouched.
+//
+// Encoding (Advanced SIMD scalar three same):
+//   01 | U=0 | 11110 | sz=01 | 1 | Rm | 11100 | 1 | Rn | Rd = 0x5E60E400
+// =============================================================================
+auto emit_fcmeq_f64(AssemblerBuffer& buf, int Dd, int Dn, int Dm) -> void {
+    uint32_t insn = 0x5E60E400U;
+    insn |= static_cast<uint32_t>(Dm & 0x1F) << 16;
     insn |= static_cast<uint32_t>(Dn & 0x1F) << 5;
     insn |= static_cast<uint32_t>(Dd & 0x1F);
     buf.emit(insn);

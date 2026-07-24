@@ -2070,11 +2070,13 @@ auto translate_fsqrt(TranslationResult* a1, IRInstr* /*a2*/) -> void {
 //   5. free addr_reg
 //   6. emit_x87_pop                   (TOP++, updates status_word)
 //
-// For S16: FCVTZS to W (32-bit), STRH stores low 16 bits.
-// For S32: FCVTZS to W (32-bit), STR stores 32 bits.
-// For S64: FCVTZS to X (64-bit, is_64bit_int=1), STR stores 64 bits.
-// The register number for Wd_int and Xd_int is the same; only the instruction
-// width differs via the size and is_64bit_int parameters.
+// The FCVT*S always converts at X width regardless of destination size, so
+// the rounded value is exact and emit_fist_indefinite_guard can range-check
+// it against the true destination width (x86 stores the integer indefinite
+// INT_MIN-of-width for NaN and any out-of-range value; AArch64 saturation
+// bounds are the X ones and NaN converts to 0).  The store width (STRH /
+// STR W / STR X) still matches the operand; in range, the low bits of the
+// X result are the value.
 //
 // Register allocation:
 //   Xbase   (gpr pool 0) — X87State base
@@ -2144,7 +2146,8 @@ auto translate_fistp(TranslationResult* a1, IRInstr* a2) -> void {
     //   sf=0 for 32-bit int result, sf=1 for 64-bit.  ftype=1 for f64 source.
     //   rmode field: NS=0, PS=1, MS=2, ZS=3.
 
-    const int is_64bit_int = (int_size == IROperandSize::S64) ? 1 : 0;
+    // X-width conversion for every size — see the indefinite-guard note above.
+    const int is_64bit_int = 1;
     const int Wd_rc = Wd_tmp;  // free after emit_load_st — reuse as RC scratch
 
     if (x87_fast_round_active(*a1)) {
@@ -2216,6 +2219,9 @@ auto translate_fistp(TranslationResult* a1, IRInstr* a2) -> void {
         // [14] done — Wd_int now holds the correctly rounded integer.
     }
 
+    // NaN / out-of-range → integer indefinite (x86 semantics).
+    emit_fist_indefinite_guard(*a1, buf, Wd_int, Dd_val, int_size);
+
     // Step 3: compute destination address
     const int addr_reg =
         compute_operand_address(*a1, /*is_64bit=*/true, &a2->operands[0], GPR::XZR);
@@ -2266,9 +2272,13 @@ auto translate_fisttp(TranslationResult* a1, IRInstr* a2) -> void {
     // Step 1: load ST(0) mantissa → Dd_val
     emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Dd_val, Xst_base);
 
-    // Step 2: FISTT always truncates — single FCVTZS, no RC dispatch needed
-    const int is_64bit_int = (int_size == IROperandSize::S64) ? 1 : 0;
-    emit_fcvt_fp_to_int(buf, is_64bit_int, /*ftype=double*/ 1, /*rmode=FCVTZS*/ 3, Wd_int, Dd_val);
+    // Step 2: FISTT always truncates — single FCVTZS, no RC dispatch needed.
+    // X-width conversion for every size (see translate_fistp).
+    emit_fcvt_fp_to_int(buf, /*is_64bit_int=*/1, /*ftype=double*/ 1, /*rmode=FCVTZS*/ 3, Wd_int,
+                        Dd_val);
+
+    // NaN / out-of-range → integer indefinite (x86 semantics).
+    emit_fist_indefinite_guard(*a1, buf, Wd_int, Dd_val, int_size);
 
     // Step 3: compute destination address
     const int addr_reg =
@@ -2866,7 +2876,8 @@ auto translate_fist(TranslationResult* a1, IRInstr* a2) -> void {
     emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Dd_val, Xst_base);
 
     // Rounding mode dispatch — same CBZ/SUB chain as translate_fistp.
-    const int is_64bit_int = (int_size == IROperandSize::S64) ? 1 : 0;
+    // X-width conversion for every size (see translate_fistp).
+    const int is_64bit_int = 1;
     const int Wd_rc = Wd_tmp;
 
     if (x87_fast_round_active(*a1)) {
@@ -2905,6 +2916,9 @@ auto translate_fist(TranslationResult* a1, IRInstr* a2) -> void {
                             Dd_val);  // [13] FCVTPS (RC=2)
         // [14] done
     }
+
+    // NaN / out-of-range → integer indefinite (x86 semantics).
+    emit_fist_indefinite_guard(*a1, buf, Wd_int, Dd_val, int_size);
 
     // Store integer to memory
     const int addr_reg =
@@ -3275,45 +3289,51 @@ auto translate_fnop(TranslationResult* a1, IRInstr* /*a2*/) -> void {
 // =============================================================================
 // FSCALE — ST(0) ← ST(0) · 2^trunc(ST(1)).  ST(1) NOT popped.
 //
-// Strategy (pure f64 — no f80 unpacking like stock):
-//   k          = FCVTZS(ST(1))            ; truncated, saturating signed
-//   exp_new    = 1023 + k
-//   if k > 1023:    multiplier = +∞  (overflow)
-//   if k < -1022:   multiplier = 0   (underflow)
-//   else:           multiplier_bits = exp_new << 52  ; 2^k as f64
-//   result_norm = ST(0) · multiplier
-//   if ST(1) is NaN: result = ST(1)        ; FCVTZS(NaN)=0 would give wrong answer
-//   else:            result = result_norm
+// Strategy (pure f64 — no f80 unpacking like stock): multiply by 2^k built
+// as a raw bit pattern.  A single multiplier only spans k ∈ [-1022, 1023];
+// saturating it outside that range flushes results x86 keeps — denormal
+// results for k < -1022 (fscale(1.0, -1074) = 0x1) and finite results for
+// denormal ST(0) with k > 1023 (fscale(2^-1074, 2000) = 2^926).  So the
+// scaling is staged, musl-scalbn style, fully branchless:
+//
+//   k = FCVTZS(ST(1))                       ; truncated, saturating signed
+//   twice:  if k >  1023 { x ·= 2^969;  k -= 969 }   (CSEL'd multiplier)
+//           if k < -1022 { x ·= 2^-969; k += 969 }
+//   k = clamp(k, -1022, 1023)
+//   result_staged = x · 2^k
+//
+// The conditional steps keep every intermediate exact whenever the true
+// result is representable: a step only fires for |k| beyond the normal
+// range, and a representable result then forces x far enough from the
+// underflow boundary that x·2^∓969 stays normal (one negative step active
+// ⟹ x ≥ 2^-51, two ⟹ x ≥ 2^917).  The final FMUL is therefore the only
+// rounding step, and gradual underflow lands on the correctly rounded
+// denormal.  When an intermediate does round (true result < 2^-1075), the
+// remaining ≥ 969-exponent step still drives it to the correct 0.  Beyond
+// the staged range (|k| > 2·969 + 1022 after clamping) the chain saturates
+// to 0/∞ through ordinary FMUL rounding.
+//
+// Infinite ST(1) needs one correction: FCVTZS saturation makes ±∞ look
+// like a huge finite k, whose staged chain gives 0 for {x=0, k huge>0} and
+// ∞ for {x=±∞, k huge<0}, where the SDM wants the invalid-operation NaN
+// (0·2^+∞ and ∞·2^-∞).  A final factor f — +∞ if ST(1)=+∞, 0 if ST(1)=-∞,
+// else 1.0, selected on ST(1)'s bit pattern — restores exactly those cases
+// via FMUL's own 0·∞ = NaN and is an exact identity otherwise.  It also
+// fixes huge *finite* ST(1), which the old saturating multiplier got
+// wrong: fscale(0, 1e10) = 0 (not NaN), fscale(∞, -1e10) = ∞ (not NaN).
+//
+//   if ST(1) is NaN: result = ST(1)     ; FCVTZS(NaN)=0 would give x·1
+//   else:            result = result_staged · f
 //
 // FMUL handles the remaining special-case fall-out automatically:
-//   ST(0) NaN → result NaN; 0·∞ → NaN; ∞·finite → ±∞ etc.
+//   ST(0) NaN → result NaN; ∞·finite → ±∞; signed zeros preserved.
 // =============================================================================
 int emit_inline_fscale_core(TranslationResult& a1, AssemblerBuffer& buf, int Dx_in, int Dy_in) {
     // ── k = trunc(Dy_in) as 32-bit signed (saturating) ──
     const int Wd_k = alloc_free_gpr(a1);
     emit_fcvtzs(buf, /*ftype=*/1 /*f64*/, /*is_64bit_int=*/0, Wd_k, Dy_in);
 
-    // ── Build multiplier bits in Wd_e (reused as 64-bit Xd_bits below) ──
-    // exp_new = 1023 + k
-    const int Wd_e = alloc_free_gpr(a1);
-    emit_add_imm(buf, /*is_64bit=*/0, /*is_sub=*/0, /*is_set_flags=*/0,
-                 /*shift=*/0, /*imm12=*/1023, Wd_k, Wd_e);
-    // UBFIZ Xd_bits, Wd_e, #52, #11   → exp_new at bits[62:52], rest zero
-    // 32-bit ADD zero-extends; the X view of Wd_e has high 32 bits zero, so
-    // UBFM N=1 immr=12 imms=10 reads low 11 bits and rotates to bits 52..62.
-    emit_bitfield(buf, /*is_64bit=*/1, /*opc=*/2 /*UBFM*/, /*N=*/1,
-                  /*immr=*/12, /*imms=*/10, /*Rn=*/Wd_e, /*Rd=*/Wd_e);
-
-    // CSEL helper (no GPR variant exists in our helpers).
-    auto emit_csel = [&](int is_64, int Rd, int Rn, int Rm, int cond) {
-        uint32_t insn = 0x1A800000U;
-        insn |= static_cast<uint32_t>(is_64 != 0) << 31;
-        insn |= static_cast<uint32_t>(Rm & 0x1F) << 16;
-        insn |= static_cast<uint32_t>(cond & 0xF) << 12;
-        insn |= static_cast<uint32_t>(Rn & 0x1F) << 5;
-        insn |= static_cast<uint32_t>(Rd & 0x1F);
-        buf.emit(insn);
-    };
+    constexpr int kEQ = 0x0;  // equal
     constexpr int kGT = 0xC;  // signed greater-than
     constexpr int kLT = 0xB;  // signed less-than
     constexpr int kVS = 0x6;  // overflow set (FP unordered)
@@ -3321,40 +3341,84 @@ int emit_inline_fscale_core(TranslationResult& a1, AssemblerBuffer& buf, int Dx_
     // Guest EFLAGS may be live in NZCV across this op (stock's own fscale
     // lowering preserves them) — save across the CMP/CMN/FCMP region,
     // which runs to the final FCSEL.  Peak GPR concurrency with the save
-    // is 4 (Wd_k + Wd_e + Xtemp + Xnzcv), the in-run scratch budget.
+    // is 4 (Wd_k + Xm + Xt + Xnzcv), the in-run scratch budget.
     const int Xnzcv = alloc_free_gpr(a1);
     emit_mrs_nzcv(buf, Xnzcv);
 
-    // CMP Wd_k, #1023.  GT (signed) → k > 1023 → overflow.
-    emit_add_imm(buf, /*is_64bit=*/0, /*is_sub=*/1, /*is_set_flags=*/1,
-                 /*shift=*/0, /*imm12=*/1023, Wd_k, /*Rd=*/31);
-    {
-        const int Xtemp = alloc_free_gpr(a1);
-        // +Inf bits = 0x7FF0_0000_0000_0000 = MOVZ #0x7FF0 LSL #48
-        emit_movn(buf, /*is_64bit=*/1, /*opc=*/2 /*MOVZ*/, /*hw=*/3, 0x7FF0, Xtemp);
-        emit_csel(/*is_64bit=*/1, /*Rd=*/Wd_e, /*Rn=*/Xtemp, /*Rm=*/Wd_e, kGT);
-        free_gpr(a1, Xtemp);
+    // ── Two conditional pre-scaling steps ──
+    // Multiplier bit patterns: 1.0 = 0x3FF0…, 2^969 = (1023+969)<<52 =
+    // 0x7C80…, 2^-969 = (1023-969)<<52 = 0x0360….  The GT and LT arms are
+    // mutually exclusive within a step (k > 1023 steps down to k > 54).
+    // Multiplying by the CSEL'd-in 1.0 when no arm fires is exact for every
+    // input including denormals, ±0, ±∞ and NaN.
+    const int Xm = alloc_free_gpr(a1);
+    const int Xt = alloc_free_gpr(a1);
+    const int Dd_m = alloc_free_fpr(a1);
+    for (int step = 0; step < 2; ++step) {
+        // CMP Wd_k, #1023.  GT → scale up by 2^969.
+        emit_add_imm(buf, /*is_64bit=*/0, /*is_sub=*/1, /*is_set_flags=*/1,
+                     /*shift=*/0, /*imm12=*/1023, Wd_k, /*Rd=*/31);
+        emit_movn(buf, /*is_64bit=*/1, /*opc=*/2 /*MOVZ*/, /*hw=*/3, 0x3FF0, Xm);
+        emit_movn(buf, /*is_64bit=*/1, /*opc=*/2 /*MOVZ*/, /*hw=*/3, 0x7C80, Xt);
+        emit_csel_gpr(buf, /*is_64bit=*/1, Xm, Xt, Xm, kGT);
+        emit_add_imm(buf, /*is_64bit=*/0, /*is_sub=*/1, /*is_set_flags=*/0,
+                     /*shift=*/0, /*imm12=*/969, Wd_k, Xt);  // Xt = k - 969
+        emit_csel_gpr(buf, /*is_64bit=*/0, Wd_k, Xt, Wd_k, kGT);
+        // CMN Wd_k, #1022.  LT → scale down by 2^-969.
+        emit_add_imm(buf, /*is_64bit=*/0, /*is_sub=*/0, /*is_set_flags=*/1,
+                     /*shift=*/0, /*imm12=*/1022, Wd_k, /*Rd=*/31);
+        emit_movn(buf, /*is_64bit=*/1, /*opc=*/2 /*MOVZ*/, /*hw=*/3, 0x0360, Xt);
+        emit_csel_gpr(buf, /*is_64bit=*/1, Xm, Xt, Xm, kLT);
+        emit_add_imm(buf, /*is_64bit=*/0, /*is_sub=*/0, /*is_set_flags=*/0,
+                     /*shift=*/0, /*imm12=*/969, Wd_k, Xt);  // Xt = k + 969
+        emit_csel_gpr(buf, /*is_64bit=*/0, Wd_k, Xt, Wd_k, kLT);
+        // x ·= step multiplier
+        emit_fmov_x_to_d(buf, Dd_m, Xm);
+        emit_fmul_f64(buf, Dx_in, Dx_in, Dd_m);
     }
 
-    // CMN Wd_k, #1022 → flags as Wd_k + 1022.  LT → k < -1022 → underflow.
-    // CMN imm12: ADDS Rd=XZR, Rn, #imm12.  Use emit_add_imm with is_sub=0,
-    // set_flags=1, Rd=31.
+    // ── Clamp k to the single-multiplier range [-1022, 1023] ──
+    emit_add_imm(buf, /*is_64bit=*/0, /*is_sub=*/1, /*is_set_flags=*/1,
+                 /*shift=*/0, /*imm12=*/1023, Wd_k, /*Rd=*/31);
+    emit_movn(buf, /*is_64bit=*/0, /*opc=*/2 /*MOVZ*/, /*hw=*/0, 1023, Xt);
+    emit_csel_gpr(buf, /*is_64bit=*/0, Wd_k, Xt, Wd_k, kGT);
     emit_add_imm(buf, /*is_64bit=*/0, /*is_sub=*/0, /*is_set_flags=*/1,
                  /*shift=*/0, /*imm12=*/1022, Wd_k, /*Rd=*/31);
-    // CSEL Wd_e = (LT) ? XZR : Wd_e — underflow → multiplier = 0.
-    emit_csel(/*is_64bit=*/1, /*Rd=*/Wd_e, /*Rn=*/31 /*XZR*/, /*Rm=*/Wd_e, kLT);
+    emit_movn(buf, /*is_64bit=*/0, /*opc=*/0 /*MOVN*/, /*hw=*/0, 1021, Xt);  // -1022
+    emit_csel_gpr(buf, /*is_64bit=*/0, Wd_k, Xt, Wd_k, kLT);
+
+    // ── Final multiplier bits: (1023 + k) << 52 ──
+    // 32-bit ADD zero-extends; the X view of Xm has high 32 bits zero, so
+    // UBFM N=1 immr=12 imms=10 (UBFIZ #52,#11) reads the low 11 bits and
+    // rotates them to bits 52..62.
+    emit_add_imm(buf, /*is_64bit=*/0, /*is_sub=*/0, /*is_set_flags=*/0,
+                 /*shift=*/0, /*imm12=*/1023, Wd_k, Xm);
+    emit_bitfield(buf, /*is_64bit=*/1, /*opc=*/2 /*UBFM*/, /*N=*/1,
+                  /*immr=*/12, /*imms=*/10, /*Rn=*/Xm, /*Rd=*/Xm);
     free_gpr(a1, Wd_k);
+    emit_fmov_x_to_d(buf, Dd_m, Xm);
 
-    // FMOV multiplier into FPR.
-    const int Dd_m = alloc_free_fpr(a1);
-    emit_fmov_x_to_d(buf, Dd_m, Wd_e);
-    free_gpr(a1, Wd_e);
-
-    // result_norm = Dx_in * Dd_m.  The FMUL is the last read of Dx_in —
-    // free it right after.
+    // result_staged = Dx_in · 2^k — the only step that can underflow, so a
+    // denormal result is rounded exactly once.  Last read of Dx_in.
     const int Dd_norm = alloc_free_fpr(a1);
     emit_fmul_f64(buf, Dd_norm, Dx_in, Dd_m);
     free_fpr(a1, Dx_in);
+
+    // ── Infinity correction factor f (see header comment) ──
+    emit_fmov_d_to_x(buf, Xt, Dy_in);  // Xt = bits(ST(1))
+    const int Xf = alloc_free_gpr(a1);  // Wd_k's slot — peak stays 4
+    emit_movn(buf, /*is_64bit=*/1, /*opc=*/2 /*MOVZ*/, /*hw=*/3, 0x3FF0, Xf);  // f = 1.0
+    emit_movn(buf, /*is_64bit=*/1, /*opc=*/2 /*MOVZ*/, /*hw=*/3, 0x7FF0, Xm);  // +∞ bits
+    emit_subs_reg(buf, /*is_64bit=*/1, Xt, Xm, /*Rd=*/31);
+    emit_csel_gpr(buf, /*is_64bit=*/1, Xf, Xm, Xf, kEQ);  // f = (y==+∞) ? +∞ : f
+    emit_movn(buf, /*is_64bit=*/1, /*opc=*/2 /*MOVZ*/, /*hw=*/3, 0xFFF0, Xm);  // -∞ bits
+    emit_subs_reg(buf, /*is_64bit=*/1, Xt, Xm, /*Rd=*/31);
+    emit_csel_gpr(buf, /*is_64bit=*/1, Xf, 31 /*XZR*/, Xf, kEQ);  // f = (y==-∞) ? 0 : f
+    emit_fmov_x_to_d(buf, Dd_m, Xf);
+    free_gpr(a1, Xf);
+    free_gpr(a1, Xt);
+    free_gpr(a1, Xm);
+    emit_fmul_f64(buf, Dd_norm, Dd_norm, Dd_m);
     free_fpr(a1, Dd_m);
 
     // FCMP Dy_in, Dy_in → V=1 iff Dy_in is NaN.
