@@ -19,10 +19,16 @@
 // v1 scope: instructions that neither read nor write EFLAGS and whose
 // lowering is trivial under stock's register convention (guest GPRs live
 // 1:1 in ARM x0–x15): 32/64-bit `mov r,r` / `mov r,imm` / `mov r,[m]` /
-// `mov [m],r` and `lea`.  Excluded: 8/16-bit operands (sub-register merge
-// semantics), segment overrides, rep prefixes, fixup-carrying immediates,
-// absolute-memory operands (need external fixups), `mov [m],imm`
-// (deferred, easy v1.1).
+// `mov [m],r`, `lea`, `movzx`/`movsx`/`movsxd` with a register source
+// (dst is always 32/64-bit so there is no sub-register merge; the 8/16-bit
+// SOURCE read is a plain bitfield extract, including the high-byte
+// AH/CH/DH/BH forms), and `fwait` (stock's translate_insn has no case for
+// `wait` — it falls through and emits nothing, binary-audited upstream
+// 2026-07-12, so consuming it as a nop is exact).  Excluded: other 8/16-bit
+// operands (sub-register merge semantics), segment overrides, rep prefixes,
+// fixup-carrying immediates, absolute-memory operands (need external
+// fixups), `mov [m],imm` (deferred, easy v1.1), movzx/movsx from memory
+// (deferred: needs a width field alongside mem_operand).
 //
 // v2 scope: v1 plus the simple flag-WRITING ALU ops add/sub/inc/dec/and/
 // or/xor, bridgeable only when their written flags are provably dead.
@@ -101,6 +107,36 @@ inline bool is_bridge_v1(const IRInstr& ins) {
         // runtime address materializer asserts seg_override == 0.
         return gpr_32_or_64(ins.operands[0]) && ins.operands[1].kind == IROperandKind::MemRef &&
                ins.operands[1].mem.seg_override == 0;
+    }
+    if (op == kOpcodeName_movzx || op == kOpcodeName_movsx || op == kOpcodeName_movsxd) {
+        if (ins.num_operands != 2) {
+            return false;
+        }
+        const IROperand& dst = ins.operands[0];
+        const IROperand& src = ins.operands[1];
+        if (!gpr_32_or_64(dst)) {
+            return false;
+        }
+        if (src.kind != IROperandKind::Register || !src.reg.reg.is_gpr()) {
+            return false;  // memory sources deferred
+        }
+        switch (src.reg.size) {
+            case IROperandSize::S8:
+                // Register-byte encoding high nibble: 0x0X = low byte,
+                // 0x1X = high byte (AH/CH/DH/BH); anything else unexpected.
+                return (src.reg.reg.value & 0xF0) <= 0x10;
+            case IROperandSize::S16:
+                return true;
+            case IROperandSize::S32:
+                return op == kOpcodeName_movsxd;
+            default:
+                return false;
+        }
+    }
+    if (op == kOpcodeName_wait) {
+        // FWAIT checks pending unmasked FP exceptions, which neither we nor
+        // stock model: stock's translate_insn emits nothing for `wait`.
+        return true;
     }
     return false;
 }

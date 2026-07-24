@@ -80,6 +80,7 @@ ALL_TESTS=(
     test_bridge_lea
     test_bridge_flags
     test_bridge_alu
+    test_bridge_ext
     test_fld_arith_arithp_fma
     test_readst_elide
     test_fxch

@@ -104,6 +104,11 @@ enum class Op : uint8_t {
     BridgeLea,     // lea r,[m]    inputs[0]=enc(dst), mem_operand=&src
     BridgeLoadG,   // mov r,[m]    inputs[0]=enc(dst), mem_operand=&src
     BridgeStoreG,  // mov [m],r    inputs[0]=enc(src), mem_operand=&dst
+    BridgeExt,     // movzx/movsx/movsxd r,r
+                   //   inputs[0]=enc(dst), inputs[1]=enc(src)
+                   //   imm_bits[1:0] = source class (0=8lo, 1=8hi(AH..BH),
+                   //   2=16, 3=32), imm_bits[2] = sign-extend (movsx/movsxd).
+                   //   Lowers to UBFX/SBFX — flag-free like every bridge op.
 
     // ── Bridge ALU ops (run bridging v2) ────────────────────────────────────
     // Flag-writing integer ALU (add/sub/and/or/xor, plus inc/dec folded to

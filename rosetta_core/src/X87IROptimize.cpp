@@ -126,6 +126,7 @@ static void pass_dse(Context& ctx) {
             case Op::BridgeLea:
             case Op::BridgeLoadG:
             case Op::BridgeStoreG:
+            case Op::BridgeExt:
             case Op::BridgeAluRR:
             case Op::BridgeAluRI:
             case Op::BridgeAluRM:
@@ -169,6 +170,7 @@ static void pass_dse(Context& ctx) {
             case Op::BridgeLea:
             case Op::BridgeLoadG:
             case Op::BridgeStoreG:
+            case Op::BridgeExt:
             case Op::BridgeAluRR:
             case Op::BridgeAluRI:
             case Op::BridgeAluRM:
@@ -419,6 +421,7 @@ static void pass_fma_reduce(Context& ctx) {
             case Op::BridgeLea:
             case Op::BridgeLoadG:
             case Op::BridgeStoreG:
+            case Op::BridgeExt:
             case Op::BridgeAluRR:
             case Op::BridgeAluRI:
             case Op::BridgeAluRM:

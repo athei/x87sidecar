@@ -305,6 +305,14 @@ static bool build_fcmov(Context& ctx, IRInstr* instr, int aarch64_cond) {
 // just fails the build (all-or-nothing bridged mode bails).
 static bool build_bridge(Context& ctx, IRInstr* instr) {
     const uint16_t op = instr->opcode();
+
+    if (op == kOpcodeName_wait) {
+        // FWAIT: consume, no node. Stock's translate_insn has no case for
+        // `wait` — it falls to the shared epilogue and emits nothing — and we
+        // model no pending-FP-exception state either, so a nop is exact.
+        return true;
+    }
+
     IROperand& dst = instr->operands[0];
     IROperand& src = instr->operands[1];
 
@@ -362,6 +370,31 @@ static bool build_bridge(Context& ctx, IRInstr* instr) {
         }
         ctx.nodes[id].flags |= width_flag(dst);
         ctx.nodes[id].mem_operand = &src;
+        return true;
+    }
+    if (op == kOpcodeName_movzx || op == kOpcodeName_movsx || op == kOpcodeName_movsxd) {
+        // Shape already validated by is_bridge_v1: dst is a 32/64-bit GPR,
+        // src is a register — 8-bit (low or high byte), 16-bit, or 32-bit
+        // (the latter only for movsxd).
+        uint8_t cls;
+        switch (src.reg.size) {
+            case IROperandSize::S8:
+                cls = ((src.reg.reg.value & 0xF0) == 0x10) ? 1 : 0;
+                break;
+            case IROperandSize::S16:
+                cls = 2;
+                break;
+            default:
+                cls = 3;
+                break;
+        }
+        auto id = ctx.add_node(Op::BridgeExt, bridge_encode_reg(dst.reg.reg.index()),
+                               bridge_encode_reg(src.reg.reg.index()));
+        if (id < 0) {
+            return false;
+        }
+        ctx.nodes[id].flags |= width_flag(dst);
+        ctx.nodes[id].imm_bits = cls | (op == kOpcodeName_movzx ? 0u : 4u);
         return true;
     }
 

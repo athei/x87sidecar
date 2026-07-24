@@ -512,6 +512,7 @@ int main(int argc, char** argv) try {
     size_t max_rows = 200;
     size_t hot_addrs = 100;  // rows in the hot-address section; 0 = suppress
     size_t frag_rows = 30;   // rows in the FP-run-fragmentation section; 0 = suppress
+    int frag_wide_gap = 16;  // gap ceiling for the demand-model upper-bound tiers
     double max_arm_per_x87 = 0.0;  // 0 = no filter
     enum class RankBy : std::uint8_t { Emit, Exec } rank_by = RankBy::Emit;
     std::vector<std::string> files;
@@ -544,6 +545,8 @@ int main(int argc, char** argv) try {
             hot_addrs = static_cast<size_t>(std::strtoull(argv[++i], nullptr, 10));
         } else if (a == "--frag-rows" && i + 1 < argc) {
             frag_rows = static_cast<size_t>(std::strtoull(argv[++i], nullptr, 10));
+        } else if (a == "--frag-wide-gap" && i + 1 < argc) {
+            frag_wide_gap = static_cast<int>(std::strtol(argv[++i], nullptr, 10));
         } else if (a == "--max-arm-per-x87" && i + 1 < argc) {
             max_arm_per_x87 = std::strtod(argv[++i], nullptr);
         } else if (a == "--dump-block" && i + 1 < argc) {
@@ -669,6 +672,13 @@ int main(int argc, char** argv) try {
                 "                          bridge_v2_savings_pct sizes v1+proven-v2 the\n"
                 "                          same way.  Feeds go/no-go on run bridging.\n"
                 "                          Default 30; pass 0 to suppress the section.\n"
+                "  --frag-wide-gap N       Gap ceiling for the demand-model upper-bound\n"
+                "                          tiers (default 16).  bridge_wide_savings_pct =\n"
+                "                          our v2 op shapes at gap <= N; bridge_ceiling_\n"
+                "                          savings_pct = any straight-line gap <= N (the\n"
+                "                          most a demand-model port could recover). wide -\n"
+                "                          v2 is the gap-width headroom; ceiling - wide is\n"
+                "                          what the extra SSE/mul/test families would add.\n"
                 "\n"
                 "Caveat: the pattern is measured in isolation.  Block context (cache dirty\n"
                 "state, surrounding ops) that determines whether IR's gate refuses in\n"
@@ -1444,17 +1454,26 @@ int main(int argc, char** argv) try {
                 uint16_t joins_inelig;
                 uint16_t spliced;     // instrs removed by the v1 splice
                 uint16_t spliced_v2;  // instrs removed by the v2-proven splice (v1 ∪ proven v2)
+                uint16_t spliced_wide;  // v2-shape gaps up to frag_wide_gap (upper bound)
+                uint16_t spliced_ceil;  // any straight-line gap up to frag_wide_gap (ceiling)
                 uint32_t arm_orig;
                 uint32_t arm_bridged;
                 uint32_t arm_bridged_v2;
+                uint32_t arm_wide;
+                uint32_t arm_ceil;
                 uint16_t bridge_live;  // TLY3: bridge ops per pass that actually ran
                 long double saved_w;
                 long double saved_v2_w;
+                long double saved_wide_w;
+                long double saved_ceil_w;
                 std::string preview;
             };
             std::vector<FragRow> frows;
             long double sum_saved_w = 0.0L;
             long double sum_saved_v2_w = 0.0L;
+            long double sum_saved_wide_w = 0.0L;
+            long double sum_saved_ceil_w = 0.0L;
+            const int wide_gap = std::max(frag_wide_gap, x87bridge::kMaxGapV1);
             uint64_t gaps_v1_w = 0;        // exec-weighted v1 joining-gap instrs
             uint64_t gaps_v2only_w = 0;    // exec-weighted v2-only joining-gap instrs
             uint64_t gaps_v2proven_w = 0;  // v2-only with the flag-dead proof
@@ -1507,6 +1526,14 @@ int main(int argc, char** argv) try {
                 const bool has_fl = x87bridge::block_has_flag_liveness(mut_instrs, L);
                 std::vector<bool> drop(b.instrs.size(), false);
                 std::vector<bool> drop_v2(b.instrs.size(), false);
+                // Upper-bound tiers for the demand-model evaluation: "wide" =
+                // our v2 op shapes but with the gap raised to wide_gap; "ceil"
+                // = any straight-line gap up to wide_gap (absolute ceiling —
+                // the demand model can never recover more than this). Both
+                // ignore the flag-dead proof, since the demand model is what
+                // would gate safety; here we size the opportunity.
+                std::vector<bool> drop_wide(b.instrs.size(), false);
+                std::vector<bool> drop_ceil(b.instrs.size(), false);
                 for (size_t s = 0; s + 1 < segs.size(); ++s) {
                     const int64_t gstart = segs[s].start + segs[s].len;
                     const int64_t gend = segs[s + 1].start;  // exclusive
@@ -1558,9 +1585,23 @@ int main(int argc, char** argv) try {
                             row.spliced_v2++;
                         }
                     }
+                    // Wide tier: our v2 shapes, gap up to wide_gap.
+                    if (all_v2 && glen <= wide_gap) {
+                        for (int64_t g = gstart; g < gend; ++g) {
+                            drop_wide[static_cast<size_t>(g)] = true;
+                            row.spliced_wide++;
+                        }
+                    }
+                    // Ceiling tier: any straight-line gap up to wide_gap.
+                    if (glen <= wide_gap) {
+                        for (int64_t g = gstart; g < gend; ++g) {
+                            drop_ceil[static_cast<size_t>(g)] = true;
+                            row.spliced_ceil++;
+                        }
+                    }
                 }
-                if (row.joins_v1 == 0 && row.joins_v2 == 0) {
-                    continue;  // no bridgeable joins; skip measurement and row
+                if (row.joins_v1 == 0 && row.joins_v2 == 0 && row.spliced_ceil == 0) {
+                    continue;  // no bridgeable joins at any tier; skip measurement
                 }
 
                 row.arm_orig = runOneMode(b.instrs.data(), b.instrs.size(), &prod_cfg);
@@ -1597,6 +1638,22 @@ int main(int argc, char** argv) try {
                     row.saved_v2_w = row.saved_w;
                 }
                 sum_saved_v2_w += row.saved_v2_w;
+                // Wide/ceiling upper-bound tiers (reuse a lower tier's result
+                // when the splice set is identical, to skip a re-translation).
+                if (row.spliced_wide > row.spliced_v2) {
+                    measure_splice(drop_wide, row.spliced_wide, row.arm_wide, row.saved_wide_w);
+                } else {
+                    row.arm_wide = row.arm_bridged_v2;
+                    row.saved_wide_w = row.saved_v2_w;
+                }
+                sum_saved_wide_w += row.saved_wide_w;
+                if (row.spliced_ceil > row.spliced_wide) {
+                    measure_splice(drop_ceil, row.spliced_ceil, row.arm_ceil, row.saved_ceil_w);
+                } else {
+                    row.arm_ceil = row.arm_wide;
+                    row.saved_ceil_w = row.saved_wide_w;
+                }
+                sum_saved_ceil_w += row.saved_ceil_w;
 
                 int picked = 0;
                 for (size_t k = 0; k < b.instrs.size() && picked < 6; ++k) {
@@ -1610,6 +1667,11 @@ int main(int argc, char** argv) try {
             }
 
             std::ranges::sort(frows, [](const FragRow& a, const FragRow& b) {
+                // Rank by the ceiling (total recoverable) so demand-model-
+                // relevant rows surface; per-row columns still expose each tier.
+                if (a.saved_ceil_w != b.saved_ceil_w) {
+                    return a.saved_ceil_w > b.saved_ceil_w;
+                }
                 if (a.saved_w != b.saved_w) {
                     return a.saved_w > b.saved_w;
                 }
@@ -1621,6 +1683,10 @@ int main(int argc, char** argv) try {
                 total_arm > 0 ? static_cast<double>(100.0L * sum_saved_w / total_arm) : 0.0;
             const double v2_savings_pct =
                 total_arm > 0 ? static_cast<double>(100.0L * sum_saved_v2_w / total_arm) : 0.0;
+            const double wide_savings_pct =
+                total_arm > 0 ? static_cast<double>(100.0L * sum_saved_wide_w / total_arm) : 0.0;
+            const double ceil_savings_pct =
+                total_arm > 0 ? static_cast<double>(100.0L * sum_saved_ceil_w / total_arm) : 0.0;
             std::printf("# FP-run fragmentation (run-bridging opportunity, v1 = mov/lea "
                         "gaps <= %d; v2 adds flag-dead ALU with the flag_liveness==0 proof)\n",
                         x87bridge::kMaxGapV1);
@@ -1630,6 +1696,18 @@ int main(int argc, char** argv) try {
             std::printf("bridge_v2_saved_arm_w,%llu\n",
                         static_cast<unsigned long long>(sum_saved_v2_w));
             std::printf("bridge_v2_savings_pct,%.3f\n", v2_savings_pct);
+            // Demand-model upper bounds: "wide" raises the gap to wide_gap for
+            // our current op shapes; "ceiling" splices any gap up to wide_gap
+            // (the most a demand-model port could ever recover). wide - v2 is
+            // the gap-width headroom; ceiling - wide is what upstream's extra
+            // op families (SSE/mul/test) could add on top.
+            std::printf("# demand-model upper bounds (gap <= %d)\n", wide_gap);
+            std::printf("bridge_wide_saved_arm_w,%llu\n",
+                        static_cast<unsigned long long>(sum_saved_wide_w));
+            std::printf("bridge_wide_savings_pct,%.3f\n", wide_savings_pct);
+            std::printf("bridge_ceiling_saved_arm_w,%llu\n",
+                        static_cast<unsigned long long>(sum_saved_ceil_w));
+            std::printf("bridge_ceiling_savings_pct,%.3f\n", ceil_savings_pct);
             std::printf("gap_instrs_w_v1,%llu\n", static_cast<unsigned long long>(gaps_v1_w));
             std::printf("gap_instrs_w_v2only,%llu\n",
                         static_cast<unsigned long long>(gaps_v2only_w));
@@ -1655,21 +1733,25 @@ int main(int argc, char** argv) try {
             }
             const size_t fr_n = std::min(frag_rows, frows.size());
             std::printf("rank,block_id,start_pc,exec,segments,joins_v1,joins_v2,joins_v2p,"
-                        "joins_inelig,spliced,spliced_v2,arm_orig,arm_bridged,arm_bridged_v2,"
-                        "bridge_live,saved_w,saved_v2_w,preview\n");
+                        "joins_inelig,spliced,spliced_v2,spliced_wide,spliced_ceil,arm_orig,"
+                        "arm_bridged,arm_bridged_v2,arm_wide,arm_ceil,bridge_live,saved_w,"
+                        "saved_v2_w,saved_wide_w,saved_ceil_w,preview\n");
             for (size_t k = 0; k < fr_n; ++k) {
                 const auto& r = frows[k];
-                std::printf("%zu,%u,0x%08x,%llu,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%llu,%llu,%s\n",
-                            k + 1, r.block_id, r.start_pc,
-                            static_cast<unsigned long long>(r.exec),
-                            static_cast<unsigned>(r.segments), static_cast<unsigned>(r.joins_v1),
-                            static_cast<unsigned>(r.joins_v2), static_cast<unsigned>(r.joins_v2p),
-                            static_cast<unsigned>(r.joins_inelig),
-                            static_cast<unsigned>(r.spliced), static_cast<unsigned>(r.spliced_v2),
-                            r.arm_orig, r.arm_bridged, r.arm_bridged_v2,
-                            static_cast<unsigned>(r.bridge_live),
-                            static_cast<unsigned long long>(r.saved_w),
-                            static_cast<unsigned long long>(r.saved_v2_w), r.preview.c_str());
+                std::printf(
+                    "%zu,%u,0x%08x,%llu,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%llu,%llu,%llu,"
+                    "%llu,%s\n",
+                    k + 1, r.block_id, r.start_pc, static_cast<unsigned long long>(r.exec),
+                    static_cast<unsigned>(r.segments), static_cast<unsigned>(r.joins_v1),
+                    static_cast<unsigned>(r.joins_v2), static_cast<unsigned>(r.joins_v2p),
+                    static_cast<unsigned>(r.joins_inelig), static_cast<unsigned>(r.spliced),
+                    static_cast<unsigned>(r.spliced_v2), static_cast<unsigned>(r.spliced_wide),
+                    static_cast<unsigned>(r.spliced_ceil), r.arm_orig, r.arm_bridged,
+                    r.arm_bridged_v2, r.arm_wide, r.arm_ceil, static_cast<unsigned>(r.bridge_live),
+                    static_cast<unsigned long long>(r.saved_w),
+                    static_cast<unsigned long long>(r.saved_v2_w),
+                    static_cast<unsigned long long>(r.saved_wide_w),
+                    static_cast<unsigned long long>(r.saved_ceil_w), r.preview.c_str());
             }
             std::printf("\n");
         }

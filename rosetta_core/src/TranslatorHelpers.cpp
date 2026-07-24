@@ -86,6 +86,15 @@ auto emit_load_immediate(TranslationResult& result, int is_64bit, uint64_t value
         return reg;
     }
 
+    // 64-bit value with clear high half: a 32-bit ORR zero-extends into the X
+    // register, so values like 0x55555555 (a valid 32-bit bitmask whose 64-bit
+    // pattern is not encodable) take 1 insn instead of a MOVZ+MOVK chain.
+    if (is_64bit && (v >> 32) == 0 && is_bitmask_immediate(/*is_64bit=*/0, v, enc)) {
+        emit_orr_imm(result.insn_buf, /*is_64bit=*/0, reg, GPR::XZR, enc.N, enc.immr,
+                     enc.imms & 0x3F);
+        return reg;
+    }
+
     // Count zero 16-bit chunks and 0xFFFF chunks to choose MOVZ vs MOVN
     int zeros = 0;
     int ones = 0;
