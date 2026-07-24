@@ -1288,6 +1288,28 @@ void lower(Context& ctx, TranslationResult* result) {
                 free_gpr(*result, addr);
                 break;
             }
+            case Op::BridgeExt: {
+                // movzx/movsx/movsxd r,r — bitfield extract, flag-free.
+                const int dst = bridge_decode_reg(n.inputs[0]);
+                const int src = bridge_decode_reg(n.inputs[1]);
+                const int cls = static_cast<int>(n.imm_bits & 3);
+                const int lsb = (cls == 1) ? 8 : 0;  // 8hi = AH/CH/DH/BH
+                const int width = (cls >= 2) ? ((cls == 3) ? 32 : 16) : 8;
+                if ((n.imm_bits & 4) == 0) {
+                    // movzx: UBFX W-form — the W-write zeroes bits [63:32]
+                    // too, so one encoding covers both r32 and r64 dsts.
+                    emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/2 /*UBFM*/, /*N=*/0,
+                                  static_cast<int8_t>(lsb),
+                                  static_cast<int8_t>(lsb + width - 1), src, dst);
+                } else {
+                    // movsx/movsxd: SBFX to the dst width (SXTB/SXTH/SXTW).
+                    const int sf = (n.flags & kBridge64) ? 1 : 0;
+                    emit_bitfield(buf, sf, /*opc=*/0 /*SBFM*/, /*N=*/sf,
+                                  static_cast<int8_t>(lsb),
+                                  static_cast<int8_t>(lsb + width - 1), src, dst);
+                }
+                break;
+            }
 
             // ── Bridge ALU ops (run bridging v2) ──────────────────────────
             // Written flags are proven dead (flag_liveness == 0), so every
@@ -1689,9 +1711,10 @@ int peak_live_gprs(const Context& ctx, int budget, int* first_over_node, bool fa
 
             // Bridge ops write guest GPRs (x0-x15, architecturally owned,
             // never allocated); only the address materialization may take
-            // one scratch.  MovRR/MovRI need none.
+            // one scratch.  MovRR/MovRI/Ext need none.
             case Op::BridgeMovRR:
             case Op::BridgeMovRI:
+            case Op::BridgeExt:
                 break;
             case Op::BridgeLea:
             case Op::BridgeLoadG:
@@ -2200,6 +2223,7 @@ static bool remat_relieve_fpr_pressure(Context& ctx, int budget) {
                         case Op::BridgeLea:
                         case Op::BridgeLoadG:
                         case Op::BridgeStoreG:
+                        case Op::BridgeExt:
                         case Op::BridgeAluRR:
                         case Op::BridgeAluRI:
                         case Op::BridgeAluRM:

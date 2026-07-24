@@ -7,6 +7,7 @@
 #include <sys/event.h>
 #include <sys/mman.h>
 #include <sys/ptrace.h>
+#include <sys/sysctl.h>
 #include <sys/wait.h>
 
 #include <algorithm>
@@ -48,6 +49,56 @@ const char* logsEnabled = nullptr;
             printf(fmt, ##__VA_ARGS__); \
         }                               \
     } while (0)
+
+// Returns true when the running XNU build is >= the given threshold build
+// number, compared component-wise (numeric), parsed from kern.version's
+// "root:xnu-<A.B.C.D.E>~<F>" token. On any parse/sysctl failure, returns
+// `fallback` (default false, i.e. keep the conservative detach() path).
+//
+// A string compare would be wrong here ("9" > "13432" lexically, and the dotted
+// tail needs numeric ordering), so we compare each dotted component as an int.
+// The trailing "~N" revision suffix is ignored. Missing trailing components in
+// the running build are treated as 0, so an exact prefix match counts as "at
+// least" (>=).
+static bool xnuBuildAtLeast(const int* threshold, size_t nThreshold, bool fallback = false) {
+    char buf[512];
+    size_t len = sizeof(buf);
+    if (sysctlbyname("kern.version", buf, &len, nullptr, 0) != 0) {
+        return fallback;
+    }
+    buf[sizeof(buf) - 1] = '\0';
+
+    const char* p = strstr(buf, "root:xnu-");
+    if (!p) {
+        return fallback;
+    }
+    p += strlen("root:xnu-");
+
+    for (size_t i = 0; i < nThreshold; ++i) {
+        // A component must start with a digit; anything else (end of token,
+        // "~", "/") means the running build has no more components -> treat as 0.
+        int running = 0;
+        if (*p >= '0' && *p <= '9') {
+            char* end = nullptr;
+            long v = strtol(p, &end, 10);
+            running = static_cast<int>(v);
+            p = end;
+            if (*p == '.') {
+                ++p;  // step over the separator to the next component
+            }
+        }
+        if (running != threshold[i]) {
+            return running > threshold[i];
+        }
+    }
+    // All compared components equal -> at least the threshold.
+    return true;
+}
+
+// XNU build 13432.0.94.501.4~1 (Golden Gate Dev Beta 4) is the first kernel
+// where the debugserver-style detach (detach_golden_gate) is correct; older
+// kernels need the classic detach().
+static const int kGoldenGateXnuBuild[] = {13432, 0, 94, 501, 4};
 
 using DyldProcessInfo = struct dyld_process_info_base*;
 
@@ -358,6 +409,105 @@ public:
             VERBOSE_LOG("Debugger detached.\n");
         }
         return ok;
+    }
+
+    bool detachGoldenGate() {
+        // Exact 1:1 port of lldb debugserver's MachProcess::Detach()
+        // (llvm lldb/tools/debugserver/source/MacOSX/MachProcess.mm). Order:
+        //
+        //   DoSIGSTOP(clear_bps, allow_running=true)   // run, then SIGSTOP-stop
+        //     -> PrivateResume(): ReplyToAllExceptions + task_resume  (RUN)
+        //     -> Signal(SIGSTOP, timeout): kill(SIGSTOP), wait for the stop
+        //        (the exception thread task_suspend()s on catching the SIGSTOP
+        //         exception, in ExceptionMessageReceived)
+        //   ReplyToAllExceptions()                     // reply SIGSTOP, traced
+        //   ShutDownExceptionThread()                  // restore ports
+        //   ::ptrace(PT_DETACH)                        // best-effort
+        //   m_task.Resume()                            // balance the suspend
+        //
+        // The two invariants that make this work, both verified against XNU
+        // (bsd/kern) and the debugserver source:
+        //
+        //  * A planted BRK arrives as a raw EXC_BREAKPOINT on our Mach port with
+        //    p_stat == SRUN (NOT a BSD trace-stop; XNU only sets p_stat == SSTOP
+        //    via issignal_locked for BSD signals). So the SIGSTOP is genuinely
+        //    needed to reach the p_stat == SSTOP that PT_DETACH's gate wants.
+        //  * debugserver task_suspend()s ONLY when it catches the SIGSTOP
+        //    exception (paired with that catch), and SIGSTOPs a RUNNING task,
+        //    not a pre-suspended one. Suspending before the SIGSTOP means
+        //    kill(SIGSTOP) races a task that is already frozen at Mach level;
+        //    the SIGSTOP exception may not be delivered until the task runs, so
+        //    the drain below can stall on a fast/differently-scheduled host.
+        //    We therefore do NOT suspend up front: we resume the BRK, SIGSTOP
+        //    the running task, and suspend only once the SIGSTOP exception is
+        //    in hand.
+
+        // 1. PrivateResume: reply to the held BRK so the task runs. (Our "stopped
+        //    at BRK" state is a held Mach exception, not a Mach suspend, so there
+        //    is no task_resume to pair here; just release the exception.)
+        exc_.release();
+
+        // 2. Signal(SIGSTOP) on the RUNNING task, then wait for the SIGSTOP to
+        //    come back as EXC_SOFT_SIGNAL. Suppress any other soft signal and
+        //    forward genuine faults, mirroring debugserver's bundle handling.
+        kill(childPid_, SIGSTOP);
+
+        bool gotSigstop = false;
+        for (int attempts = 0; attempts < 8 && !gotSigstop; ++attempts) {
+            lastEvent_ = exc_.waitForEvent(3000);
+            if (!lastEvent_.valid) {
+                break;
+            }
+            int sig = lastEvent_.softSignal();
+            if (sig == SIGSTOP) {
+                gotSigstop = true;
+            } else if (sig != 0) {
+                exc_.reply(0);
+            } else {
+                exc_.forward();
+            }
+        }
+
+        if (!gotSigstop) {
+            fprintf(stdout, "detach: SIGSTOP not received\n");
+        }
+
+        // 2b. task_suspend paired with the SIGSTOP catch (debugserver:
+        //     ExceptionMessageReceived -> m_task.Suspend on the first exception
+        //     of the bundle). This is the balanced counterpart to m_task.Resume()
+        //     at the end. It freezes the task at Mach level while we tear down.
+        task_suspend(taskPort_);
+
+        // 3. ReplyToAllExceptions: reply to the SIGSTOP exception WHILE STILL
+        //    TRACED. reply(0) does PT_THUPDATE(0) to suppress the signal and
+        //    sends the Mach reply; because P_LTRACED is still set, XNU's
+        //    resume-on-reply path (pt_setrunnable) runs and lifts the job-control
+        //    SSTOP cleanly, so no dangling stop is left for a future signal to
+        //    wedge on. (The task stays frozen by the Mach suspend from 2b.)
+        exc_.reply(0);
+
+        // 4. ShutDownExceptionThread: restore original exception ports, drop ours.
+        exc_.restoreAndTearDown();
+
+        // 5. PT_DETACH, best-effort, exactly as debugserver treats it (it logs
+        //    the return but never requires success). Because step 3 SRUN'd the
+        //    proc, this returns EBUSY and does not clear P_LTRACED; that is safe:
+        //    the original exception ports are already restored, so any future
+        //    signal takes its default (non-debugger) disposition rather than
+        //    routing to our torn-down port (verified upstream: a post-detach
+        //    SIGUSR1 terminates the tracee normally instead of wedging it).
+        errno = 0;
+        if (ptrace(PT_DETACH, childPid_, reinterpret_cast<caddr_t>(1), 0) < 0 && errno != EBUSY) {
+            fprintf(stdout, "ptrace(PT_DETACH): %s\n", strerror(errno));
+        }
+
+        // 6. m_task.Resume(): balance the task_suspend from 2b. This is what
+        //    actually runs the process; no SIGCONT is needed because the SSTOP was
+        //    already lifted by the reply-while-traced in step 3.
+        task_resume(taskPort_);
+
+        VERBOSE_LOG("Debugger detached (golden gate path).\n");
+        return true;
     }
 
     bool setBreakpoint(uint64_t address) {
@@ -953,7 +1103,19 @@ int main(int argc, char* argv[]) try {
                         mach_error_string(kr));
             }
         } else {
-            (void)dbg.detach();
+            // Pick the detach path by kernel version. detachGoldenGate() (a 1:1
+            // port of debugserver's MachProcess::Detach) is correct only on
+            // new-enough XNU; on older kernels it leaves the tracee P_LTRACED
+            // (forces SIG_DFL on all signals, freezing signal-driven GUI apps),
+            // so those use the classic detach().
+            if (xnuBuildAtLeast(kGoldenGateXnuBuild,
+                                sizeof(kGoldenGateXnuBuild) / sizeof(kGoldenGateXnuBuild[0]))) {
+                VERBOSE_LOG("Using detachGoldenGate (xnu >= 13432.0.94.501.4)\n");
+                (void)dbg.detachGoldenGate();
+            } else {
+                VERBOSE_LOG("Using classic detach (xnu < 13432.0.94.501.4)\n");
+                (void)dbg.detach();
+            }
         }
     };
 
