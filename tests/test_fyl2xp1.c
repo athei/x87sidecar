@@ -71,6 +71,43 @@ int main(void) {
     check_ulp("fyl2xp1(1,-0.1)", do_fyl2xp1(1.0, -0.1), 1.0 * log2(0.9));
     check_ulp("fyl2xp1(2, 0.25)", do_fyl2xp1(2.0, 0.25), 2.0 * log2(1.25));
 
+    /* Tiny x: fl(1+x) == 1, so add-then-log2 alone returns 0 — the whole
+     * result must come from the log1p-style correction term (y·x/ln2). */
+    check_ulp("fyl2xp1(1, 2^-60)", do_fyl2xp1(1.0, ldexp(1.0, -60)),
+              log1p(ldexp(1.0, -60)) / M_LN2);
+    check_ulp("fyl2xp1(1, -2^-60)", do_fyl2xp1(1.0, -ldexp(1.0, -60)),
+              log1p(-ldexp(1.0, -60)) / M_LN2);
+    check_ulp("fyl2xp1(1, 2^-53)", do_fyl2xp1(1.0, ldexp(1.0, -53)),
+              log1p(ldexp(1.0, -53)) / M_LN2);
+    check_ulp("fyl2xp1(1, -2^-53)", do_fyl2xp1(1.0, -ldexp(1.0, -53)),
+              log1p(-ldexp(1.0, -53)) / M_LN2);
+    /* Note: below |x| < 2^-64 stock Rosetta itself returns 0 (its f80
+     * add-then-log2 rounds x away at 64 mantissa bits); the inline
+     * correction keeps full accuracy there instead, so assertions stay
+     * within the range where stock agrees. */
+    check_ulp("fyl2xp1(3, 2^-62)", do_fyl2xp1(3.0, ldexp(1.0, -62)),
+              3.0 * (log1p(ldexp(1.0, -62)) / M_LN2));
+    check_ulp("fyl2xp1(1e10, 2^-60)", do_fyl2xp1(1e10, ldexp(1.0, -60)),
+              1e10 * (log1p(ldexp(1.0, -60)) / M_LN2));
+
+    /* Boundary of the rounded-away range and just above it. */
+    check_ulp("fyl2xp1(1, 2^-52)", do_fyl2xp1(1.0, ldexp(1.0, -52)),
+              log1p(ldexp(1.0, -52)) / M_LN2);
+    check_ulp("fyl2xp1(1, 3·2^-52)", do_fyl2xp1(1.0, 3.0 * ldexp(1.0, -52)),
+              log1p(3.0 * ldexp(1.0, -52)) / M_LN2);
+    check_ulp("fyl2xp1(1, 2^-30)", do_fyl2xp1(1.0, ldexp(1.0, -30)),
+              log1p(ldexp(1.0, -30)) / M_LN2);
+    check_ulp("fyl2xp1(1, -2^-30)", do_fyl2xp1(1.0, -ldexp(1.0, -30)),
+              log1p(-ldexp(1.0, -30)) / M_LN2);
+
+    /* x = ±0 must stay exactly zero (correction contributes nothing). */
+    check_ulp("fyl2xp1(5, +0)", do_fyl2xp1(5.0, 0.0), 0.0);
+    check_ulp("fyl2xp1(5, -0)", do_fyl2xp1(5.0, -0.0), -0.0);
+
+    /* Spec-range edges. */
+    check_ulp("fyl2xp1(1, 0.29)", do_fyl2xp1(1.0, 0.29), log2(1.29));
+    check_ulp("fyl2xp1(1, -0.29)", do_fyl2xp1(1.0, -0.29), log2(0.71));
+
     printf("\n%d failure(s)\n", failures);
     return failures ? 1 : 0;
 }
