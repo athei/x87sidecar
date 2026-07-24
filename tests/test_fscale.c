@@ -15,6 +15,7 @@
  *   Overflow (k too large) → ±Inf with sign of ST(0)
  *   Underflow (k too negative) → ±0 with sign of ST(0)
  */
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -131,6 +132,42 @@ int main(void) {
         double pos_inf = 1.0 / 0.0;
         check("fscale(2.0, 2000.0)", 2.0, 2000.0, pos_inf); /* overflow → +Inf */
         check("fscale(2.0, -2000.0)", 2.0, -2000.0, 0.0);   /* underflow → 0 */
+    }
+
+    /* Gradual underflow — k < -1022 must produce denormals, not flush to 0. */
+    {
+        const double min_denorm = ldexp(1.0, -1074);
+
+        check("fscale(1.0, -1074) = min denormal", 1.0, -1074.0, min_denorm);
+        check("fscale(-1.0, -1074)", -1.0, -1074.0, -min_denorm);
+        check("fscale(1.5, -1030) denormal result", 1.5, -1030.0, ldexp(1.5, -1030));
+        check("fscale(1.0, -1023)", 1.0, -1023.0, ldexp(1.0, -1023));
+        check("fscale(1.0, -1075) below range → 0", 1.0, -1075.0, 0.0);
+        /* Round-to-nearest at the denormal grid: 1.5·2^-1074 → 2^-1073. */
+        check("fscale(1.5, -1074) rounds to 2^-1073", 1.5, -1074.0, ldexp(1.0, -1073));
+        /* Deep staging: k needing both 2^-969 steps. */
+        check("fscale(2^1023, -2097) = min denormal", ldexp(1.0, 1023), -2097.0, min_denorm);
+        check("fscale(2^1023, -2098) → 0", ldexp(1.0, 1023), -2098.0, 0.0);
+        /* Denormal input scaled further down. */
+        check("fscale(2^-1074, -1) → 0 (ties-to-even)", min_denorm, -1.0, 0.0);
+        check("fscale(2^-1073, -1)", ldexp(1.0, -1073), -1.0, min_denorm);
+    }
+
+    /* Denormal ST(0) with large positive k — finite results, not +Inf. */
+    {
+        const double min_denorm = ldexp(1.0, -1074);
+        double pos_inf = 1.0 / 0.0;
+        check("fscale(2^-1074, 2000) = 2^926", min_denorm, 2000.0, ldexp(1.0, 926));
+        check("fscale(2^-1074, 2097) = 2^1023", min_denorm, 2097.0, ldexp(1.0, 1023));
+        check("fscale(2^-1074, 4000) → +Inf", min_denorm, 4000.0, pos_inf);
+        check("fscale(2^-1074, 1100) = 2^26", min_denorm, 1100.0, ldexp(1.0, 26));
+    }
+
+    /* Huge finite ST(1) is not an infinity — 0 and ∞ operands stay valid. */
+    {
+        double pos_inf = 1.0 / 0.0;
+        check("fscale(0, 1e10) = 0", 0.0, 1e10, 0.0);
+        check("fscale(+Inf, -1e10) = +Inf", pos_inf, -1e10, pos_inf);
     }
 
     printf("\n%d failure(s)\n", failures);
