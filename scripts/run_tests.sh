@@ -120,6 +120,7 @@ ALL_TESTS=(
     test_fsin
     test_x87_loop
     test_flags_across_x87
+    test_flags_across_vex
     test_fcos
     test_f2xm1
     test_fpatan
