@@ -483,7 +483,6 @@ void sampleThread(SamplerCtx* ctx, const guest_pc::Reader& reader, guest_pc::Cac
                 ctx->image_attempts < kMaxImageAttempts &&
                 ctx->image_rejected.find(res.x86_pc & ~(kImageGranularity - 1)) ==
                     ctx->image_rejected.end()) {
-                ctx->image_attempts++;
                 GuestImage img;
                 if (findGuestImage(ctx->task, res.x86_pc, img)) {
                     if (img.is_exe) {
@@ -504,6 +503,11 @@ void sampleThread(SamplerCtx* ctx, const guest_pc::Reader& reader, guest_pc::Cac
                         }
                     }
                 } else {
+                    // Only a walk that found no image at all counts against the
+                    // budget.  Identifying a DLL is progress: it is cached, so
+                    // it never costs again, and a client can easily run code in
+                    // dozens of libraries before it reaches its own.
+                    ctx->image_attempts++;
                     ctx->image_rejected.insert(res.x86_pc & ~(kImageGranularity - 1));
                 }
             }
