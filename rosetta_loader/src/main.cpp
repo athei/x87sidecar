@@ -920,7 +920,6 @@ static void print_loader_usage(const char* prog) {
         "over these flags so an app bundle can enable it without touching argv):\n"
         "  --sample=<file>       write a guest-pc sample profile here; enables it\n"
         "  --sample-hz=<rate>    sample rate, default 1000\n"
-        "  --sample-for=<secs>   stop sampling after this long (default: never)\n"
         "  --guest-range=<lo-hi> guest pcs that mark the thread worth profiling,\n"
         "                        default 0-0x100000000 (all 32-bit guest code)\n"
         "  --all-threads         sample every thread instead of latching onto one\n"
@@ -952,9 +951,7 @@ int main(int argc, char* argv[]) try {
     sidecar::SamplerConfig samplerCfg;
     while (argi < argc) {
         const std::string_view arg{argv[argi]};
-        if (arg.starts_with("--sample-for=")) {
-            samplerCfg.duration_s = strtod(std::string(arg.substr(13)).c_str(), nullptr);
-        } else if (arg.starts_with("--sample-hz=")) {
+        if (arg.starts_with("--sample-hz=")) {
             const double hz = strtod(std::string(arg.substr(12)).c_str(), nullptr);
             if (hz > 0) {
                 samplerCfg.interval_us = static_cast<uint64_t>(1e6 / hz);

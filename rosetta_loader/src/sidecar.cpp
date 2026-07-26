@@ -23,6 +23,7 @@
 
 #include "guest_pc_map.hpp"
 #include "rosetta_core/Config.h"
+#include "rosetta_core/ConfigEnv.h"
 #include "rosetta_core/CoreConfig.h"
 #include "rosetta_core/Fixup.h"
 #include "rosetta_core/IRInstr.h"
@@ -564,9 +565,6 @@ void* samplerMain(void* raw) {
     const double started = nowUs();
     double lastReport = started;
     for (;;) {
-        if (ctx->cfg.duration_s > 0 && (nowUs() - started) / 1e6 >= ctx->cfg.duration_s) {
-            break;
-        }
         if (latched != MACH_PORT_NULL) {
             // Steady state: one thread, one thread_get_state, no task_threads,
             // no port churn and no thread_info.
@@ -1284,16 +1282,13 @@ void samplerConfigFromEnv(SamplerConfig& cfg) {
             cfg.interval_us = static_cast<uint64_t>(1e6 / rate);
         }
     }
-    if (const char* secs = getenv("X87_SAMPLE_FOR")) {
-        cfg.duration_s = strtod(secs, nullptr);
-    }
     if (const char* secs = getenv("X87_SAMPLE_REPORT")) {
         cfg.report_s = strtod(secs, nullptr);
     }
-    if (getenv("X87_ALL_THREADS") != nullptr) {
+    if (env_truthy("X87_ALL_THREADS")) {
         cfg.all_threads = true;
     }
-    if (getenv("X87_NO_UNWIND") != nullptr) {
+    if (env_truthy("X87_NO_UNWIND")) {
         cfg.unwind = false;
     }
     if (const char* range = getenv("X87_GUEST_RANGE")) {

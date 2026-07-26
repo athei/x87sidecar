@@ -59,12 +59,11 @@ struct SamplerConfig {
     uint64_t interval_us = 1000;  // X87_SAMPLE_HZ, default 1 kHz
     uint64_t guest_lo = 0;        // default: all 32-bit guest code
     uint64_t guest_hi = 0x100000000ULL;
-    double duration_s = 0;  // 0 = until the tracee exits
-    double report_s = 10;   // profile rewrite interval
-    bool unwind = true;     // walk the guest frame-pointer chain
+    double report_s = 10;  // profile rewrite interval
+    bool unwind = true;    // walk the guest frame-pointer chain
 };
 
-// Overlay X87_SAMPLE / X87_SAMPLE_HZ / X87_SAMPLE_FOR / X87_SAMPLE_REPORT /
+// Overlay X87_SAMPLE / X87_SAMPLE_HZ / X87_SAMPLE_REPORT /
 // X87_GUEST_RANGE / X87_ALL_THREADS / X87_NO_UNWIND onto `cfg`.  Env is how the
 // app bundle enables this: gamelauncher passes fixed arguments, but applies its
 // [env] table.

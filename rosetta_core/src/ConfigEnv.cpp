@@ -38,6 +38,8 @@ constexpr FusionEntry kFusionTable[] = {
     {.name = "fstp_arith_fstp", .id = FusionId::fstp_arith_fstp},
 };
 
+}  // namespace
+
 // Treat any non-null env value other than "" / "0" as truthy.  Matches
 // the pre-refactor convention so existing X87_FOO=1 invocations keep
 // working unchanged.
@@ -48,6 +50,8 @@ bool env_truthy(const char* name) {
     }
     return std::strcmp(v, "0") != 0;
 }
+
+namespace {
 
 // Inverse of env_truthy for knobs that default ON: returns 1 unless
 // the env var is explicitly set to "0".  Unset / empty / any other
@@ -370,8 +374,6 @@ void print_env_help(std::FILE* out) {
                  "                                the settings, the thread it latched onto, a\n"
                  "                                leaf histogram and folded stacks.\n"
                  "  X87_SAMPLE_HZ=N               sample rate, default 1000\n"
-                 "  X87_SAMPLE_FOR=SECS           stop sampling after this long (default: run\n"
-                 "                                until the target exits)\n"
                  "  X87_SAMPLE_REPORT=SECS        profile rewrite interval, default 10\n"
                  "  X87_GUEST_RANGE=LO-HI         guest pcs that mark the thread worth\n"
                  "                                profiling, default 0-0x100000000 (all 32-bit\n"

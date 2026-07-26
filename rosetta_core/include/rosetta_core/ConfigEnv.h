@@ -16,3 +16,8 @@
 // implementations call it after their own preamble.
 RosettaConfig load_config_from_env();
 void print_env_help(std::FILE* out);
+
+// True when `name` is set to anything other than "0".  Exported so the few
+// settings read outside load_config_from_env still agree with every other
+// boolean knob, where an explicit "0" turns the thing off.
+bool env_truthy(const char* name);
