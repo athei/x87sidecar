@@ -71,6 +71,13 @@ struct SamplerConfig {
     // take with it: every catchable exit path flushes (see flushSamplerIfEnabled),
     // and a rewrite is cheap (62 ms measured for a 10 MB profile).
     double report_s = 60;
+    // Also write each report interval on its own, as <path>.NNNN, holding only
+    // the samples taken during it.  The cumulative profile answers "where does
+    // this run spend its time" and cannot answer "where does the fight spend
+    // its time", because every report it has ever written covers everything
+    // since the process started.  A window cannot be recovered afterwards, so
+    // it has to be written at the time.  X87_SAMPLE_WINDOWS=0 turns it off.
+    bool windows = true;
     bool unwind = true;  // walk the guest frame-pointer chain
 };
 

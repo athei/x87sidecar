@@ -1,5 +1,6 @@
 #include "sidecar.hpp"
 
+#include <dirent.h>
 #include <libproc.h>
 #include <mach/mach.h>
 #include <mach/mach_port.h>
@@ -856,6 +857,35 @@ struct SamplerStats {
     std::map<uint64_t, ThreadStats> threads;  // mach thread id -> its samples
 };
 
+// Fold one set of counters into another, so the run total can be accumulated
+// from the windows rather than kept alongside them.  The aggregator drains into
+// the window set and merges here once per report, which keeps the drain path
+// single-target and makes the two views agree by construction: the cumulative
+// profile IS the sum of every window written.
+void mergeStats(SamplerStats& into, const SamplerStats& from) {
+    into.samples += from.samples;
+    into.samples_measured += from.samples_measured;
+    into.in_range += from.in_range;
+    into.resolved += from.resolved;
+    into.not_translated += from.not_translated;
+    into.unavailable += from.unavailable;
+    into.frames += from.frames;
+    into.unwound += from.unwound;
+    into.total_us += from.total_us;
+    for (const auto& [tid, src] : from.threads) {
+        ThreadStats& dst = into.threads[tid];
+        dst.samples += src.samples;
+        dst.resolved += src.resolved;
+        dst.in_range += src.in_range;
+        for (const auto& [pc, n] : src.pcs) {
+            dst.pcs[pc] += n;
+        }
+        for (const auto& [stack, n] : src.stacks) {
+            dst.stacks[stack] += n;
+        }
+    }
+}
+
 // A thread's name, if it set one.  Empty for most, but a named thread is the
 // clearest way to say which one a profile is of.
 std::string machThreadName(mach_port_t thread) {
@@ -1010,6 +1040,19 @@ struct AggCtx {
     double report_s;
     bool unwind;
     bool range_pinned;
+    // Per-window delta profiles: how many have been written, and where the one
+    // being filled started, in run seconds and in latched seconds.  A window's
+    // rate has to divide by the latched time inside THAT window, not the run's.
+    bool windows = false;
+    unsigned window_seq = 0;
+    double window_started_s = 0;
+    double window_latched_us = 0;
+    // Which subject the windows written so far describe.  A window file is on
+    // disk before the latch can change, so a run that re-latched has files from
+    // the old thread that a reader summing the series must not add to the new
+    // one's.  The cumulative profile drops those samples; this is how a window
+    // says which side of that line it falls on.
+    unsigned subject_seq = 0;
     std::map<uint64_t, GuestModule> modules;
     // 64 KB slots holding an address no search could explain: a frame-pointer
     // walk invents return addresses out of ordinary data, and those must cost
@@ -1027,20 +1070,29 @@ constexpr double kDyldAskEveryS = 1.0;
 
 // Written by the aggregator, which owns everything in it.  The sampler is not
 // involved and does not pause: sampling continues through a write.
-void writeProfile(const AggCtx* ctx, const SamplerStats& st, double elapsed) {
-    const std::string tmp = ctx->path + ".tmp";
+// `path` is where this one goes, which is ctx->path for the cumulative profile
+// and ctx->path.NNNN for a window.  A window passes its own span and the latched
+// time inside it; windowStart below zero means this is the cumulative profile
+// and the whole-run figures apply.
+void writeProfile(const AggCtx* ctx, const SamplerStats& st, double elapsed,
+                  const std::string& path, double windowStart = -1, double windowProfiled = 0) {
+    const std::string tmp = path + ".tmp";
     FILE* fh = fopen(tmp.c_str(), "wb");
     if (fh == nullptr) {
         return;
     }
 
     const std::scoped_lock latch(g_latch.mu);
+    const bool windowed = windowStart >= 0;
     // The time samples actually accrued over: latched stretches only.  Dividing
     // by the sampler's lifetime instead counts the discovery phase, which
     // records nothing and takes ~2 s on the client — enough to make a run that
     // achieved 99% of its requested rate read as 88%.
     const double profiled =
-        (g_latch.latched_us + (g_latch.latched_at != 0 ? nowUs() - g_latch.latched_at : 0)) / 1e6;
+        windowed
+            ? windowProfiled
+            : (g_latch.latched_us + (g_latch.latched_at != 0 ? nowUs() - g_latch.latched_at : 0)) /
+                  1e6;
     const uint64_t latchedTid = g_latch.tid;
     const std::string& latchedName = g_latch.name;
     const uint64_t sweeps = g_latch.sweeps;
@@ -1065,6 +1117,15 @@ void writeProfile(const AggCtx* ctx, const SamplerStats& st, double elapsed) {
     fprintf(fh, "sweep_hz %.1f\n",
             ctx->sweep_interval_us != 0 ? 1e6 / static_cast<double>(ctx->sweep_interval_us) : 0.0);
     fprintf(fh, "elapsed_s %.1f\n", elapsed);
+    // A window holds only the samples taken between these two run timestamps,
+    // so a reader can pick the stretch it cares about and sum those files.
+    // Absent means cumulative: every sample since the sampler started.
+    fprintf(fh, "subject_seq %u\n", ctx->subject_seq);
+    if (windowed) {
+        fprintf(fh, "window_seq %u\n", ctx->window_seq);
+        fprintf(fh, "window_start_s %.3f\n", windowStart);
+        fprintf(fh, "window_end_s %.3f\n", windowStart + elapsed);
+    }
     // The rate that was actually achieved.  It is not rate_hz: the sample work,
     // the profile writes below and the kernel's timer leeway all come out of it,
     // so a reader weighting samples by time needs this one.
@@ -1213,7 +1274,7 @@ void writeProfile(const AggCtx* ctx, const SamplerStats& st, double elapsed) {
     }
 
     fclose(fh);
-    if (rename(tmp.c_str(), ctx->path.c_str()) != 0) {
+    if (rename(tmp.c_str(), path.c_str()) != 0) {
         unlink(tmp.c_str());
     }
 }
@@ -1266,7 +1327,12 @@ void learnAddress(AggCtx* ctx, uint64_t addr) {
 
 // Consume everything the sampler has published.  Pure local work: no syscall
 // touches the target unless an address turns up that no module explains.
-void drainRing(AggCtx* ctx, SamplerStats& st, uint64_t& baseSamples, uint64_t& baseNs) {
+// Samples land in `st`, which is the window being filled.  `run` is the total so
+// far, and is here only because a subject change has to throw away BOTH: what
+// came before describes another thread, and leaving it in the run total would
+// keep it in every later profile.
+void drainRing(AggCtx* ctx, SamplerStats& st, SamplerStats& run, uint64_t& baseSamples,
+               uint64_t& baseNs) {
     while (true) {
         const uint64_t tail = g_ring.tail.load(std::memory_order_relaxed);
         const uint64_t head = g_ring.head.load(std::memory_order_acquire);
@@ -1292,8 +1358,10 @@ void drainRing(AggCtx* ctx, SamplerStats& st, uint64_t& baseSamples, uint64_t& b
         if (kind == SampleKind::Reset) {
             // The subject changed: what came before describes another thread.
             const std::scoped_lock lock(g_latch.mu);
-            g_latch.discarded += st.samples;
+            g_latch.discarded += st.samples + run.samples;
             st = SamplerStats{};
+            run = SamplerStats{};
+            ctx->subject_seq++;
             baseSamples = g_counters.samples.load(std::memory_order_relaxed);
             baseNs = g_counters.total_ns.load(std::memory_order_relaxed);
         } else {
@@ -1354,33 +1422,65 @@ constexpr uint64_t kCacheSnapshotEvery = 1024;
 
 void* aggregatorMain(void* raw) {
     auto* ctx = static_cast<AggCtx*>(raw);
-    SamplerStats st;
+    // Samples drain into the window; the run total is the windows merged.  Kept
+    // this way round rather than as two independent tallies so the cumulative
+    // profile is the sum of the window files by construction, which is the one
+    // property a reader adding them up depends on.
+    SamplerStats win;
+    SamplerStats run;
     uint64_t baseSamples = 0;
     uint64_t baseNs = 0;
+    unsigned lastSubject = ctx->subject_seq;
     double lastReport = nowUs();
     while (true) {
         const bool running = g_sampler_running.load(std::memory_order_relaxed);
         const bool flushing = g_sampler_flush_request.load(std::memory_order_relaxed) &&
                               !g_sampler_flush_done.load(std::memory_order_relaxed);
-        drainRing(ctx, st, baseSamples, baseNs);
+        drainRing(ctx, win, run, baseSamples, baseNs);
 
         double startedAt = 0;
+        double latchedUs = 0;
         bool latched = false;
         {
             const std::scoped_lock lock(g_latch.mu);
             latched = g_latch.latched || g_latch.tid != 0;
             startedAt = g_latch.started;
+            latchedUs =
+                g_latch.latched_us + (g_latch.latched_at != 0 ? nowUs() - g_latch.latched_at : 0);
+        }
+        // A new subject restarts the run clock, so the window's start would be
+        // on the old timeline and its span would come out negative.
+        if (ctx->subject_seq != lastSubject) {
+            lastSubject = ctx->subject_seq;
+            ctx->window_started_s = 0;
+            ctx->window_latched_us = latchedUs;
         }
         const bool due = ctx->report_s > 0 && (nowUs() - lastReport) / 1e6 >= ctx->report_s;
         // A profile is only written once there IS a subject: an unlatched one
         // would be a blend of whatever the discovery sweeps saw.
         if (latched && (due || flushing || !running)) {
             lastReport = nowUs();
-            st.samples_measured = g_counters.samples.load(std::memory_order_relaxed) - baseSamples;
-            st.total_us =
-                static_cast<double>(g_counters.total_ns.load(std::memory_order_relaxed) - baseNs) /
-                1000.0;
-            writeProfile(ctx, st, (nowUs() - startedAt) / 1e6);
+            const double elapsed = (nowUs() - startedAt) / 1e6;
+            const uint64_t samplesNow = g_counters.samples.load(std::memory_order_relaxed);
+            const uint64_t nsNow = g_counters.total_ns.load(std::memory_order_relaxed);
+            win.samples_measured = samplesNow - baseSamples;
+            win.total_us = static_cast<double>(nsNow - baseNs) / 1000.0;
+            baseSamples = samplesNow;
+            baseNs = nsNow;
+
+            if (ctx->windows) {
+                char suffix[16];
+                snprintf(suffix, sizeof(suffix), ".%04u", ctx->window_seq);
+                writeProfile(ctx, win, elapsed - ctx->window_started_s, ctx->path + suffix,
+                             ctx->window_started_s, (latchedUs - ctx->window_latched_us) / 1e6);
+                ctx->window_seq++;
+            }
+            ctx->window_started_s = elapsed;
+            ctx->window_latched_us = latchedUs;
+
+            mergeStats(run, win);
+            win = SamplerStats{};
+            writeProfile(ctx, run, elapsed, ctx->path);
         }
         if (flushing) {
             g_sampler_flush_done.store(true, std::memory_order_release);
@@ -2282,6 +2382,11 @@ void samplerConfigFromEnv(SamplerConfig& cfg) {
     if (const char* secs = getenv("X87_SAMPLE_REPORT")) {
         cfg.report_s = strtod(secs, nullptr);
     }
+    // Defaults ON, so unset and empty both read as on and only an explicit "0"
+    // turns it off, matching every other knob that ships enabled.
+    if (const char* w = getenv("X87_SAMPLE_WINDOWS"); w != nullptr && w[0] != '\0') {
+        cfg.windows = strcmp(w, "0") != 0;
+    }
     if (env_truthy("X87_NO_UNWIND")) {
         cfg.unwind = false;
     }
@@ -2295,6 +2400,31 @@ void samplerConfigFromEnv(SamplerConfig& cfg) {
     }
 }
 
+// Delete every <path>.NNNN left by an earlier run.  Scanned rather than counted
+// up from zero, because a previous run may have written more windows than this
+// one will and stopping at the first gap would leave its tail behind.
+void unlinkWindowSeries(const std::string& path) {
+    const size_t slash = path.find_last_of('/');
+    const std::string dir = slash == std::string::npos ? "." : path.substr(0, slash);
+    const std::string stem = slash == std::string::npos ? path : path.substr(slash + 1);
+    DIR* d = opendir(dir.c_str());
+    if (d == nullptr) {
+        return;
+    }
+    while (const struct dirent* e = readdir(d)) {
+        const std::string name = e->d_name;
+        if (name.size() != stem.size() + 5 || name.compare(0, stem.size(), stem) != 0 ||
+            name[stem.size()] != '.') {
+            continue;
+        }
+        if (std::all_of(name.begin() + static_cast<long>(stem.size()) + 1, name.end(),
+                        [](char c) { return c >= '0' && c <= '9'; })) {
+            unlink((dir + "/" + name).c_str());
+        }
+    }
+    closedir(d);
+}
+
 void startSampler(mach_port_t parentTaskPort, uint64_t runtimeBase, const SamplerConfig& in) {
     if (in.path.empty()) {
         return;
@@ -2306,7 +2436,11 @@ void startSampler(mach_port_t parentTaskPort, uint64_t runtimeBase, const Sample
     // Nothing from a previous run may survive into this one: a run that never
     // latches writes no profile, and the absence has to be the answer rather
     // than the last run's file still sitting there to be read as this one's.
+    // The windows go too, and matter more: a reader sums the series, so one
+    // stale .NNNN would be added into this run's totals rather than merely
+    // misread, and a shorter run would leave the tail of a longer one behind.
     unlink(cfg.path.c_str());
+    unlinkWindowSeries(cfg.path);
     // The target's pid is needed by both threads and pid_for_task only answers
     // while it is alive, so it is read here, once, before either starts.
     pid_t targetPid = 0;
@@ -2338,7 +2472,8 @@ void startSampler(mach_port_t parentTaskPort, uint64_t runtimeBase, const Sample
                            .sweep_interval_us = cfg.sweep_interval_us,
                            .report_s = cfg.report_s,
                            .unwind = cfg.unwind,
-                           .range_pinned = cfg.guest_range_pinned};
+                           .range_pinned = cfg.guest_range_pinned,
+                           .windows = cfg.windows};
     pthread_t aggThr;
     if (pthread_create(&aggThr, &attr, aggregatorMain, agg) != 0) {
         delete agg;
