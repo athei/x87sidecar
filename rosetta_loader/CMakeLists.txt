@@ -28,6 +28,7 @@ add_custom_command(
 
 add_executable(x87sidecar
     src/main.cpp
+    src/guest_pc_map.cpp
     src/macho_loader.cpp
     src/mach_exception.cpp
     src/offset_finder.cpp
