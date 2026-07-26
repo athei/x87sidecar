@@ -1012,8 +1012,8 @@ void sampleThread(SamplerCtx* ctx, const guest_pc::Reader& reader, guest_pc::Cac
                 // The host pc, which is what the thread was actually running:
                 // no x86 was translated to this address because none is
                 // involved.  On the client this is around 40% of the samples on
-                // the game's own thread — the Rosetta runtime, the unix half of
-                // wine and of our d3d9, Metal and libsystem — and counting them
+                // the game's own thread (the Rosetta runtime, the unix half of
+                // wine and of our d3d9, Metal, libsystem), and counting them
                 // without keeping the address made the largest single slice of
                 // the thread the one nothing could be said about.
                 rec[2] = arm_thread_state64_get_pc(state);

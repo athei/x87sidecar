@@ -67,10 +67,16 @@ struct SamplerConfig {
     uint64_t guest_lo = 0;
     uint64_t guest_hi = 0x100000000ULL;
     bool guest_range_pinned = false;
-    // Profile rewrite interval.  It bounds only what an uncatchable kill can
-    // take with it: every catchable exit path flushes (see flushSamplerIfEnabled),
-    // and a rewrite is cheap (62 ms measured for a 10 MB profile).
-    double report_s = 60;
+    // Profile rewrite interval, and with it the window size below, which is what
+    // sets this rather than durability: every catchable exit path flushes (see
+    // flushSamplerIfEnabled), so it bounds only what an uncatchable kill takes
+    // with it, and a rewrite is cheap (62 ms measured for a 10 MB profile).
+    // Ten seconds because a window is the smallest stretch of a run that can be
+    // asked about afterwards, and the questions worth asking are about phases of
+    // a session (a fight, a load, a zone) rather than whole runs.  At 60 a
+    // capture of a raid pull came back with the fight averaged into the login
+    // screen and no way to separate them.
+    double report_s = 10;
     // Also write each report interval on its own, as <path>.NNNN, holding only
     // the samples taken during it.  The cumulative profile answers "where does
     // this run spend its time" and cannot answer "where does the fight spend
