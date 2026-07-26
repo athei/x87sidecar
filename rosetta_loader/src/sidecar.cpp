@@ -417,6 +417,19 @@ struct SamplerStats {
     std::map<uint64_t, ThreadStats> threads;  // mach thread id -> its samples
 };
 
+// A thread's name, if it set one.  Empty for most, but a named thread is the
+// clearest way to say which one a profile is of.
+std::string machThreadName(mach_port_t thread) {
+    thread_extended_info_data_t info{};
+    mach_msg_type_number_t count = THREAD_EXTENDED_INFO_COUNT;
+    if (thread_info(thread, THREAD_EXTENDED_INFO, reinterpret_cast<thread_info_t>(&info), &count) !=
+        KERN_SUCCESS) {
+        return {};
+    }
+    info.pth_name[sizeof(info.pth_name) - 1] = '\0';
+    return info.pth_name;
+}
+
 // The mach thread id, which is stable for the life of the thread, unlike the
 // port name a task_threads sweep hands back.
 uint64_t machThreadId(mach_port_t thread) {
@@ -468,9 +481,10 @@ void sampleThread(SamplerCtx* ctx, const guest_pc::Reader& reader, guest_pc::Cac
                         ctx->cfg.guest_hi = img.base + img.size;
                         ctx->image_found = true;
                         fprintf(stdout,
-                                "[rosettax87] X87_SAMPLE: main image at 0x%llx, size 0x%x; "
-                                "following the thread that runs it\n",
-                                static_cast<unsigned long long>(img.base), img.size);
+                                "[rosettax87] X87_SAMPLE: main image found at "
+                                "0x%llx-0x%llx; looking for the thread that runs it\n",
+                                static_cast<unsigned long long>(img.base),
+                                static_cast<unsigned long long>(img.base + img.size));
                         fflush(stdout);
                     } else {
                         // A DLL: remember it so its pcs stop costing a walk.
@@ -541,7 +555,8 @@ void sampleThread(SamplerCtx* ctx, const guest_pc::Reader& reader, guest_pc::Cac
 // reader never catches a half-written one.  rename(2) within a directory is
 // atomic.
 void writeProfile(const SamplerCtx* ctx, const SamplerStats& st, const guest_pc::Cache& cache,
-                  uint64_t latchedTid, uint64_t sweeps, double elapsed) {
+                  uint64_t latchedTid, const std::string& latchedName, uint64_t sweeps,
+                  double elapsed) {
     const std::string tmp = ctx->cfg.path + ".tmp";
     FILE* fh = fopen(tmp.c_str(), "wb");
     if (fh == nullptr) {
@@ -572,10 +587,13 @@ void writeProfile(const SamplerCtx* ctx, const SamplerStats& st, const guest_pc:
     fprintf(fh, "mode %s\n", ctx->cfg.all_threads ? "all-threads" : "latched");
     fprintf(fh, "guest_range 0x%llx-0x%llx\n", static_cast<unsigned long long>(ctx->cfg.guest_lo),
             static_cast<unsigned long long>(ctx->cfg.guest_hi));
-    fprintf(fh, "guest_range_from %s\n",
-            ctx->cfg.guest_range_pinned ? "X87_GUEST_RANGE"
-            : ctx->image_found          ? "main image (detected)"
-                                        : "default (no main image found)");
+    const char* rangeFrom = "default (no main image found)";
+    if (ctx->cfg.guest_range_pinned) {
+        rangeFrom = "X87_GUEST_RANGE";
+    } else if (ctx->image_found) {
+        rangeFrom = "main image (detected)";
+    }
+    fprintf(fh, "guest_range_from %s\n", rangeFrom);
     // Only two shapes exist: a latched run, whose samples all come from the one
     // thread below, or an explicit all-threads run.  A failed latch writes no
     // profile at all.
@@ -585,6 +603,9 @@ void writeProfile(const SamplerCtx* ctx, const SamplerStats& st, const guest_pc:
     } else {
         fprintf(fh, "latch_state latched\n");
         fprintf(fh, "latched_thread 0x%llx\n", static_cast<unsigned long long>(latchedTid));
+        if (!latchedName.empty()) {
+            fprintf(fh, "latched_thread_name %s\n", latchedName.c_str());
+        }
     }
     fprintf(fh, "threads_seen %zu\n", st.threads.size());
     fprintf(fh, "discovery_sweeps %llu\n", static_cast<unsigned long long>(sweeps));
@@ -659,6 +680,7 @@ void* samplerMain(void* raw) {
 
     mach_port_t latched = MACH_PORT_NULL;
     uint64_t latchedTid = 0;
+    std::string latchedName;
     std::unordered_map<uint64_t, uint64_t> scores;  // mach thread id -> in-range hits
     int missTicks = 0;
     uint64_t sweeps = 0;
@@ -696,6 +718,12 @@ void* samplerMain(void* raw) {
             if (inRange) {
                 missTicks = 0;
             } else if (++missTicks > kUnlatchAfter) {
+                fprintf(stdout,
+                        "[rosettax87] X87_SAMPLE: unlatched from thread 0x%llx, %d ticks with "
+                        "nothing in the main image; searching again\n",
+                        static_cast<unsigned long long>(latchedTid), missTicks);
+                fflush(stdout);
+                latchedName.clear();
                 mach_port_deallocate(mach_task_self(), latched);
                 latched = MACH_PORT_NULL;
                 latchedTid = 0;
@@ -742,6 +770,16 @@ void* samplerMain(void* raw) {
             if (best != MACH_PORT_NULL && sweeps >= kDiscoveryTicks) {
                 latched = best;
                 latchedTid = bestTid;
+                latchedName = machThreadName(best);
+                fprintf(stdout,
+                        "[rosettax87] X87_SAMPLE: LATCHED onto thread 0x%llx%s%s%s after %llu "
+                        "sweeps (seen in range %llu times, %zu candidates); profiling only "
+                        "that thread from here\n",
+                        static_cast<unsigned long long>(bestTid), latchedName.empty() ? "" : " (\"",
+                        latchedName.c_str(), latchedName.empty() ? "" : "\")",
+                        static_cast<unsigned long long>(sweeps),
+                        static_cast<unsigned long long>(bestScore), scores.size());
+                fflush(stdout);
             }
             for (mach_msg_type_number_t i = 0; i < count; i++) {
                 if (threads[i] != latched) {
@@ -760,7 +798,8 @@ void* samplerMain(void* raw) {
         if (haveProfile && ctx->cfg.report_s > 0 &&
             (nowUs() - lastReport) / 1e6 >= ctx->cfg.report_s) {
             lastReport = nowUs();
-            writeProfile(ctx, st, cache, latchedTid, sweeps, (nowUs() - started) / 1e6);
+            writeProfile(ctx, st, cache, latchedTid, latchedName, sweeps,
+                         (nowUs() - started) / 1e6);
         }
 
         struct timespec ts{static_cast<time_t>(ctx->cfg.interval_us / 1000000),
@@ -769,7 +808,7 @@ void* samplerMain(void* raw) {
     }
 
     if (ctx->cfg.all_threads || latchedTid != 0) {
-        writeProfile(ctx, st, cache, latchedTid, sweeps, (nowUs() - started) / 1e6);
+        writeProfile(ctx, st, cache, latchedTid, latchedName, sweeps, (nowUs() - started) / 1e6);
     }
     return nullptr;
 }
