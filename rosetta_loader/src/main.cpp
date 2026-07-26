@@ -28,6 +28,7 @@
 #include <vector>
 
 #include "coop_proto.h"
+#include "dyld_process_info.hpp"
 #include "mach_exception.hpp"
 #include "offset_finder.hpp"
 #include "rosetta_core/Config.h"
@@ -99,16 +100,6 @@ static bool xnuBuildAtLeast(const int* threshold, size_t nThreshold, bool fallba
 // where the debugserver-style detach (detach_golden_gate) is correct; older
 // kernels need the classic detach().
 static const int kGoldenGateXnuBuild[] = {13432, 0, 94, 501, 4};
-
-using DyldProcessInfo = struct dyld_process_info_base*;
-
-extern "C" DyldProcessInfo _dyld_process_info_create(task_t task, uint64_t timestamp,
-                                                     kern_return_t* kernelError);
-extern "C" void _dyld_process_info_for_each_image(DyldProcessInfo info,
-                                                  void (^callback)(uint64_t machHeaderAddress,
-                                                                   const uuid_t uuid,
-                                                                   const char* path));
-extern "C" void _dyld_process_info_release(DyldProcessInfo info);
 
 // bootstrap_register2 is a private libSystem symbol (the non-deprecated way to
 // publish a dynamic service name). It isn't in <servers/bootstrap.h>, so declare

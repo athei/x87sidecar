@@ -79,7 +79,7 @@ struct SamplerConfig {
 // this: gamelauncher passes fixed arguments, but applies its [env] table.
 void samplerConfigFromEnv(SamplerConfig& cfg);
 
-void startSampler(mach_port_t parentTaskPort, uint64_t runtimeBase, const SamplerConfig& cfg);
+void startSampler(mach_port_t parentTaskPort, uint64_t runtimeBase, const SamplerConfig& in);
 
 // Ask the sampler for one last profile write and wait for it.  The sampler
 // thread is detached, so process exit kills it wherever it happens to be: without
