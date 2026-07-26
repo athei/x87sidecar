@@ -276,10 +276,10 @@ constexpr int kDiscoveryTicks = 200;
 
 // If nothing ever runs inside the guest range, discovery would otherwise sweep
 // every thread at the full sample rate forever, which is the most expensive
-// mode there is.  After this many sweeps give up on latching and drop to one
-// sweep per kIdleSweepEvery ticks: still collecting, but at bounded cost.  The
-// profile says so, and its [threads] table shows resolved>0 with in_range=0,
-// which is what a wrong guest_range looks like.
+// mode there is.  After this many sweeps drop to one sweep per kIdleSweepEvery
+// ticks.  It never stops looking: a target that starts slowly, or whose
+// interesting thread is replaced by another one, still gets picked up, just
+// with a longer wait.  Latching clears the throttle again.
 constexpr uint64_t kDiscoveryGiveUp = 30000;
 constexpr uint64_t kIdleSweepEvery = 1000;
 
@@ -926,6 +926,10 @@ void* samplerMain(void* raw) {
                 latched = best;
                 latchedTid = bestTid;
                 latchedName = machThreadName(best);
+                // Latching disproves "nothing ever runs there", so drop the
+                // throttle: if this thread later goes quiet, re-discovery has
+                // to run at full speed, not at one sweep per kIdleSweepEvery.
+                gaveUpLatching = false;
                 fprintf(stdout,
                         "[rosettax87] X87_SAMPLE: LATCHED onto thread 0x%llx%s%s%s after %llu "
                         "sweeps (seen in range %llu times, %zu candidates); profiling only "
