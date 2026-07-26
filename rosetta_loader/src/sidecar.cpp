@@ -229,6 +229,12 @@ bool readParent(mach_port_t task, uint64_t addr, void* dst, size_t size) {
 // sweeps everything instead.  Output goes to the single file named by
 // X87_SAMPLE.
 struct SamplerCtx {
+    // True once the guest range means something: either it was pinned, or the
+    // main image has been found.  Until then nothing can be judged in range,
+    // because the fallback range is "all 32-bit guest code" and would let any
+    // thread that touched a wine dll win the latch.
+    [[nodiscard]] bool rangeKnown() const;
+
     mach_port_t task;
     uint64_t base;
     SamplerConfig cfg;
@@ -242,6 +248,10 @@ struct SamplerCtx {
 // Give up after this many probes and keep the default range: a target whose
 // main image never shows up in a sample is one the walk-back cannot help with.
 constexpr int kMaxImageAttempts = 64;
+
+bool SamplerCtx::rangeKnown() const {
+    return cfg.guest_range_pinned || image_found;
+}
 
 bool samplerRead(void* raw, uint64_t addr, void* dst, size_t len) {
     auto* ctx = static_cast<SamplerCtx*>(raw);
@@ -498,7 +508,8 @@ void sampleThread(SamplerCtx* ctx, const guest_pc::Reader& reader, guest_pc::Cac
                 }
             }
             if (!record) {
-                inRange = res.x86_pc >= ctx->cfg.guest_lo && res.x86_pc < ctx->cfg.guest_hi;
+                inRange = ctx->rangeKnown() && res.x86_pc >= ctx->cfg.guest_lo &&
+                          res.x86_pc < ctx->cfg.guest_hi;
                 break;
             }
             st.resolved++;
@@ -508,7 +519,8 @@ void sampleThread(SamplerCtx* ctx, const guest_pc::Reader& reader, guest_pc::Cac
             // where it spends its time is exactly the question, and that
             // includes wow_turbo.dll, fmod and the wine layer.
             ts.pcs[res.x86_pc]++;
-            if (res.x86_pc >= ctx->cfg.guest_lo && res.x86_pc < ctx->cfg.guest_hi) {
+            if (ctx->rangeKnown() && res.x86_pc >= ctx->cfg.guest_lo &&
+                res.x86_pc < ctx->cfg.guest_hi) {
                 st.in_range++;
                 ts.in_range++;
                 inRange = true;
