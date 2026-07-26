@@ -239,6 +239,10 @@ struct GuestModule {
     uint64_t base = 0;
     uint64_t size = 0;
     bool macho = false;  // else a PE mapped by wine
+    // Executable, but nothing on disk or in dyld accounts for it: JIT output,
+    // or a runtime's own generated code.  `path` is then a description of the
+    // mapping rather than a file, and there is nothing to symbolise against.
+    bool anon = false;
     // Cleared when a later scan no longer finds the image.  Kept rather than
     // dropped: samples taken while it was mapped still need its range.
     bool loaded = true;
@@ -672,7 +676,11 @@ void refreshDyldImages(mach_port_t task, std::map<uint64_t, GuestModule>& module
 // Does `addr` point at executable memory?  One region query, and the only cheap
 // way to tell code the map has not named yet from the ordinary data a
 // frame-pointer walk mistakes for a return address.
-bool looksLikeCode(mach_port_t task, uint64_t addr) {
+// `regionBase`/`regionSize`, when given, report the mapping the address fell
+// in, so a caller that cannot name it any other way can still describe it by
+// its extent rather than discarding it.
+bool looksLikeCode(mach_port_t task, uint64_t addr, uint64_t* regionBase = nullptr,
+                   uint64_t* regionSize = nullptr) {
     mach_vm_address_t address = addr;
     mach_vm_size_t size = 0;
     vm_region_submap_info_data_64_t info;
@@ -686,6 +694,12 @@ bool looksLikeCode(mach_port_t task, uint64_t addr) {
                                reinterpret_cast<vm_region_recurse_info_t>(&info),
                                &count) != KERN_SUCCESS) {
         return false;
+    }
+    if (regionBase != nullptr) {
+        *regionBase = address;
+    }
+    if (regionSize != nullptr) {
+        *regionSize = size;
     }
     return addr >= address && addr < address + size && (info.protection & VM_PROT_EXECUTE) != 0;
 }
@@ -1244,9 +1258,15 @@ void writeProfile(const AggCtx* ctx, const SamplerStats& st, double elapsed,
     // entirely.  Worst case the map is one scan interval old.
     fprintf(fh, "\n[modules]\n# base size kind state path\n");
     for (const auto& [base, mod] : ctx->modules) {
+        const char* kind = "pe";
+        if (mod.anon) {
+            kind = "anon";
+        } else if (mod.macho) {
+            kind = "macho";
+        }
         fprintf(fh, "0x%llx 0x%llx %s %s %s\n", static_cast<unsigned long long>(mod.base),
-                static_cast<unsigned long long>(mod.size), mod.macho ? "macho" : "pe",
-                mod.loaded ? "loaded" : "gone", mod.path.c_str());
+                static_cast<unsigned long long>(mod.size), kind, mod.loaded ? "loaded" : "gone",
+                mod.path.c_str());
     }
 
     fprintf(fh, "\n[leaves]\n# tid pc count   (exclusive: execution was AT this address)\n");
@@ -1321,7 +1341,9 @@ void learnAddress(AggCtx* ctx, uint64_t addr) {
     // Not "is it backed by a file": measured, the guest x86_64 shared cache
     // under Rosetta reports NO file for its text at all, so that test rejects
     // exactly the addresses dyld is needed for.
-    if (!looksLikeCode(ctx->task, addr)) {
+    uint64_t regionBase = 0;
+    uint64_t regionSize = 0;
+    if (!looksLikeCode(ctx->task, addr, &regionBase, &regionSize)) {
         ctx->unmapped.insert(slot);
         return;
     }
@@ -1340,9 +1362,39 @@ void learnAddress(AggCtx* ctx, uint64_t addr) {
     ctx->last_dyld_us = now;
     ctx->asked_dyld = true;
     refreshDyldImages(ctx->task, ctx->modules);
-    if (moduleAt(ctx->modules, addr) == nullptr) {
-        ctx->unmapped.insert(slot);
+    if (moduleAt(ctx->modules, addr) != nullptr) {
+        return;
     }
+    // Executable, no image, and dyld has never heard of it: generated code, and
+    // on this target that is most of what runs.  Recording the mapping itself
+    // keeps it in the profile as its own row instead of collapsing into one
+    // "unmapped" total, which is the difference between "44% of the thread is
+    // somewhere we cannot name" and "44% of the thread is in this 11 KB of
+    // it".  Nothing can be symbolised inside it, but an offset from a stable
+    // base is still an identity that a disassembly can be pointed at.
+    //
+    // It starts after any image already known inside the region rather than at
+    // the region's base.  One mapping can hold a small image and a large
+    // unnamed remainder: wine's own loader is 8 KB of __TEXT at the bottom of
+    // the region the hot generated code sits in, and keying this on the region
+    // base would have replaced `wine` in the map with an entry spanning it.
+    const uint64_t regionEnd = regionBase + regionSize;
+    uint64_t lo = regionBase;
+    if (const auto it = ctx->modules.upper_bound(addr); it != ctx->modules.begin()) {
+        const auto& prev = std::prev(it)->second;
+        if (prev.base >= regionBase && prev.base + prev.size > lo) {
+            lo = prev.base + prev.size;
+        }
+    }
+    if (regionSize != 0 && lo <= addr && addr < regionEnd) {
+        char label[64];
+        snprintf(label, sizeof(label), "anon@0x%llx", static_cast<unsigned long long>(lo));
+        ctx->modules[lo] = GuestModule{
+            .base = lo, .size = regionEnd - lo, .macho = false, .anon = true, .path = label};
+        g_modmap.learned.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    ctx->unmapped.insert(slot);
 }
 
 // Consume everything the sampler has published.  Pure local work: no syscall
