@@ -122,6 +122,7 @@ private:
 
     pid_t childPid_ = -1;
     task_t taskPort_ = MACH_PORT_NULL;
+    thread_t handshakeThread_ = MACH_PORT_NULL;
     std::map<uint64_t, uint32_t> breakpoints_;  // addr -> original instruction
 
     // Debug events arrive as Mach exception messages on a port we own (see
@@ -203,10 +204,19 @@ public:
         if (taskPort_ != MACH_PORT_NULL) {
             mach_port_deallocate(mach_task_self(), taskPort_);
         }
+        if (handshakeThread_ != MACH_PORT_NULL) {
+            mach_port_deallocate(mach_task_self(), handshakeThread_);
+        }
     }
 
     [[nodiscard]] task_t taskPort() const { return taskPort_; }
     [[nodiscard]] mach_port_t stoppedThread() const { return lastEvent_.thread; }
+
+    // Cooperative mode only: the control port of the tracee thread that
+    // performed the handshake (wine's unix-loader startup thread). Held for the
+    // sidecar's lifetime alongside taskPort_. MACH_PORT_NULL under the default
+    // attach, which never receives one.
+    [[nodiscard]] thread_t handshakeThread() const { return handshakeThread_; }
 
     // Arm/disarm the thread-level EXC_BREAKPOINT catcher on the currently
     // stopped thread — the one that will execute (and later re-execute) the
@@ -217,13 +227,15 @@ public:
     void disarmThreadBreakpoint() { exc_.removeThreadBreakpoint(); }
 
     // ── Cooperative mode (no task_for_pid / no ptrace) ──────────────────────
-    // Adopt a task port the tracee voluntarily handed over via the bootstrap
-    // handshake. Takes ownership of the send right (released by ~MuhDebugger).
-    // No ptrace attach, no exec-stop: the tracee is already running and is held
-    // quiescent by blocking in the handshake until we reply.
-    bool adopt(pid_t pid, task_t task) {
+    // Adopt the task and thread ports the tracee voluntarily handed over via
+    // the bootstrap handshake. Both arrive as COPY_SEND, so we own both send
+    // rights; ~MuhDebugger releases them. No ptrace attach, no exec-stop: the
+    // tracee is already running and is held quiescent by blocking in the
+    // handshake until we reply.
+    bool adopt(pid_t pid, task_t task, thread_t handshakeThread) {
         childPid_ = pid;
         taskPort_ = task;
+        handshakeThread_ = handshakeThread;
         return exc_.initPortOnly(pid, task);
     }
 
@@ -1035,10 +1047,11 @@ int main(int argc, char* argv[]) try {
             return 1;
         }
         task_t traceeTask = rcv.req.task_port.name;
+        thread_t traceeThread = rcv.req.thread_port.name;
         coopReplyPort = rcv.req.header.msgh_remote_port;
         VERBOSE_LOG("[rosettax87] cooperative attach: task=0x%x thread=0x%x reply=0x%x\n",
-                    traceeTask, rcv.req.thread_port.name, coopReplyPort);
-        if (!dbg.adopt(parentPid, traceeTask)) {
+                    traceeTask, traceeThread, coopReplyPort);
+        if (!dbg.adopt(parentPid, traceeTask, traceeThread)) {
             return 1;
         }
         needsInitBarrier = false;  // cooperative attaches post-init; oah already mapped
