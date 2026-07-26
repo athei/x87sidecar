@@ -739,14 +739,32 @@ void* samplerMain(void* raw) {
             }
             if (!ctx->cfg.all_threads && sweeps >= kDiscoveryGiveUp && !gaveUpLatching) {
                 gaveUpLatching = true;
-                fprintf(stdout,
-                        "[rosettax87] X87_SAMPLE: FAILED to latch, no thread ran in "
-                        "guest-range=[0x%llx,0x%llx) in %llu sweeps. No profile written. "
-                        "Still searching, one sweep per %llu ticks.\n",
+                // Two different failures reach here and they need different
+                // fixes, so name the one that happened rather than just the
+                // range: without a main image the range is only a fallback.
+                if (!ctx->cfg.guest_range_pinned && !ctx->image_found) {
+                    fprintf(stdout,
+                            "[rosettax87] X87_SAMPLE: FAILED to latch after %llu sweeps: no PE "
+                            "main image was found in the guest, and nothing ran in the fallback "
+                            "range [0x%llx,0x%llx). NO PROFILE WILL BE WRITTEN. If this target "
+                            "has no PE image, set X87_GUEST_RANGE=lo-hi. Still searching, one "
+                            "sweep per %llu ticks.\n",
+                            static_cast<unsigned long long>(sweeps),
+                            static_cast<unsigned long long>(ctx->cfg.guest_lo),
+                            static_cast<unsigned long long>(ctx->cfg.guest_hi),
+                            static_cast<unsigned long long>(kIdleSweepEvery));
+                } else {
+                    fprintf(
+                        stdout,
+                        "[rosettax87] X87_SAMPLE: FAILED to latch after %llu sweeps: no "
+                        "thread ran in [0x%llx,0x%llx), which came from %s. NO PROFILE WILL "
+                        "BE WRITTEN. Still searching, one sweep per %llu ticks.\n",
+                        static_cast<unsigned long long>(sweeps),
                         static_cast<unsigned long long>(ctx->cfg.guest_lo),
                         static_cast<unsigned long long>(ctx->cfg.guest_hi),
-                        static_cast<unsigned long long>(sweeps),
+                        ctx->cfg.guest_range_pinned ? "X87_GUEST_RANGE" : "the detected main image",
                         static_cast<unsigned long long>(kIdleSweepEvery));
+                }
                 fflush(stdout);
             }
             sweeps++;
