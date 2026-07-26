@@ -842,6 +842,10 @@ struct ThreadStats {
     uint64_t in_range = 0;
     std::unordered_map<uint64_t, uint64_t> pcs;        // leaf guest pc -> hits
     std::map<std::vector<uint64_t>, uint64_t> stacks;  // root-first stack -> hits
+    // Host ARM pcs, for the samples no x86 was translated to.  Leaves only: the
+    // guest frame-pointer chain says nothing about native frames, and an empty
+    // answer is better than a walk of whatever x5 happened to hold.
+    std::unordered_map<uint64_t, uint64_t> host_pcs;
 };
 
 struct SamplerStats {
@@ -882,6 +886,9 @@ void mergeStats(SamplerStats& into, const SamplerStats& from) {
         }
         for (const auto& [stack, n] : src.stacks) {
             dst.stacks[stack] += n;
+        }
+        for (const auto& [pc, n] : src.host_pcs) {
+            dst.host_pcs[pc] += n;
         }
     }
 }
@@ -1006,7 +1013,15 @@ void sampleThread(SamplerCtx* ctx, const guest_pc::Reader& reader, guest_pc::Cac
             if (record) {
                 rec[0] = tid;
                 rec[1] = sampleHeader(SampleKind::NotTranslated, false, 0);
-                n = 2;
+                // The host pc, which is what the thread was actually running:
+                // no x86 was translated to this address because none is
+                // involved.  On the client this is around 40% of the samples on
+                // the game's own thread — the Rosetta runtime, the unix half of
+                // wine and of our d3d9, Metal and libsystem — and counting them
+                // without keeping the address made the largest single slice of
+                // the thread the one nothing could be said about.
+                rec[2] = arm_thread_state64_get_pc(state);
+                n = 3;
             }
             break;
         case guest_pc::Status::Unavailable:
@@ -1254,6 +1269,20 @@ void writeProfile(const AggCtx* ctx, const SamplerStats& st, double elapsed,
         }
     }
 
+    // Host ARM pcs: the samples with no guest pc because no x86 was involved.
+    // Counted against `samples`, not `resolved`, so a reader must weight them
+    // against the whole to see how much of the thread they are.
+    fprintf(fh, "\n[host_leaves]\n# tid pc count   (host arm pcs, no guest translation)\n");
+    for (const auto& [tid, ts] : st.threads) {
+        std::vector<std::pair<uint64_t, uint64_t>> all(ts.host_pcs.begin(), ts.host_pcs.end());
+        std::sort(all.begin(), all.end(),
+                  [](const auto& a, const auto& b) { return a.second > b.second; });
+        for (const auto& [pc, hits] : all) {
+            fprintf(fh, "0x%llx 0x%llx %llu\n", static_cast<unsigned long long>(tid),
+                    static_cast<unsigned long long>(pc), static_cast<unsigned long long>(hits));
+        }
+    }
+
     fprintf(fh, "\n[stacks]\n# tid root;...;leaf count   (inclusive: these were ON the stack)\n");
     for (const auto& [tid, ts] : st.threads) {
         std::vector<std::pair<const std::vector<uint64_t>*, uint64_t>> all;
@@ -1353,7 +1382,9 @@ void drainRing(AggCtx* ctx, SamplerStats& st, SamplerStats& run, uint64_t& baseS
         const auto kind = static_cast<SampleKind>((hdr >> 32) & 0xFF);
         const bool inRange = ((hdr >> 16) & 1) != 0;
         const uint64_t depth = hdr & 0xFFFF;
-        const size_t words = kind == SampleKind::Resolved ? 3 + depth : 2;
+        const size_t words = kind == SampleKind::Resolved        ? 3 + depth
+                             : kind == SampleKind::NotTranslated ? 3
+                                                                 : 2;
 
         if (kind == SampleKind::Reset) {
             // The subject changed: what came before describes another thread.
@@ -1398,9 +1429,17 @@ void drainRing(AggCtx* ctx, SamplerStats& st, SamplerStats& run, uint64_t& baseS
                     }
                     break;
                 }
-                case SampleKind::NotTranslated:
+                case SampleKind::NotTranslated: {
+                    const uint64_t host =
+                        g_ring.slots[(tail + 2) & kRingMask].load(std::memory_order_relaxed);
                     st.not_translated++;
+                    ts.host_pcs[host]++;
+                    // Same lookup as a guest address: the map holds Mach-O
+                    // images too, and dyld is the only thing that can name one
+                    // inside the shared cache, which is where most of these are.
+                    learnAddress(ctx, host);
                     break;
+                }
                 case SampleKind::Unavailable:
                     st.unavailable++;
                     break;
