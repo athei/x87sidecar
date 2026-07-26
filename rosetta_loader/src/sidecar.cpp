@@ -4,6 +4,7 @@
 #include <mach/mach_port.h>
 #include <mach/mach_vm.h>
 #include <pthread.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <array>
@@ -13,11 +14,14 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <map>
 #include <mutex>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
+#include "guest_pc_map.hpp"
 #include "rosetta_core/Config.h"
 #include "rosetta_core/CoreConfig.h"
 #include "rosetta_core/Fixup.h"
@@ -209,6 +213,444 @@ bool readParent(mach_port_t task, uint64_t addr, void* dst, size_t size) {
     kern_return_t kr =
         mach_vm_read_overwrite(task, addr, size, reinterpret_cast<mach_vm_address_t>(dst), &got);
     return kr == KERN_SUCCESS && got == size;
+}
+
+// ── Guest-pc sampler ────────────────────────────────────────────────────────
+// Samples the tracee without stopping it and resolves each host ARM pc to a
+// guest x86 pc through guest_pc::resolve.  Neither thread_get_state nor
+// mach_vm_read suspends the target, so this costs the tracee nothing beyond
+// memory-read traffic; the cost is our own CPU, which bounds the sample rate.
+//
+// By default it latches onto the thread caught executing guest code inside the
+// configured guest range and then samples only that thread, which is what makes
+// a high rate affordable: a sweep of every thread pays a fragment-tree walk per
+// thread even for the ones parked outside translated code.  --all-threads
+// sweeps everything instead.  Output goes to the single file named by
+// X87_SAMPLE.
+struct SamplerCtx {
+    mach_port_t task;
+    uint64_t base;
+    SamplerConfig cfg;
+    int reads;
+};
+
+bool samplerRead(void* raw, uint64_t addr, void* dst, size_t len) {
+    auto* ctx = static_cast<SamplerCtx*>(raw);
+    ctx->reads++;
+    return readParent(ctx->task, addr, dst, len);
+}
+
+double nowUs() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC_RAW, &ts);
+    return (static_cast<double>(ts.tv_sec) * 1e6) + (static_cast<double>(ts.tv_nsec) / 1e3);
+}
+
+// Unlatch after this many consecutive ticks where the latched thread is not in
+// the range, so a thread that stops being the interesting one is given up.
+constexpr int kUnlatchAfter = 2000;
+
+// Sweep every thread for this many ticks before latching, and latch onto the
+// one seen in the range most often rather than the first one seen at all: more
+// than one thread can run guest code and the busiest is the one worth having.
+constexpr int kDiscoveryTicks = 200;
+
+// If nothing ever runs inside the guest range, discovery would otherwise sweep
+// every thread at the full sample rate forever, which is the most expensive
+// mode there is.  After this many sweeps give up on latching and drop to one
+// sweep per kIdleSweepEvery ticks: still collecting, but at bounded cost.  The
+// profile says so, and its [threads] table shows resolved>0 with in_range=0,
+// which is what a wrong guest_range looks like.
+constexpr uint64_t kDiscoveryGiveUp = 30000;
+constexpr uint64_t kIdleSweepEvery = 1000;
+
+// Frame-pointer walk of the GUEST stack.  Return addresses on that stack are
+// already guest x86 addresses (the translation keeps guest state in guest
+// memory), so unwinding needs no resolver at all: only the leaf pc comes from
+// the ARM pc.  Frame pointer omission means the chain can be short or break
+// early; that costs depth, never a wrong leaf.
+constexpr int kMaxFrames = 48;
+
+// A caller's frame sits above the callee's and not absurdly far above it.
+constexpr uint64_t kMaxFrameSpan = 1U << 20;
+
+// Nothing is mapped in the low 64 KB of a Windows address space, so a "return
+// address" below this is a misread slot, not a frame.  Without this the walk
+// happily appends roots like 0x1, 0x4, 0xa0 and 0x800, which then show up as
+// garbage at the base of a stack.
+constexpr uint64_t kMinCodeAddr = 0x10000;
+
+int unwindGuestStack(mach_port_t task, uint64_t framePtr, bool guest32, uint64_t* out, int max) {
+    const uint64_t mask = guest32 ? 0xFFFFFFFFULL : ~0ULL;
+    const size_t width = guest32 ? 4 : 8;
+    uint64_t fp = framePtr & mask;
+    int depth = 0;
+    while (depth < max) {
+        if (fp == 0 || (fp & (width - 1)) != 0) {
+            break;
+        }
+        uint8_t frame[16];
+        if (!readParent(task, fp, frame, width * 2)) {
+            break;
+        }
+        uint64_t saved = 0;
+        uint64_t ret = 0;
+        memcpy(&saved, frame, width);
+        memcpy(&ret, frame + width, width);
+        if (ret < kMinCodeAddr || (guest32 && ret >= 0x100000000ULL)) {
+            break;
+        }
+        out[depth++] = ret;
+        // The stack grows down, so the caller's frame is above ours.
+        if (saved <= fp || saved - fp > kMaxFrameSpan) {
+            break;
+        }
+        fp = saved;
+    }
+    return depth;
+}
+
+// Everything is kept per guest thread, so a profile taken with --all-threads
+// says which thread each address came from rather than blending them.
+struct ThreadStats {
+    uint64_t samples = 0;
+    uint64_t resolved = 0;
+    uint64_t in_range = 0;
+    std::unordered_map<uint64_t, uint64_t> pcs;        // leaf guest pc -> hits
+    std::map<std::vector<uint64_t>, uint64_t> stacks;  // root-first stack -> hits
+};
+
+struct SamplerStats {
+    uint64_t samples = 0;
+    uint64_t in_range = 0;
+    uint64_t resolved = 0;
+    uint64_t not_translated = 0;
+    uint64_t unavailable = 0;
+    uint64_t frames = 0;   // total frames unwound, for the average depth
+    uint64_t unwound = 0;  // samples an unwind was attempted for
+    double total_us = 0;
+    std::map<uint64_t, ThreadStats> threads;  // mach thread id -> its samples
+};
+
+// The mach thread id, which is stable for the life of the thread, unlike the
+// port name a task_threads sweep hands back.
+uint64_t machThreadId(mach_port_t thread) {
+    thread_identifier_info_data_t id{};
+    mach_msg_type_number_t count = THREAD_IDENTIFIER_INFO_COUNT;
+    if (thread_info(thread, THREAD_IDENTIFIER_INFO, reinterpret_cast<thread_info_t>(&id), &count) !=
+        KERN_SUCCESS) {
+        return 0;
+    }
+    return id.thread_id;
+}
+
+// `record` false makes this a probe: it still resolves, so the caller can tell
+// whether the thread is in the guest range, but nothing enters the profile.
+// Discovery uses that, because a latched profile must contain the latched
+// thread's samples and nothing else.
+void sampleThread(SamplerCtx* ctx, const guest_pc::Reader& reader, guest_pc::Cache& cache,
+                  mach_port_t thread, uint64_t tid, SamplerStats& st, bool record, bool& inRange) {
+    inRange = false;
+    arm_thread_state64_t state{};
+    mach_msg_type_number_t count = ARM_THREAD_STATE64_COUNT;
+    if (thread_get_state(thread, ARM_THREAD_STATE64, reinterpret_cast<thread_state_t>(&state),
+                         &count) != KERN_SUCCESS) {
+        return;
+    }
+    if (record) {
+        st.samples++;
+        st.threads[tid].samples++;
+    }
+    ThreadStats scratch;
+    ThreadStats& ts = record ? st.threads[tid] : scratch;
+
+    guest_pc::Resolution res{};
+    const double t0 = nowUs();
+    const guest_pc::Status status =
+        guest_pc::resolve(reader, ctx->base, arm_thread_state64_get_pc(state), res, cache);
+
+    switch (status) {
+        case guest_pc::Status::Resolved: {
+            if (!record) {
+                inRange = res.x86_pc >= ctx->cfg.guest_lo && res.x86_pc < ctx->cfg.guest_hi;
+                break;
+            }
+            st.resolved++;
+            ts.resolved++;
+            // Every resolved pc is recorded.  The guest range only decides
+            // which thread to latch onto: once we are on the game's thread,
+            // where it spends its time is exactly the question, and that
+            // includes wow_turbo.dll, fmod and the wine layer.
+            ts.pcs[res.x86_pc]++;
+            if (res.x86_pc >= ctx->cfg.guest_lo && res.x86_pc < ctx->cfg.guest_hi) {
+                st.in_range++;
+                ts.in_range++;
+                inRange = true;
+            }
+            if (ctx->cfg.unwind) {
+                // x5 holds the guest frame pointer while translated code runs,
+                // which the resolver has just confirmed is the case.
+                const bool guest32 = res.x86_pc < 0x100000000ULL;
+                uint64_t frames[kMaxFrames];
+                const int depth =
+                    unwindGuestStack(ctx->task, state.__x[5], guest32, frames, kMaxFrames);
+                st.unwound++;
+                st.frames += static_cast<uint64_t>(depth);
+                std::vector<uint64_t> stack;
+                stack.reserve(static_cast<size_t>(depth) + 1);
+                for (int i = depth - 1; i >= 0; i--) {
+                    stack.push_back(frames[i]);  // root first
+                }
+                stack.push_back(res.x86_pc);  // leaf last
+                ts.stacks[stack]++;
+            }
+            break;
+        }
+        case guest_pc::Status::NotTranslated:
+            if (record) {
+                st.not_translated++;
+            }
+            break;
+        case guest_pc::Status::Unavailable:
+            if (record) {
+                st.unavailable++;
+            }
+            break;
+    }
+    // Timed across resolve AND unwind: the unwind is the larger half once the
+    // cache is warm, so timing only the resolve would flatter the sampler.
+    if (record) {
+        st.total_us += nowUs() - t0;
+    }
+}
+
+// The profile is rewritten in full every report interval so it can be read
+// while the game runs, and is written to a sibling temp file then renamed, so a
+// reader never catches a half-written one.  rename(2) within a directory is
+// atomic.
+void writeProfile(const SamplerCtx* ctx, const SamplerStats& st, const guest_pc::Cache& cache,
+                  uint64_t latchedTid, uint64_t sweeps, double elapsed) {
+    const std::string tmp = ctx->cfg.path + ".tmp";
+    FILE* fh = fopen(tmp.c_str(), "wb");
+    if (fh == nullptr) {
+        return;
+    }
+
+    const auto& cs = cache.stats();
+    pid_t targetPid = 0;
+    pid_for_task(ctx->task, &targetPid);
+    char when[64] = "unknown";
+    const time_t now = time(nullptr);
+    struct tm tmv;
+    if (gmtime_r(&now, &tmv) != nullptr) {
+        strftime(when, sizeof(when), "%Y-%m-%dT%H:%M:%SZ", &tmv);
+    }
+
+    fprintf(fh, "# x87sidecar guest-pc sample profile\n");
+    fprintf(fh, "# Addresses are guest x86 pcs. Symbolising them needs the module map of\n");
+    fprintf(fh, "# the run they came from; this file does not carry one.\n");
+    fprintf(fh, "version 1\n");
+    fprintf(fh, "pid %d\n", targetPid);
+    fprintf(fh, "written %s\n", when);
+    fprintf(fh, "runtime_base 0x%llx\n", static_cast<unsigned long long>(ctx->base));
+    fprintf(fh, "rate_hz %.1f\n",
+            ctx->cfg.interval_us != 0 ? 1e6 / static_cast<double>(ctx->cfg.interval_us) : 0.0);
+    fprintf(fh, "interval_us %llu\n", static_cast<unsigned long long>(ctx->cfg.interval_us));
+    fprintf(fh, "elapsed_s %.1f\n", elapsed);
+    fprintf(fh, "mode %s\n", ctx->cfg.all_threads ? "all-threads" : "latched");
+    fprintf(fh, "guest_range 0x%llx-0x%llx\n", static_cast<unsigned long long>(ctx->cfg.guest_lo),
+            static_cast<unsigned long long>(ctx->cfg.guest_hi));
+    // Only two shapes exist: a latched run, whose samples all come from the one
+    // thread below, or an explicit all-threads run.  A failed latch writes no
+    // profile at all.
+    if (ctx->cfg.all_threads) {
+        fprintf(fh, "latch_state all-threads (latching disabled)\n");
+        fprintf(fh, "latched_thread -\n");
+    } else {
+        fprintf(fh, "latch_state latched\n");
+        fprintf(fh, "latched_thread 0x%llx\n", static_cast<unsigned long long>(latchedTid));
+    }
+    fprintf(fh, "threads_seen %zu\n", st.threads.size());
+    fprintf(fh, "discovery_sweeps %llu\n", static_cast<unsigned long long>(sweeps));
+    fprintf(fh, "unwind %s\n", ctx->cfg.unwind ? "yes" : "no");
+    fprintf(fh, "samples %llu\n", static_cast<unsigned long long>(st.samples));
+    fprintf(fh, "resolved %llu\n", static_cast<unsigned long long>(st.resolved));
+    fprintf(fh, "in_range %llu\n", static_cast<unsigned long long>(st.in_range));
+    fprintf(fh, "not_translated %llu\n", static_cast<unsigned long long>(st.not_translated));
+    fprintf(fh, "unavailable %llu\n", static_cast<unsigned long long>(st.unavailable));
+    fprintf(fh, "avg_us %.2f\n",
+            st.samples != 0 ? st.total_us / static_cast<double>(st.samples) : 0.0);
+    fprintf(
+        fh, "avg_depth %.2f\n",
+        st.unwound != 0 ? static_cast<double>(st.frames) / static_cast<double>(st.unwound) : 0.0);
+    fprintf(fh, "cache_pc_hits %llu\n", static_cast<unsigned long long>(cs.pc_hits));
+    fprintf(fh, "cache_fragment_hits %llu\n", static_cast<unsigned long long>(cs.fragment_hits));
+    fprintf(fh, "cache_negative_hits %llu\n", static_cast<unsigned long long>(cs.negative_hits));
+    fprintf(fh, "cache_misses %llu\n", static_cast<unsigned long long>(cs.misses));
+    fprintf(fh, "cache_stale %llu\n", static_cast<unsigned long long>(cs.stale));
+
+    // Per-thread totals, so a reader can tell one thread's profile from a blend
+    // of several without parsing the sample sections.
+    fprintf(fh, "\n[threads]\n# tid samples resolved in_range latched\n");
+    for (const auto& [tid, ts] : st.threads) {
+        fprintf(fh, "0x%llx %llu %llu %llu %s\n", static_cast<unsigned long long>(tid),
+                static_cast<unsigned long long>(ts.samples),
+                static_cast<unsigned long long>(ts.resolved),
+                static_cast<unsigned long long>(ts.in_range), tid == latchedTid ? "yes" : "no");
+    }
+
+    fprintf(fh, "\n[leaves]\n# tid pc count   (exclusive: execution was AT this address)\n");
+    for (const auto& [tid, ts] : st.threads) {
+        std::vector<std::pair<uint64_t, uint64_t>> all(ts.pcs.begin(), ts.pcs.end());
+        std::sort(all.begin(), all.end(),
+                  [](const auto& a, const auto& b) { return a.second > b.second; });
+        for (const auto& [pc, hits] : all) {
+            fprintf(fh, "0x%llx 0x%llx %llu\n", static_cast<unsigned long long>(tid),
+                    static_cast<unsigned long long>(pc), static_cast<unsigned long long>(hits));
+        }
+    }
+
+    fprintf(fh, "\n[stacks]\n# tid root;...;leaf count   (inclusive: these were ON the stack)\n");
+    for (const auto& [tid, ts] : st.threads) {
+        std::vector<std::pair<const std::vector<uint64_t>*, uint64_t>> all;
+        all.reserve(ts.stacks.size());
+        for (const auto& [stack, hits] : ts.stacks) {
+            all.emplace_back(&stack, hits);
+        }
+        std::sort(all.begin(), all.end(),
+                  [](const auto& a, const auto& b) { return a.second > b.second; });
+        for (const auto& [stack, hits] : all) {
+            fprintf(fh, "0x%llx ", static_cast<unsigned long long>(tid));
+            for (size_t i = 0; i < stack->size(); i++) {
+                fprintf(fh, "%s0x%llx", i != 0 ? ";" : "",
+                        static_cast<unsigned long long>((*stack)[i]));
+            }
+            fprintf(fh, " %llu\n", static_cast<unsigned long long>(hits));
+        }
+    }
+
+    fclose(fh);
+    if (rename(tmp.c_str(), ctx->cfg.path.c_str()) != 0) {
+        unlink(tmp.c_str());
+    }
+}
+
+void* samplerMain(void* raw) {
+    auto* ctx = static_cast<SamplerCtx*>(raw);
+    const guest_pc::Reader reader{samplerRead, ctx};
+    guest_pc::Cache cache;
+    SamplerStats st;
+
+    mach_port_t latched = MACH_PORT_NULL;
+    uint64_t latchedTid = 0;
+    std::unordered_map<uint64_t, uint64_t> scores;  // mach thread id -> in-range hits
+    int missTicks = 0;
+    uint64_t sweeps = 0;
+    uint64_t tick = 0;
+    bool gaveUpLatching = false;
+
+    // The only thing this ever prints: everything else belongs in the profile,
+    // not in the game's log.
+    fprintf(stdout,
+            "[rosettax87] X87_SAMPLE: sampling to '%s' at %.0f Hz, "
+            "guest-range=[0x%llx,0x%llx), %s\n",
+            ctx->cfg.path.c_str(),
+            ctx->cfg.interval_us != 0 ? 1e6 / static_cast<double>(ctx->cfg.interval_us) : 0.0,
+            static_cast<unsigned long long>(ctx->cfg.guest_lo),
+            static_cast<unsigned long long>(ctx->cfg.guest_hi),
+            ctx->cfg.all_threads ? "all-threads" : "latching");
+    fflush(stdout);
+
+    const double started = nowUs();
+    double lastReport = started;
+    for (;;) {
+        if (ctx->cfg.duration_s > 0 && (nowUs() - started) / 1e6 >= ctx->cfg.duration_s) {
+            break;
+        }
+        if (latched != MACH_PORT_NULL) {
+            // Steady state: one thread, one thread_get_state, no task_threads,
+            // no port churn and no thread_info.
+            bool inRange = false;
+            sampleThread(ctx, reader, cache, latched, latchedTid, st, true, inRange);
+            if (inRange) {
+                missTicks = 0;
+            } else if (++missTicks > kUnlatchAfter) {
+                mach_port_deallocate(mach_task_self(), latched);
+                latched = MACH_PORT_NULL;
+                latchedTid = 0;
+                missTicks = 0;
+                scores.clear();
+                sweeps = 0;
+            }
+        } else if (!gaveUpLatching || tick % kIdleSweepEvery == 0) {
+            thread_act_array_t threads = nullptr;
+            mach_msg_type_number_t count = 0;
+            if (task_threads(ctx->task, &threads, &count) != KERN_SUCCESS) {
+                break;
+            }
+            if (!ctx->cfg.all_threads && sweeps >= kDiscoveryGiveUp && !gaveUpLatching) {
+                gaveUpLatching = true;
+                fprintf(stdout,
+                        "[rosettax87] X87_SAMPLE: FAILED to latch, no thread ran in "
+                        "guest-range=[0x%llx,0x%llx) in %llu sweeps. No profile written. "
+                        "Still searching, one sweep per %llu ticks.\n",
+                        static_cast<unsigned long long>(ctx->cfg.guest_lo),
+                        static_cast<unsigned long long>(ctx->cfg.guest_hi),
+                        static_cast<unsigned long long>(sweeps),
+                        static_cast<unsigned long long>(kIdleSweepEvery));
+                fflush(stdout);
+            }
+            sweeps++;
+            mach_port_t best = MACH_PORT_NULL;
+            uint64_t bestTid = 0;
+            uint64_t bestScore = 0;
+            for (mach_msg_type_number_t i = 0; i < count; i++) {
+                const uint64_t tid = machThreadId(threads[i]);
+                bool inRange = false;
+                sampleThread(ctx, reader, cache, threads[i], tid, st, ctx->cfg.all_threads,
+                             inRange);
+                if (inRange && !ctx->cfg.all_threads && tid != 0) {
+                    const uint64_t score = ++scores[tid];
+                    if (score >= bestScore) {
+                        bestScore = score;
+                        best = threads[i];
+                        bestTid = tid;
+                    }
+                }
+            }
+            if (best != MACH_PORT_NULL && sweeps >= kDiscoveryTicks) {
+                latched = best;
+                latchedTid = bestTid;
+            }
+            for (mach_msg_type_number_t i = 0; i < count; i++) {
+                if (threads[i] != latched) {
+                    mach_port_deallocate(mach_task_self(), threads[i]);
+                }
+            }
+            vm_deallocate(mach_task_self(), reinterpret_cast<vm_address_t>(threads),
+                          count * sizeof(thread_act_t));
+        }
+
+        tick++;
+        // A latched profile is only written once there IS a latched thread: an
+        // unlatched one would be a blend of whatever the discovery sweeps saw,
+        // which is not a profile of anything.
+        const bool haveProfile = ctx->cfg.all_threads || latchedTid != 0;
+        if (haveProfile && ctx->cfg.report_s > 0 &&
+            (nowUs() - lastReport) / 1e6 >= ctx->cfg.report_s) {
+            lastReport = nowUs();
+            writeProfile(ctx, st, cache, latchedTid, sweeps, (nowUs() - started) / 1e6);
+        }
+
+        struct timespec ts{static_cast<time_t>(ctx->cfg.interval_us / 1000000),
+                           static_cast<long>((ctx->cfg.interval_us % 1000000) * 1000)};
+        nanosleep(&ts, nullptr);
+    }
+
+    if (ctx->cfg.all_threads || latchedTid != 0) {
+        writeProfile(ctx, st, cache, latchedTid, sweeps, (nowUs() - started) / 1e6);
+    }
+    return nullptr;
 }
 
 bool writeParent(mach_port_t task, uint64_t addr, const void* src, size_t size) {
@@ -828,6 +1270,55 @@ bool spawnReceiveThread(mach_port_t servicePort, mach_port_t parentTaskPort) {
         }
     }
     return true;
+}
+
+void samplerConfigFromEnv(SamplerConfig& cfg) {
+    // X87_SAMPLE names the profile and enables the sampler, exactly as
+    // X87_PROFILE does for the block profiler.
+    if (const char* path = getenv("X87_SAMPLE"); path != nullptr && path[0] != '\0') {
+        cfg.path = path;
+    }
+    if (const char* hz = getenv("X87_SAMPLE_HZ")) {
+        const double rate = strtod(hz, nullptr);
+        if (rate > 0) {
+            cfg.interval_us = static_cast<uint64_t>(1e6 / rate);
+        }
+    }
+    if (const char* secs = getenv("X87_SAMPLE_FOR")) {
+        cfg.duration_s = strtod(secs, nullptr);
+    }
+    if (const char* secs = getenv("X87_SAMPLE_REPORT")) {
+        cfg.report_s = strtod(secs, nullptr);
+    }
+    if (getenv("X87_ALL_THREADS") != nullptr) {
+        cfg.all_threads = true;
+    }
+    if (getenv("X87_NO_UNWIND") != nullptr) {
+        cfg.unwind = false;
+    }
+    if (const char* range = getenv("X87_GUEST_RANGE")) {
+        const char* dash = strchr(range[0] == '0' && range[1] == 'x' ? range + 2 : range, '-');
+        if (dash != nullptr) {
+            cfg.guest_lo = strtoull(range, nullptr, 0);
+            cfg.guest_hi = strtoull(dash + 1, nullptr, 0);
+        }
+    }
+}
+
+void startSampler(mach_port_t parentTaskPort, uint64_t runtimeBase, const SamplerConfig& cfg) {
+    if (cfg.path.empty()) {
+        return;
+    }
+    pthread_t thr;
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    auto* ctx = new SamplerCtx{parentTaskPort, runtimeBase, cfg, 0};
+    if (pthread_create(&thr, &attr, samplerMain, ctx) != 0) {
+        delete ctx;
+        fprintf(stdout, "[rosettax87] X87_SAMPLE: sampler thread creation failed\n");
+    }
+    pthread_attr_destroy(&attr);
 }
 
 void dumpCountersIfEnabled(mach_port_t /*parentTaskPort*/) {

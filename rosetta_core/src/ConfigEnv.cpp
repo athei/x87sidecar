@@ -183,8 +183,8 @@ RosettaConfig load_config_from_env() {
             target = static_cast<uint8_t>(v);
             std::printf("[rosettax87] %s=%ld\n", env_name, v);
         } else {
-            std::printf("[rosettax87] %s: '%s' out of range [%ld,%ld] (ignored)\n", env_name, t,
-                        lo, hi);
+            std::printf("[rosettax87] %s: '%s' out of range [%ld,%ld] (ignored)\n", env_name, t, lo,
+                        hi);
         }
     };
     parse_bridge_bound("X87_BRIDGE_MAX_GAP", cfg.bridge_max_gap, 1, 4);
@@ -359,6 +359,31 @@ void print_env_help(std::FILE* out) {
                  "                                or profile_analyze)\n"
                  "  X87_NO_BRIDGE_HASH_LIST=H,... never bridge the listed blocks (wins over\n"
                  "                                the include list)\n"
+                 "  X87_SAMPLE=<file>             sampling profiler: write a guest-pc sample\n"
+                 "                                profile here (rosettax87 only).  Setting it\n"
+                 "                                enables sampling, as X87_PROFILE does for the\n"
+                 "                                block profiler.  The tracee is never stopped;\n"
+                 "                                host ARM pcs are resolved to guest x86 pcs and\n"
+                 "                                the guest stack is walked.  The file is\n"
+                 "                                rewritten in full every report interval, so it\n"
+                 "                                can be read while the target runs, and holds\n"
+                 "                                the settings, the thread it latched onto, a\n"
+                 "                                leaf histogram and folded stacks.\n"
+                 "  X87_SAMPLE_HZ=N               sample rate, default 1000\n"
+                 "  X87_SAMPLE_FOR=SECS           stop sampling after this long (default: run\n"
+                 "                                until the target exits)\n"
+                 "  X87_SAMPLE_REPORT=SECS        profile rewrite interval, default 10\n"
+                 "  X87_GUEST_RANGE=LO-HI         guest pcs that mark the thread worth\n"
+                 "                                profiling, default 0-0x100000000 (all 32-bit\n"
+                 "                                guest code).  If nothing runs in this range\n"
+                 "                                no profile is written and the reason is\n"
+                 "                                logged.\n"
+                 "  X87_ALL_THREADS=1             sample every thread rather than latching onto\n"
+                 "                                one.  Costs a fragment-tree walk per thread\n"
+                 "                                per tick, including threads parked outside\n"
+                 "                                translated code.\n"
+                 "  X87_NO_UNWIND=1               record leaf pcs only, skip the guest stack\n"
+                 "                                walk (roughly halves the per-sample cost)\n"
                  "  X87_DISABLE_ALL_FUSIONS=1     disable every peephole fusion\n"
                  "  X87_GATE_FLUSH_THRESHOLD=N             override the IR-gate flush-and-\n"
                  "  X87_GATE_FLUSH_THRESHOLD_DEFERRED_POP=N proceed minimum run length per\n"

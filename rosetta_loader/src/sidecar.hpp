@@ -3,6 +3,8 @@
 #include <mach/mach.h>
 #include <stdint.h>
 
+#include <string>
+
 // Sidecar Mach IPC service.
 //
 // After the loader's debugger phase detaches, we transition into "sidecar
@@ -44,5 +46,30 @@ bool spawnReceiveThread(mach_port_t servicePort, mach_port_t parentTaskPort);
 // struct outlives NOTE_EXIT for a brief grace window).  No-op when
 // X87_PROFILE was not set or counter allocation failed.
 void dumpCountersIfEnabled(mach_port_t parentTaskPort);
+
+// Guest-pc sampler.
+//
+// X87_SAMPLE=<path> enables it and names the profile, exactly like X87_PROFILE.
+// Everything lands in that one self-describing file: the settings it ran with,
+// whether it latched onto a single thread or swept them all, the per-thread
+// sample counts, the leaf histogram and the folded stacks.
+struct SamplerConfig {
+    std::string path;  // X87_SAMPLE; empty = disabled
+    bool all_threads = false;
+    uint64_t interval_us = 1000;  // X87_SAMPLE_HZ, default 1 kHz
+    uint64_t guest_lo = 0;        // default: all 32-bit guest code
+    uint64_t guest_hi = 0x100000000ULL;
+    double duration_s = 0;  // 0 = until the tracee exits
+    double report_s = 10;   // profile rewrite interval
+    bool unwind = true;     // walk the guest frame-pointer chain
+};
+
+// Overlay X87_SAMPLE / X87_SAMPLE_HZ / X87_SAMPLE_FOR / X87_SAMPLE_REPORT /
+// X87_GUEST_RANGE / X87_ALL_THREADS / X87_NO_UNWIND onto `cfg`.  Env is how the
+// app bundle enables this: gamelauncher passes fixed arguments, but applies its
+// [env] table.
+void samplerConfigFromEnv(SamplerConfig& cfg);
+
+void startSampler(mach_port_t parentTaskPort, uint64_t runtimeBase, const SamplerConfig& cfg);
 
 }  // namespace sidecar

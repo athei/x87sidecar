@@ -780,7 +780,8 @@ public:
         // after writing to a tracee. Best-effort: a failure only regresses to
         // the old behaviour, so log and continue.
         vm_machine_attribute_val_t flush = MATTR_VAL_ICACHE_FLUSH;
-        kern_return_t fkr = mach_vm_machine_attribute(taskPort_, address, size, MATTR_CACHE, &flush);
+        kern_return_t fkr =
+            mach_vm_machine_attribute(taskPort_, address, size, MATTR_CACHE, &flush);
         if (fkr != KERN_SUCCESS) {
             fprintf(stdout, "Warning: i-cache flush at 0x%llx failed (error 0x%x: %s)\n", address,
                     fkr, mach_error_string(fkr));
@@ -909,10 +910,21 @@ static void print_loader_usage(const char* prog) {
         "  --cooperative  attach via a voluntary task-port handshake instead of\n"
         "                 task_for_pid + ptrace. The target must hand over its\n"
         "                 task port over the bootstrap service named in the\n"
-        "                 " X87_COOP_ENV " env var (set automatically). Needs no\n"
+        "                 " X87_COOP_ENV
+        " env var (set automatically). Needs no\n"
         "                 get-task-allow entitlement, so the binary is notarizable.\n"
         "                 Non-cooperative targets keep using the default path.\n"
         "  --help         print this message and exit\n"
+        "\n"
+        "Sampling profiler (see also the X87_SAMPLE* variables below, which win\n"
+        "over these flags so an app bundle can enable it without touching argv):\n"
+        "  --sample=<file>       write a guest-pc sample profile here; enables it\n"
+        "  --sample-hz=<rate>    sample rate, default 1000\n"
+        "  --sample-for=<secs>   stop sampling after this long (default: never)\n"
+        "  --guest-range=<lo-hi> guest pcs that mark the thread worth profiling,\n"
+        "                        default 0-0x100000000 (all 32-bit guest code)\n"
+        "  --all-threads         sample every thread instead of latching onto one\n"
+        "  --no-unwind           record leaf pcs only, skip the guest stack walk\n"
         "\n"
         "All other configuration is via environment variables:\n"
         "\n",
@@ -925,7 +937,6 @@ static std::string coop_service_name(pid_t pid) {
     return std::string("x87sidecar.") + std::to_string(pid);
 }
 
-
 int main(int argc, char* argv[]) try {
     int argi = 1;
     if (argi < argc && std::string_view(argv[argi]) == "--help") {
@@ -937,6 +948,36 @@ int main(int argc, char* argv[]) try {
         cooperative = true;
         ++argi;
     }
+    // Sampling profiler options; X87_SAMPLE and friends override these below.
+    sidecar::SamplerConfig samplerCfg;
+    while (argi < argc) {
+        const std::string_view arg{argv[argi]};
+        if (arg.starts_with("--sample-for=")) {
+            samplerCfg.duration_s = strtod(std::string(arg.substr(13)).c_str(), nullptr);
+        } else if (arg.starts_with("--sample-hz=")) {
+            const double hz = strtod(std::string(arg.substr(12)).c_str(), nullptr);
+            if (hz > 0) {
+                samplerCfg.interval_us = static_cast<uint64_t>(1e6 / hz);
+            }
+        } else if (arg.starts_with("--sample=")) {
+            samplerCfg.path = std::string(arg.substr(9));
+        } else if (arg == "--all-threads") {
+            samplerCfg.all_threads = true;
+        } else if (arg == "--no-unwind") {
+            samplerCfg.unwind = false;
+        } else if (arg.starts_with("--guest-range=")) {
+            const std::string spec{arg.substr(14)};
+            const size_t dash = spec.find('-', spec[0] == '0' && spec[1] == 'x' ? 2 : 0);
+            if (dash != std::string::npos) {
+                samplerCfg.guest_lo = strtoull(spec.substr(0, dash).c_str(), nullptr, 0);
+                samplerCfg.guest_hi = strtoull(spec.substr(dash + 1).c_str(), nullptr, 0);
+            }
+        } else {
+            break;
+        }
+        ++argi;
+    }
+
     if (argi >= argc) {
         std::fprintf(stderr, "%s: missing <program> argument (try --help)\n", argv[0]);
         return 2;
@@ -1025,8 +1066,7 @@ int main(int argc, char* argv[]) try {
         task_get_bootstrap_port(mach_task_self(), &bootstrapPort);
         mach_port_t servicePort = MACH_PORT_NULL;
         mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &servicePort);
-        mach_port_insert_right(mach_task_self(), servicePort, servicePort,
-                               MACH_MSG_TYPE_MAKE_SEND);
+        mach_port_insert_right(mach_task_self(), servicePort, servicePort, MACH_MSG_TYPE_MAKE_SEND);
         kern_return_t kr =
             bootstrap_register2(bootstrapPort, const_cast<char*>(coopName.c_str()), servicePort, 0);
         if (kr != KERN_SUCCESS) {
@@ -1793,6 +1833,9 @@ int main(int argc, char* argv[]) try {
             fprintf(stdout, "M2: failed to spawn receive thread\n");
             return 1;
         }
+        // Env wins over the flags: an app bundle can set variables but not argv.
+        sidecar::samplerConfigFromEnv(samplerCfg);
+        sidecar::startSampler(parentTaskPort, runtimeBase, samplerCfg);
         VERBOSE_LOG("M2: receive thread running; entering kqueue wait\n");
 
         // Self-test: send a tickle message from this process to our own
