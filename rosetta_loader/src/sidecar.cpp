@@ -388,8 +388,110 @@ bool readGuestImage(mach_port_t task, uint64_t base, GuestImage& out) {
     return true;
 }
 
-// The image containing `pc`, found by walking back to the nearest PE header.
+// A Mach-O guest (an ordinary x86-64 program under Rosetta, rather than a
+// Windows one under Wine) carries the same two facts in its own header:
+// MH_EXECUTE says it is a program and not a library, and the segment table
+// gives its extent.  Unlike a PE, its base is not on a coarse boundary that can
+// be walked back to, but it does not need to be: the region the pc lives in
+// starts at the __TEXT segment, which is where the header sits.
+constexpr uint32_t kMachMagic64 = 0xFEEDFACFU;
+constexpr uint32_t kMachMagic32 = 0xFEEDFACEU;
+constexpr uint32_t kMachExecute = 2;  // MH_EXECUTE
+constexpr uint32_t kLcSegment64 = 0x19;
+constexpr uint32_t kLcSegment32 = 0x1;
+
+bool readGuestMachO(mach_port_t task, uint64_t base, GuestImage& out) {
+    uint32_t header[8];
+    if (!readParent(task, base, header, sizeof(header))) {
+        return false;
+    }
+    const bool is64 = header[0] == kMachMagic64;
+    if (!is64 && header[0] != kMachMagic32) {
+        return false;
+    }
+    const uint32_t filetype = header[3];
+    const uint32_t ncmds = header[4];
+    if (ncmds == 0 || ncmds > 4096) {
+        return false;
+    }
+
+    uint64_t lo = UINT64_MAX;
+    uint64_t hi = 0;
+    uint64_t cmd = base + (is64 ? 32 : 28);
+    for (uint32_t i = 0; i < ncmds; i++) {
+        uint32_t head[2];  // cmd, cmdsize
+        if (!readParent(task, cmd, head, sizeof(head)) || head[1] < 8) {
+            return false;
+        }
+        if (head[0] == (is64 ? kLcSegment64 : kLcSegment32)) {
+            char name[16];
+            if (!readParent(task, cmd + 8, name, sizeof(name))) {
+                return false;
+            }
+            // __PAGEZERO is a multi-gigabyte hole below the image, not part of
+            // it, and would swallow the whole address space if counted.
+            if (memcmp(name, "__PAGEZERO", 10) != 0) {
+                uint64_t vmaddr = 0;
+                uint64_t vmsize = 0;
+                if (is64) {
+                    if (!readParent(task, cmd + 24, &vmaddr, 8) ||
+                        !readParent(task, cmd + 32, &vmsize, 8)) {
+                        return false;
+                    }
+                } else {
+                    uint32_t a = 0;
+                    uint32_t sz = 0;
+                    if (!readParent(task, cmd + 24, &a, 4) || !readParent(task, cmd + 28, &sz, 4)) {
+                        return false;
+                    }
+                    vmaddr = a;
+                    vmsize = sz;
+                }
+                lo = vmaddr < lo ? vmaddr : lo;
+                hi = vmaddr + vmsize > hi ? vmaddr + vmsize : hi;
+            }
+        }
+        cmd += head[1];
+    }
+    if (lo == UINT64_MAX || hi <= lo || hi - lo > (256ULL << 20)) {
+        return false;
+    }
+
+    out.base = base;
+    out.size = static_cast<uint32_t>(hi - lo);
+    out.is_exe = filetype == kMachExecute;
+    return true;
+}
+
+// The start of the mapping `pc` lives in.  For a Mach-O that is the image
+// header; for a PE it is usually a section, which is why the PE path walks.
+bool guestRegionStart(mach_port_t task, uint64_t pc, uint64_t& start) {
+    mach_vm_address_t address = pc;
+    mach_vm_size_t size = 0;
+    vm_region_basic_info_data_64_t info;
+    mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+    mach_port_t object = MACH_PORT_NULL;
+    if (mach_vm_region(task, &address, &size, VM_REGION_BASIC_INFO_64,
+                       reinterpret_cast<vm_region_info_t>(&info), &count,
+                       &object) != KERN_SUCCESS) {
+        return false;
+    }
+    if (pc < address || pc >= address + size) {
+        return false;  // nothing mapped at pc; the returned region is above it
+    }
+    start = address;
+    return true;
+}
+
+// The image containing `pc`: a Mach-O at the start of its mapping, or a PE
+// found by walking back to the nearest header.
 bool findGuestImage(mach_port_t task, uint64_t pc, GuestImage& out) {
+    uint64_t regionStart = 0;
+    if (guestRegionStart(task, pc, regionStart) && readGuestMachO(task, regionStart, out) &&
+        pc < out.base + out.size) {
+        return true;
+    }
+
     uint64_t candidate = pc & ~(kImageGranularity - 1);
     for (int step = 0; step < kMaxImageSteps; step++) {
         GuestImage img;
@@ -764,10 +866,11 @@ void* samplerMain(void* raw) {
                 // range: without a main image the range is only a fallback.
                 if (!ctx->cfg.guest_range_pinned && !ctx->image_found) {
                     fprintf(stdout,
-                            "[rosettax87] X87_SAMPLE: FAILED to latch after %llu sweeps: no PE "
-                            "main image was found in the guest, and nothing ran in the fallback "
-                            "range [0x%llx,0x%llx). NO PROFILE WILL BE WRITTEN. If this target "
-                            "has no PE image, set X87_GUEST_RANGE=lo-hi. Still searching, one "
+                            "[rosettax87] X87_SAMPLE: FAILED to latch after %llu sweeps: no "
+                            "main image was found in the guest (no PE or Mach-O header above "
+                            "any sampled pc), and nothing ran in the fallback range "
+                            "[0x%llx,0x%llx). NO PROFILE WILL BE WRITTEN. Set "
+                            "X87_GUEST_RANGE=lo-hi to say where to look. Still searching, one "
                             "sweep per %llu ticks.\n",
                             static_cast<unsigned long long>(sweeps),
                             static_cast<unsigned long long>(ctx->cfg.guest_lo),
