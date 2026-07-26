@@ -693,6 +693,9 @@ void* samplerMain(void* raw) {
     mach_port_t latched = MACH_PORT_NULL;
     uint64_t latchedTid = 0;
     std::string latchedName;
+    // Survives an unlatch, so a re-latch can tell "the same thread went quiet
+    // and came back" from "the subject changed".
+    uint64_t previousTid = 0;
     std::unordered_map<uint64_t, uint64_t> scores;  // mach thread id -> in-range hits
     int missTicks = 0;
     uint64_t sweeps = 0;
@@ -719,7 +722,7 @@ void* samplerMain(void* raw) {
     }
     fflush(stdout);
 
-    const double started = nowUs();
+    double started = nowUs();
     double lastReport = started;
     for (;;) {
         if (latched != MACH_PORT_NULL) {
@@ -738,6 +741,7 @@ void* samplerMain(void* raw) {
                 latchedName.clear();
                 mach_port_deallocate(mach_task_self(), latched);
                 latched = MACH_PORT_NULL;
+                previousTid = latchedTid;
                 latchedTid = 0;
                 missTicks = 0;
                 scores.clear();
@@ -798,6 +802,20 @@ void* samplerMain(void* raw) {
                 }
             }
             if (best != MACH_PORT_NULL && sweeps >= kDiscoveryTicks) {
+                // Re-latching onto a different thread makes everything already
+                // captured a profile of something else, and a latched profile
+                // must describe one thread.  Start over rather than blend two.
+                if (previousTid != 0 && bestTid != previousTid) {
+                    fprintf(stdout,
+                            "[rosettax87] X87_SAMPLE: subject changed, thread 0x%llx is not the "
+                            "0x%llx profiled before; discarding %llu samples and starting the "
+                            "profile again\n",
+                            static_cast<unsigned long long>(bestTid),
+                            static_cast<unsigned long long>(previousTid),
+                            static_cast<unsigned long long>(st.samples));
+                    st = SamplerStats{};
+                    started = nowUs();
+                }
                 latched = best;
                 latchedTid = bestTid;
                 latchedName = machThreadName(best);
