@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -672,9 +673,28 @@ void sampleThread(SamplerCtx* ctx, const guest_pc::Reader& reader, guest_pc::Cac
 // while the game runs, and is written to a sibling temp file then renamed, so a
 // reader never catches a half-written one.  rename(2) within a directory is
 // atomic.
+// What the sampler followed, and when it changed.  A profile whose subject
+// changed mid-run has thrown data away, and the reader has to be able to see
+// that from the file rather than from a log that may be long gone.
+struct LatchLog {
+    std::vector<std::string> events;
+    uint64_t discarded = 0;
+
+    void add(double at, const char* fmt, ...) __attribute__((format(printf, 3, 4))) {
+        char detail[256];
+        va_list ap;
+        va_start(ap, fmt);
+        vsnprintf(detail, sizeof(detail), fmt, ap);
+        va_end(ap);
+        char line[320];
+        snprintf(line, sizeof(line), "%.1f %s", at, detail);
+        events.emplace_back(line);
+    }
+};
+
 void writeProfile(const SamplerCtx* ctx, const SamplerStats& st, const guest_pc::Cache& cache,
                   uint64_t latchedTid, const std::string& latchedName, uint64_t sweeps,
-                  double elapsed) {
+                  double elapsed, const LatchLog& latchLog) {
     const std::string tmp = ctx->cfg.path + ".tmp";
     FILE* fh = fopen(tmp.c_str(), "wb");
     if (fh == nullptr) {
@@ -727,6 +747,8 @@ void writeProfile(const SamplerCtx* ctx, const SamplerStats& st, const guest_pc:
     }
     fprintf(fh, "threads_seen %zu\n", st.threads.size());
     fprintf(fh, "discovery_sweeps %llu\n", static_cast<unsigned long long>(sweeps));
+    fprintf(fh, "latch_events %zu\n", latchLog.events.size());
+    fprintf(fh, "samples_discarded %llu\n", static_cast<unsigned long long>(latchLog.discarded));
     fprintf(fh, "unwind %s\n", ctx->cfg.unwind ? "yes" : "no");
     fprintf(fh, "samples %llu\n", static_cast<unsigned long long>(st.samples));
     fprintf(fh, "resolved %llu\n", static_cast<unsigned long long>(st.resolved));
@@ -746,6 +768,13 @@ void writeProfile(const SamplerCtx* ctx, const SamplerStats& st, const guest_pc:
 
     // Per-thread totals, so a reader can tell one thread's profile from a blend
     // of several without parsing the sample sections.
+    // Anything but a single "latched" line means the run was not one
+    // continuous observation of one thread.
+    fprintf(fh, "\n[latch_history]\n# elapsed_s event detail\n");
+    for (const auto& event : latchLog.events) {
+        fprintf(fh, "%s\n", event.c_str());
+    }
+
     fprintf(fh, "\n[threads]\n# tid samples resolved in_range latched\n");
     for (const auto& [tid, ts] : st.threads) {
         fprintf(fh, "0x%llx %llu %llu %llu %s\n", static_cast<unsigned long long>(tid),
@@ -802,6 +831,7 @@ void* samplerMain(void* raw) {
     // Survives an unlatch, so a re-latch can tell "the same thread went quiet
     // and came back" from "the subject changed".
     uint64_t previousTid = 0;
+    LatchLog latchLog;
     std::unordered_map<uint64_t, uint64_t> scores;  // mach thread id -> in-range hits
     int missTicks = 0;
     uint64_t sweeps = 0;
@@ -844,6 +874,9 @@ void* samplerMain(void* raw) {
                         "nothing in the main image; searching again\n",
                         static_cast<unsigned long long>(latchedTid), missTicks);
                 fflush(stdout);
+                latchLog.add((nowUs() - started) / 1e6,
+                             "unlatched 0x%llx after %d ticks outside the image",
+                             static_cast<unsigned long long>(latchedTid), missTicks);
                 latchedName.clear();
                 mach_port_deallocate(mach_task_self(), latched);
                 latched = MACH_PORT_NULL;
@@ -920,6 +953,11 @@ void* samplerMain(void* raw) {
                             static_cast<unsigned long long>(bestTid),
                             static_cast<unsigned long long>(previousTid),
                             static_cast<unsigned long long>(st.samples));
+                    latchLog.discarded += st.samples;
+                    latchLog.add((nowUs() - started) / 1e6,
+                                 "discarded %llu samples from 0x%llx: subject changed",
+                                 static_cast<unsigned long long>(st.samples),
+                                 static_cast<unsigned long long>(previousTid));
                     st = SamplerStats{};
                     started = nowUs();
                 }
@@ -930,6 +968,13 @@ void* samplerMain(void* raw) {
                 // throttle: if this thread later goes quiet, re-discovery has
                 // to run at full speed, not at one sweep per kIdleSweepEvery.
                 gaveUpLatching = false;
+                latchLog.add((nowUs() - started) / 1e6,
+                             "latched 0x%llx%s%s%s seen_in_range=%llu candidates=%zu sweeps=%llu",
+                             static_cast<unsigned long long>(bestTid),
+                             latchedName.empty() ? "" : " (", latchedName.c_str(),
+                             latchedName.empty() ? "" : ")",
+                             static_cast<unsigned long long>(bestScore), scores.size(),
+                             static_cast<unsigned long long>(sweeps));
                 fprintf(stdout,
                         "[rosettax87] X87_SAMPLE: LATCHED onto thread 0x%llx%s%s%s after %llu "
                         "sweeps (seen in range %llu times, %zu candidates); profiling only "
@@ -957,8 +1002,8 @@ void* samplerMain(void* raw) {
         if (haveProfile && ctx->cfg.report_s > 0 &&
             (nowUs() - lastReport) / 1e6 >= ctx->cfg.report_s) {
             lastReport = nowUs();
-            writeProfile(ctx, st, cache, latchedTid, latchedName, sweeps,
-                         (nowUs() - started) / 1e6);
+            writeProfile(ctx, st, cache, latchedTid, latchedName, sweeps, (nowUs() - started) / 1e6,
+                         latchLog);
         }
 
         struct timespec ts{static_cast<time_t>(ctx->cfg.interval_us / 1000000),
@@ -967,7 +1012,8 @@ void* samplerMain(void* raw) {
     }
 
     if (ctx->cfg.all_threads || latchedTid != 0) {
-        writeProfile(ctx, st, cache, latchedTid, latchedName, sweeps, (nowUs() - started) / 1e6);
+        writeProfile(ctx, st, cache, latchedTid, latchedName, sweeps, (nowUs() - started) / 1e6,
+                     latchLog);
     }
     return nullptr;
 }
