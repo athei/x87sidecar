@@ -919,17 +919,42 @@ static void print_loader_usage(const char* prog) {
         "Sampling profiler (see also the X87_SAMPLE* variables below, which win\n"
         "over these flags so an app bundle can enable it without touching argv):\n"
         "  --sample=<file>       write a guest-pc sample profile here; enables it\n"
-        "  --sample-hz=<rate>    sample rate, default 1000\n"
+        "  --sample-hz=<rate>    sample rate for the latched thread, default 1000\n"
+        "  --sweep-hz=<rate>     rate at which every thread is swept while\n"
+        "                        looking for one to latch onto, default 1000;\n"
+        "                        never faster than --sample-hz\n"
         "  --guest-range=<lo-hi> pin the guest pcs that mark the thread worth\n"
         "                        profiling; by default the guest's main image is\n"
         "                        found (PE or Mach-O) and its range used\n"
-        "  --all-threads         sample every thread instead of latching onto one\n"
         "  --no-unwind           record leaf pcs only, skip the guest stack walk\n"
         "\n"
         "All other configuration is via environment variables:\n"
         "\n",
         prog);
     print_env_help(stdout);
+}
+
+// The sidecar rarely gets to return from main: whatever supervises the game
+// usually kills it once the tracee is gone, so the kqueue NOTE_EXIT path loses
+// the race.  Catch the terminating signals and let the sampler write what it has
+// before going, which is otherwise up to a whole report interval of samples.
+// SIGKILL cannot be caught, which is why the report interval still has to be
+// short enough that losing one is cheap.
+extern "C" void sampler_exit_signal(int sig) {
+    sidecar::flushSamplerIfEnabled();
+    _exit(128 + sig);
+}
+
+static void installSamplerExitSignals(const sidecar::SamplerConfig& cfg) {
+    if (cfg.path.empty()) {
+        return;
+    }
+    struct sigaction sa{};
+    sa.sa_handler = sampler_exit_signal;
+    sigemptyset(&sa.sa_mask);
+    for (const int sig : {SIGTERM, SIGINT, SIGHUP}) {
+        sigaction(sig, &sa, nullptr);
+    }
 }
 
 // Cooperative-mode bootstrap service name: "x87sidecar.<tracee-pid>".
@@ -957,10 +982,13 @@ int main(int argc, char* argv[]) try {
             if (hz > 0) {
                 samplerCfg.interval_us = static_cast<uint64_t>(1e6 / hz);
             }
+        } else if (arg.starts_with("--sweep-hz=")) {
+            const double hz = strtod(std::string(arg.substr(11)).c_str(), nullptr);
+            if (hz > 0) {
+                samplerCfg.sweep_interval_us = static_cast<uint64_t>(1e6 / hz);
+            }
         } else if (arg.starts_with("--sample=")) {
             samplerCfg.path = std::string(arg.substr(9));
-        } else if (arg == "--all-threads") {
-            samplerCfg.all_threads = true;
         } else if (arg == "--no-unwind") {
             samplerCfg.unwind = false;
         } else if (arg.starts_with("--guest-range=")) {
@@ -1835,6 +1863,7 @@ int main(int argc, char* argv[]) try {
         // Env wins over the flags: an app bundle can set variables but not argv.
         sidecar::samplerConfigFromEnv(samplerCfg);
         sidecar::startSampler(parentTaskPort, runtimeBase, samplerCfg);
+        installSamplerExitSignals(samplerCfg);
         VERBOSE_LOG("M2: receive thread running; entering kqueue wait\n");
 
         // Self-test: send a tickle message from this process to our own
@@ -1866,6 +1895,9 @@ int main(int argc, char* argv[]) try {
         // mach_vm_read still works against the held task-port send-right.
         // Use it to pull X87_PROFILE counters back into the .prof file.
         sidecar::dumpCountersIfEnabled(dbg.taskPort());
+        // The sampler thread is detached, so returning from main would kill it
+        // mid-interval and throw away everything since its last report.
+        sidecar::flushSamplerIfEnabled();
         close(kq);
     }
 

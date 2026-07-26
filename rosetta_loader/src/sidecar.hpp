@@ -51,28 +51,40 @@ void dumpCountersIfEnabled(mach_port_t parentTaskPort);
 //
 // X87_SAMPLE=<path> enables it and names the profile, exactly like X87_PROFILE.
 // Everything lands in that one self-describing file: the settings it ran with,
-// whether it latched onto a single thread or swept them all, the per-thread
-// sample counts, the leaf histogram and the folded stacks.
+// which thread it latched onto, the rate it actually achieved, the leaf
+// histogram and the folded stacks.
 struct SamplerConfig {
-    std::string path;  // X87_SAMPLE; empty = disabled
-    bool all_threads = false;
+    std::string path;             // X87_SAMPLE; empty = disabled
     uint64_t interval_us = 1000;  // X87_SAMPLE_HZ, default 1 kHz
+    // Discovery has its own, slower cadence: a sweep touches every thread in the
+    // task, so it costs more than a millisecond of work on a real target and
+    // must not inherit a high sampling rate.  X87_SAMPLE_SWEEP_HZ, never faster
+    // than interval_us.
+    uint64_t sweep_interval_us = 1000;
     // The guest pcs that mark the thread worth profiling.  Left unset, the
     // sampler finds the main executable image itself (see detectMainImage) and
     // uses its range; setting X87_GUEST_RANGE pins it instead.
     uint64_t guest_lo = 0;
     uint64_t guest_hi = 0x100000000ULL;
     bool guest_range_pinned = false;
-    double report_s = 10;  // profile rewrite interval
-    bool unwind = true;    // walk the guest frame-pointer chain
+    // Profile rewrite interval.  It bounds only what an uncatchable kill can
+    // take with it: every catchable exit path flushes (see flushSamplerIfEnabled),
+    // and a rewrite is cheap (62 ms measured for a 10 MB profile).
+    double report_s = 60;
+    bool unwind = true;  // walk the guest frame-pointer chain
 };
 
-// Overlay X87_SAMPLE / X87_SAMPLE_HZ / X87_SAMPLE_REPORT /
-// X87_GUEST_RANGE / X87_ALL_THREADS / X87_NO_UNWIND onto `cfg`.  Env is how the
-// app bundle enables this: gamelauncher passes fixed arguments, but applies its
-// [env] table.
+// Overlay X87_SAMPLE / X87_SAMPLE_HZ / X87_SAMPLE_SWEEP_HZ / X87_SAMPLE_REPORT /
+// X87_GUEST_RANGE / X87_NO_UNWIND onto `cfg`.  Env is how the app bundle enables
+// this: gamelauncher passes fixed arguments, but applies its [env] table.
 void samplerConfigFromEnv(SamplerConfig& cfg);
 
 void startSampler(mach_port_t parentTaskPort, uint64_t runtimeBase, const SamplerConfig& cfg);
+
+// Ask the sampler for one last profile write and wait for it.  The sampler
+// thread is detached, so process exit kills it wherever it happens to be: without
+// this, everything sampled since the last report interval is lost, which at a
+// 60 s interval is up to a minute of the run.  No-op when sampling is off.
+void flushSamplerIfEnabled();
 
 }  // namespace sidecar
