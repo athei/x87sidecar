@@ -45,10 +45,10 @@ static volatile unsigned long long vm = 0x9e3779b97f4a7c15ull;
  * (5,5) -> eq=1 lt=0; (3,9) -> eq=0 lt=1; (9,3) -> eq=0 lt=0.
  */
 
-__attribute__((target("avx2,bmi2")))
-static int probe_vmovd(unsigned a, unsigned b) {
+__attribute__((target("avx2,bmi2"))) static int probe_vmovd(unsigned a, unsigned b) {
     unsigned char eq, lt;
-    __asm__ volatile("cmpl %[b], %[a]\n\t"
+    __asm__ volatile(
+        "cmpl %[b], %[a]\n\t"
         "vmovd %[a], %%xmm0\n\tvmovd %%xmm0, %%r10d\n\t"
         "sete %[eq]\n\tsetb %[lt]\n\t"
         : [eq] "=&r"(eq), [lt] "=&r"(lt)
@@ -57,10 +57,10 @@ static int probe_vmovd(unsigned a, unsigned b) {
     return (eq << 1) | lt;
 }
 
-__attribute__((target("avx2,bmi2")))
-static int probe_vpextrd(unsigned a, unsigned b) {
+__attribute__((target("avx2,bmi2"))) static int probe_vpextrd(unsigned a, unsigned b) {
     unsigned char eq, lt;
-    __asm__ volatile("cmpl %[b], %[a]\n\t"
+    __asm__ volatile(
+        "cmpl %[b], %[a]\n\t"
         "vmovd %[a], %%xmm0\n\tvpextrd $0, %%xmm0, %%r10d\n\t"
         "sete %[eq]\n\tsetb %[lt]\n\t"
         : [eq] "=&r"(eq), [lt] "=&r"(lt)
@@ -69,11 +69,11 @@ static int probe_vpextrd(unsigned a, unsigned b) {
     return (eq << 1) | lt;
 }
 
-__attribute__((target("avx2,bmi2")))
-static int probe_mulx(unsigned a, unsigned b) {
+__attribute__((target("avx2,bmi2"))) static int probe_mulx(unsigned a, unsigned b) {
     unsigned char eq, lt;
     unsigned long long lo, hi;
-    __asm__ volatile("cmpl %[b], %[a]\n\t"
+    __asm__ volatile(
+        "cmpl %[b], %[a]\n\t"
         "mulxq %[m], %[lo], %[hi]\n\tmulxq %[m], %[lo], %[hi]\n\t"
         "sete %[eq]\n\tsetb %[lt]\n\t"
         : [eq] "=&r"(eq), [lt] "=&r"(lt), [lo] "=&r"(lo), [hi] "=&r"(hi)
@@ -83,11 +83,11 @@ static int probe_mulx(unsigned a, unsigned b) {
 }
 
 /* The production filling: a GPR-to-XMM round trip, then two mulx. */
-__attribute__((target("avx2,bmi2")))
-static int probe_field(unsigned a, unsigned b) {
+__attribute__((target("avx2,bmi2"))) static int probe_field(unsigned a, unsigned b) {
     unsigned char eq, lt;
     unsigned long long lo, hi;
-    __asm__ volatile("cmpl %[b], %[a]\n\t"
+    __asm__ volatile(
+        "cmpl %[b], %[a]\n\t"
         "vmovd %[a], %%xmm0\n\tvpextrd $0, %%xmm0, %%r10d\n\t"
         "mulxq %[m], %[lo], %[hi]\n\tmulxq %[m], %[lo], %[hi]\n\t"
         "sete %[eq]\n\tsetb %[lt]\n\t"
@@ -98,11 +98,11 @@ static int probe_field(unsigned a, unsigned b) {
 }
 
 /* Same, with x87 in the span so the sidecar owns part of the block. */
-__attribute__((target("avx2,bmi2")))
-static int probe_field_x87(unsigned a, unsigned b) {
+__attribute__((target("avx2,bmi2"))) static int probe_field_x87(unsigned a, unsigned b) {
     unsigned char eq, lt;
     unsigned long long lo, hi;
-    __asm__ volatile("cmpl %[b], %[a]\n\t"
+    __asm__ volatile(
+        "cmpl %[b], %[a]\n\t"
         "vmovd %[a], %%xmm0\n\tvpextrd $0, %%xmm0, %%r10d\n\t"
         "fldl %[x]\n\tfstpl %[r]\n\t"
         "mulxq %[m], %[lo], %[hi]\n\tmulxq %[m], %[lo], %[hi]\n\t"
@@ -114,11 +114,11 @@ static int probe_field_x87(unsigned a, unsigned b) {
 }
 
 /* x87 arithmetic, not just a load/store pair, between producer and reader. */
-__attribute__((target("avx2,bmi2")))
-static int probe_x87_arith(unsigned a, unsigned b) {
+__attribute__((target("avx2,bmi2"))) static int probe_x87_arith(unsigned a, unsigned b) {
     unsigned char eq, lt;
     unsigned long long lo, hi;
-    __asm__ volatile("cmpl %[b], %[a]\n\t"
+    __asm__ volatile(
+        "cmpl %[b], %[a]\n\t"
         "fldl %[x]\n\tfldl %[x]\n\tfaddp\n\tfstpl %[r]\n\t"
         "vmovd %[a], %%xmm0\n\tvpextrd $0, %%xmm0, %%r10d\n\t"
         "mulxq %[m], %[lo], %[hi]\n\t"
@@ -136,13 +136,14 @@ static int probe_x87_arith(unsigned a, unsigned b) {
  * nothing leaves it one too small.  Both are +/-2^32 on the whole value.
  */
 
-__attribute__((target("avx2,bmi2")))
-static unsigned long long sub64_across_vex(unsigned long long a, unsigned long long b, int with_x87) {
+__attribute__((target("avx2,bmi2"))) static unsigned long long sub64_across_vex(
+    unsigned long long a, unsigned long long b, int with_x87) {
     unsigned al = (unsigned)a, ah = (unsigned)(a >> 32);
     unsigned bl = (unsigned)b, bh = (unsigned)(b >> 32);
     unsigned long long lo, hi;
     if (with_x87) {
-        __asm__ volatile("subl %[bl], %[al]\n\t"
+        __asm__ volatile(
+            "subl %[bl], %[al]\n\t"
             "vmovd %[bl], %%xmm0\n\tvpextrd $0, %%xmm0, %%r10d\n\t"
             "fldl %[x]\n\tfstpl %[r]\n\t"
             "mulxq %[m], %[lo], %[hi]\n\tmulxq %[m], %[lo], %[hi]\n\t"
@@ -151,7 +152,8 @@ static unsigned long long sub64_across_vex(unsigned long long a, unsigned long l
             : [bl] "r"(bl), [bh] "r"(bh), [m] "m"(vm), [x] "m"(vx), "d"(0x0123456789abcdefull)
             : "cc", "xmm0", "r10", "st");
     } else {
-        __asm__ volatile("subl %[bl], %[al]\n\t"
+        __asm__ volatile(
+            "subl %[bl], %[al]\n\t"
             "vmovd %[bl], %%xmm0\n\tvpextrd $0, %%xmm0, %%r10d\n\t"
             "mulxq %[m], %[lo], %[hi]\n\tmulxq %[m], %[lo], %[hi]\n\t"
             "sbbl %[bh], %[ah]\n\t"
@@ -168,13 +170,14 @@ static unsigned long long sub64_across_vex(unsigned long long a, unsigned long l
  * where a spurious carry landed in a high limb of a widening conversion.
  */
 
-__attribute__((target("avx2,bmi2")))
-static unsigned long long add64_across_vex(unsigned long long a, unsigned long long b, int with_x87) {
+__attribute__((target("avx2,bmi2"))) static unsigned long long add64_across_vex(
+    unsigned long long a, unsigned long long b, int with_x87) {
     unsigned al = (unsigned)a, ah = (unsigned)(a >> 32);
     unsigned bl = (unsigned)b, bh = (unsigned)(b >> 32);
     unsigned long long lo, hi;
     if (with_x87) {
-        __asm__ volatile("addl %[bl], %[al]\n\t"
+        __asm__ volatile(
+            "addl %[bl], %[al]\n\t"
             "vmovd %[bl], %%xmm0\n\tvpextrd $0, %%xmm0, %%r10d\n\t"
             "fldl %[x]\n\tfstpl %[r]\n\t"
             "mulxq %[m], %[lo], %[hi]\n\tmulxq %[m], %[lo], %[hi]\n\t"
@@ -183,7 +186,8 @@ static unsigned long long add64_across_vex(unsigned long long a, unsigned long l
             : [bl] "r"(bl), [bh] "r"(bh), [m] "m"(vm), [x] "m"(vx), "d"(0x0123456789abcdefull)
             : "cc", "xmm0", "r10", "st");
     } else {
-        __asm__ volatile("addl %[bl], %[al]\n\t"
+        __asm__ volatile(
+            "addl %[bl], %[al]\n\t"
             "vmovd %[bl], %%xmm0\n\tvpextrd $0, %%xmm0, %%r10d\n\t"
             "mulxq %[m], %[lo], %[hi]\n\tmulxq %[m], %[lo], %[hi]\n\t"
             "adcl %[bh], %[ah]\n\t"
@@ -218,7 +222,8 @@ static unsigned long long add64_across_vex(unsigned long long a, unsigned long l
 
 static int probe_rdtsc(unsigned a, unsigned b) {
     unsigned char eq, lt;
-    __asm__ volatile("cmpl %[b], %[a]\n\t"
+    __asm__ volatile(
+        "cmpl %[b], %[a]\n\t"
         "rdtsc\n\t"
         "sete %[eq]\n\tsetb %[lt]\n\t"
         : [eq] "=&r"(eq), [lt] "=&r"(lt)
@@ -227,12 +232,13 @@ static int probe_rdtsc(unsigned a, unsigned b) {
     return (eq << 1) | lt;
 }
 
-__attribute__((target("avx2,bmi2")))
-static unsigned long long sub64_across_rdtsc(unsigned long long a, unsigned long long b) {
+__attribute__((target("avx2,bmi2"))) static unsigned long long sub64_across_rdtsc(
+    unsigned long long a, unsigned long long b) {
     unsigned al = (unsigned)a, ah = (unsigned)(a >> 32);
     unsigned bl = (unsigned)b, bh = (unsigned)(b >> 32);
     unsigned long long lo, hi;
-    __asm__ volatile("subl %[bl], %[al]\n\t"
+    __asm__ volatile(
+        "subl %[bl], %[al]\n\t"
         "rdtsc\n\t"
         "vmovd %[bl], %%xmm0\n\tvpextrd $0, %%xmm0, %%r10d\n\t"
         "mulxq %[m], %[lo], %[hi]\n\t"
@@ -321,7 +327,8 @@ static int probe_bridge_mov(unsigned a, unsigned b) {
     unsigned char eq, lt;
     unsigned scratch;
     double out;
-    __asm__ volatile("cmpl %[b], %[a]\n\t"
+    __asm__ volatile(
+        "cmpl %[b], %[a]\n\t"
         "fldl (%[p])\n\tfmull 8(%[p])\n\t"
         "movl %[a], %[s]\n\t"
         "fldl 16(%[p])\n\tfmull 24(%[p])\n\t"
@@ -345,7 +352,8 @@ static int probe_bridge_inc(unsigned a, unsigned b) {
     unsigned char eq, lt;
     unsigned scratch = 1;
     double out;
-    __asm__ volatile("cmpl %[b], %[a]\n\t"
+    __asm__ volatile(
+        "cmpl %[b], %[a]\n\t"
         "fldl (%[p])\n\tfmull 8(%[p])\n\t"
         "incl %[s]\n\t"
         "fldl 16(%[p])\n\tfmull 24(%[p])\n\t"
@@ -361,7 +369,10 @@ typedef int (*probe_fn)(unsigned, unsigned);
 
 int main(void) {
     int fails = 0;
-    struct { const char *name; probe_fn fn; } probes[] = {
+    struct {
+        const char* name;
+        probe_fn fn;
+    } probes[] = {
         {"vmovd", probe_vmovd},
         {"vpextrd", probe_vpextrd},
         {"mulx", probe_mulx},
@@ -371,7 +382,10 @@ int main(void) {
         {"bridge_mov", probe_bridge_mov},
         {"rdtsc", probe_rdtsc},
     };
-    struct { unsigned a, b; int want; } cases[] = {{5, 5, 2}, {3, 9, 1}, {9, 3, 0}};
+    struct {
+        unsigned a, b;
+        int want;
+    } cases[] = {{5, 5, 2}, {3, 9, 1}, {9, 3, 0}};
     for (unsigned p = 0; p < sizeof(probes) / sizeof(probes[0]); p++) {
         for (int i = 0; i < 3; i++) {
             int g = probes[p].fn(cases[i].a, cases[i].b);
@@ -388,7 +402,10 @@ int main(void) {
      * (never zero here: 1 -> 2) and the CMP's CF, which `inc` leaves alone.
      * eq=1 would mean the cmp's ZF leaked through an unsound bridge.
      */
-    struct { unsigned a, b; int want; } inc_cases[] = {{5, 5, 0}, {3, 9, 1}, {9, 3, 0}};
+    struct {
+        unsigned a, b;
+        int want;
+    } inc_cases[] = {{5, 5, 0}, {3, 9, 1}, {9, 3, 0}};
     for (int i = 0; i < 3; i++) {
         int g = probe_bridge_inc(inc_cases[i].a, inc_cases[i].b);
         if (g != inc_cases[i].want) {
@@ -407,7 +424,9 @@ int main(void) {
      * not borrow, and the `sbb` subtracted a borrow anyway -- turning a high
      * dword of 0 into 0xffffffff and the whole value into ~2^64.
      */
-    struct { unsigned long long a, b; } sub_cases[] = {
+    struct {
+        unsigned long long a, b;
+    } sub_cases[] = {
         {0x0000000100000000ull, 0x0000000000000001ull},
         {0xfedcba9876543210ull, 0x0000000087654321ull},
         {0x0000000200000000ull, 0x0000000100000001ull},
@@ -421,8 +440,7 @@ int main(void) {
             unsigned long long got = sub64_across_vex(sub_cases[i].a, sub_cases[i].b, x87);
             if (got != want) {
                 printf("FAIL sub64%-7s case %u: got %016llx want %016llx (delta %+lld * 2^32)\n",
-                       x87 ? "_x87" : "", i, got, want,
-                       (long long)((got >> 32) - (want >> 32)));
+                       x87 ? "_x87" : "", i, got, want, (long long)((got >> 32) - (want >> 32)));
                 fails++;
             }
         }
@@ -448,7 +466,9 @@ int main(void) {
 
     /* Both polarities again: the first three carry out of the low half, the
      * rest must not, so an invented carry has somewhere to show. */
-    struct { unsigned long long a, b; } add_cases[] = {
+    struct {
+        unsigned long long a, b;
+    } add_cases[] = {
         {0x00000000ffffffffull, 0x0000000000000001ull},
         {0x12345678fedcba98ull, 0x0000000123456789ull},
         {0x00000001fffffffeull, 0x0000000200000003ull},
@@ -462,8 +482,7 @@ int main(void) {
             unsigned long long got = add64_across_vex(add_cases[i].a, add_cases[i].b, x87);
             if (got != want) {
                 printf("FAIL add64%-5s case %u: got %016llx want %016llx (delta %+lld * 2^32)\n",
-                       x87 ? "_x87" : "", i, got, want,
-                       (long long)((got >> 32) - (want >> 32)));
+                       x87 ? "_x87" : "", i, got, want, (long long)((got >> 32) - (want >> 32)));
                 fails++;
             }
         }

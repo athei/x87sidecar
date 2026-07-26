@@ -31,14 +31,7 @@ static bench_ns_t bench_single_fld_fstp_m32(void) {
     volatile float r;
     float a = 1.5f;
     for (int i = 0; i < TIMES; i++)
-        __asm__ volatile(FENCE
-                         "flds %1\n\t"
-                         FENCE
-                         "fstps %0\n\t"
-                         FENCE
-                         : "=m"(r)
-                         : "m"(a)
-                         : "ecx");
+        __asm__ volatile(FENCE "flds %1\n\t" FENCE "fstps %0\n\t" FENCE : "=m"(r) : "m"(a) : "ecx");
     return bench_now_ns() - start;
 }
 
@@ -50,14 +43,7 @@ static bench_ns_t bench_single_fld_fstp_m64(void) {
     volatile double r;
     double a = 3.141592653589793;
     for (int i = 0; i < TIMES; i++)
-        __asm__ volatile(FENCE
-                         "fldl %1\n\t"
-                         FENCE
-                         "fstpl %0\n\t"
-                         FENCE
-                         : "=m"(r)
-                         : "m"(a)
-                         : "ecx");
+        __asm__ volatile(FENCE "fldl %1\n\t" FENCE "fstpl %0\n\t" FENCE : "=m"(r) : "m"(a) : "ecx");
     return bench_now_ns() - start;
 }
 
@@ -71,13 +57,7 @@ static bench_ns_t bench_single_fld_fst_fstp(void) {
     volatile double rd;
     double a = 2.718281828459045;
     for (int i = 0; i < TIMES; i++)
-        __asm__ volatile(FENCE
-                         "fldl %2\n\t"
-                         FENCE
-                         "fsts %0\n\t"
-                         FENCE
-                         "fstpl %1\n\t"
-                         FENCE
+        __asm__ volatile(FENCE "fldl %2\n\t" FENCE "fsts %0\n\t" FENCE "fstpl %1\n\t" FENCE
                          : "=m"(rf), "=m"(rd)
                          : "m"(a)
                          : "ecx");
@@ -93,14 +73,7 @@ static bench_ns_t bench_single_fld32_fstp64(void) {
     volatile double r;
     float a = 1.5f;
     for (int i = 0; i < TIMES; i++)
-        __asm__ volatile(FENCE
-                         "flds %1\n\t"
-                         FENCE
-                         "fstpl %0\n\t"
-                         FENCE
-                         : "=m"(r)
-                         : "m"(a)
-                         : "ecx");
+        __asm__ volatile(FENCE "flds %1\n\t" FENCE "fstpl %0\n\t" FENCE : "=m"(r) : "m"(a) : "ecx");
     return bench_now_ns() - start;
 }
 
@@ -109,14 +82,7 @@ static bench_ns_t bench_single_fld64_fstp32(void) {
     volatile float r;
     double a = 3.141592653589793;
     for (int i = 0; i < TIMES; i++)
-        __asm__ volatile(FENCE
-                         "fldl %1\n\t"
-                         FENCE
-                         "fstps %0\n\t"
-                         FENCE
-                         : "=m"(r)
-                         : "m"(a)
-                         : "ecx");
+        __asm__ volatile(FENCE "fldl %1\n\t" FENCE "fstps %0\n\t" FENCE : "=m"(r) : "m"(a) : "ecx");
     return bench_now_ns() - start;
 }
 
@@ -136,11 +102,7 @@ static struct {
 static bench_ns_t bench_single_fld_fstp_m32_padded(void) {
     bench_ns_t start = bench_now_ns();
     for (int i = 0; i < TIMES; i++)
-        __asm__ volatile(FENCE
-                         "flds %1\n\t"
-                         FENCE
-                         "fstps %0\n\t"
-                         FENCE
+        __asm__ volatile(FENCE "flds %1\n\t" FENCE "fstps %0\n\t" FENCE
                          : "=m"(g_m32.r)
                          : "m"(g_m32.a)
                          : "ecx");

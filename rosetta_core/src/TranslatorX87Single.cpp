@@ -136,12 +136,11 @@ void translate_fld_single(TranslationResult& a1, IRInstr* a2) {
     const int Wsh = alloc_free_gpr(a1);  // tag bit position = 2 * newTop
     emit_lsl1(buf, Wsh, Wtop);
 
-    emit_bfi_top(buf, Wsw, Wtop);   // status half: TOP <- newTop
-    emit_lslv(buf, 0, Wsh, Wm, Wm); // mask = 0x30000 << (2 * newTop)
+    emit_bfi_top(buf, Wsw, Wtop);    // status half: TOP <- newTop
+    emit_lslv(buf, 0, Wsh, Wm, Wm);  // mask = 0x30000 << (2 * newTop)
 
     // STR Dd, [Xbase, Widx, LSL #3] — st[newTop] at (newTop + 1) * 8.
-    emit_ldr_str_reg(buf, /*size=*/3, /*is_fp=*/1, /*opc=*/0 /*STR*/, Widx, /*shift=*/1, Xbase,
-                     Dd);
+    emit_ldr_str_reg(buf, /*size=*/3, /*is_fp=*/1, /*opc=*/0 /*STR*/, Widx, /*shift=*/1, Xbase, Dd);
 
     // BIC Wsw, Wsw, Wm — tag half: mark newTop kValid (bits = 00).
     emit_logical_shifted_reg(buf, /*is_64bit=*/0, /*opc=*/0 /*AND*/, /*N=invert*/ 1,
@@ -176,8 +175,8 @@ void translate_fst_single(TranslationResult& a1, IRInstr* a2, bool is_fstp) {
         emit_add_imm(buf, /*is_64bit=*/0, /*is_sub=*/0, /*is_set_flags=*/0,
                      /*shift=*/0, 1, Wtop, Widx);
         // LDR Dd, [Xbase, Widx, LSL #3] — st[TOP] at (TOP + 1) * 8.
-        emit_ldr_str_reg(buf, /*size=*/3, /*is_fp=*/1, /*opc=*/1 /*LDR*/, Widx, /*shift=*/1,
-                         Xbase, Dd);
+        emit_ldr_str_reg(buf, /*size=*/3, /*is_fp=*/1, /*opc=*/1 /*LDR*/, Widx, /*shift=*/1, Xbase,
+                         Dd);
         free_gpr(a1, Widx);
         // Address convention matches translate_fst (hardcoded 64-bit).
         const int Xaddr =
@@ -213,8 +212,7 @@ void translate_fst_single(TranslationResult& a1, IRInstr* a2, bool is_fstp) {
     emit_lsl1(buf, Wsh, Wtop);
 
     // LDR Dd, [Xbase, Widx, LSL #3] — st[oldTop] at (oldTop + 1) * 8.
-    emit_ldr_str_reg(buf, /*size=*/3, /*is_fp=*/1, /*opc=*/1 /*LDR*/, Widx, /*shift=*/1, Xbase,
-                     Dd);
+    emit_ldr_str_reg(buf, /*size=*/3, /*is_fp=*/1, /*opc=*/1 /*LDR*/, Widx, /*shift=*/1, Xbase, Dd);
 
     emit_lslv(buf, 0, Wsh, Wm, Wm);  // mask = 0x30000 << (2 * oldTop)
     // ORR Wsw, Wsw, Wm — tag half: mark oldTop kEmpty (bits = 11).

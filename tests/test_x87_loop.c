@@ -40,7 +40,6 @@ static double ref_sum(double per_element) {
     return ref;
 }
 
-
 static void check_sum(const char* name, double got, double expected) {
     uint64_t g, e;
     memcpy(&g, &got, sizeof(g));
@@ -113,8 +112,8 @@ int main(void) {
                              : [r] "=m"(r), [q] "=m"(q)
                              : [x] "m"(x)
                              : "st", "st(1)");
-            acc += r;   /* sin */
-            acc2 += q;  /* cos */
+            acc += r;  /* sin */
+            acc2 += q; /* cos */
         }
         check_sum("loop-fsincos-sin", acc, ref_sum(sin(1.3)));
         check_sum("loop-fsincos-cos", acc2, ref_sum(cos(1.3)));

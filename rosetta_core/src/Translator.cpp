@@ -144,8 +144,8 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                 // listed IR-content hashes; exclude list vetoes them
                 // (exclude wins).  cache.profile_hash is populated on block
                 // transition, before any run start in the block.
-                bool bridge_allowed = g_rosetta_config != nullptr &&
-                                      g_rosetta_config->enable_bridge != 0;
+                bool bridge_allowed =
+                    g_rosetta_config != nullptr && g_rosetta_config->enable_bridge != 0;
                 if (bridge_allowed) {
                     const auto& cfg = *g_rosetta_config;
                     if (!cfg.x87_no_bridge_hash_list.empty() &&
@@ -270,8 +270,7 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
         const bool ir_disabled = g_rosetta_config && g_rosetta_config->disable_x87_ir;
         if (!ir_disabled && cache.bridge_pending_total > 0 &&
             cache.bridge_pending_idx == static_cast<int16_t>(insn_idx) && cache.top_dirty == 0 &&
-            cache.tag_push_pending == 0 && cache.deferred_pop_count == 0 &&
-            cache.perm_dirty == 0) {
+            cache.tag_push_pending == 0 && cache.deferred_pop_count == 0 && cache.perm_dirty == 0) {
             const int total = cache.bridge_pending_total;
             const int x87_count = cache.bridge_pending_x87;
             const int plain_run = cache.bridge_pending_plain;
@@ -280,10 +279,10 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
 
             cache.set_run(total);  // pin GPRs across the whole region
             X87IR::IRFailReason bridge_reason = X87IR::IRFailReason::kNone;
-            const int consumed = X87IR::compile_run(
-                translation_result, instr_array, num_instrs, insn_idx, total, &bridge_reason,
-                nullptr, nullptr, /*bridged=*/true,
-                /*bridges_v2=*/g_rosetta_config->enable_bridge_v2 != 0);
+            const int consumed =
+                X87IR::compile_run(translation_result, instr_array, num_instrs, insn_idx, total,
+                                   &bridge_reason, nullptr, nullptr, /*bridged=*/true,
+                                   /*bridges_v2=*/g_rosetta_config->enable_bridge_v2 != 0);
             if (consumed == total) {
                 if (cache.tally_bridge != 0xFFFFU) {
                     cache.tally_bridge =

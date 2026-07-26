@@ -1309,7 +1309,7 @@ int emit_inline_fyl2xp1(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, 
     emit_fsub_f64(buf, Dt, Du, Dt);   // t = u - 1
     emit_fsub_f64(buf, Dt, Dx2, Dt);  // c = x - (u - 1)
     free_fpr(a1, Dx2);
-    emit_fdiv_f64(buf, Dt, Dt, Du);   // t = c / u
+    emit_fdiv_f64(buf, Dt, Dt, Du);  // t = c / u
     free_fpr(a1, Du);
     const int Dinv = alloc_free_fpr(a1);
     emit_fldr_imm(buf, 3, Dinv, Xconst, ConstOff::Log2InvLn2);

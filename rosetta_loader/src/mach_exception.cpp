@@ -159,8 +159,8 @@ bool MachExceptionSession::verifyInstalled() const {
     exception_behavior_t behaviors[kMaxExcPorts];
     thread_state_flavor_t flavors[kMaxExcPorts];
     mach_msg_type_number_t count = kMaxExcPorts;
-    kern_return_t kr = task_get_exception_ports(task_, EXC_MASK_ALL, masks, &count, ports, behaviors,
-                                                flavors);
+    kern_return_t kr =
+        task_get_exception_ports(task_, EXC_MASK_ALL, masks, &count, ports, behaviors, flavors);
     if (kr != KERN_SUCCESS) {
         fprintf(stdout, "MachExc: task_get_exception_ports failed (0x%x: %s)\n", kr,
                 mach_error_string(kr));
@@ -275,8 +275,8 @@ bool MachExceptionSession::reply(int signalToForward) {
     // signal, so this is skipped for them.
     if (current_.softSignal() != 0) {
         errno = 0;
-        if (ptrace(PT_THUPDATE, pid_, reinterpret_cast<caddr_t>(static_cast<uintptr_t>(
-                                           current_.thread)),
+        if (ptrace(PT_THUPDATE, pid_,
+                   reinterpret_cast<caddr_t>(static_cast<uintptr_t>(current_.thread)),
                    signalToForward) != 0) {
             fprintf(stdout, "MachExc: PT_THUPDATE failed: %s\n", strerror(errno));
         }

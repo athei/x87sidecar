@@ -155,7 +155,6 @@ struct X87Cache {
         int16_t x87_count = 0;
         int16_t bridges = 0;
     };
-    static BridgedRun lookahead_bridged(IRInstr* instr_array, int64_t num_instrs,
-                                        int64_t insn_idx, int max_gap, int max_total_bridges,
-                                        bool allow_v2 = false);
+    static BridgedRun lookahead_bridged(IRInstr* instr_array, int64_t num_instrs, int64_t insn_idx,
+                                        int max_gap, int max_total_bridges, bool allow_v2 = false);
 };
