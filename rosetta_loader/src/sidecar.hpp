@@ -57,8 +57,12 @@ struct SamplerConfig {
     std::string path;  // X87_SAMPLE; empty = disabled
     bool all_threads = false;
     uint64_t interval_us = 1000;  // X87_SAMPLE_HZ, default 1 kHz
-    uint64_t guest_lo = 0;        // default: all 32-bit guest code
+    // The guest pcs that mark the thread worth profiling.  Left unset, the
+    // sampler finds the main executable image itself (see detectMainImage) and
+    // uses its range; setting X87_GUEST_RANGE pins it instead.
+    uint64_t guest_lo = 0;
     uint64_t guest_hi = 0x100000000ULL;
+    bool guest_range_pinned = false;
     double report_s = 10;  // profile rewrite interval
     bool unwind = true;    // walk the guest frame-pointer chain
 };

@@ -920,8 +920,9 @@ static void print_loader_usage(const char* prog) {
         "over these flags so an app bundle can enable it without touching argv):\n"
         "  --sample=<file>       write a guest-pc sample profile here; enables it\n"
         "  --sample-hz=<rate>    sample rate, default 1000\n"
-        "  --guest-range=<lo-hi> guest pcs that mark the thread worth profiling,\n"
-        "                        default 0-0x100000000 (all 32-bit guest code)\n"
+        "  --guest-range=<lo-hi> pin the guest pcs that mark the thread worth\n"
+        "                        profiling; by default the main PE image is found\n"
+        "                        in the guest and used\n"
         "  --all-threads         sample every thread instead of latching onto one\n"
         "  --no-unwind           record leaf pcs only, skip the guest stack walk\n"
         "\n"
@@ -968,6 +969,7 @@ int main(int argc, char* argv[]) try {
             if (dash != std::string::npos) {
                 samplerCfg.guest_lo = strtoull(spec.substr(0, dash).c_str(), nullptr, 0);
                 samplerCfg.guest_hi = strtoull(spec.substr(dash + 1).c_str(), nullptr, 0);
+                samplerCfg.guest_range_pinned = true;
             }
         } else {
             break;

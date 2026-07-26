@@ -233,7 +233,15 @@ struct SamplerCtx {
     uint64_t base;
     SamplerConfig cfg;
     int reads;
+    // Main-image detection, used only until it succeeds.
+    bool image_found = false;
+    int image_attempts = 0;
+    std::unordered_set<uint64_t> image_rejected;
 };
+
+// Give up after this many probes and keep the default range: a target whose
+// main image never shows up in a sample is one the walk-back cannot help with.
+constexpr int kMaxImageAttempts = 64;
 
 bool samplerRead(void* raw, uint64_t addr, void* dst, size_t len) {
     auto* ctx = static_cast<SamplerCtx*>(raw);
@@ -311,6 +319,82 @@ int unwindGuestStack(mach_port_t task, uint64_t framePtr, bool guest32, uint64_t
     return depth;
 }
 
+// ── Finding the guest's main image ──────────────────────────────────────────
+// The interesting thread is the one running the program, not a worker running
+// library code, so the latch needs the main executable's address range.  Rather
+// than be told it, read it out of the guest: every resolved pc lies inside some
+// mapped PE image, Windows maps images on 64 KB boundaries, and an image's own
+// header carries both its size and whether it is an EXE or a DLL.  Walking back
+// from a pc to the nearest such header therefore names the image the pc belongs
+// to, and the IMAGE_FILE_DLL bit says whether it is the one we want.
+constexpr uint64_t kImageGranularity = 0x10000;
+
+// WoW.exe is ~9.5 MB; this bounds the walk-back for any pc we probe.
+constexpr int kMaxImageSteps = 512;
+
+constexpr uint16_t kDosMagic = 0x5A4D;     // "MZ"
+constexpr uint32_t kPeSignature = 0x4550;  // "PE\0\0"
+constexpr uint16_t kPe32Magic = 0x10B;
+constexpr uint16_t kFileDll = 0x2000;  // IMAGE_FILE_DLL
+
+struct GuestImage {
+    uint64_t base = 0;
+    uint32_t size = 0;
+    bool is_exe = false;
+};
+
+// Parse a PE image header at `base`, if one is there.
+bool readGuestImage(mach_port_t task, uint64_t base, GuestImage& out) {
+    uint16_t dos = 0;
+    if (!readParent(task, base, &dos, sizeof(dos)) || dos != kDosMagic) {
+        return false;
+    }
+    int32_t lfanew = 0;
+    if (!readParent(task, base + 0x3C, &lfanew, sizeof(lfanew)) || lfanew < 0 ||
+        lfanew > (1 << 20)) {
+        return false;
+    }
+    const uint64_t pe = base + static_cast<uint64_t>(lfanew);
+    uint32_t sig = 0;
+    if (!readParent(task, pe, &sig, sizeof(sig)) || sig != kPeSignature) {
+        return false;
+    }
+    uint16_t characteristics = 0;
+    uint16_t magic = 0;
+    uint32_t sizeOfImage = 0;
+    // COFF header follows the signature; Characteristics is its last field.
+    // The optional header follows that, with SizeOfImage 56 bytes in.
+    if (!readParent(task, pe + 4 + 18, &characteristics, sizeof(characteristics)) ||
+        !readParent(task, pe + 24, &magic, sizeof(magic)) || magic != kPe32Magic ||
+        !readParent(task, pe + 24 + 56, &sizeOfImage, sizeof(sizeOfImage))) {
+        return false;
+    }
+    if (sizeOfImage == 0 || sizeOfImage > (256U << 20)) {
+        return false;
+    }
+    out.base = base;
+    out.size = sizeOfImage;
+    out.is_exe = (characteristics & kFileDll) == 0;
+    return true;
+}
+
+// The image containing `pc`, found by walking back to the nearest PE header.
+bool findGuestImage(mach_port_t task, uint64_t pc, GuestImage& out) {
+    uint64_t candidate = pc & ~(kImageGranularity - 1);
+    for (int step = 0; step < kMaxImageSteps; step++) {
+        GuestImage img;
+        if (readGuestImage(task, candidate, img) && pc < img.base + img.size) {
+            out = img;
+            return true;
+        }
+        if (candidate < kImageGranularity) {
+            break;
+        }
+        candidate -= kImageGranularity;
+    }
+    return false;
+}
+
 // Everything is kept per guest thread, so a profile taken with --all-threads
 // says which thread each address came from rather than blending them.
 struct ThreadStats {
@@ -372,6 +456,33 @@ void sampleThread(SamplerCtx* ctx, const guest_pc::Reader& reader, guest_pc::Cac
 
     switch (status) {
         case guest_pc::Status::Resolved: {
+            if (!ctx->cfg.guest_range_pinned && !ctx->image_found &&
+                ctx->image_attempts < kMaxImageAttempts &&
+                ctx->image_rejected.find(res.x86_pc & ~(kImageGranularity - 1)) ==
+                    ctx->image_rejected.end()) {
+                ctx->image_attempts++;
+                GuestImage img;
+                if (findGuestImage(ctx->task, res.x86_pc, img)) {
+                    if (img.is_exe) {
+                        ctx->cfg.guest_lo = img.base;
+                        ctx->cfg.guest_hi = img.base + img.size;
+                        ctx->image_found = true;
+                        fprintf(stdout,
+                                "[rosettax87] X87_SAMPLE: main image at 0x%llx, size 0x%x; "
+                                "following the thread that runs it\n",
+                                static_cast<unsigned long long>(img.base), img.size);
+                        fflush(stdout);
+                    } else {
+                        // A DLL: remember it so its pcs stop costing a walk.
+                        for (uint64_t p = img.base; p < img.base + img.size;
+                             p += kImageGranularity) {
+                            ctx->image_rejected.insert(p);
+                        }
+                    }
+                } else {
+                    ctx->image_rejected.insert(res.x86_pc & ~(kImageGranularity - 1));
+                }
+            }
             if (!record) {
                 inRange = res.x86_pc >= ctx->cfg.guest_lo && res.x86_pc < ctx->cfg.guest_hi;
                 break;
@@ -461,6 +572,10 @@ void writeProfile(const SamplerCtx* ctx, const SamplerStats& st, const guest_pc:
     fprintf(fh, "mode %s\n", ctx->cfg.all_threads ? "all-threads" : "latched");
     fprintf(fh, "guest_range 0x%llx-0x%llx\n", static_cast<unsigned long long>(ctx->cfg.guest_lo),
             static_cast<unsigned long long>(ctx->cfg.guest_hi));
+    fprintf(fh, "guest_range_from %s\n",
+            ctx->cfg.guest_range_pinned ? "X87_GUEST_RANGE"
+            : ctx->image_found          ? "main image (detected)"
+                                        : "default (no main image found)");
     // Only two shapes exist: a latched run, whose samples all come from the one
     // thread below, or an explicit all-threads run.  A failed latch writes no
     // profile at all.
@@ -552,14 +667,22 @@ void* samplerMain(void* raw) {
 
     // The only thing this ever prints: everything else belongs in the profile,
     // not in the game's log.
-    fprintf(stdout,
-            "[rosettax87] X87_SAMPLE: sampling to '%s' at %.0f Hz, "
-            "guest-range=[0x%llx,0x%llx), %s\n",
-            ctx->cfg.path.c_str(),
-            ctx->cfg.interval_us != 0 ? 1e6 / static_cast<double>(ctx->cfg.interval_us) : 0.0,
-            static_cast<unsigned long long>(ctx->cfg.guest_lo),
-            static_cast<unsigned long long>(ctx->cfg.guest_hi),
-            ctx->cfg.all_threads ? "all-threads" : "latching");
+    if (ctx->cfg.guest_range_pinned || ctx->cfg.all_threads) {
+        fprintf(stdout,
+                "[rosettax87] X87_SAMPLE: sampling to '%s' at %.0f Hz, "
+                "guest-range=[0x%llx,0x%llx), %s\n",
+                ctx->cfg.path.c_str(),
+                ctx->cfg.interval_us != 0 ? 1e6 / static_cast<double>(ctx->cfg.interval_us) : 0.0,
+                static_cast<unsigned long long>(ctx->cfg.guest_lo),
+                static_cast<unsigned long long>(ctx->cfg.guest_hi),
+                ctx->cfg.all_threads ? "all-threads" : "latching");
+    } else {
+        fprintf(stdout,
+                "[rosettax87] X87_SAMPLE: sampling to '%s' at %.0f Hz, latching onto the "
+                "thread that runs the main image\n",
+                ctx->cfg.path.c_str(),
+                ctx->cfg.interval_us != 0 ? 1e6 / static_cast<double>(ctx->cfg.interval_us) : 0.0);
+    }
     fflush(stdout);
 
     const double started = nowUs();
@@ -1296,6 +1419,7 @@ void samplerConfigFromEnv(SamplerConfig& cfg) {
         if (dash != nullptr) {
             cfg.guest_lo = strtoull(range, nullptr, 0);
             cfg.guest_hi = strtoull(dash + 1, nullptr, 0);
+            cfg.guest_range_pinned = true;
         }
     }
 }
