@@ -744,9 +744,6 @@ enum class SampleKind : uint8_t {
     Resolved = 0,
     NotTranslated = 1,
     Unavailable = 2,
-    // Everything recorded so far describes a different thread and must go.  Sent
-    // rather than applied directly so it lands in the stream in the right order.
-    Reset = 3,
 };
 
 struct SampleRing {
@@ -811,8 +808,7 @@ struct LatchState {
     uint64_t tid = 0;
     std::string name;
     uint64_t sweeps = 0;
-    uint64_t discarded = 0;
-    double started = 0;  // restarted whenever the subject changes
+    double started = 0;
     // Time actually spent latched, which is the only time samples accrue.  The
     // rate must be divided by THIS and not by the sampler's lifetime: discovery
     // takes ~2 s on the client, and counting it made a 99% run read as 88%.
@@ -1062,12 +1058,6 @@ struct AggCtx {
     unsigned window_seq = 0;
     double window_started_s = 0;
     double window_latched_us = 0;
-    // Which subject the windows written so far describe.  A window file is on
-    // disk before the latch can change, so a run that re-latched has files from
-    // the old thread that a reader summing the series must not add to the new
-    // one's.  The cumulative profile drops those samples; this is how a window
-    // says which side of that line it falls on.
-    unsigned subject_seq = 0;
     std::map<uint64_t, GuestModule> modules;
     // 64 KB slots holding an address no search could explain: a frame-pointer
     // walk invents return addresses out of ordinary data, and those must cost
@@ -1135,7 +1125,6 @@ void writeProfile(const AggCtx* ctx, const SamplerStats& st, double elapsed,
     // A window holds only the samples taken between these two run timestamps,
     // so a reader can pick the stretch it cares about and sum those files.
     // Absent means cumulative: every sample since the sampler started.
-    fprintf(fh, "subject_seq %u\n", ctx->subject_seq);
     if (windowed) {
         fprintf(fh, "window_seq %u\n", ctx->window_seq);
         fprintf(fh, "window_start_s %.3f\n", windowStart);
@@ -1173,8 +1162,11 @@ void writeProfile(const AggCtx* ctx, const SamplerStats& st, double elapsed,
         rangeFrom = "main image (detected)";
     }
     fprintf(fh, "guest_range_from %s\n", rangeFrom);
-    // Only one shape exists: a latched run, whose samples all come from the one
-    // thread below.  A failed latch writes no profile at all.
+    // A failed latch writes no profile at all, so a profile always has a
+    // subject.  `latched_thread` is the CURRENT one, not the only one: a run
+    // that re-latched has every thread it followed in [threads], each holding
+    // the samples taken while it was the subject.  [latch_history] says when
+    // each took over.
     fprintf(fh, "latch_state latched\n");
     fprintf(fh, "latched_thread 0x%llx\n", static_cast<unsigned long long>(latchedTid));
     if (!latchedName.empty()) {
@@ -1183,7 +1175,6 @@ void writeProfile(const AggCtx* ctx, const SamplerStats& st, double elapsed,
     fprintf(fh, "threads_seen %zu\n", st.threads.size());
     fprintf(fh, "discovery_sweeps %llu\n", static_cast<unsigned long long>(sweeps));
     fprintf(fh, "latch_events %zu\n", g_latch.events.size());
-    fprintf(fh, "samples_discarded %llu\n", static_cast<unsigned long long>(g_latch.discarded));
     fprintf(fh, "unwind %s\n", ctx->unwind ? "yes" : "no");
     fprintf(fh, "samples %llu\n", static_cast<unsigned long long>(st.samples_measured));
     fprintf(fh, "resolved %llu\n", static_cast<unsigned long long>(st.resolved));
@@ -1356,12 +1347,10 @@ void learnAddress(AggCtx* ctx, uint64_t addr) {
 
 // Consume everything the sampler has published.  Pure local work: no syscall
 // touches the target unless an address turns up that no module explains.
-// Samples land in `st`, which is the window being filled.  `run` is the total so
-// far, and is here only because a subject change has to throw away BOTH: what
-// came before describes another thread, and leaving it in the run total would
-// keep it in every later profile.
-void drainRing(AggCtx* ctx, SamplerStats& st, SamplerStats& run, uint64_t& baseSamples,
-               uint64_t& baseNs) {
+// Samples land in `st`, the window being filled.  Every one is keyed by the
+// thread it came from, so a run that re-latched keeps both threads rather than
+// choosing between them.
+void drainRing(AggCtx* ctx, SamplerStats& st) {
     while (true) {
         const uint64_t tail = g_ring.tail.load(std::memory_order_relaxed);
         const uint64_t head = g_ring.head.load(std::memory_order_acquire);
@@ -1386,16 +1375,7 @@ void drainRing(AggCtx* ctx, SamplerStats& st, SamplerStats& run, uint64_t& baseS
                              : kind == SampleKind::NotTranslated ? 3
                                                                  : 2;
 
-        if (kind == SampleKind::Reset) {
-            // The subject changed: what came before describes another thread.
-            const std::scoped_lock lock(g_latch.mu);
-            g_latch.discarded += st.samples + run.samples;
-            st = SamplerStats{};
-            run = SamplerStats{};
-            ctx->subject_seq++;
-            baseSamples = g_counters.samples.load(std::memory_order_relaxed);
-            baseNs = g_counters.total_ns.load(std::memory_order_relaxed);
-        } else {
+        {
             ThreadStats& ts = st.threads[tid];
             ts.samples++;
             st.samples++;
@@ -1443,8 +1423,6 @@ void drainRing(AggCtx* ctx, SamplerStats& st, SamplerStats& run, uint64_t& baseS
                 case SampleKind::Unavailable:
                     st.unavailable++;
                     break;
-                case SampleKind::Reset:
-                    break;
             }
         }
         g_ring.tail.store(tail + words, std::memory_order_release);
@@ -1469,13 +1447,12 @@ void* aggregatorMain(void* raw) {
     SamplerStats run;
     uint64_t baseSamples = 0;
     uint64_t baseNs = 0;
-    unsigned lastSubject = ctx->subject_seq;
     double lastReport = nowUs();
     while (true) {
         const bool running = g_sampler_running.load(std::memory_order_relaxed);
         const bool flushing = g_sampler_flush_request.load(std::memory_order_relaxed) &&
                               !g_sampler_flush_done.load(std::memory_order_relaxed);
-        drainRing(ctx, win, run, baseSamples, baseNs);
+        drainRing(ctx, win);
 
         double startedAt = 0;
         double latchedUs = 0;
@@ -1486,13 +1463,6 @@ void* aggregatorMain(void* raw) {
             startedAt = g_latch.started;
             latchedUs =
                 g_latch.latched_us + (g_latch.latched_at != 0 ? nowUs() - g_latch.latched_at : 0);
-        }
-        // A new subject restarts the run clock, so the window's start would be
-        // on the old timeline and its span would come out negative.
-        if (ctx->subject_seq != lastSubject) {
-            lastSubject = ctx->subject_seq;
-            ctx->window_started_s = 0;
-            ctx->window_latched_us = latchedUs;
         }
         const bool due = ctx->report_s > 0 && (nowUs() - lastReport) / 1e6 >= ctx->report_s;
         // A profile is only written once there IS a subject: an unlatched one
@@ -1668,29 +1638,23 @@ void* samplerMain(void* raw) {
                 }
             }
             if (best != MACH_PORT_NULL && sweeps >= kDiscoverySweeps) {
-                // Re-latching onto a different thread makes everything already
-                // captured a profile of something else, and a latched profile
-                // must describe one thread.  Start over rather than blend two.
+                // Re-latching onto a different thread used to throw away
+                // everything captured so far, because a cumulative profile had
+                // to describe one thread or it described nothing.  Every sample
+                // is keyed by its thread and every report interval is now its
+                // own file, so neither is true: the old thread's samples stay
+                // under the old thread, in the windows they were taken in, and
+                // the run reads as a timeline of which thread was the subject
+                // when.  Throwing them away was only ever a way to avoid
+                // blending two threads into one number.
                 if (previousTid != 0 && bestTid != previousTid) {
                     fprintf(stdout,
-                            "[rosettax87] X87_SAMPLE: subject changed, thread 0x%llx is not the "
-                            "0x%llx profiled before; discarding its samples and starting the "
-                            "profile again\n",
+                            "[rosettax87] X87_SAMPLE: subject changed, thread 0x%llx takes over "
+                            "from 0x%llx; both stay in the profile under their own thread\n",
                             static_cast<unsigned long long>(bestTid),
                             static_cast<unsigned long long>(previousTid));
-                    g_latch.add((nowUs() - started) / 1e6, "discarded 0x%llx: subject changed",
+                    g_latch.add((nowUs() - started) / 1e6, "subject changed from 0x%llx",
                                 static_cast<unsigned long long>(previousTid));
-                    // Sent, not applied: it has to take effect at this point in
-                    // the stream, and only the aggregator knows how many samples
-                    // it is throwing away.
-                    const uint64_t reset[2] = {0, sampleHeader(SampleKind::Reset, false, 0)};
-                    g_ring.push(reset, 2);
-                    {
-                        const std::scoped_lock lock(g_latch.mu);
-                        g_latch.latched_us = 0;
-                        g_latch.latched_at = 0;
-                    }
-                    started = nowUs();
                 }
                 latched = best;
                 latchedTid = bestTid;
