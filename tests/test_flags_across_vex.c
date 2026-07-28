@@ -19,7 +19,16 @@
  *
  * Read the result through the phases of scripts/run_tests.sh: a failure in
  * phase 1/5 (native Rosetta, hook disabled) is stock's; a failure in phase
- * 2 that clears with X87_ENABLE_BRIDGE=0 or X87_BRIDGE_V2=0 is ours.
+ * 2 that clears with X87_ENABLE_BRIDGE=0 or X87_BRIDGE_V2=0 is ours.  The
+ * harness reads it that way itself: this test is in its
+ * KNOWN_STOCK_DIVERGENCE list, so a phase 1 failure is reported XFAIL and
+ * every later phase is diffed against the cases phase 1 already failed.
+ * Only a case stock got right and a sidecar phase got wrong fails the run.
+ *
+ * Whether it reproduces at all is hardware-dependent, which is the reason
+ * for that latitude: every case here passes on an M5 Max and the whole
+ * sub64/add64 set fails on the macos-26-arm64 CI runner, in all eleven
+ * phases including native.
  *
  * Width caveat: samples build -arch x86_64, while the field case is i686.
  * The halves here are deliberately 32-bit `subl`/`sbbl` on 32-bit register
