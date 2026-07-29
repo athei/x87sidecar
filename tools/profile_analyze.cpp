@@ -510,9 +510,9 @@ EmitMeasurement measurePattern(const IRInstr* instrs, size_t len) {
 int main(int argc, char** argv) try {
     uint64_t min_exec = 1000;
     size_t max_rows = 200;
-    size_t hot_addrs = 100;  // rows in the hot-address section; 0 = suppress
-    size_t frag_rows = 30;   // rows in the FP-run-fragmentation section; 0 = suppress
-    int frag_wide_gap = 16;  // gap ceiling for the demand-model upper-bound tiers
+    size_t hot_addrs = 100;        // rows in the hot-address section; 0 = suppress
+    size_t frag_rows = 30;         // rows in the FP-run-fragmentation section; 0 = suppress
+    int frag_wide_gap = 16;        // gap ceiling for the demand-model upper-bound tiers
     double max_arm_per_x87 = 0.0;  // 0 = no filter
     enum class RankBy : std::uint8_t { Emit, Exec } rank_by = RankBy::Emit;
     std::vector<std::string> files;
@@ -1194,9 +1194,8 @@ int main(int argc, char** argv) try {
             arm_per_x87_no_relief > 0
                 ? 100.0 * (arm_per_x87_no_relief - arm_per_x87) / arm_per_x87_no_relief
                 : 0.0;
-        std::printf(
-            "global_arm_per_x87_without_pressure_relief,%.2f  (split+remat saves %.2f%%)\n",
-            arm_per_x87_no_relief, relief_contribution_pct);
+        std::printf("global_arm_per_x87_without_pressure_relief,%.2f  (split+remat saves %.2f%%)\n",
+                    arm_per_x87_no_relief, relief_contribution_pct);
         const double arm_per_x87_no_bridge =
             total_ops > 0 ? static_cast<double>(total_arm_bridged / total_ops) : 0.0;
         const double bridge_contribution_pct =
@@ -1361,14 +1360,14 @@ int main(int argc, char** argv) try {
         // table above and the workload-wide total_arm used for share%.
         if (hot_addrs > 0 && !block_rows.empty()) {
             struct AddrAgg {
-                long double cost = 0.0L;       // Σ exec * arm_prod over collapsed blocks
-                long double top_cost = 0.0L;   // dominant block's own cost
-                uint64_t exec = 0;             // Σ exec
-                uint32_t x87_ops = 0;          // from the dominant (highest-cost) block
-                uint32_t max_run = 0;          // from the dominant block
-                uint32_t blocks = 0;           // count of block records at this addr
-                std::string prefix;            // dominant block's mnemonic preview
-                std::vector<uint32_t> ids;     // constituent block_ids (cost-desc order)
+                long double cost = 0.0L;      // Σ exec * arm_prod over collapsed blocks
+                long double top_cost = 0.0L;  // dominant block's own cost
+                uint64_t exec = 0;            // Σ exec
+                uint32_t x87_ops = 0;         // from the dominant (highest-cost) block
+                uint32_t max_run = 0;         // from the dominant block
+                uint32_t blocks = 0;          // count of block records at this addr
+                std::string prefix;           // dominant block's mnemonic preview
+                std::vector<uint32_t> ids;    // constituent block_ids (cost-desc order)
             };
             std::unordered_map<uint32_t, AddrAgg> by_addr;
             by_addr.reserve(block_rows.size());
@@ -1399,10 +1398,12 @@ int main(int argc, char** argv) try {
                 return a.first < b.first;  // tie-break by address for stable output
             });
             const size_t addr_n = std::min(hot_addrs, addr_rows.size());
-            std::printf("# Top %zu hot x86 addresses by exec-weighted ARM emit "
-                        "(collapsed by start_pc) - map to functions in Ghidra\n",
-                        addr_n);
-            std::printf("rank,start_pc,cost,share%%,exec,x87_ops,max_run,blocks,block_ids,prefix\n");
+            std::printf(
+                "# Top %zu hot x86 addresses by exec-weighted ARM emit "
+                "(collapsed by start_pc) - map to functions in Ghidra\n",
+                addr_n);
+            std::printf(
+                "rank,start_pc,cost,share%%,exec,x87_ops,max_run,blocks,block_ids,prefix\n");
             for (size_t i = 0; i < addr_n; ++i) {
                 const auto& [pc, a] = addr_rows[i];
                 const double share =
@@ -1452,8 +1453,8 @@ int main(int argc, char** argv) try {
                 uint16_t joins_v2;
                 uint16_t joins_v2p;  // v2 joins with the flag-dead proof (subset of joins_v2)
                 uint16_t joins_inelig;
-                uint16_t spliced;     // instrs removed by the v1 splice
-                uint16_t spliced_v2;  // instrs removed by the v2-proven splice (v1 ∪ proven v2)
+                uint16_t spliced;       // instrs removed by the v1 splice
+                uint16_t spliced_v2;    // instrs removed by the v2-proven splice (v1 ∪ proven v2)
                 uint16_t spliced_wide;  // v2-shape gaps up to frag_wide_gap (upper bound)
                 uint16_t spliced_ceil;  // any straight-line gap up to frag_wide_gap (ceiling)
                 uint32_t arm_orig;
@@ -1474,10 +1475,10 @@ int main(int argc, char** argv) try {
             long double sum_saved_wide_w = 0.0L;
             long double sum_saved_ceil_w = 0.0L;
             const int wide_gap = std::max(frag_wide_gap, x87bridge::kMaxGapV1);
-            uint64_t gaps_v1_w = 0;        // exec-weighted v1 joining-gap instrs
-            uint64_t gaps_v2only_w = 0;    // exec-weighted v2-only joining-gap instrs
-            uint64_t gaps_v2proven_w = 0;  // v2-only with the flag-dead proof
-            uint64_t gaps_inelig_w = 0;    // exec-weighted ineligible joining-gap instrs
+            uint64_t gaps_v1_w = 0;         // exec-weighted v1 joining-gap instrs
+            uint64_t gaps_v2only_w = 0;     // exec-weighted v2-only joining-gap instrs
+            uint64_t gaps_v2proven_w = 0;   // v2-only with the flag-dead proof
+            uint64_t gaps_inelig_w = 0;     // exec-weighted ineligible joining-gap instrs
             uint64_t joins_short_side = 0;  // v1 joins whose merged x87 length < 3
             uint64_t joins_total = 0;
             std::unordered_map<uint8_t, uint64_t> flag_hist;  // v2-only gap instrs
@@ -1621,8 +1622,7 @@ int main(int argc, char** argv) try {
                     }
                     arm_out = runOneMode(spliced.data(), spliced.size(), &prod_cfg);
                     const long double delta = static_cast<long double>(row.arm_orig) -
-                                              static_cast<long double>(arm_out) -
-                                              2.0L * n_spliced;
+                                              static_cast<long double>(arm_out) - 2.0L * n_spliced;
                     if (delta > 0) {
                         saved_out = static_cast<long double>(exec) * delta;
                     }
@@ -1687,9 +1687,10 @@ int main(int argc, char** argv) try {
                 total_arm > 0 ? static_cast<double>(100.0L * sum_saved_wide_w / total_arm) : 0.0;
             const double ceil_savings_pct =
                 total_arm > 0 ? static_cast<double>(100.0L * sum_saved_ceil_w / total_arm) : 0.0;
-            std::printf("# FP-run fragmentation (run-bridging opportunity, v1 = mov/lea "
-                        "gaps <= %d; v2 adds flag-dead ALU with the flag_liveness==0 proof)\n",
-                        x87bridge::kMaxGapV1);
+            std::printf(
+                "# FP-run fragmentation (run-bridging opportunity, v1 = mov/lea "
+                "gaps <= %d; v2 adds flag-dead ALU with the flag_liveness==0 proof)\n",
+                x87bridge::kMaxGapV1);
             std::printf("bridge_v1_saved_arm_w,%llu\n",
                         static_cast<unsigned long long>(sum_saved_w));
             std::printf("bridge_v1_savings_pct,%.3f\n", v1_savings_pct);
@@ -1720,11 +1721,11 @@ int main(int argc, char** argv) try {
                         static_cast<unsigned long long>(joins_short_side));
             if (!flag_hist.empty()) {
                 std::vector<std::pair<uint8_t, uint64_t>> fh(flag_hist.begin(), flag_hist.end());
-                std::ranges::sort(fh, [](const auto& a, const auto& b) {
-                    return a.second > b.second;
-                });
-                std::printf("# flag_liveness histogram of v2-only gap instrs "
-                            "(byte=count_w, top 8)\n");
+                std::ranges::sort(fh,
+                                  [](const auto& a, const auto& b) { return a.second > b.second; });
+                std::printf(
+                    "# flag_liveness histogram of v2-only gap instrs "
+                    "(byte=count_w, top 8)\n");
                 const size_t fn = std::min<size_t>(8, fh.size());
                 for (size_t k = 0; k < fn; ++k) {
                     std::printf("flag_liveness_0x%02x,%llu\n", fh[k].first,
@@ -1732,14 +1733,16 @@ int main(int argc, char** argv) try {
                 }
             }
             const size_t fr_n = std::min(frag_rows, frows.size());
-            std::printf("rank,block_id,start_pc,exec,segments,joins_v1,joins_v2,joins_v2p,"
-                        "joins_inelig,spliced,spliced_v2,spliced_wide,spliced_ceil,arm_orig,"
-                        "arm_bridged,arm_bridged_v2,arm_wide,arm_ceil,bridge_live,saved_w,"
-                        "saved_v2_w,saved_wide_w,saved_ceil_w,preview\n");
+            std::printf(
+                "rank,block_id,start_pc,exec,segments,joins_v1,joins_v2,joins_v2p,"
+                "joins_inelig,spliced,spliced_v2,spliced_wide,spliced_ceil,arm_orig,"
+                "arm_bridged,arm_bridged_v2,arm_wide,arm_ceil,bridge_live,saved_w,"
+                "saved_v2_w,saved_wide_w,saved_ceil_w,preview\n");
             for (size_t k = 0; k < fr_n; ++k) {
                 const auto& r = frows[k];
                 std::printf(
-                    "%zu,%u,0x%08x,%llu,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%llu,%llu,%llu,"
+                    "%zu,%u,0x%08x,%llu,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%llu,%llu,%"
+                    "llu,"
                     "%llu,%s\n",
                     k + 1, r.block_id, r.start_pc, static_cast<unsigned long long>(r.exec),
                     static_cast<unsigned>(r.segments), static_cast<unsigned>(r.joins_v1),

@@ -324,8 +324,8 @@ static bool build_bridge(Context& ctx, IRInstr* instr) {
         if (dst.kind == IROperandKind::Register) {
             const int16_t dst_enc = bridge_encode_reg(dst.reg.reg.index());
             if (src.kind == IROperandKind::Register) {
-                auto id = ctx.add_node(Op::BridgeMovRR, dst_enc,
-                                       bridge_encode_reg(src.reg.reg.index()));
+                auto id =
+                    ctx.add_node(Op::BridgeMovRR, dst_enc, bridge_encode_reg(src.reg.reg.index()));
                 if (id < 0) {
                     return false;
                 }
@@ -421,9 +421,9 @@ static bool build_bridge(Context& ctx, IRInstr* instr) {
         // CF-preservation quirk only matters to flag READERS, and the proof
         // says there are none for the written flags; untouched NZCV carries
         // any passing-through flags).
-        auto id = ctx.add_node(Op::BridgeAluRI, bridge_encode_reg(dst.reg.reg.index()), -1,
-                               bridge_encode_reg(op == kOpcodeName_inc ? kBridgeAluAdd
-                                                                       : kBridgeAluSub));
+        auto id =
+            ctx.add_node(Op::BridgeAluRI, bridge_encode_reg(dst.reg.reg.index()), -1,
+                         bridge_encode_reg(op == kOpcodeName_inc ? kBridgeAluAdd : kBridgeAluSub));
         if (id < 0) {
             return false;
         }
@@ -467,8 +467,8 @@ static bool build_bridge(Context& ctx, IRInstr* instr) {
             return false;
         }
         if (dst.kind == IROperandKind::MemRef && src.kind == IROperandKind::Register) {
-            auto id = ctx.add_node(Op::BridgeAluMR, bridge_encode_reg(src.reg.reg.index()), -1,
-                                   kind_enc);
+            auto id =
+                ctx.add_node(Op::BridgeAluMR, bridge_encode_reg(src.reg.reg.index()), -1, kind_enc);
             if (id < 0) {
                 return false;
             }

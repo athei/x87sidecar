@@ -52,8 +52,8 @@ static void check_u32(const char* name, uint32_t got, uint32_t expected) {
 
 static void check_u64(const char* name, uint64_t got, uint64_t expected) {
     if (got != expected) {
-        printf("FAIL  %-55s  got=0x%016llx  expected=0x%016llx\n", name,
-               (unsigned long long)got, (unsigned long long)expected);
+        printf("FAIL  %-55s  got=0x%016llx  expected=0x%016llx\n", name, (unsigned long long)got,
+               (unsigned long long)expected);
         failures++;
     } else {
         printf("PASS  %s\n", name);
@@ -76,7 +76,7 @@ int main(void) {
             "subl   $2, %2\n\t" /* gap */
             "fldl   16(%5)\n\t"
             "fmull  24(%5)\n\t"
-            "xorl   $0xff, %3\n\t" /* gap */
+            "xorl   $0xff, %3\n\t"  /* gap */
             "orl    $0x100, %3\n\t" /* gap */
             "faddp\n\t"
             "fstpl  %0\n\t"
@@ -101,7 +101,7 @@ int main(void) {
         __asm__ volatile(
             "fldl   (%3)\n\t"
             "fmull  8(%3)\n\t"
-            "addq   $7, %1\n\t" /* gap (64-bit) */
+            "addq   $7, %1\n\t"   /* gap (64-bit) */
             "andq   $-16, %2\n\t" /* gap (64-bit logical imm) */
             "fldl   16(%3)\n\t"
             "fmull  24(%3)\n\t"
@@ -150,7 +150,7 @@ int main(void) {
         __asm__ volatile(
             "fldl   (%3)\n\t"
             "fmull  8(%3)\n\t"
-            "addl   (%2), %1\n\t" /* gap: RM — rc += mem[0] */
+            "addl   (%2), %1\n\t"  /* gap: RM — rc += mem[0] */
             "subl   %1, 4(%2)\n\t" /* gap: MR — mem[1] -= rc */
             "fldl   16(%3)\n\t"
             "fmull  24(%3)\n\t"
@@ -220,8 +220,8 @@ int main(void) {
             : "r"(lhs), "r"(a)
             : "cc", "st", "st(1)", "memory");
         check("v2 cf passthrough: fp result", out, a[0] * a[1] + a[2] * a[3]);
-        check_u32(pick ? "v2 cf passthrough: jc taken" : "v2 cf passthrough: jc not taken",
-                  taken, pick ? 1U : 0U);
+        check_u32(pick ? "v2 cf passthrough: jc taken" : "v2 cf passthrough: jc not taken", taken,
+                  pick ? 1U : 0U);
         check_u32("v2 cf passthrough: dec value", rc, 9);
     }
 

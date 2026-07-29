@@ -47,14 +47,14 @@ int main(void) {
      * region only up to the branch — Rosetta ends the block there, so the
      * bridged region is the straight-line FP code in between.) */
     for (int pick = 0; pick < 2; pick++) {
-        const uint32_t lhs = pick ? 1 : 9;  /* 1 <= 5 taken; 9 <= 5 not taken */
+        const uint32_t lhs = pick ? 1 : 9; /* 1 <= 5 taken; 9 <= 5 not taken */
         uint32_t taken = 0xdead;
         double out;
         __asm__ volatile(
             "cmpl   $5, %2\n\t" /* sets flags BEFORE the bridged region */
             "fldl   (%3)\n\t"
             "fmull  8(%3)\n\t"
-            "movl   $77, %%ecx\n\t" /* bridge */
+            "movl   $77, %%ecx\n\t"     /* bridge */
             "leal   (%%ecx), %%edx\n\t" /* bridge */
             "fldl   16(%3)\n\t"
             "fmull  24(%3)\n\t"

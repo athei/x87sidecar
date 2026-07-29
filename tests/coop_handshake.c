@@ -44,7 +44,8 @@ __attribute__((constructor)) static void x87_coop_handshake(void) {
     mach_port_t service = MACH_PORT_NULL;
     kern_return_t kr = bootstrap_look_up(bootstrap_port, name, &service);
     if (kr != KERN_SUCCESS) {
-        if (verbose) fprintf(stderr, "coop: bootstrap_look_up(%s) failed 0x%x\n", name, kr);
+        if (verbose)
+            fprintf(stderr, "coop: bootstrap_look_up(%s) failed 0x%x\n", name, kr);
         return;
     }
 
@@ -68,13 +69,15 @@ __attribute__((constructor)) static void x87_coop_handshake(void) {
     msg.thread_port.disposition = MACH_MSG_TYPE_COPY_SEND;
     msg.thread_port.type = MACH_MSG_PORT_DESCRIPTOR;
 
-    kr = mach_msg(&msg.header, MACH_SEND_MSG, sizeof(msg), 0, MACH_PORT_NULL,
-                  MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+    kr = mach_msg(&msg.header, MACH_SEND_MSG, sizeof(msg), 0, MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE,
+                  MACH_PORT_NULL);
     if (kr != KERN_SUCCESS) {
-        if (verbose) fprintf(stderr, "coop: handshake send failed 0x%x\n", kr);
+        if (verbose)
+            fprintf(stderr, "coop: handshake send failed 0x%x\n", kr);
         return;
     }
-    if (verbose) fprintf(stderr, "coop: handed over task+thread ports; blocking for reply\n");
+    if (verbose)
+        fprintf(stderr, "coop: handed over task+thread ports; blocking for reply\n");
 
     // Block until the sidecar has done its install and replies. The receive
     // buffer needs room for the message header AND the trailer the kernel
@@ -87,7 +90,8 @@ __attribute__((constructor)) static void x87_coop_handshake(void) {
     memset(&rep, 0, sizeof(rep));
     kr = mach_msg(&rep.reply.header, MACH_RCV_MSG, 0, sizeof(rep), reply, 30000 /*ms*/,
                   MACH_PORT_NULL);
-    if (verbose) fprintf(stderr, "coop: handshake reply kr=0x%x; continuing\n", kr);
+    if (verbose)
+        fprintf(stderr, "coop: handshake reply kr=0x%x; continuing\n", kr);
 
     // Invalidate our own i-cache for the code the sidecar patched. This runs on
     // the same thread that will execute translate_insn, and sys_icache_invalidate

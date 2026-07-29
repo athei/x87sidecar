@@ -221,11 +221,11 @@ X87Cache::BridgedRun X87Cache::lookahead_bridged(IRInstr* instr_array, int64_t n
     // long as the consecutive gap stays <= max_gap and the region's bridge
     // budget holds.  `last_x87_end` tracks the trailing-bridge trim point:
     // the region is only ever committed up to the last x87 instruction.
-    int total = 0;         // committed region length (ends on x87)
-    int x87_count = 0;     // x87 ops within the committed region
-    int bridges = 0;       // bridges within the committed region
-    int pending_gap = 0;   // bridge instructions since the last x87 op
-    int joins = 0;         // gaps that got x87 on both sides
+    int total = 0;        // committed region length (ends on x87)
+    int x87_count = 0;    // x87 ops within the committed region
+    int bridges = 0;      // bridges within the committed region
+    int pending_gap = 0;  // bridge instructions since the last x87 op
+    int joins = 0;        // gaps that got x87 on both sides
 
     for (int64_t i = insn_idx; i < num_instrs; i++) {
         IRInstr& ins = instr_array[i];

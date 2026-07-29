@@ -3405,7 +3405,7 @@ int emit_inline_fscale_core(TranslationResult& a1, AssemblerBuffer& buf, int Dx_
     free_fpr(a1, Dx_in);
 
     // ── Infinity correction factor f (see header comment) ──
-    emit_fmov_d_to_x(buf, Xt, Dy_in);  // Xt = bits(ST(1))
+    emit_fmov_d_to_x(buf, Xt, Dy_in);   // Xt = bits(ST(1))
     const int Xf = alloc_free_gpr(a1);  // Wd_k's slot — peak stays 4
     emit_movn(buf, /*is_64bit=*/1, /*opc=*/2 /*MOVZ*/, /*hw=*/3, 0x3FF0, Xf);  // f = 1.0
     emit_movn(buf, /*is_64bit=*/1, /*opc=*/2 /*MOVZ*/, /*hw=*/3, 0x7FF0, Xm);  // +∞ bits

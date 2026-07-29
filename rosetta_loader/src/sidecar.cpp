@@ -1,24 +1,33 @@
 #include "sidecar.hpp"
 
+#include <dirent.h>
+#include <libproc.h>
 #include <mach/mach.h>
 #include <mach/mach_port.h>
 #include <mach/mach_vm.h>
 #include <pthread.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <map>
 #include <mutex>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
+#include "dyld_process_info.hpp"
+#include "guest_pc_map.hpp"
 #include "rosetta_core/Config.h"
+#include "rosetta_core/ConfigEnv.h"
 #include "rosetta_core/CoreConfig.h"
 #include "rosetta_core/Fixup.h"
 #include "rosetta_core/IRInstr.h"
@@ -209,6 +218,1583 @@ bool readParent(mach_port_t task, uint64_t addr, void* dst, size_t size) {
     kern_return_t kr =
         mach_vm_read_overwrite(task, addr, size, reinterpret_cast<mach_vm_address_t>(dst), &got);
     return kr == KERN_SUCCESS && got == size;
+}
+
+// ── Guest-pc sampler ────────────────────────────────────────────────────────
+// Samples the tracee without stopping it and resolves each host ARM pc to a
+// guest x86 pc through guest_pc::resolve.  Neither thread_get_state nor
+// mach_vm_read suspends the target, so this costs the tracee nothing beyond
+// memory-read traffic; the cost is our own CPU, which bounds the sample rate.
+//
+// It latches onto the thread caught executing guest code inside the configured
+// guest range and then samples only that thread, which is what makes a high rate
+// affordable: a sweep of every thread pays a fragment-tree walk per thread even
+// for the ones parked outside translated code.  Output goes to the single file
+// named by X87_SAMPLE.
+// One loaded image of the target, as the profile reports it.  A guest pc means
+// nothing without the map of the run it came from, so the sampler builds that
+// map itself (see scanModules) rather than leaving the reader to find a matching
+// wine +loaddll log.
+struct GuestModule {
+    uint64_t base = 0;
+    uint64_t size = 0;
+    bool macho = false;  // else a PE mapped by wine
+    // Executable, but nothing on disk or in dyld accounts for it: JIT output,
+    // or a runtime's own generated code.  `path` is then a description of the
+    // mapping rather than a file, and there is nothing to symbolise against.
+    bool anon = false;
+    // Cleared when a later scan no longer finds the image.  Kept rather than
+    // dropped: samples taken while it was mapped still need its range.
+    bool loaded = true;
+    std::string path;  // on disk, and may contain spaces, so it goes last
+};
+
+// How often the module map is rebuilt while the target runs.  Flat, and short.
+// A backoff was tried and is wrong for this target: the game keeps loading for
+// far longer than it takes to start — wow_turbo.dll, the addons and wined3d all
+// arrive well after ten seconds — so an interval that grows starves exactly the
+// window that matters.  Measured on the client: a 14 s run got two scans and
+// missed a third of its samples' modules.
+constexpr double kScanEveryS = 5.0;
+
+// The walk pauses this long every this many regions.  See scanModules: the cost
+// that matters is not our CPU, it is the target's vm_map lock.
+constexpr uint64_t kScanYieldEvery = 128;
+constexpr long kScanYieldNs = 1000000;  // 1 ms
+
+// Counters for the profile header.  The scanner thread writes them, the sampler
+// thread reads them, and they are the ONLY thing the two share: the map itself
+// travels as a file.
+struct ModuleMapStats {
+    std::atomic<uint64_t> learned{0};    // images the map gained
+    std::atomic<uint64_t> searches{0};   // header searches, the expensive path
+    std::atomic<uint64_t> dyld_asks{0};  // times dyld's image list was consulted
+    std::atomic<uint64_t> scan_us{0};    // time spent reading the target for both
+};
+ModuleMapStats g_modmap;
+
+struct SamplerCtx {
+    // True once the guest range means something: either it was pinned, or the
+    // main image has been found.  Until then nothing can be judged in range,
+    // because the fallback range is "all 32-bit guest code" and would let any
+    // thread that touched a wine dll win the latch.
+    [[nodiscard]] bool rangeKnown() const;
+
+    mach_port_t task;
+    uint64_t base;
+    SamplerConfig cfg;
+    int reads;
+    // Read once while the target is alive.  The last profile is written after it
+    // has exited, and pid_for_task on a dead task reports -1, which loses the
+    // one field that ties a profile to the run's log.
+    pid_t pid = 0;
+    // Main-image detection, used only until it succeeds.
+    bool image_found = false;
+    int image_attempts = 0;
+    std::unordered_set<uint64_t> image_rejected;
+};
+
+// Give up after this many probes and keep the default range: a target whose
+// main image never shows up in a sample is one the walk-back cannot help with.
+constexpr int kMaxImageAttempts = 64;
+
+// Exit handshake with the sampler thread, which is detached and would otherwise
+// be killed mid-interval by process exit.  One relaxed load per tick.
+std::atomic<bool> g_sampler_running{false};
+std::atomic<bool> g_sampler_flush_request{false};
+std::atomic<bool> g_sampler_flush_done{false};
+
+bool SamplerCtx::rangeKnown() const {
+    return cfg.guest_range_pinned || image_found;
+}
+
+bool samplerRead(void* raw, uint64_t addr, void* dst, size_t len) {
+    auto* ctx = static_cast<SamplerCtx*>(raw);
+    ctx->reads++;
+    return readParent(ctx->task, addr, dst, len);
+}
+
+double nowUs() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC_RAW, &ts);
+    return (static_cast<double>(ts.tv_sec) * 1e6) + (static_cast<double>(ts.tv_nsec) / 1e3);
+}
+
+// Unlatch after this long without seeing the latched thread in the range, so a
+// thread that stops being the interesting one is given up.  Wall-clock, not
+// ticks: at 10 kHz a tick count would make this window a fifth of a second and
+// every loading screen would unlatch.
+constexpr double kUnlatchAfterS = 2.0;
+
+// Sweep every thread for this many sweeps before latching, and latch onto the
+// one seen in the range most often rather than the first one seen at all: more
+// than one thread can run guest code and the busiest is the one worth having.
+constexpr uint64_t kDiscoverySweeps = 200;
+
+// If nothing ever runs inside the guest range, discovery would otherwise sweep
+// every thread forever, which is the most expensive mode there is.  After this
+// many sweeps drop to one sweep per kIdleSweepS seconds.  It never stops
+// looking: a target that starts slowly, or whose interesting thread is replaced
+// by another one, still gets picked up, just with a longer wait.  Latching
+// clears the throttle again.
+constexpr uint64_t kDiscoveryGiveUp = 30000;
+constexpr double kIdleSweepS = 1.0;
+
+// Frame-pointer walk of the GUEST stack.  Return addresses on that stack are
+// already guest x86 addresses (the translation keeps guest state in guest
+// memory), so unwinding needs no resolver at all: only the leaf pc comes from
+// the ARM pc.  Frame pointer omission means the chain can be short or break
+// early; that costs depth, never a wrong leaf.
+constexpr int kMaxFrames = 48;
+
+// A caller's frame sits above the callee's and not absurdly far above it.
+constexpr uint64_t kMaxFrameSpan = 1U << 20;
+
+// Nothing is mapped in the low 64 KB of a Windows address space, so a "return
+// address" below this is a misread slot, not a frame.  Without this the walk
+// happily appends roots like 0x1, 0x4, 0xa0 and 0x800, which then show up as
+// garbage at the base of a stack.
+constexpr uint64_t kMinCodeAddr = 0x10000;
+
+int unwindGuestStack(mach_port_t task, uint64_t framePtr, bool guest32, uint64_t* out, int max) {
+    const uint64_t mask = guest32 ? 0xFFFFFFFFULL : ~0ULL;
+    const size_t width = guest32 ? 4 : 8;
+    uint64_t fp = framePtr & mask;
+    int depth = 0;
+    while (depth < max) {
+        if (fp == 0 || (fp & (width - 1)) != 0) {
+            break;
+        }
+        uint8_t frame[16];
+        if (!readParent(task, fp, frame, width * 2)) {
+            break;
+        }
+        uint64_t saved = 0;
+        uint64_t ret = 0;
+        memcpy(&saved, frame, width);
+        memcpy(&ret, frame + width, width);
+        if (ret < kMinCodeAddr || (guest32 && ret >= 0x100000000ULL)) {
+            break;
+        }
+        out[depth++] = ret;
+        // The stack grows down, so the caller's frame is above ours.
+        if (saved <= fp || saved - fp > kMaxFrameSpan) {
+            break;
+        }
+        fp = saved;
+    }
+    return depth;
+}
+
+// ── Finding the guest's main image ──────────────────────────────────────────
+// The interesting thread is the one running the program, not a worker running
+// library code, so the latch needs the main executable's address range.  Rather
+// than be told it, read it out of the guest: every resolved pc lies inside some
+// mapped PE image, Windows maps images on 64 KB boundaries, and an image's own
+// header carries both its size and whether it is an EXE or a DLL.  Walking back
+// from a pc to the nearest such header therefore names the image the pc belongs
+// to, and the IMAGE_FILE_DLL bit says whether it is the one we want.
+constexpr uint64_t kImageGranularity = 0x10000;
+
+// WoW.exe is ~9.5 MB; this bounds the walk-back for any pc we probe.
+constexpr int kMaxImageSteps = 512;
+
+constexpr uint16_t kDosMagic = 0x5A4D;     // "MZ"
+constexpr uint32_t kPeSignature = 0x4550;  // "PE\0\0"
+constexpr uint16_t kPe32Magic = 0x10B;
+constexpr uint16_t kPe32PlusMagic = 0x20B;
+constexpr uint16_t kFileDll = 0x2000;  // IMAGE_FILE_DLL
+
+struct GuestImage {
+    uint64_t base = 0;
+    uint32_t size = 0;
+    bool is_exe = false;
+    bool macho = false;  // else a PE
+};
+
+// Parse a PE image header at `base`, if one is there.  `allow64` also accepts a
+// PE32+ one: the module map wants every image the process has, while the
+// main-image search below is looking for a 32-bit program and would rather not
+// consider the 64-bit side of a wow64 process at all.  SizeOfImage sits 56 bytes
+// into the optional header either way — PE32+ drops BaseOfData and widens
+// ImageBase, which cancels out.
+bool readGuestImage(mach_port_t task, uint64_t base, GuestImage& out, bool allow64 = false) {
+    uint16_t dos = 0;
+    if (!readParent(task, base, &dos, sizeof(dos)) || dos != kDosMagic) {
+        return false;
+    }
+    int32_t lfanew = 0;
+    if (!readParent(task, base + 0x3C, &lfanew, sizeof(lfanew)) || lfanew < 0 ||
+        lfanew > (1 << 20)) {
+        return false;
+    }
+    const uint64_t pe = base + static_cast<uint64_t>(lfanew);
+    uint32_t sig = 0;
+    if (!readParent(task, pe, &sig, sizeof(sig)) || sig != kPeSignature) {
+        return false;
+    }
+    uint16_t characteristics = 0;
+    uint16_t magic = 0;
+    uint32_t sizeOfImage = 0;
+    // COFF header follows the signature; Characteristics is its last field.
+    // The optional header follows that, with SizeOfImage 56 bytes in.
+    if (!readParent(task, pe + 4 + 18, &characteristics, sizeof(characteristics)) ||
+        !readParent(task, pe + 24, &magic, sizeof(magic)) ||
+        !readParent(task, pe + 24 + 56, &sizeOfImage, sizeof(sizeOfImage))) {
+        return false;
+    }
+    const bool bitnessWanted = magic == kPe32Magic || (allow64 && magic == kPe32PlusMagic);
+    if (!bitnessWanted) {
+        return false;
+    }
+    if (sizeOfImage == 0 || sizeOfImage > (256U << 20)) {
+        return false;
+    }
+    out.base = base;
+    out.size = sizeOfImage;
+    out.is_exe = (characteristics & kFileDll) == 0;
+    out.macho = false;
+    return true;
+}
+
+// A Mach-O guest (an ordinary x86-64 program under Rosetta, rather than a
+// Windows one under Wine) carries the same two facts in its own header:
+// MH_EXECUTE says it is a program and not a library, and the segment table
+// gives its extent.  Unlike a PE, its base is not on a coarse boundary that can
+// be walked back to, but it does not need to be: the region the pc lives in
+// starts at the __TEXT segment, which is where the header sits.
+constexpr uint32_t kMachMagic64 = 0xFEEDFACFU;
+constexpr uint32_t kMachMagic32 = 0xFEEDFACEU;
+constexpr uint32_t kMachExecute = 2;  // MH_EXECUTE
+constexpr uint32_t kLcSegment64 = 0x19;
+constexpr uint32_t kLcSegment32 = 0x1;
+
+// `codeOnly` restricts the extent to the executable segments.  A dylib in the
+// dyld shared cache has its __TEXT, __DATA and __LINKEDIT split across the
+// cache's own regions, gigabytes apart, so its full extent is meaningless as a
+// module range; the executable part is contiguous and is the only part a pc can
+// land in.  The guest-range use below wants the whole image and leaves it off.
+constexpr uint32_t kLcIdDylib = 0xD;
+
+bool readGuestMachO(mach_port_t task, uint64_t base, GuestImage& out, bool codeOnly = false,
+                    std::string* installName = nullptr) {
+    uint32_t header[8];
+    if (!readParent(task, base, header, sizeof(header))) {
+        return false;
+    }
+    const bool is64 = header[0] == kMachMagic64;
+    if (!is64 && header[0] != kMachMagic32) {
+        return false;
+    }
+    const uint32_t filetype = header[3];
+    const uint32_t ncmds = header[4];
+    if (ncmds == 0 || ncmds > 4096) {
+        return false;
+    }
+
+    uint64_t lo = UINT64_MAX;
+    uint64_t hi = 0;
+    uint64_t cmd = base + (is64 ? 32 : 28);
+    for (uint32_t i = 0; i < ncmds; i++) {
+        uint32_t head[2];  // cmd, cmdsize
+        if (!readParent(task, cmd, head, sizeof(head)) || head[1] < 8) {
+            return false;
+        }
+        // A dylib's own name, which is the only way to name one inside the dyld
+        // shared cache: every mapping there reports the cache file rather than
+        // the library, so the kernel cannot tell us and only the image itself
+        // knows.  Free here — these load commands are already being walked.
+        if (head[0] == kLcIdDylib && installName != nullptr && head[1] >= 12) {
+            uint32_t nameOff = 0;
+            if (readParent(task, cmd + 8, &nameOff, sizeof(nameOff)) && nameOff >= 12 &&
+                nameOff < head[1]) {
+                char buf[512];
+                const size_t want = std::min<size_t>(sizeof(buf) - 1, head[1] - nameOff);
+                if (readParent(task, cmd + nameOff, buf, want)) {
+                    buf[want] = '\0';
+                    *installName = buf;
+                }
+            }
+        }
+        if (head[0] == (is64 ? kLcSegment64 : kLcSegment32)) {
+            if (head[1] < (is64 ? 72U : 56U)) {
+                return false;  // too short to be the segment command it claims
+            }
+            char name[16];
+            if (!readParent(task, cmd + 8, name, sizeof(name))) {
+                return false;
+            }
+            // __PAGEZERO is a multi-gigabyte hole below the image, not part of
+            // it, and would swallow the whole address space if counted.
+            if (memcmp(name, "__PAGEZERO", 10) != 0) {
+                uint64_t vmaddr = 0;
+                uint64_t vmsize = 0;
+                uint32_t initprot = 0;
+                if (is64) {
+                    if (!readParent(task, cmd + 24, &vmaddr, 8) ||
+                        !readParent(task, cmd + 32, &vmsize, 8) ||
+                        !readParent(task, cmd + 60, &initprot, 4)) {
+                        return false;
+                    }
+                } else {
+                    uint32_t a = 0;
+                    uint32_t sz = 0;
+                    if (!readParent(task, cmd + 24, &a, 4) || !readParent(task, cmd + 28, &sz, 4) ||
+                        !readParent(task, cmd + 44, &initprot, 4)) {
+                        return false;
+                    }
+                    vmaddr = a;
+                    vmsize = sz;
+                }
+                if (!codeOnly || (initprot & VM_PROT_EXECUTE) != 0) {
+                    lo = vmaddr < lo ? vmaddr : lo;
+                    hi = vmaddr + vmsize > hi ? vmaddr + vmsize : hi;
+                }
+            }
+        }
+        cmd += head[1];
+    }
+    if (lo == UINT64_MAX || hi <= lo || hi - lo > (256ULL << 20)) {
+        return false;
+    }
+
+    out.base = base;
+    out.size = static_cast<uint32_t>(hi - lo);
+    out.is_exe = filetype == kMachExecute;
+    out.macho = true;
+    return true;
+}
+
+// The start of the mapping `pc` lives in.  For a Mach-O that is the image
+// header; for a PE it is usually a section, which is why the PE path walks.
+bool guestRegionStart(mach_port_t task, uint64_t pc, uint64_t& start) {
+    mach_vm_address_t address = pc;
+    mach_vm_size_t size = 0;
+    vm_region_basic_info_data_64_t info;
+    mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+    mach_port_t object = MACH_PORT_NULL;
+    if (mach_vm_region(task, &address, &size, VM_REGION_BASIC_INFO_64,
+                       reinterpret_cast<vm_region_info_t>(&info), &count,
+                       &object) != KERN_SUCCESS) {
+        return false;
+    }
+    if (pc < address || pc >= address + size) {
+        return false;  // nothing mapped at pc; the returned region is above it
+    }
+    start = address;
+    return true;
+}
+
+// The image containing `pc`: a Mach-O at the start of its mapping, or a PE
+// found by walking back to the nearest header.  `forMap` asks the two readers
+// for what the module map wants rather than what main-image detection wants:
+// PE32+ accepted, and a Mach-O measured by its executable segments only.
+bool findGuestImage(mach_port_t task, uint64_t pc, GuestImage& out, bool forMap = false,
+                    std::string* installName = nullptr) {
+    uint64_t regionStart = 0;
+    if (guestRegionStart(task, pc, regionStart) &&
+        readGuestMachO(task, regionStart, out, forMap, installName) && pc < out.base + out.size) {
+        return true;
+    }
+
+    uint64_t candidate = pc & ~(kImageGranularity - 1);
+    for (int step = 0; step < kMaxImageSteps; step++) {
+        GuestImage img;
+        if (readGuestImage(task, candidate, img, forMap) && pc < img.base + img.size) {
+            out = img;
+            return true;
+        }
+        if (candidate < kImageGranularity) {
+            break;
+        }
+        candidate -= kImageGranularity;
+    }
+    return false;
+}
+
+// The module holding `addr`, or nullptr.
+const GuestModule* moduleAt(const std::map<uint64_t, GuestModule>& modules, uint64_t addr) {
+    auto it = modules.upper_bound(addr);
+    if (it == modules.begin()) {
+        return nullptr;
+    }
+    --it;
+    return addr < it->second.base + it->second.size ? &it->second : nullptr;
+}
+
+// Build the module map that goes into the profile.  It takes two sources,
+// because neither sees the whole address space: dyld knows every Mach-O image by
+// name, including those in the shared cache, and knows nothing about the PE
+// images wine maps; the kernel knows which file backs any mapping, which names
+// the PEs, but reports the cache file rather than the dylib for anything in the
+// shared cache.
+//
+// NOTHING here walks the address space.  A walk is ~12000 region queries plus a
+// read apiece, and every one of them takes the TARGET's vm_map lock, which its
+// own mmap and page faults need too — measured cost on the client: the game took
+// 13 s to reach its login screen against 8 s without the scanner.  Instead the
+// sampler hands over the addresses it actually saw and only those are looked up,
+// so once a module has been resolved the scanner touches the target no further.
+
+// Ask dyld where its images are.  This is the ONLY way to name anything in the
+// shared cache: a dylib's __TEXT there sits hundreds of megabytes inside a
+// single ~2 GB region that covers a thousand libraries, so there is no header
+// for a per-address lookup to walk back to.  Reads nothing for an image already
+// known at the same base under the same name — a Mach-O's segments are fixed
+// once it is loaded.
+void refreshDyldImages(mach_port_t task, std::map<uint64_t, GuestModule>& modules) {
+    const double started = nowUs();
+    __block std::map<uint64_t, GuestModule>* known = &modules;
+    __block uint64_t learned = 0;
+    kern_return_t kr = KERN_SUCCESS;
+    DyldProcessInfo info = _dyld_process_info_create(task, 0, &kr);
+    if (info == nullptr) {
+        return;
+    }
+    _dyld_process_info_for_each_image(
+        info, ^(uint64_t header, const uuid_t /*uuid*/, const char* path) {
+          if (path == nullptr) {
+              return;
+          }
+          const auto it = known->find(header);
+          if (it != known->end() && it->second.macho && it->second.path == path) {
+              return;
+          }
+          GuestImage img;
+          if (readGuestMachO(task, header, img, true)) {
+              (*known)[header] =
+                  GuestModule{.base = header, .size = img.size, .macho = true, .path = path};
+              learned++;
+          }
+        });
+    _dyld_process_info_release(info);
+    g_modmap.dyld_asks.fetch_add(1, std::memory_order_relaxed);
+    g_modmap.learned.fetch_add(learned, std::memory_order_relaxed);
+    g_modmap.scan_us.fetch_add(static_cast<uint64_t>(nowUs() - started), std::memory_order_relaxed);
+}
+
+// Does `addr` point at executable memory?  One region query, and the only cheap
+// way to tell code the map has not named yet from the ordinary data a
+// frame-pointer walk mistakes for a return address.
+// `regionBase`/`regionSize`, when given, report the mapping the address fell
+// in, so a caller that cannot name it any other way can still describe it by
+// its extent rather than discarding it.
+bool looksLikeCode(mach_port_t task, uint64_t addr, uint64_t* regionBase = nullptr,
+                   uint64_t* regionSize = nullptr) {
+    mach_vm_address_t address = addr;
+    mach_vm_size_t size = 0;
+    vm_region_submap_info_data_64_t info;
+    mach_msg_type_number_t count = VM_REGION_SUBMAP_INFO_COUNT_64;
+    natural_t depth = 1000;
+    // _recurse, not mach_vm_region: the shared cache is a submap, and the plain
+    // call reports the submap entry (~2 GB, r--) instead of the mapping inside
+    // it (r-x).  Measured — with the plain call every cache address looks
+    // non-executable and this test rejects exactly what it is meant to admit.
+    if (mach_vm_region_recurse(task, &address, &size, &depth,
+                               reinterpret_cast<vm_region_recurse_info_t>(&info),
+                               &count) != KERN_SUCCESS) {
+        return false;
+    }
+    if (regionBase != nullptr) {
+        *regionBase = address;
+    }
+    if (regionSize != nullptr) {
+        *regionSize = size;
+    }
+    return addr >= address && addr < address + size && (info.protection & VM_PROT_EXECUTE) != 0;
+}
+
+// One sampled address the map cannot explain: find the image holding it, and
+// nothing else.  A PE is found by walking back to its header on the 64 KB grid,
+// a Mach-O at the start of its mapping; then one name lookup.  Tens of syscalls
+// for a whole module, paid once, against thousands for a walk paid every time.
+bool resolveAddress(mach_port_t task, pid_t pid, uint64_t addr,
+                    std::map<uint64_t, GuestModule>& modules) {
+    const double started = nowUs();
+    g_modmap.searches.fetch_add(1, std::memory_order_relaxed);
+    GuestImage img;
+    std::string installName;
+    if (!findGuestImage(task, addr, img, true, &installName)) {
+        return false;
+    }
+    // What the kernel says backs the mapping, which is right for everything wine
+    // maps and for an ordinary dylib on disk.
+    char path[MAXPATHLEN];
+    path[0] = '\0';
+    const int len = proc_regionfilename(pid, img.base, path, sizeof(path));
+    if (len > 0) {
+        path[std::min<size_t>(static_cast<size_t>(len), sizeof(path) - 1)] = '\0';
+    }
+    // Inside the shared cache every mapping reports the cache itself, so the
+    // image's own install name is the only thing that names the library.
+    std::string name = path;
+    if (name.empty() || name.find("dyld_shared_cache") != std::string::npos) {
+        if (installName.empty()) {
+            return false;  // nothing can name it; not worth reporting
+        }
+        name = installName;
+    }
+    modules[img.base] =
+        GuestModule{.base = img.base, .size = img.size, .macho = img.macho, .path = name};
+    g_modmap.learned.fetch_add(1, std::memory_order_relaxed);
+    g_modmap.scan_us.fetch_add(static_cast<uint64_t>(nowUs() - started), std::memory_order_relaxed);
+    return true;
+}
+
+// The sampler's handoff to the aggregator: a single-producer, single-consumer
+// ring of 64-bit words.  Measuring a sample costs a few stores and an index
+// publish — no lookup, no allocation, no lock — and everything else (the
+// histograms, the module map, the profile) belongs to the thread that drains it.
+//
+// Records are variable length because stacks are:
+//     [0] mach thread id
+//     [1] status | in_range | depth
+//     [2] leaf guest pc            (only when the status is Resolved)
+//     [3..] `depth` frames, root first
+constexpr size_t kRingWords = 1U << 18;  // 2 MB, seconds of slack at 10 kHz
+constexpr size_t kRingMask = kRingWords - 1;
+
+enum class SampleKind : uint8_t {
+    Resolved = 0,
+    NotTranslated = 1,
+    Unavailable = 2,
+};
+
+struct SampleRing {
+    std::array<std::atomic<uint64_t>, kRingWords> slots;
+    std::atomic<uint64_t> head{0};  // words published by the sampler
+    std::atomic<uint64_t> tail{0};  // words consumed by the aggregator
+    std::atomic<uint64_t> dropped{0};
+
+    // Producer.  Never blocks and never waits: a record that does not fit is
+    // dropped whole and counted, because stalling the sampler would distort the
+    // very timeline it is measuring.
+    void push(const uint64_t* words, size_t n) {
+        const uint64_t h = head.load(std::memory_order_relaxed);
+        const uint64_t t = tail.load(std::memory_order_acquire);
+        if (h - t + n > kRingWords) {
+            dropped.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        for (size_t i = 0; i < n; i++) {
+            slots[(h + i) & kRingMask].store(words[i], std::memory_order_relaxed);
+        }
+        // Publishing last is what makes a partly written record unreadable.
+        head.store(h + n, std::memory_order_release);
+    }
+};
+SampleRing g_ring;
+
+uint64_t sampleHeader(SampleKind kind, bool inRange, uint64_t depth) {
+    return (static_cast<uint64_t>(kind) << 32) | (static_cast<uint64_t>(inRange) << 16) | depth;
+}
+
+// What the sampler measures about itself.  Counters rather than records because
+// they describe the sampling, not any one sample.
+struct SamplerCounters {
+    std::atomic<uint64_t> samples{0};
+    std::atomic<uint64_t> total_ns{0};
+    std::atomic<uint64_t> missed_ticks{0};
+    // Of those, the ticks where OUR work alone outran the period.  The rest
+    // were late for reasons outside this thread: a sleep that returned late, or
+    // preemption.  At a 100 us period either is easy to hit.
+    std::atomic<uint64_t> overrun_ticks{0};
+    // The guest range, once main-image detection settles it.
+    std::atomic<uint64_t> guest_lo{0};
+    std::atomic<uint64_t> guest_hi{0};
+    std::atomic<bool> image_found{false};
+    // A snapshot of the resolver cache, refreshed periodically: the cache itself
+    // belongs to the sampler thread and may not be read from another.
+    std::atomic<uint64_t> cache_pc_hits{0};
+    std::atomic<uint64_t> cache_fragment_hits{0};
+    std::atomic<uint64_t> cache_negative_hits{0};
+    std::atomic<uint64_t> cache_misses{0};
+    std::atomic<uint64_t> cache_stale{0};
+};
+SamplerCounters g_counters;
+
+// Latch state, which the profile reports and only the sampler knows.  A mutex is
+// right here and nowhere else: it is taken on a latch transition and once per
+// profile write, never per sample.
+struct LatchState {
+    std::mutex mu;
+    bool latched = false;
+    uint64_t tid = 0;
+    std::string name;
+    uint64_t sweeps = 0;
+    double started = 0;
+    // Time actually spent latched, which is the only time samples accrue.  The
+    // rate must be divided by THIS and not by the sampler's lifetime: discovery
+    // takes ~2 s on the client, and counting it made a 99% run read as 88%.
+    double latched_at = 0;  // 0 when not latched
+    double latched_us = 0;  // completed latched stretches
+    std::vector<std::string> events;
+
+    void add(double at, const char* fmt, ...) __attribute__((format(printf, 3, 4))) {
+        char detail[256];
+        va_list ap;
+        va_start(ap, fmt);
+        vsnprintf(detail, sizeof(detail), fmt, ap);
+        va_end(ap);
+        char line[320];
+        snprintf(line, sizeof(line), "%.1f %s", at, detail);
+        const std::scoped_lock lock(mu);
+        events.emplace_back(line);
+    }
+};
+LatchState g_latch;
+
+// Everything is kept per guest thread, so the profile says which thread each
+// address came from rather than leaving it implicit.
+struct ThreadStats {
+    uint64_t samples = 0;
+    uint64_t resolved = 0;
+    uint64_t in_range = 0;
+    std::unordered_map<uint64_t, uint64_t> pcs;        // leaf guest pc -> hits
+    std::map<std::vector<uint64_t>, uint64_t> stacks;  // root-first stack -> hits
+    // Host ARM pcs, for the samples no x86 was translated to.  Leaves only: the
+    // guest frame-pointer chain says nothing about native frames, and an empty
+    // answer is better than a walk of whatever x5 happened to hold.
+    std::unordered_map<uint64_t, uint64_t> host_pcs;
+};
+
+struct SamplerStats {
+    uint64_t samples = 0;           // recorded, i.e. what the histograms hold
+    uint64_t samples_measured = 0;  // taken, including any the ring had to drop
+    uint64_t in_range = 0;
+    uint64_t resolved = 0;
+    uint64_t not_translated = 0;
+    uint64_t unavailable = 0;
+    uint64_t frames = 0;   // total frames unwound, for the average depth
+    uint64_t unwound = 0;  // samples an unwind was attempted for
+    double total_us = 0;
+    std::map<uint64_t, ThreadStats> threads;  // mach thread id -> its samples
+};
+
+// Fold one set of counters into another, so the run total can be accumulated
+// from the windows rather than kept alongside them.  The aggregator drains into
+// the window set and merges here once per report, which keeps the drain path
+// single-target and makes the two views agree by construction: the cumulative
+// profile IS the sum of every window written.
+void mergeStats(SamplerStats& into, const SamplerStats& from) {
+    into.samples += from.samples;
+    into.samples_measured += from.samples_measured;
+    into.in_range += from.in_range;
+    into.resolved += from.resolved;
+    into.not_translated += from.not_translated;
+    into.unavailable += from.unavailable;
+    into.frames += from.frames;
+    into.unwound += from.unwound;
+    into.total_us += from.total_us;
+    for (const auto& [tid, src] : from.threads) {
+        ThreadStats& dst = into.threads[tid];
+        dst.samples += src.samples;
+        dst.resolved += src.resolved;
+        dst.in_range += src.in_range;
+        for (const auto& [pc, n] : src.pcs) {
+            dst.pcs[pc] += n;
+        }
+        for (const auto& [stack, n] : src.stacks) {
+            dst.stacks[stack] += n;
+        }
+        for (const auto& [pc, n] : src.host_pcs) {
+            dst.host_pcs[pc] += n;
+        }
+    }
+}
+
+// A thread's name, if it set one.  Empty for most, but a named thread is the
+// clearest way to say which one a profile is of.
+std::string machThreadName(mach_port_t thread) {
+    thread_extended_info_data_t info{};
+    mach_msg_type_number_t count = THREAD_EXTENDED_INFO_COUNT;
+    if (thread_info(thread, THREAD_EXTENDED_INFO, reinterpret_cast<thread_info_t>(&info), &count) !=
+        KERN_SUCCESS) {
+        return {};
+    }
+    info.pth_name[sizeof(info.pth_name) - 1] = '\0';
+    return info.pth_name;
+}
+
+// The mach thread id, which is stable for the life of the thread, unlike the
+// port name a task_threads sweep hands back.
+uint64_t machThreadId(mach_port_t thread) {
+    thread_identifier_info_data_t id{};
+    mach_msg_type_number_t count = THREAD_IDENTIFIER_INFO_COUNT;
+    if (thread_info(thread, THREAD_IDENTIFIER_INFO, reinterpret_cast<thread_info_t>(&id), &count) !=
+        KERN_SUCCESS) {
+        return 0;
+    }
+    return id.thread_id;
+}
+
+// `record` false makes this a probe: it still resolves, so the caller can tell
+// whether the thread is in the guest range, but nothing enters the profile.
+// Discovery uses that, because a latched profile must contain the latched
+// thread's samples and nothing else.
+// One sample: read the thread's ARM pc, resolve it to a guest pc, unwind, and
+// hand the result to the aggregator.  Nothing is accumulated here and nothing is
+// looked up — this thread's only job is to be on time.  `record=false` makes it
+// a discovery probe, which scores a thread without entering the profile.
+void sampleThread(SamplerCtx* ctx, const guest_pc::Reader& reader, guest_pc::Cache& cache,
+                  mach_port_t thread, uint64_t tid, bool record, bool& inRange) {
+    inRange = false;
+    arm_thread_state64_t state{};
+    mach_msg_type_number_t count = ARM_THREAD_STATE64_COUNT;
+    if (thread_get_state(thread, ARM_THREAD_STATE64, reinterpret_cast<thread_state_t>(&state),
+                         &count) != KERN_SUCCESS) {
+        return;
+    }
+    if (record) {
+        g_counters.samples.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    guest_pc::Resolution res{};
+    const double t0 = nowUs();
+    const guest_pc::Status status =
+        guest_pc::resolve(reader, ctx->base, arm_thread_state64_get_pc(state), res, cache);
+
+    // Room for the header words, the leaf and a full stack.
+    uint64_t rec[kMaxFrames + 3];
+    size_t n = 0;
+
+    switch (status) {
+        case guest_pc::Status::Resolved: {
+            if (!ctx->cfg.guest_range_pinned && !ctx->image_found &&
+                ctx->image_attempts < kMaxImageAttempts &&
+                !ctx->image_rejected.contains(res.x86_pc & ~(kImageGranularity - 1))) {
+                GuestImage img;
+                if (findGuestImage(ctx->task, res.x86_pc, img)) {
+                    if (img.is_exe) {
+                        ctx->cfg.guest_lo = img.base;
+                        ctx->cfg.guest_hi = img.base + img.size;
+                        ctx->image_found = true;
+                        g_counters.guest_lo.store(img.base, std::memory_order_relaxed);
+                        g_counters.guest_hi.store(img.base + img.size, std::memory_order_relaxed);
+                        g_counters.image_found.store(true, std::memory_order_relaxed);
+                        fprintf(stdout,
+                                "[rosettax87] X87_SAMPLE: main image found at "
+                                "0x%llx-0x%llx; looking for the thread that runs it\n",
+                                static_cast<unsigned long long>(img.base),
+                                static_cast<unsigned long long>(img.base + img.size));
+                        fflush(stdout);
+                    } else {
+                        // A DLL: remember it so its pcs stop costing a walk.
+                        for (uint64_t p = img.base; p < img.base + img.size;
+                             p += kImageGranularity) {
+                            ctx->image_rejected.insert(p);
+                        }
+                    }
+                } else {
+                    // Only a walk that found no image at all counts against the
+                    // budget.  Identifying a DLL is progress: it is cached, so
+                    // it never costs again, and a client can easily run code in
+                    // dozens of libraries before it reaches its own.
+                    ctx->image_attempts++;
+                    ctx->image_rejected.insert(res.x86_pc & ~(kImageGranularity - 1));
+                }
+            }
+            inRange = ctx->rangeKnown() && res.x86_pc >= ctx->cfg.guest_lo &&
+                      res.x86_pc < ctx->cfg.guest_hi;
+            if (!record) {
+                break;
+            }
+            uint64_t depth = 0;
+            if (ctx->cfg.unwind) {
+                // x5 holds the guest frame pointer while translated code runs,
+                // which the resolver has just confirmed is the case.
+                const bool guest32 = res.x86_pc < 0x100000000ULL;
+                uint64_t frames[kMaxFrames];
+                const int walked =
+                    unwindGuestStack(ctx->task, state.__x[5], guest32, frames, kMaxFrames);
+                depth = static_cast<uint64_t>(walked);
+                rec[3] = 0;  // filled below, root first
+                for (int i = walked - 1; i >= 0; i--) {
+                    rec[3 + (walked - 1 - i)] = frames[i];
+                }
+            }
+            rec[0] = tid;
+            rec[1] = sampleHeader(SampleKind::Resolved, inRange, depth);
+            rec[2] = res.x86_pc;
+            n = 3 + depth;
+            break;
+        }
+        case guest_pc::Status::NotTranslated:
+            if (record) {
+                rec[0] = tid;
+                rec[1] = sampleHeader(SampleKind::NotTranslated, false, 0);
+                // The host pc, which is what the thread was actually running:
+                // no x86 was translated to this address because none is
+                // involved.  On the client this is around 40% of the samples on
+                // the game's own thread (the Rosetta runtime, the unix half of
+                // wine and of our d3d9, Metal, libsystem), and counting them
+                // without keeping the address made the largest single slice of
+                // the thread the one nothing could be said about.
+                rec[2] = arm_thread_state64_get_pc(state);
+                n = 3;
+            }
+            break;
+        case guest_pc::Status::Unavailable:
+            if (record) {
+                rec[0] = tid;
+                rec[1] = sampleHeader(SampleKind::Unavailable, false, 0);
+                n = 2;
+            }
+            break;
+    }
+    if (n != 0) {
+        g_ring.push(rec, n);
+    }
+    // Timed across resolve AND unwind: the unwind is the larger half once the
+    // cache is warm, so timing only the resolve would flatter the sampler.
+    if (record) {
+        g_counters.total_ns.fetch_add(static_cast<uint64_t>((nowUs() - t0) * 1000.0),
+                                      std::memory_order_relaxed);
+    }
+}
+
+// Everything the profile is made of, owned by one thread: the histograms, the
+// module map and the file itself.  The sampler thread touches none of it.
+struct AggCtx {
+    mach_port_t task;
+    pid_t pid;
+    uint64_t runtime_base;
+    std::string path;
+    uint64_t interval_us;
+    uint64_t sweep_interval_us;
+    double report_s;
+    bool unwind;
+    bool range_pinned;
+    // Per-window delta profiles: how many have been written, and where the one
+    // being filled started, in run seconds and in latched seconds.  A window's
+    // rate has to divide by the latched time inside THAT window, not the run's.
+    bool windows = false;
+    unsigned window_seq = 0;
+    double window_started_s = 0;
+    double window_latched_us = 0;
+    std::map<uint64_t, GuestModule> modules;
+    // 64 KB slots holding an address no search could explain: a frame-pointer
+    // walk invents return addresses out of ordinary data, and those must cost
+    // one lookup, not one per sighting.
+    std::unordered_set<uint64_t> unmapped;
+    double last_dyld_us = 0;
+    bool asked_dyld = false;
+    // The fullest the ring has been seen.  Owned by this thread alone, so no
+    // atomic: it is read once, when this same thread writes the profile.
+    uint64_t ring_peak = 0;
+};
+
+// How often dyld's image list may be consulted, at most.
+constexpr double kDyldAskEveryS = 1.0;
+
+// Written by the aggregator, which owns everything in it.  The sampler is not
+// involved and does not pause: sampling continues through a write.
+// `path` is where this one goes, which is ctx->path for the cumulative profile
+// and ctx->path.NNNN for a window.  A window passes its own span and the latched
+// time inside it; windowStart below zero means this is the cumulative profile
+// and the whole-run figures apply.
+void writeProfile(const AggCtx* ctx, const SamplerStats& st, double elapsed,
+                  const std::string& path, double windowStart = -1, double windowProfiled = 0) {
+    const std::string tmp = path + ".tmp";
+    FILE* fh = fopen(tmp.c_str(), "wb");
+    if (fh == nullptr) {
+        return;
+    }
+
+    const std::scoped_lock latch(g_latch.mu);
+    const bool windowed = windowStart >= 0;
+    // The time samples actually accrued over: latched stretches only.  Dividing
+    // by the sampler's lifetime instead counts the discovery phase, which
+    // records nothing and takes ~2 s on the client — enough to make a run that
+    // achieved 99% of its requested rate read as 88%.
+    const double profiled =
+        windowed
+            ? windowProfiled
+            : (g_latch.latched_us + (g_latch.latched_at != 0 ? nowUs() - g_latch.latched_at : 0)) /
+                  1e6;
+    const uint64_t latchedTid = g_latch.tid;
+    const std::string& latchedName = g_latch.name;
+    const uint64_t sweeps = g_latch.sweeps;
+    pid_t targetPid = ctx->pid;
+    char when[64] = "unknown";
+    const time_t now = time(nullptr);
+    struct tm tmv;
+    if (gmtime_r(&now, &tmv) != nullptr) {
+        strftime(when, sizeof(when), "%Y-%m-%dT%H:%M:%SZ", &tmv);
+    }
+
+    fprintf(fh, "# x87sidecar guest-pc sample profile\n");
+    fprintf(fh, "# Addresses are guest x86 pcs. The [modules] section below is the map of the\n");
+    fprintf(fh, "# run they came from, so symbolising needs nothing but this file.\n");
+    fprintf(fh, "version 1\n");
+    fprintf(fh, "pid %d\n", targetPid);
+    fprintf(fh, "written %s\n", when);
+    fprintf(fh, "runtime_base 0x%llx\n", static_cast<unsigned long long>(ctx->runtime_base));
+    fprintf(fh, "rate_hz %.1f\n",
+            ctx->interval_us != 0 ? 1e6 / static_cast<double>(ctx->interval_us) : 0.0);
+    fprintf(fh, "interval_us %llu\n", static_cast<unsigned long long>(ctx->interval_us));
+    fprintf(fh, "sweep_hz %.1f\n",
+            ctx->sweep_interval_us != 0 ? 1e6 / static_cast<double>(ctx->sweep_interval_us) : 0.0);
+    fprintf(fh, "elapsed_s %.1f\n", elapsed);
+    // A window holds only the samples taken between these two run timestamps,
+    // so a reader can pick the stretch it cares about and sum those files.
+    // Absent means cumulative: every sample since the sampler started.
+    if (windowed) {
+        fprintf(fh, "window_seq %u\n", ctx->window_seq);
+        fprintf(fh, "window_start_s %.3f\n", windowStart);
+        fprintf(fh, "window_end_s %.3f\n", windowStart + elapsed);
+    }
+    // The rate that was actually achieved.  It is not rate_hz: the sample work,
+    // the profile writes below and the kernel's timer leeway all come out of it,
+    // so a reader weighting samples by time needs this one.
+    fprintf(fh, "profiled_s %.1f\n", profiled);
+    fprintf(fh, "effective_hz %.1f\n",
+            profiled > 0 ? static_cast<double>(st.samples_measured) / profiled : 0.0);
+    fprintf(
+        fh, "missed_ticks %llu\n",
+        static_cast<unsigned long long>(g_counters.missed_ticks.load(std::memory_order_relaxed)));
+    fprintf(
+        fh, "overrun_ticks %llu\n",
+        static_cast<unsigned long long>(g_counters.overrun_ticks.load(std::memory_order_relaxed)));
+    // Samples measured but never recorded, because the aggregator fell behind
+    // and the ring was full.  Zero unless the machine is badly overloaded; it is
+    // here so a run that lost some says so instead of quietly under-counting.
+    fprintf(fh, "samples_dropped %llu\n",
+            static_cast<unsigned long long>(g_ring.dropped.load(std::memory_order_relaxed)));
+    // What the margin was: how close the handoff came to being full.
+    fprintf(fh, "ring_peak_words %llu\n", static_cast<unsigned long long>(ctx->ring_peak));
+    fprintf(fh, "ring_peak_pct %.1f\n",
+            100.0 * static_cast<double>(ctx->ring_peak) / static_cast<double>(kRingWords));
+    fprintf(fh, "mode latched\n");
+    fprintf(fh, "guest_range 0x%llx-0x%llx\n",
+            static_cast<unsigned long long>(g_counters.guest_lo.load(std::memory_order_relaxed)),
+            static_cast<unsigned long long>(g_counters.guest_hi.load(std::memory_order_relaxed)));
+    const char* rangeFrom = "default (no main image found)";
+    if (ctx->range_pinned) {
+        rangeFrom = "X87_GUEST_RANGE";
+    } else if (g_counters.image_found.load(std::memory_order_relaxed)) {
+        rangeFrom = "main image (detected)";
+    }
+    fprintf(fh, "guest_range_from %s\n", rangeFrom);
+    // A failed latch writes no profile at all, so a profile always has a
+    // subject.  `latched_thread` is the CURRENT one, not the only one: a run
+    // that re-latched has every thread it followed in [threads], each holding
+    // the samples taken while it was the subject.  [latch_history] says when
+    // each took over.
+    fprintf(fh, "latch_state latched\n");
+    fprintf(fh, "latched_thread 0x%llx\n", static_cast<unsigned long long>(latchedTid));
+    if (!latchedName.empty()) {
+        fprintf(fh, "latched_thread_name %s\n", latchedName.c_str());
+    }
+    fprintf(fh, "threads_seen %zu\n", st.threads.size());
+    fprintf(fh, "discovery_sweeps %llu\n", static_cast<unsigned long long>(sweeps));
+    fprintf(fh, "latch_events %zu\n", g_latch.events.size());
+    fprintf(fh, "unwind %s\n", ctx->unwind ? "yes" : "no");
+    fprintf(fh, "samples %llu\n", static_cast<unsigned long long>(st.samples_measured));
+    fprintf(fh, "resolved %llu\n", static_cast<unsigned long long>(st.resolved));
+    fprintf(fh, "in_range %llu\n", static_cast<unsigned long long>(st.in_range));
+    fprintf(fh, "not_translated %llu\n", static_cast<unsigned long long>(st.not_translated));
+    fprintf(fh, "unavailable %llu\n", static_cast<unsigned long long>(st.unavailable));
+    fprintf(
+        fh, "avg_us %.2f\n",
+        st.samples_measured != 0 ? st.total_us / static_cast<double>(st.samples_measured) : 0.0);
+    fprintf(
+        fh, "avg_depth %.2f\n",
+        st.unwound != 0 ? static_cast<double>(st.frames) / static_cast<double>(st.unwound) : 0.0);
+    fprintf(
+        fh, "cache_pc_hits %llu\n",
+        static_cast<unsigned long long>(g_counters.cache_pc_hits.load(std::memory_order_relaxed)));
+    fprintf(fh, "cache_fragment_hits %llu\n",
+            static_cast<unsigned long long>(
+                g_counters.cache_fragment_hits.load(std::memory_order_relaxed)));
+    fprintf(fh, "cache_negative_hits %llu\n",
+            static_cast<unsigned long long>(
+                g_counters.cache_negative_hits.load(std::memory_order_relaxed)));
+    fprintf(
+        fh, "cache_misses %llu\n",
+        static_cast<unsigned long long>(g_counters.cache_misses.load(std::memory_order_relaxed)));
+    fprintf(
+        fh, "cache_stale %llu\n",
+        static_cast<unsigned long long>(g_counters.cache_stale.load(std::memory_order_relaxed)));
+    fprintf(fh, "modules %zu\n", ctx->modules.size());
+    // What the map cost the target: header searches (a walk-back apiece) and
+    // whole-image-list asks.  Both should stay small; if searches tracks
+    // modules_unmapped, the cheap executability test has stopped filtering.
+    fprintf(fh, "modules_searches %llu\n",
+            static_cast<unsigned long long>(g_modmap.searches.load(std::memory_order_relaxed)));
+    fprintf(fh, "modules_dyld_asks %llu\n",
+            static_cast<unsigned long long>(g_modmap.dyld_asks.load(std::memory_order_relaxed)));
+    fprintf(fh, "modules_learned %llu\n",
+            static_cast<unsigned long long>(g_modmap.learned.load(std::memory_order_relaxed)));
+    // 64 KB slots holding an address no image explains: overwhelmingly the
+    // frame-pointer walk mistaking data for a return address.
+    fprintf(fh, "modules_unmapped %zu\n", ctx->unmapped.size());
+    fprintf(fh, "modules_scan_s %.2f\n",
+            static_cast<double>(g_modmap.scan_us.load(std::memory_order_relaxed)) / 1e6);
+
+    // Per-thread totals, so a reader can tell one thread's profile from a blend
+    // of several without parsing the sample sections.
+    // Anything but a single "latched" line means the run was not one
+    // continuous observation of one thread.
+    fprintf(fh, "\n[latch_history]\n# elapsed_s event detail\n");
+    for (const auto& event : g_latch.events) {
+        fprintf(fh, "%s\n", event.c_str());
+    }
+
+    fprintf(fh, "\n[threads]\n# tid samples resolved in_range latched\n");
+    for (const auto& [tid, ts] : st.threads) {
+        fprintf(fh, "0x%llx %llu %llu %llu %s\n", static_cast<unsigned long long>(tid),
+                static_cast<unsigned long long>(ts.samples),
+                static_cast<unsigned long long>(ts.resolved),
+                static_cast<unsigned long long>(ts.in_range), tid == latchedTid ? "yes" : "no");
+    }
+
+    // What every address below means.  "gone" is an image that was mapped when
+    // it was sampled and has since been unloaded; its samples are still real.
+    // The path is last because it can contain spaces.
+    //
+    // Copied straight out of the scanner thread's file rather than built here,
+    // which is what keeps a scan of the whole address space off this thread
+    // entirely.  Worst case the map is one scan interval old.
+    fprintf(fh, "\n[modules]\n# base size kind state path\n");
+    for (const auto& [base, mod] : ctx->modules) {
+        const char* kind = "pe";
+        if (mod.anon) {
+            kind = "anon";
+        } else if (mod.macho) {
+            kind = "macho";
+        }
+        fprintf(fh, "0x%llx 0x%llx %s %s %s\n", static_cast<unsigned long long>(mod.base),
+                static_cast<unsigned long long>(mod.size), kind, mod.loaded ? "loaded" : "gone",
+                mod.path.c_str());
+    }
+
+    fprintf(fh, "\n[leaves]\n# tid pc count   (exclusive: execution was AT this address)\n");
+    for (const auto& [tid, ts] : st.threads) {
+        std::vector<std::pair<uint64_t, uint64_t>> all(ts.pcs.begin(), ts.pcs.end());
+        std::sort(all.begin(), all.end(),
+                  [](const auto& a, const auto& b) { return a.second > b.second; });
+        for (const auto& [pc, hits] : all) {
+            fprintf(fh, "0x%llx 0x%llx %llu\n", static_cast<unsigned long long>(tid),
+                    static_cast<unsigned long long>(pc), static_cast<unsigned long long>(hits));
+        }
+    }
+
+    // Host ARM pcs: the samples with no guest pc because no x86 was involved.
+    // Counted against `samples`, not `resolved`, so a reader must weight them
+    // against the whole to see how much of the thread they are.
+    fprintf(fh, "\n[host_leaves]\n# tid pc count   (host arm pcs, no guest translation)\n");
+    for (const auto& [tid, ts] : st.threads) {
+        std::vector<std::pair<uint64_t, uint64_t>> all(ts.host_pcs.begin(), ts.host_pcs.end());
+        std::sort(all.begin(), all.end(),
+                  [](const auto& a, const auto& b) { return a.second > b.second; });
+        for (const auto& [pc, hits] : all) {
+            fprintf(fh, "0x%llx 0x%llx %llu\n", static_cast<unsigned long long>(tid),
+                    static_cast<unsigned long long>(pc), static_cast<unsigned long long>(hits));
+        }
+    }
+
+    fprintf(fh, "\n[stacks]\n# tid root;...;leaf count   (inclusive: these were ON the stack)\n");
+    for (const auto& [tid, ts] : st.threads) {
+        std::vector<std::pair<const std::vector<uint64_t>*, uint64_t>> all;
+        all.reserve(ts.stacks.size());
+        for (const auto& [stack, hits] : ts.stacks) {
+            all.emplace_back(&stack, hits);
+        }
+        std::sort(all.begin(), all.end(),
+                  [](const auto& a, const auto& b) { return a.second > b.second; });
+        for (const auto& [stack, hits] : all) {
+            fprintf(fh, "0x%llx ", static_cast<unsigned long long>(tid));
+            for (size_t i = 0; i < stack->size(); i++) {
+                fprintf(fh, "%s0x%llx", i != 0 ? ";" : "",
+                        static_cast<unsigned long long>((*stack)[i]));
+            }
+            fprintf(fh, " %llu\n", static_cast<unsigned long long>(hits));
+        }
+    }
+
+    fclose(fh);
+    if (rename(tmp.c_str(), path.c_str()) != 0) {
+        unlink(tmp.c_str());
+    }
+}
+
+// Take one address the map does not explain and try to name its image.  Only
+// ever called for addresses the target actually executed, so a module costs one
+// lookup and everything else in it is free.
+void learnAddress(AggCtx* ctx, uint64_t addr) {
+    if (addr < kMinCodeAddr || moduleAt(ctx->modules, addr) != nullptr) {
+        return;
+    }
+    const uint64_t slot = addr & ~(kImageGranularity - 1);
+    if (ctx->unmapped.contains(slot)) {
+        return;
+    }
+    // CHEAPEST TEST FIRST, and it matters more than it looks: most addresses
+    // that reach here are not code at all but slots a frame-pointer walk
+    // mistook for return addresses — 4347 of them in one 33 s client run.  Real
+    // code is EXECUTABLE; an invented address points at the heap, the stack or
+    // nothing.  One region query settles it, where the image search below costs
+    // a 512-step header walk-back before it can fail.  Ordered the other way
+    // round this cost the target ~2 million cross-task reads in a startup.
+    //
+    // Not "is it backed by a file": measured, the guest x86_64 shared cache
+    // under Rosetta reports NO file for its text at all, so that test rejects
+    // exactly the addresses dyld is needed for.
+    uint64_t regionBase = 0;
+    uint64_t regionSize = 0;
+    if (!looksLikeCode(ctx->task, addr, &regionBase, &regionSize)) {
+        ctx->unmapped.insert(slot);
+        return;
+    }
+    if (resolveAddress(ctx->task, ctx->pid, addr, ctx->modules)) {
+        return;
+    }
+    // Executable, but no header to walk back to: an image in the shared cache,
+    // or one whose sampled address lies in a region that is not its first.  dyld
+    // is the remaining authority.  Rate limited as a backstop: several new
+    // images sampled at once need one ask between them, not one each.  Whatever
+    // it still cannot explain is memoised below and never asks again.
+    const double now = nowUs();
+    if (ctx->asked_dyld && now - ctx->last_dyld_us < kDyldAskEveryS * 1e6) {
+        return;  // deliberately not memoised: the next sighting gets a full try
+    }
+    ctx->last_dyld_us = now;
+    ctx->asked_dyld = true;
+    refreshDyldImages(ctx->task, ctx->modules);
+    if (moduleAt(ctx->modules, addr) != nullptr) {
+        return;
+    }
+    // Executable, no image, and dyld has never heard of it: generated code, and
+    // on this target that is most of what runs.  Recording the mapping itself
+    // keeps it in the profile as its own row instead of collapsing into one
+    // "unmapped" total, which is the difference between "44% of the thread is
+    // somewhere we cannot name" and "44% of the thread is in this 11 KB of
+    // it".  Nothing can be symbolised inside it, but an offset from a stable
+    // base is still an identity that a disassembly can be pointed at.
+    //
+    // It starts after any image already known inside the region rather than at
+    // the region's base.  One mapping can hold a small image and a large
+    // unnamed remainder: wine's own loader is 8 KB of __TEXT at the bottom of
+    // the region the hot generated code sits in, and keying this on the region
+    // base would have replaced `wine` in the map with an entry spanning it.
+    const uint64_t regionEnd = regionBase + regionSize;
+    uint64_t lo = regionBase;
+    if (const auto it = ctx->modules.upper_bound(addr); it != ctx->modules.begin()) {
+        const auto& prev = std::prev(it)->second;
+        if (prev.base >= regionBase && prev.base + prev.size > lo) {
+            lo = prev.base + prev.size;
+        }
+    }
+    if (regionSize != 0 && lo <= addr && addr < regionEnd) {
+        char label[64];
+        snprintf(label, sizeof(label), "anon@0x%llx", static_cast<unsigned long long>(lo));
+        ctx->modules[lo] = GuestModule{
+            .base = lo, .size = regionEnd - lo, .macho = false, .anon = true, .path = label};
+        g_modmap.learned.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    ctx->unmapped.insert(slot);
+}
+
+// Consume everything the sampler has published.  Pure local work: no syscall
+// touches the target unless an address turns up that no module explains.
+// Samples land in `st`, the window being filled.  Every one is keyed by the
+// thread it came from, so a run that re-latched keeps both threads rather than
+// choosing between them.
+void drainRing(AggCtx* ctx, SamplerStats& st) {
+    while (true) {
+        const uint64_t tail = g_ring.tail.load(std::memory_order_relaxed);
+        const uint64_t head = g_ring.head.load(std::memory_order_acquire);
+        // How full the handoff has ever been.  With no drops this is the only
+        // thing that says whether the run had margin or was one hiccup from
+        // losing samples.  Measured per record, not once per drain: this thread
+        // is the only consumer, so the level only rises between drains and the
+        // next drain would see that peak anyway — but a drain can BLOCK in the
+        // middle, on a header walk-back or an ask to dyld, while the sampler
+        // keeps pushing, and that is the growth a once-per-drain reading misses.
+        // The loads are already here, so it costs nothing.
+        ctx->ring_peak = std::max(ctx->ring_peak, head - tail);
+        if (head - tail < 2) {
+            return;
+        }
+        const uint64_t tid = g_ring.slots[tail & kRingMask].load(std::memory_order_relaxed);
+        const uint64_t hdr = g_ring.slots[(tail + 1) & kRingMask].load(std::memory_order_relaxed);
+        const auto kind = static_cast<SampleKind>((hdr >> 32) & 0xFF);
+        const bool inRange = ((hdr >> 16) & 1) != 0;
+        const uint64_t depth = hdr & 0xFFFF;
+        const size_t words = kind == SampleKind::Resolved        ? 3 + depth
+                             : kind == SampleKind::NotTranslated ? 3
+                                                                 : 2;
+
+        {
+            ThreadStats& ts = st.threads[tid];
+            ts.samples++;
+            st.samples++;
+            switch (kind) {
+                case SampleKind::Resolved: {
+                    const uint64_t leaf =
+                        g_ring.slots[(tail + 2) & kRingMask].load(std::memory_order_relaxed);
+                    st.resolved++;
+                    ts.resolved++;
+                    ts.pcs[leaf]++;
+                    learnAddress(ctx, leaf);
+                    if (inRange) {
+                        st.in_range++;
+                        ts.in_range++;
+                    }
+                    if (ctx->unwind) {
+                        st.unwound++;
+                        st.frames += depth;
+                        std::vector<uint64_t> stack;
+                        stack.reserve(depth + 1);
+                        for (uint64_t i = 0; i < depth; i++) {
+                            const uint64_t frame = g_ring.slots[(tail + 3 + i) & kRingMask].load(
+                                std::memory_order_relaxed);
+                            stack.push_back(frame);
+                            // A module can appear only as a CALLER, so frames
+                            // are learned too, not just leaves.
+                            learnAddress(ctx, frame);
+                        }
+                        stack.push_back(leaf);  // leaf last
+                        ts.stacks[stack]++;
+                    }
+                    break;
+                }
+                case SampleKind::NotTranslated: {
+                    const uint64_t host =
+                        g_ring.slots[(tail + 2) & kRingMask].load(std::memory_order_relaxed);
+                    st.not_translated++;
+                    ts.host_pcs[host]++;
+                    // Same lookup as a guest address: the map holds Mach-O
+                    // images too, and dyld is the only thing that can name one
+                    // inside the shared cache, which is where most of these are.
+                    learnAddress(ctx, host);
+                    break;
+                }
+                case SampleKind::Unavailable:
+                    st.unavailable++;
+                    break;
+            }
+        }
+        g_ring.tail.store(tail + words, std::memory_order_release);
+    }
+}
+
+// How often the aggregator wakes.  Short, because draining is local work and a
+// short interval keeps the ring shallow and a newly loaded module named within
+// a fraction of a second.
+constexpr long kDrainEveryNs = 100000000;  // 100 ms
+
+// How often the sampler publishes its resolver-cache counters.
+constexpr uint64_t kCacheSnapshotEvery = 1024;
+
+void* aggregatorMain(void* raw) {
+    auto* ctx = static_cast<AggCtx*>(raw);
+    // Samples drain into the window; the run total is the windows merged.  Kept
+    // this way round rather than as two independent tallies so the cumulative
+    // profile is the sum of the window files by construction, which is the one
+    // property a reader adding them up depends on.
+    SamplerStats win;
+    SamplerStats run;
+    uint64_t baseSamples = 0;
+    uint64_t baseNs = 0;
+    double lastReport = nowUs();
+    while (true) {
+        const bool running = g_sampler_running.load(std::memory_order_relaxed);
+        const bool flushing = g_sampler_flush_request.load(std::memory_order_relaxed) &&
+                              !g_sampler_flush_done.load(std::memory_order_relaxed);
+        drainRing(ctx, win);
+
+        double startedAt = 0;
+        double latchedUs = 0;
+        bool latched = false;
+        {
+            const std::scoped_lock lock(g_latch.mu);
+            latched = g_latch.latched || g_latch.tid != 0;
+            startedAt = g_latch.started;
+            latchedUs =
+                g_latch.latched_us + (g_latch.latched_at != 0 ? nowUs() - g_latch.latched_at : 0);
+        }
+        const bool due = ctx->report_s > 0 && (nowUs() - lastReport) / 1e6 >= ctx->report_s;
+        // A profile is only written once there IS a subject: an unlatched one
+        // would be a blend of whatever the discovery sweeps saw.
+        if (latched && (due || flushing || !running)) {
+            lastReport = nowUs();
+            const double elapsed = (nowUs() - startedAt) / 1e6;
+            const uint64_t samplesNow = g_counters.samples.load(std::memory_order_relaxed);
+            const uint64_t nsNow = g_counters.total_ns.load(std::memory_order_relaxed);
+            win.samples_measured = samplesNow - baseSamples;
+            win.total_us = static_cast<double>(nsNow - baseNs) / 1000.0;
+            baseSamples = samplesNow;
+            baseNs = nsNow;
+
+            if (ctx->windows) {
+                char suffix[16];
+                snprintf(suffix, sizeof(suffix), ".%04u", ctx->window_seq);
+                writeProfile(ctx, win, elapsed - ctx->window_started_s, ctx->path + suffix,
+                             ctx->window_started_s, (latchedUs - ctx->window_latched_us) / 1e6);
+                ctx->window_seq++;
+            }
+            ctx->window_started_s = elapsed;
+            ctx->window_latched_us = latchedUs;
+
+            mergeStats(run, win);
+            win = SamplerStats{};
+            writeProfile(ctx, run, elapsed, ctx->path);
+        }
+        if (flushing) {
+            g_sampler_flush_done.store(true, std::memory_order_release);
+        }
+        if (!running) {
+            return nullptr;
+        }
+        struct timespec ts{.tv_sec = 0, .tv_nsec = kDrainEveryNs};
+        nanosleep(&ts, nullptr);
+    }
+}
+
+void* samplerMain(void* raw) {
+    auto* ctx = static_cast<SamplerCtx*>(raw);
+    const guest_pc::Reader reader{samplerRead, ctx};
+    guest_pc::Cache cache;
+
+    mach_port_t latched = MACH_PORT_NULL;
+    uint64_t latchedTid = 0;
+    std::string latchedName;
+    // Survives an unlatch, so a re-latch can tell "the same thread went quiet
+    // and came back" from "the subject changed".
+    uint64_t previousTid = 0;
+    std::unordered_map<uint64_t, uint64_t> scores;  // mach thread id -> in-range hits
+    double lastInRange = 0;
+    double lastSweep = 0;
+    uint64_t sweeps = 0;
+    bool gaveUpLatching = false;
+
+    // The only thing this ever prints: everything else belongs in the profile,
+    // not in the game's log.
+    const double sampleHz =
+        ctx->cfg.interval_us != 0 ? 1e6 / static_cast<double>(ctx->cfg.interval_us) : 0.0;
+    const double sweepHz = ctx->cfg.sweep_interval_us != 0
+                               ? 1e6 / static_cast<double>(ctx->cfg.sweep_interval_us)
+                               : 0.0;
+    if (ctx->cfg.guest_range_pinned) {
+        fprintf(stdout,
+                "[rosettax87] X87_SAMPLE: sampling to '%s' at %.0f Hz (sweeps %.0f Hz), latching "
+                "onto the thread that runs guest-range=[0x%llx,0x%llx)\n",
+                ctx->cfg.path.c_str(), sampleHz, sweepHz,
+                static_cast<unsigned long long>(ctx->cfg.guest_lo),
+                static_cast<unsigned long long>(ctx->cfg.guest_hi));
+    } else {
+        fprintf(stdout,
+                "[rosettax87] X87_SAMPLE: sampling to '%s' at %.0f Hz (sweeps %.0f Hz), latching "
+                "onto the thread that runs the main image\n",
+                ctx->cfg.path.c_str(), sampleHz, sweepHz);
+    }
+    fflush(stdout);
+
+    double started = nowUs();
+    double nextTick = started;
+    uint64_t ticks = 0;
+    for (;;) {
+        const double tickStart = nowUs();
+        if (latched != MACH_PORT_NULL) {
+            // Steady state: one thread, one thread_get_state, no task_threads,
+            // no port churn and no thread_info.
+            bool inRange = false;
+            sampleThread(ctx, reader, cache, latched, latchedTid, true, inRange);
+            const double now = nowUs();
+            if (inRange) {
+                lastInRange = now;
+            } else if (now - lastInRange > kUnlatchAfterS * 1e6) {
+                const double quiet = (now - lastInRange) / 1e6;
+                fprintf(stdout,
+                        "[rosettax87] X87_SAMPLE: unlatched from thread 0x%llx, %.1f s with "
+                        "nothing in the main image; searching again\n",
+                        static_cast<unsigned long long>(latchedTid), quiet);
+                fflush(stdout);
+                g_latch.add((now - started) / 1e6,
+                            "unlatched 0x%llx after %.1f s outside the image",
+                            static_cast<unsigned long long>(latchedTid), quiet);
+                {
+                    const std::scoped_lock lock(g_latch.mu);
+                    g_latch.latched = false;
+                    if (g_latch.latched_at != 0) {
+                        g_latch.latched_us += nowUs() - g_latch.latched_at;
+                        g_latch.latched_at = 0;
+                    }
+                }
+                latchedName.clear();
+                mach_port_deallocate(mach_task_self(), latched);
+                latched = MACH_PORT_NULL;
+                previousTid = latchedTid;
+                latchedTid = 0;
+                scores.clear();
+                sweeps = 0;
+                lastSweep = 0;
+            }
+        } else if (!gaveUpLatching || nowUs() - lastSweep >= kIdleSweepS * 1e6) {
+            lastSweep = nowUs();
+            thread_act_array_t threads = nullptr;
+            mach_msg_type_number_t count = 0;
+            if (task_threads(ctx->task, &threads, &count) != KERN_SUCCESS) {
+                break;
+            }
+            if (sweeps >= kDiscoveryGiveUp && !gaveUpLatching) {
+                gaveUpLatching = true;
+                // Two different failures reach here and they need different
+                // fixes, so name the one that happened rather than just the
+                // range: without a main image the range is only a fallback.
+                if (!ctx->cfg.guest_range_pinned && !ctx->image_found) {
+                    fprintf(stdout,
+                            "[rosettax87] X87_SAMPLE: FAILED to latch after %llu sweeps: no "
+                            "main image was found in the guest (no PE or Mach-O header above "
+                            "any sampled pc), and nothing ran in the fallback range "
+                            "[0x%llx,0x%llx). NO PROFILE WILL BE WRITTEN. Set "
+                            "X87_GUEST_RANGE=lo-hi to say where to look. Still searching, one "
+                            "sweep per %.0f s.\n",
+                            static_cast<unsigned long long>(sweeps),
+                            static_cast<unsigned long long>(ctx->cfg.guest_lo),
+                            static_cast<unsigned long long>(ctx->cfg.guest_hi), kIdleSweepS);
+                } else {
+                    fprintf(
+                        stdout,
+                        "[rosettax87] X87_SAMPLE: FAILED to latch after %llu sweeps: no "
+                        "thread ran in [0x%llx,0x%llx), which came from %s. NO PROFILE WILL "
+                        "BE WRITTEN. Still searching, one sweep per %.0f s.\n",
+                        static_cast<unsigned long long>(sweeps),
+                        static_cast<unsigned long long>(ctx->cfg.guest_lo),
+                        static_cast<unsigned long long>(ctx->cfg.guest_hi),
+                        ctx->cfg.guest_range_pinned ? "X87_GUEST_RANGE" : "the detected main image",
+                        kIdleSweepS);
+                }
+                fflush(stdout);
+            }
+            sweeps++;
+            mach_port_t best = MACH_PORT_NULL;
+            uint64_t bestTid = 0;
+            uint64_t bestScore = 0;
+            for (mach_msg_type_number_t i = 0; i < count; i++) {
+                const uint64_t tid = machThreadId(threads[i]);
+                bool inRange = false;
+                // record=false: a discovery sample is a probe for "which thread
+                // is worth having", never part of the profile.
+                sampleThread(ctx, reader, cache, threads[i], tid, false, inRange);
+                if (inRange && tid != 0) {
+                    const uint64_t score = ++scores[tid];
+                    if (score >= bestScore) {
+                        bestScore = score;
+                        best = threads[i];
+                        bestTid = tid;
+                    }
+                }
+            }
+            if (best != MACH_PORT_NULL && sweeps >= kDiscoverySweeps) {
+                // Re-latching onto a different thread used to throw away
+                // everything captured so far, because a cumulative profile had
+                // to describe one thread or it described nothing.  Every sample
+                // is keyed by its thread and every report interval is now its
+                // own file, so neither is true: the old thread's samples stay
+                // under the old thread, in the windows they were taken in, and
+                // the run reads as a timeline of which thread was the subject
+                // when.  Throwing them away was only ever a way to avoid
+                // blending two threads into one number.
+                if (previousTid != 0 && bestTid != previousTid) {
+                    fprintf(stdout,
+                            "[rosettax87] X87_SAMPLE: subject changed, thread 0x%llx takes over "
+                            "from 0x%llx; both stay in the profile under their own thread\n",
+                            static_cast<unsigned long long>(bestTid),
+                            static_cast<unsigned long long>(previousTid));
+                    g_latch.add((nowUs() - started) / 1e6, "subject changed from 0x%llx",
+                                static_cast<unsigned long long>(previousTid));
+                }
+                latched = best;
+                latchedTid = bestTid;
+                latchedName = machThreadName(best);
+                // The unlatch window is measured from the last in-range sample,
+                // so it has to start now rather than at whatever the previous
+                // latch left behind.
+                lastInRange = nowUs();
+                // Latching disproves "nothing ever runs there", so drop the
+                // throttle: if this thread later goes quiet, re-discovery has
+                // to run at full speed, not at one sweep per kIdleSweepS.
+                gaveUpLatching = false;
+
+                {
+                    const std::scoped_lock lock(g_latch.mu);
+                    g_latch.latched = true;
+                    g_latch.tid = latchedTid;
+                    g_latch.name = latchedName;
+                    g_latch.started = started;
+                    g_latch.latched_at = nowUs();
+                }
+                g_latch.add((nowUs() - started) / 1e6,
+                            "latched 0x%llx%s%s%s seen_in_range=%llu candidates=%zu sweeps=%llu",
+                            static_cast<unsigned long long>(bestTid),
+                            latchedName.empty() ? "" : " (", latchedName.c_str(),
+                            latchedName.empty() ? "" : ")",
+                            static_cast<unsigned long long>(bestScore), scores.size(),
+                            static_cast<unsigned long long>(sweeps));
+                fprintf(stdout,
+                        "[rosettax87] X87_SAMPLE: LATCHED onto thread 0x%llx%s%s%s after %llu "
+                        "sweeps (seen in range %llu times, %zu candidates); profiling only "
+                        "that thread from here\n",
+                        static_cast<unsigned long long>(bestTid), latchedName.empty() ? "" : " (\"",
+                        latchedName.c_str(), latchedName.empty() ? "" : "\")",
+                        static_cast<unsigned long long>(sweeps),
+                        static_cast<unsigned long long>(bestScore), scores.size());
+                fflush(stdout);
+            }
+            for (mach_msg_type_number_t i = 0; i < count; i++) {
+                if (threads[i] != latched) {
+                    mach_port_deallocate(mach_task_self(), threads[i]);
+                }
+            }
+            vm_deallocate(mach_task_self(), reinterpret_cast<vm_address_t>(threads),
+                          count * sizeof(thread_act_t));
+        }
+
+        // Publish what the resolver cache is doing, for the profile header.
+        // Once in a while rather than per sample: it is a diagnostic, and the
+        // cache itself belongs to this thread.
+        if (++ticks % kCacheSnapshotEvery == 0) {
+            const auto& cs = cache.stats();
+            g_counters.cache_pc_hits.store(cs.pc_hits, std::memory_order_relaxed);
+            g_counters.cache_fragment_hits.store(cs.fragment_hits, std::memory_order_relaxed);
+            g_counters.cache_negative_hits.store(cs.negative_hits, std::memory_order_relaxed);
+            g_counters.cache_misses.store(cs.misses, std::memory_order_relaxed);
+            g_counters.cache_stale.store(cs.stale, std::memory_order_relaxed);
+        }
+
+        // Pace against a deadline instead of sleeping the whole interval after
+        // the work.  A sample costs tens of microseconds and the kernel adds a
+        // leeway proportional to the requested wait (measured on this machine:
+        // 1000 us -> 1263, 100 us -> 132), so sleeping the full interval lands
+        // well below the requested rate: a 1 kHz run realized 754 Hz.  Asking
+        // only for what is left until the next deadline converges on the rate
+        // that was actually asked for.
+        const uint64_t period =
+            latched != MACH_PORT_NULL ? ctx->cfg.interval_us : ctx->cfg.sweep_interval_us;
+        if (nowUs() - tickStart > static_cast<double>(period)) {
+            g_counters.overrun_ticks.fetch_add(1, std::memory_order_relaxed);
+        }
+        nextTick += static_cast<double>(period);
+        const double now = nowUs();
+        if (now >= nextTick) {
+            // The work outran the period.  Sample again immediately, but move
+            // the deadline up: catching up in a burst would sample one part of
+            // the timeline harder than the rest.
+            g_counters.missed_ticks.fetch_add(1, std::memory_order_relaxed);
+            nextTick = now;
+        } else {
+            const auto waitUs = static_cast<uint64_t>(nextTick - now);
+            struct timespec ts{static_cast<time_t>(waitUs / 1000000),
+                               static_cast<long>((waitUs % 1000000) * 1000)};
+            nanosleep(&ts, nullptr);
+        }
+    }
+
+    return nullptr;
 }
 
 bool writeParent(mach_port_t task, uint64_t addr, const void* src, size_t size) {
@@ -828,6 +2414,154 @@ bool spawnReceiveThread(mach_port_t servicePort, mach_port_t parentTaskPort) {
         }
     }
     return true;
+}
+
+void samplerConfigFromEnv(SamplerConfig& cfg) {
+    // X87_SAMPLE names the profile and enables the sampler, exactly as
+    // X87_PROFILE does for the block profiler.
+    if (const char* path = getenv("X87_SAMPLE"); path != nullptr && path[0] != '\0') {
+        cfg.path = path;
+    }
+    if (const char* hz = getenv("X87_SAMPLE_HZ")) {
+        const double rate = strtod(hz, nullptr);
+        if (rate > 0) {
+            cfg.interval_us = static_cast<uint64_t>(1e6 / rate);
+        }
+    }
+    if (const char* hz = getenv("X87_SAMPLE_SWEEP_HZ")) {
+        const double rate = strtod(hz, nullptr);
+        if (rate > 0) {
+            cfg.sweep_interval_us = static_cast<uint64_t>(1e6 / rate);
+        }
+    }
+    if (const char* secs = getenv("X87_SAMPLE_REPORT")) {
+        cfg.report_s = strtod(secs, nullptr);
+    }
+    // Defaults ON, so unset and empty both read as on and only an explicit "0"
+    // turns it off, matching every other knob that ships enabled.
+    if (const char* w = getenv("X87_SAMPLE_WINDOWS"); w != nullptr && w[0] != '\0') {
+        cfg.windows = strcmp(w, "0") != 0;
+    }
+    if (env_truthy("X87_NO_UNWIND")) {
+        cfg.unwind = false;
+    }
+    if (const char* range = getenv("X87_GUEST_RANGE")) {
+        const char* dash = strchr(range[0] == '0' && range[1] == 'x' ? range + 2 : range, '-');
+        if (dash != nullptr) {
+            cfg.guest_lo = strtoull(range, nullptr, 0);
+            cfg.guest_hi = strtoull(dash + 1, nullptr, 0);
+            cfg.guest_range_pinned = true;
+        }
+    }
+}
+
+// Delete every <path>.NNNN left by an earlier run.  Scanned rather than counted
+// up from zero, because a previous run may have written more windows than this
+// one will and stopping at the first gap would leave its tail behind.
+void unlinkWindowSeries(const std::string& path) {
+    const size_t slash = path.find_last_of('/');
+    const std::string dir = slash == std::string::npos ? "." : path.substr(0, slash);
+    const std::string stem = slash == std::string::npos ? path : path.substr(slash + 1);
+    DIR* d = opendir(dir.c_str());
+    if (d == nullptr) {
+        return;
+    }
+    while (const struct dirent* e = readdir(d)) {
+        const std::string name = e->d_name;
+        if (name.size() != stem.size() + 5 || name.compare(0, stem.size(), stem) != 0 ||
+            name[stem.size()] != '.') {
+            continue;
+        }
+        if (std::all_of(name.begin() + static_cast<long>(stem.size()) + 1, name.end(),
+                        [](char c) { return c >= '0' && c <= '9'; })) {
+            unlink((dir + "/" + name).c_str());
+        }
+    }
+    closedir(d);
+}
+
+void startSampler(mach_port_t parentTaskPort, uint64_t runtimeBase, const SamplerConfig& in) {
+    if (in.path.empty()) {
+        return;
+    }
+    SamplerConfig cfg = in;
+    // Sweeping every thread faster than the sample rate is never what was
+    // meant: the sweep is the expensive mode and the rate is the cheap one.
+    cfg.sweep_interval_us = std::max(cfg.sweep_interval_us, cfg.interval_us);
+    // Nothing from a previous run may survive into this one: a run that never
+    // latches writes no profile, and the absence has to be the answer rather
+    // than the last run's file still sitting there to be read as this one's.
+    // The windows go too, and matter more: a reader sums the series, so one
+    // stale .NNNN would be added into this run's totals rather than merely
+    // misread, and a shorter run would leave the tail of a longer one behind.
+    unlink(cfg.path.c_str());
+    unlinkWindowSeries(cfg.path);
+    // The target's pid is needed by both threads and pid_for_task only answers
+    // while it is alive, so it is read here, once, before either starts.
+    pid_t targetPid = 0;
+    pid_for_task(parentTaskPort, &targetPid);
+
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+
+    auto* ctx = new SamplerCtx{parentTaskPort, runtimeBase, cfg, 0};
+    ctx->pid = targetPid;
+    pthread_t thr;
+    if (pthread_create(&thr, &attr, samplerMain, ctx) != 0) {
+        delete ctx;
+        fprintf(stdout, "[rosettax87] X87_SAMPLE: sampler thread creation failed\n");
+        pthread_attr_destroy(&attr);
+        return;
+    }
+    g_sampler_running.store(true, std::memory_order_release);
+
+    // The aggregator owns the histograms, the module map and the file.  If it
+    // cannot start there is nothing to write the profile, so the sampler is told
+    // to stop rather than left measuring into a ring nobody drains.
+    auto* agg = new AggCtx{.task = parentTaskPort,
+                           .pid = targetPid,
+                           .runtime_base = runtimeBase,
+                           .path = cfg.path,
+                           .interval_us = cfg.interval_us,
+                           .sweep_interval_us = cfg.sweep_interval_us,
+                           .report_s = cfg.report_s,
+                           .unwind = cfg.unwind,
+                           .range_pinned = cfg.guest_range_pinned,
+                           .windows = cfg.windows};
+    pthread_t aggThr;
+    if (pthread_create(&aggThr, &attr, aggregatorMain, agg) != 0) {
+        delete agg;
+        g_sampler_running.store(false, std::memory_order_release);
+        fprintf(stdout, "[rosettax87] X87_SAMPLE: aggregator thread creation failed\n");
+    }
+    pthread_attr_destroy(&attr);
+}
+
+// Async-signal-safe: an atomic store, nanosleep and write(2).  It is called from
+// a SIGTERM handler as well as from the normal exit path, because the sidecar is
+// usually killed rather than allowed to return from main.
+void flushSamplerIfEnabled() {
+    if (!g_sampler_running.load(std::memory_order_acquire)) {
+        return;
+    }
+    g_sampler_flush_request.store(true, std::memory_order_release);
+    // The sampler notices within one tick; the write itself is a whole-file
+    // rewrite, tens of MB on a long high-rate run.  Bounded so a wedged sampler
+    // cannot hold up exit, and short enough to fit inside the grace period a
+    // process manager gives between SIGTERM and SIGKILL.
+    constexpr int kFlushWaitMs = 3000;
+    for (int i = 0; i < kFlushWaitMs; i++) {
+        if (g_sampler_flush_done.load(std::memory_order_acquire)) {
+            return;
+        }
+        struct timespec ms{0, 1000000};
+        nanosleep(&ms, nullptr);
+    }
+    static constexpr char kLate[] =
+        "[rosettax87] X87_SAMPLE: final write did not finish in time; the profile holds "
+        "everything up to the last report interval only\n";
+    (void)write(STDOUT_FILENO, kLate, sizeof(kLate) - 1);
 }
 
 void dumpCountersIfEnabled(mach_port_t /*parentTaskPort*/) {

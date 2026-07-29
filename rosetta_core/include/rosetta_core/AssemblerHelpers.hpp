@@ -118,8 +118,7 @@ auto emit_ldr_str_reg(AssemblerBuffer& buf, int size, int is_fp, int opc, int Rm
 // LDUR / STUR — signed 9-bit unscaled byte offset, no writeback (GPR only)
 // size: 0=8-bit  1=16-bit  2=32-bit  3=64-bit
 // opc:  0=STUR  1=LDUR
-auto emit_ldur_stur(AssemblerBuffer& buf, int size, int opc, int16_t simm9, int Rn, int Rt)
-    -> void;
+auto emit_ldur_stur(AssemblerBuffer& buf, int size, int opc, int16_t simm9, int Rn, int Rt) -> void;
 
 // LDR GPR immediate — thin wrapper: is_fp=0, opc=1
 auto emit_ldr_imm(AssemblerBuffer& buf, int size, int Rt, int Rn, int16_t imm12) -> void;

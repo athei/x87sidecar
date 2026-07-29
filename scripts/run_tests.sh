@@ -24,6 +24,14 @@
 #   R. replay tests/data/geom_block_874c40.ir under --fpr-pool 8 and
 #      assert the pressure splits keep it on the IR path (fpr_fail=0)
 #
+# Phase 1 doubles as the baseline the other phases are read against.  A
+# case that fails there fails with the sidecar nowhere in the picture, so
+# it is stock Rosetta's and none of our phases can make it pass; a later
+# phase failing only cases Phase 1 also failed is reported XFAIL and does
+# not fail the run, while any case Phase 1 passed still does.  Phase 1
+# itself only gets that latitude for the tests named in
+# KNOWN_STOCK_DIVERGENCE below.
+#
 # Usage:
 #   bash scripts/run_tests.sh                # build + test (all phases)
 #   bash scripts/run_tests.sh --no-build     # skip build
@@ -120,6 +128,7 @@ ALL_TESTS=(
     test_fsin
     test_x87_loop
     test_flags_across_x87
+    test_flags_across_vex
     test_fcos
     test_f2xm1
     test_fpatan
@@ -171,7 +180,48 @@ filter_runtime_lines() {
 TOTAL=0
 PASSED=0
 FAILED=0
+XFAILED=0
 ERRORS=0
+
+# ── Stock-divergence baseline ────────────────────────────────────────────
+# Phase 1 is native Rosetta with the sidecar nowhere in the picture, so a
+# case that fails there is stock's and no phase of ours can make it pass.
+# Its FAIL lines are recorded per test and every later phase is read
+# against them: a failure whose lines all appear in the baseline is
+# reported XFAIL and does not gate, while a line the baseline does not
+# have is ours and fails as before.  Whole lines are compared, values
+# included, so the same case failing differently under the sidecar still
+# gates.
+#
+# Phase 1 itself has to allow a divergence by name.  Only the tests listed
+# here may fail there without failing the run; anything else is a broken
+# test or a broken machine and should stop the run as it always did.
+KNOWN_STOCK_DIVERGENCE=(
+    # A `sub`'s CF read wrong by a later `sbb` across a VEX/BMI2 filling,
+    # which is the field case the test was written to pin rather than
+    # something it asserts is fixed.  Reproduces on the macos-26-arm64 CI
+    # runner in every phase including native, and on no M5 Max seen so
+    # far, so it is stock Rosetta's and it is hardware-dependent.
+    test_flags_across_vex
+)
+
+STOCK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/x87sidecar-stock.XXXXXX")"
+trap 'rm -rf "$STOCK_DIR"' EXIT
+
+# 1 only while Phase 1 runs; every later phase reads what it recorded.
+BASELINE_PHASE=0
+
+fail_lines() {
+    grep -E 'FAIL' <<<"$1" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'
+}
+
+is_known_divergence() {
+    local t
+    for t in "${KNOWN_STOCK_DIVERGENCE[@]}"; do
+        [[ "$t" == "$1" ]] && return 0
+    done
+    return 1
+}
 
 check_output() {
     local name="$1"
@@ -184,9 +234,36 @@ check_output() {
     # reported NO-PASS (seen as the flaky CI failure). Same reason the FAIL
     # excerpt uses awk instead of `grep | head`.
     if grep -qE 'FAIL' <<<"$out"; then
+        local lines new count
+        lines=$(fail_lines "$out")
+        count=$(wc -l <<<"$lines" | tr -d ' ')
+        [[ "$count" -eq 1 ]] && count="1 case" || count="$count cases"
+        if [[ $BASELINE_PHASE -eq 1 ]]; then
+            printf '%s\n' "$lines" >"$STOCK_DIR/$name"
+            if is_known_divergence "$name"; then
+                echo -e "${YELLOW}XFAIL${NC} $name  (stock divergence, $count)"
+                XFAILED=$((XFAILED + 1))
+            else
+                echo -e "${RED}FAIL${NC}  $name"
+                FAILED=$((FAILED + 1))
+            fi
+            awk '++n <= 10 { print "      " $0 }' <<<"$lines"
+            return 0
+        fi
+        new="$lines"
+        if [[ -f "$STOCK_DIR/$name" ]]; then
+            new=$(grep -Fxv -f "$STOCK_DIR/$name" <<<"$lines" || true)
+        fi
+        if [[ -z "$new" ]]; then
+            echo -e "${YELLOW}XFAIL${NC} $name  (stock divergence, $count, none new)"
+            XFAILED=$((XFAILED + 1))
+            return 0
+        fi
         echo -e "${RED}FAIL${NC}  $name"
         FAILED=$((FAILED + 1))
-        awk '/FAIL/ && ++n <= 10 { print "      " $0 }' <<<"$out"
+        # Only the lines stock does not have: those are the ones that are ours.
+        awk '++n <= 10 { print "      " $0 }' <<<"$new"
+        return 0
     elif [[ "$exit_code" -ne 0 ]]; then
         # Silent crash — test exited non-zero with no FAIL line.
         echo -e "${RED}CRASH${NC} $name  (exit=$exit_code)"
@@ -206,6 +283,7 @@ check_output() {
 # ── Phase 1: native Rosetta ───────────────────────────────────────────────────
 echo -e "${BOLD}=== Phase 1: native Rosetta ===${NC}"
 
+BASELINE_PHASE=1
 for t in "${TESTS[@]}"; do
     BINARY="$TESTS_BIN/$t"
     if [[ ! -x "$BINARY" ]]; then
@@ -217,6 +295,7 @@ for t in "${TESTS[@]}"; do
     OUT=$("$BINARY" 2>/dev/null) || EXIT=$?
     check_output "$t" "$OUT" "$EXIT"
 done
+BASELINE_PHASE=0
 
 # ── Phase 2: x87sidecar ───────────────────────────────────────────────────
 # pipefail (set -o pipefail above) makes the pipe inherit the loader's
@@ -488,7 +567,7 @@ fi
 
 echo ""
 echo "================================================================"
-echo -e "Results: ${GREEN}${PASSED} passed${NC}, ${RED}${FAILED} failed${NC}, ${YELLOW}${ERRORS} skipped${NC} / ${TOTAL} total"
+echo -e "Results: ${GREEN}${PASSED} passed${NC}, ${RED}${FAILED} failed${NC}, ${YELLOW}${XFAILED} stock divergences${NC}, ${YELLOW}${ERRORS} skipped${NC} / ${TOTAL} total"
 
 if [[ $FAILED -gt 0 ]]; then
     exit 1

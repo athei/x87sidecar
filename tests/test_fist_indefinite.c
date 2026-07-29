@@ -47,8 +47,8 @@ static void check_i32(const char* name, int32_t got, int32_t expected) {
 
 static void check_i64(const char* name, int64_t got, int64_t expected) {
     if (got != expected) {
-        printf("FAIL  %-52s  got=0x%016llx  expected=0x%016llx\n", name,
-               (unsigned long long)got, (unsigned long long)expected);
+        printf("FAIL  %-52s  got=0x%016llx  expected=0x%016llx\n", name, (unsigned long long)got,
+               (unsigned long long)expected);
         failures++;
     } else {
         printf("PASS  %s\n", name);
@@ -126,8 +126,7 @@ static void fistp_i32_x2(double a, double b, int32_t* ra, int32_t* rb) {
         : "m"(b), "m"(a));
 }
 
-static void fistp_mixed_sizes(double a, double b, double c, int16_t* ra, int32_t* rb,
-                              int64_t* rc) {
+static void fistp_mixed_sizes(double a, double b, double c, int16_t* ra, int32_t* rb, int64_t* rc) {
     __asm__ volatile(
         "fldl  %3\n\t"
         "fldl  %4\n\t"
@@ -157,8 +156,7 @@ int main(void) {
 
     /* ── m32 ─────────────────────────────────────────────────────────────── */
     check_i32("fistp i32  NaN → indefinite", fistp_i32(qnan), INDEF32);
-    check_i32("fistp i32  2^40 → indefinite (not INT_MAX)", fistp_i32(1099511627776.0),
-              INDEF32);
+    check_i32("fistp i32  2^40 → indefinite (not INT_MAX)", fistp_i32(1099511627776.0), INDEF32);
     check_i32("fistp i32  -2^40 → indefinite", fistp_i32(-1099511627776.0), INDEF32);
     check_i32("fistp i32  2147483647.0 in range", fistp_i32(2147483647.0), 2147483647);
     check_i32("fistp i32  -2147483648.0 in range", fistp_i32(-2147483648.0), INT32_MIN);
@@ -171,8 +169,7 @@ int main(void) {
     check_i64("fistp i64  -2^63 in range (== indefinite bits)", fistp_i64(-9223372036854775808.0),
               INT64_MIN);
     check_i64("fistp i64  2^63-1024 in range", fistp_i64(below_2p63), 9223372036854774784LL);
-    check_i64("fistp i64  2^62 in range", fistp_i64(4611686018427387904.0),
-              4611686018427387904LL);
+    check_i64("fistp i64  2^62 in range", fistp_i64(4611686018427387904.0), 4611686018427387904LL);
 
     /* ── Post-rounding boundary: fits under some RC modes only ───────────── */
     set_cw(CW_NEAREST); /* 32767.5 → 32768 (ties-to-even) → overflow */
@@ -201,12 +198,10 @@ int main(void) {
     check_i16("fisttp i16  32767.9 → 32767", fisttp_i16(32767.9), 32767);
     check_i32("fisttp i32  NaN → indefinite", fisttp_i32(qnan), INDEF32);
     check_i32("fisttp i32  2^40 → indefinite", fisttp_i32(1099511627776.0), INDEF32);
-    check_i32("fisttp i32  2147483647.5 → INT_MAX (trunc)", fisttp_i32(2147483647.5),
-              2147483647);
+    check_i32("fisttp i32  2147483647.5 → INT_MAX (trunc)", fisttp_i32(2147483647.5), 2147483647);
     check_i64("fisttp i64  NaN → indefinite", fisttp_i64(qnan), INDEF64);
     check_i64("fisttp i64  2^63 → indefinite", fisttp_i64(9223372036854775808.0), INDEF64);
-    check_i64("fisttp i64  2^63-1024 in range", fisttp_i64(below_2p63),
-              9223372036854774784LL);
+    check_i64("fisttp i64  2^63-1024 in range", fisttp_i64(below_2p63), 9223372036854774784LL);
 
     /* ── FIST (non-popping) ──────────────────────────────────────────────── */
     {

@@ -380,8 +380,7 @@ static void emit_rcmode_dispatch(AssemblerBuffer& buf, int Wd_int, int Dd_val, i
 // Non-flag-setting ALU, register form, for BridgeAlu* lowering:
 // Rd = Rn <kind> Rm.  Never ADDS/SUBS/ANDS — bridged runs must not write
 // NZCV (see the BridgeAlu* comment in X87IR.h).
-static void emit_bridge_alu_reg(AssemblerBuffer& buf, int is64, int kind, int Rn, int Rm,
-                                int Rd) {
+static void emit_bridge_alu_reg(AssemblerBuffer& buf, int is64, int kind, int Rn, int Rm, int Rd) {
     switch (kind) {
         case kBridgeAluAdd:
             emit_add_sub_shifted_reg(buf, is64, /*is_sub=*/0, /*is_set_flags=*/0,
@@ -392,16 +391,16 @@ static void emit_bridge_alu_reg(AssemblerBuffer& buf, int is64, int kind, int Rn
                                      /*shift_type=*/0, Rm, 0, Rn, Rd);
             break;
         case kBridgeAluAnd:
-            emit_logical_shifted_reg(buf, is64, /*opc=AND*/ 0, /*n=*/0, /*shift_type=*/0, Rm,
-                                     0, Rn, Rd);
+            emit_logical_shifted_reg(buf, is64, /*opc=AND*/ 0, /*n=*/0, /*shift_type=*/0, Rm, 0, Rn,
+                                     Rd);
             break;
         case kBridgeAluOr:
-            emit_logical_shifted_reg(buf, is64, /*opc=ORR*/ 1, /*n=*/0, /*shift_type=*/0, Rm,
-                                     0, Rn, Rd);
+            emit_logical_shifted_reg(buf, is64, /*opc=ORR*/ 1, /*n=*/0, /*shift_type=*/0, Rm, 0, Rn,
+                                     Rd);
             break;
         case kBridgeAluXor:
-            emit_logical_shifted_reg(buf, is64, /*opc=EOR*/ 2, /*n=*/0, /*shift_type=*/0, Rm,
-                                     0, Rn, Rd);
+            emit_logical_shifted_reg(buf, is64, /*opc=EOR*/ 2, /*n=*/0, /*shift_type=*/0, Rm, 0, Rn,
+                                     Rd);
             break;
         default:
             assert(false && "BridgeAlu*: invalid kind");
@@ -1258,8 +1257,7 @@ void lower(Context& ctx, TranslationResult* result) {
             }
             case Op::BridgeMovRI: {
                 const int is64 = (n.flags & kBridge64) ? 1 : 0;
-                const uint64_t value =
-                    is64 ? n.imm_bits : (n.imm_bits & 0xFFFFFFFFULL);
+                const uint64_t value = is64 ? n.imm_bits : (n.imm_bits & 0xFFFFFFFFULL);
                 emit_load_immediate_no_xzr(*result, is64, value, bridge_decode_reg(n.inputs[0]));
                 break;
             }
@@ -1267,8 +1265,8 @@ void lower(Context& ctx, TranslationResult* result) {
                 const int is64 = (n.flags & kBridge64) ? 1 : 0;
                 const int dst = bridge_decode_reg(n.inputs[0]);
                 // lea never dereferences: the computed address IS the value.
-                const int addr = compute_operand_address(*result, /*is_64bit=*/true,
-                                                         n.mem_operand, dst);
+                const int addr =
+                    compute_operand_address(*result, /*is_64bit=*/true, n.mem_operand, dst);
                 if (addr != dst || !is64) {
                     // Copy into the guest register; the W-form also performs
                     // the 32-bit lea's zero-extending truncation.
@@ -1281,8 +1279,8 @@ void lower(Context& ctx, TranslationResult* result) {
             }
             case Op::BridgeLoadG: {
                 const int is64 = (n.flags & kBridge64) ? 1 : 0;
-                const int addr = compute_operand_address(*result, /*is_64bit=*/true,
-                                                         n.mem_operand, GPR::XZR);
+                const int addr =
+                    compute_operand_address(*result, /*is_64bit=*/true, n.mem_operand, GPR::XZR);
                 emit_ldr_str_imm(buf, /*size=*/is64 ? 3 : 2, /*is_fp=*/0, /*LDR*/ 1,
                                  /*imm12=*/0, addr, bridge_decode_reg(n.inputs[0]));
                 free_gpr(*result, addr);
@@ -1290,8 +1288,8 @@ void lower(Context& ctx, TranslationResult* result) {
             }
             case Op::BridgeStoreG: {
                 const int is64 = (n.flags & kBridge64) ? 1 : 0;
-                const int addr = compute_operand_address(*result, /*is_64bit=*/true,
-                                                         n.mem_operand, GPR::XZR);
+                const int addr =
+                    compute_operand_address(*result, /*is_64bit=*/true, n.mem_operand, GPR::XZR);
                 emit_ldr_str_imm(buf, /*size=*/is64 ? 3 : 2, /*is_fp=*/0, /*STR*/ 0,
                                  /*imm12=*/0, addr, bridge_decode_reg(n.inputs[0]));
                 free_gpr(*result, addr);
@@ -1308,13 +1306,12 @@ void lower(Context& ctx, TranslationResult* result) {
                     // movzx: UBFX W-form — the W-write zeroes bits [63:32]
                     // too, so one encoding covers both r32 and r64 dsts.
                     emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/2 /*UBFM*/, /*N=*/0,
-                                  static_cast<int8_t>(lsb),
-                                  static_cast<int8_t>(lsb + width - 1), src, dst);
+                                  static_cast<int8_t>(lsb), static_cast<int8_t>(lsb + width - 1),
+                                  src, dst);
                 } else {
                     // movsx/movsxd: SBFX to the dst width (SXTB/SXTH/SXTW).
                     const int sf = (n.flags & kBridge64) ? 1 : 0;
-                    emit_bitfield(buf, sf, /*opc=*/0 /*SBFM*/, /*N=*/sf,
-                                  static_cast<int8_t>(lsb),
+                    emit_bitfield(buf, sf, /*opc=*/0 /*SBFM*/, /*N=*/sf, static_cast<int8_t>(lsb),
                                   static_cast<int8_t>(lsb + width - 1), src, dst);
                 }
                 break;
@@ -1337,8 +1334,7 @@ void lower(Context& ctx, TranslationResult* result) {
                 const int dst = bridge_decode_reg(n.inputs[0]);
                 const int kind = bridge_decode_reg(n.inputs[2]);
                 const int64_t sv = static_cast<int64_t>(n.imm_bits);
-                if ((kind == kBridgeAluAdd || kind == kBridgeAluSub) && sv > -4096 &&
-                    sv < 4096) {
+                if ((kind == kBridgeAluAdd || kind == kBridgeAluSub) && sv > -4096 && sv < 4096) {
                     // Direct imm12 form; a negative immediate flips ADD<->SUB
                     // (identical mod-2^32 wrapping in the W form).
                     const int neg = sv < 0;
@@ -1357,21 +1353,20 @@ void lower(Context& ctx, TranslationResult* result) {
             case Op::BridgeAluRM: {
                 const int is64 = (n.flags & kBridge64) ? 1 : 0;
                 const int dst = bridge_decode_reg(n.inputs[0]);
-                const int addr = compute_operand_address(*result, /*is_64bit=*/true,
-                                                         n.mem_operand, GPR::XZR);
+                const int addr =
+                    compute_operand_address(*result, /*is_64bit=*/true, n.mem_operand, GPR::XZR);
                 const int scratch = alloc_free_gpr(*result);
                 emit_ldr_str_imm(buf, /*size=*/is64 ? 3 : 2, /*is_fp=*/0, /*LDR*/ 1,
                                  /*imm12=*/0, addr, scratch);
-                emit_bridge_alu_reg(buf, is64, bridge_decode_reg(n.inputs[2]), dst, scratch,
-                                    dst);
+                emit_bridge_alu_reg(buf, is64, bridge_decode_reg(n.inputs[2]), dst, scratch, dst);
                 free_gpr(*result, scratch);
                 free_gpr(*result, addr);
                 break;
             }
             case Op::BridgeAluMR: {
                 const int is64 = (n.flags & kBridge64) ? 1 : 0;
-                const int addr = compute_operand_address(*result, /*is_64bit=*/true,
-                                                         n.mem_operand, GPR::XZR);
+                const int addr =
+                    compute_operand_address(*result, /*is_64bit=*/true, n.mem_operand, GPR::XZR);
                 const int scratch = alloc_free_gpr(*result);
                 emit_ldr_str_imm(buf, /*size=*/is64 ? 3 : 2, /*is_fp=*/0, /*LDR*/ 1,
                                  /*imm12=*/0, addr, scratch);
@@ -1947,8 +1942,8 @@ int peak_live_fprs(const Context& ctx, int budget, int* first_over_node) {
             int spike = 1;  // Ds_narrow
             int k = i;
             while (k <= jj) {
-                if (k + 3 <= jj && can_emit_str_q(ctx.nodes[k], ctx.nodes[k + 1],
-                                                  ctx.nodes[k + 2], ctx.nodes[k + 3])) {
+                if (k + 3 <= jj && can_emit_str_q(ctx.nodes[k], ctx.nodes[k + 1], ctx.nodes[k + 2],
+                                                  ctx.nodes[k + 3])) {
                     spike = 2;  // + Vq_broadcast
                     break;
                 }
@@ -2091,8 +2086,7 @@ static bool insert_clone_at(Context& ctx, int src, int pos) {
         return false;
     }
     const int n = ctx.num_nodes;
-    std::memmove(&ctx.nodes[pos + 1], &ctx.nodes[pos],
-                 static_cast<size_t>(n - pos) * sizeof(Node));
+    std::memmove(&ctx.nodes[pos + 1], &ctx.nodes[pos], static_cast<size_t>(n - pos) * sizeof(Node));
     std::memmove(&ctx.node_src[pos + 1], &ctx.node_src[pos],
                  static_cast<size_t>(n - pos) * sizeof(int16_t));
     ctx.num_nodes = static_cast<int16_t>(n + 1);
@@ -2181,8 +2175,8 @@ static bool remat_relieve_fpr_pressure(Context& ctx, int budget) {
             if (hn.flags != kNone || slot_live[h]) {
                 continue;
             }
-            const bool is_const = hn.op == Op::ConstZero || hn.op == Op::ConstOne ||
-                                  hn.op == Op::ConstF64;
+            const bool is_const =
+                hn.op == Op::ConstZero || hn.op == Op::ConstOne || hn.op == Op::ConstF64;
             const bool is_load = hn.op == Op::LoadF32 || hn.op == Op::LoadF64;
             if (!is_const && !is_load) {
                 continue;
@@ -2411,8 +2405,8 @@ int compile_run(TranslationResult* result, IRInstr* instr_array, int64_t num_ins
                 *out_reason = IRFailReason::kFprPressure;
             }
             if (out_peak_gprs) {
-                *out_peak_gprs = peak_live_gprs(ctx, 0x7FFFFFFF, nullptr,
-                                                x87_fast_round_active(*result));
+                *out_peak_gprs =
+                    peak_live_gprs(ctx, 0x7FFFFFFF, nullptr, x87_fast_round_active(*result));
             }
             return 0;
         }

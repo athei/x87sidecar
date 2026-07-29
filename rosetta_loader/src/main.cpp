@@ -28,6 +28,7 @@
 #include <vector>
 
 #include "coop_proto.h"
+#include "dyld_process_info.hpp"
 #include "mach_exception.hpp"
 #include "offset_finder.hpp"
 #include "rosetta_core/Config.h"
@@ -100,16 +101,6 @@ static bool xnuBuildAtLeast(const int* threshold, size_t nThreshold, bool fallba
 // kernels need the classic detach().
 static const int kGoldenGateXnuBuild[] = {13432, 0, 94, 501, 4};
 
-using DyldProcessInfo = struct dyld_process_info_base*;
-
-extern "C" DyldProcessInfo _dyld_process_info_create(task_t task, uint64_t timestamp,
-                                                     kern_return_t* kernelError);
-extern "C" void _dyld_process_info_for_each_image(DyldProcessInfo info,
-                                                  void (^callback)(uint64_t machHeaderAddress,
-                                                                   const uuid_t uuid,
-                                                                   const char* path));
-extern "C" void _dyld_process_info_release(DyldProcessInfo info);
-
 // bootstrap_register2 is a private libSystem symbol (the non-deprecated way to
 // publish a dynamic service name). It isn't in <servers/bootstrap.h>, so declare
 // it like wine's server/mach.c does.
@@ -122,6 +113,7 @@ private:
 
     pid_t childPid_ = -1;
     task_t taskPort_ = MACH_PORT_NULL;
+    thread_t handshakeThread_ = MACH_PORT_NULL;
     std::map<uint64_t, uint32_t> breakpoints_;  // addr -> original instruction
 
     // Debug events arrive as Mach exception messages on a port we own (see
@@ -203,10 +195,19 @@ public:
         if (taskPort_ != MACH_PORT_NULL) {
             mach_port_deallocate(mach_task_self(), taskPort_);
         }
+        if (handshakeThread_ != MACH_PORT_NULL) {
+            mach_port_deallocate(mach_task_self(), handshakeThread_);
+        }
     }
 
     [[nodiscard]] task_t taskPort() const { return taskPort_; }
     [[nodiscard]] mach_port_t stoppedThread() const { return lastEvent_.thread; }
+
+    // Cooperative mode only: the control port of the tracee thread that
+    // performed the handshake (wine's unix-loader startup thread). Held for the
+    // sidecar's lifetime alongside taskPort_. MACH_PORT_NULL under the default
+    // attach, which never receives one.
+    [[nodiscard]] thread_t handshakeThread() const { return handshakeThread_; }
 
     // Arm/disarm the thread-level EXC_BREAKPOINT catcher on the currently
     // stopped thread — the one that will execute (and later re-execute) the
@@ -217,13 +218,15 @@ public:
     void disarmThreadBreakpoint() { exc_.removeThreadBreakpoint(); }
 
     // ── Cooperative mode (no task_for_pid / no ptrace) ──────────────────────
-    // Adopt a task port the tracee voluntarily handed over via the bootstrap
-    // handshake. Takes ownership of the send right (released by ~MuhDebugger).
-    // No ptrace attach, no exec-stop: the tracee is already running and is held
-    // quiescent by blocking in the handshake until we reply.
-    bool adopt(pid_t pid, task_t task) {
+    // Adopt the task and thread ports the tracee voluntarily handed over via
+    // the bootstrap handshake. Both arrive as COPY_SEND, so we own both send
+    // rights; ~MuhDebugger releases them. No ptrace attach, no exec-stop: the
+    // tracee is already running and is held quiescent by blocking in the
+    // handshake until we reply.
+    bool adopt(pid_t pid, task_t task, thread_t handshakeThread) {
         childPid_ = pid;
         taskPort_ = task;
+        handshakeThread_ = handshakeThread;
         return exc_.initPortOnly(pid, task);
     }
 
@@ -768,7 +771,8 @@ public:
         // after writing to a tracee. Best-effort: a failure only regresses to
         // the old behaviour, so log and continue.
         vm_machine_attribute_val_t flush = MATTR_VAL_ICACHE_FLUSH;
-        kern_return_t fkr = mach_vm_machine_attribute(taskPort_, address, size, MATTR_CACHE, &flush);
+        kern_return_t fkr =
+            mach_vm_machine_attribute(taskPort_, address, size, MATTR_CACHE, &flush);
         if (fkr != KERN_SUCCESS) {
             fprintf(stdout, "Warning: i-cache flush at 0x%llx failed (error 0x%x: %s)\n", address,
                     fkr, mach_error_string(fkr));
@@ -897,10 +901,23 @@ static void print_loader_usage(const char* prog) {
         "  --cooperative  attach via a voluntary task-port handshake instead of\n"
         "                 task_for_pid + ptrace. The target must hand over its\n"
         "                 task port over the bootstrap service named in the\n"
-        "                 " X87_COOP_ENV " env var (set automatically). Needs no\n"
+        "                 " X87_COOP_ENV
+        " env var (set automatically). Needs no\n"
         "                 get-task-allow entitlement, so the binary is notarizable.\n"
         "                 Non-cooperative targets keep using the default path.\n"
         "  --help         print this message and exit\n"
+        "\n"
+        "Sampling profiler (see also the X87_SAMPLE* variables below, which win\n"
+        "over these flags so an app bundle can enable it without touching argv):\n"
+        "  --sample=<file>       write a guest-pc sample profile here; enables it\n"
+        "  --sample-hz=<rate>    sample rate for the latched thread, default 1000\n"
+        "  --sweep-hz=<rate>     rate at which every thread is swept while\n"
+        "                        looking for one to latch onto, default 1000;\n"
+        "                        never faster than --sample-hz\n"
+        "  --guest-range=<lo-hi> pin the guest pcs that mark the thread worth\n"
+        "                        profiling; by default the guest's main image is\n"
+        "                        found (PE or Mach-O) and its range used\n"
+        "  --no-unwind           record leaf pcs only, skip the guest stack walk\n"
         "\n"
         "All other configuration is via environment variables:\n"
         "\n",
@@ -908,11 +925,33 @@ static void print_loader_usage(const char* prog) {
     print_env_help(stdout);
 }
 
+// The sidecar rarely gets to return from main: whatever supervises the game
+// usually kills it once the tracee is gone, so the kqueue NOTE_EXIT path loses
+// the race.  Catch the terminating signals and let the sampler write what it has
+// before going, which is otherwise up to a whole report interval of samples.
+// SIGKILL cannot be caught, which is why the report interval still has to be
+// short enough that losing one is cheap.
+extern "C" void sampler_exit_signal(int sig) {
+    sidecar::flushSamplerIfEnabled();
+    _exit(128 + sig);
+}
+
+static void installSamplerExitSignals(const sidecar::SamplerConfig& cfg) {
+    if (cfg.path.empty()) {
+        return;
+    }
+    struct sigaction sa{};
+    sa.sa_handler = sampler_exit_signal;
+    sigemptyset(&sa.sa_mask);
+    for (const int sig : {SIGTERM, SIGINT, SIGHUP}) {
+        sigaction(sig, &sa, nullptr);
+    }
+}
+
 // Cooperative-mode bootstrap service name: "x87sidecar.<tracee-pid>".
 static std::string coop_service_name(pid_t pid) {
     return std::string("x87sidecar.") + std::to_string(pid);
 }
-
 
 int main(int argc, char* argv[]) try {
     int argi = 1;
@@ -925,6 +964,38 @@ int main(int argc, char* argv[]) try {
         cooperative = true;
         ++argi;
     }
+    // Sampling profiler options; X87_SAMPLE and friends override these below.
+    sidecar::SamplerConfig samplerCfg;
+    while (argi < argc) {
+        const std::string_view arg{argv[argi]};
+        if (arg.starts_with("--sample-hz=")) {
+            const double hz = strtod(std::string(arg.substr(12)).c_str(), nullptr);
+            if (hz > 0) {
+                samplerCfg.interval_us = static_cast<uint64_t>(1e6 / hz);
+            }
+        } else if (arg.starts_with("--sweep-hz=")) {
+            const double hz = strtod(std::string(arg.substr(11)).c_str(), nullptr);
+            if (hz > 0) {
+                samplerCfg.sweep_interval_us = static_cast<uint64_t>(1e6 / hz);
+            }
+        } else if (arg.starts_with("--sample=")) {
+            samplerCfg.path = std::string(arg.substr(9));
+        } else if (arg == "--no-unwind") {
+            samplerCfg.unwind = false;
+        } else if (arg.starts_with("--guest-range=")) {
+            const std::string spec{arg.substr(14)};
+            const size_t dash = spec.find('-', spec[0] == '0' && spec[1] == 'x' ? 2 : 0);
+            if (dash != std::string::npos) {
+                samplerCfg.guest_lo = strtoull(spec.substr(0, dash).c_str(), nullptr, 0);
+                samplerCfg.guest_hi = strtoull(spec.substr(dash + 1).c_str(), nullptr, 0);
+                samplerCfg.guest_range_pinned = true;
+            }
+        } else {
+            break;
+        }
+        ++argi;
+    }
+
     if (argi >= argc) {
         std::fprintf(stderr, "%s: missing <program> argument (try --help)\n", argv[0]);
         return 2;
@@ -1013,8 +1084,7 @@ int main(int argc, char* argv[]) try {
         task_get_bootstrap_port(mach_task_self(), &bootstrapPort);
         mach_port_t servicePort = MACH_PORT_NULL;
         mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &servicePort);
-        mach_port_insert_right(mach_task_self(), servicePort, servicePort,
-                               MACH_MSG_TYPE_MAKE_SEND);
+        mach_port_insert_right(mach_task_self(), servicePort, servicePort, MACH_MSG_TYPE_MAKE_SEND);
         kern_return_t kr =
             bootstrap_register2(bootstrapPort, const_cast<char*>(coopName.c_str()), servicePort, 0);
         if (kr != KERN_SUCCESS) {
@@ -1035,10 +1105,11 @@ int main(int argc, char* argv[]) try {
             return 1;
         }
         task_t traceeTask = rcv.req.task_port.name;
+        thread_t traceeThread = rcv.req.thread_port.name;
         coopReplyPort = rcv.req.header.msgh_remote_port;
         VERBOSE_LOG("[rosettax87] cooperative attach: task=0x%x thread=0x%x reply=0x%x\n",
-                    traceeTask, rcv.req.thread_port.name, coopReplyPort);
-        if (!dbg.adopt(parentPid, traceeTask)) {
+                    traceeTask, traceeThread, coopReplyPort);
+        if (!dbg.adopt(parentPid, traceeTask, traceeThread)) {
             return 1;
         }
         needsInitBarrier = false;  // cooperative attaches post-init; oah already mapped
@@ -1780,6 +1851,10 @@ int main(int argc, char* argv[]) try {
             fprintf(stdout, "M2: failed to spawn receive thread\n");
             return 1;
         }
+        // Env wins over the flags: an app bundle can set variables but not argv.
+        sidecar::samplerConfigFromEnv(samplerCfg);
+        sidecar::startSampler(parentTaskPort, runtimeBase, samplerCfg);
+        installSamplerExitSignals(samplerCfg);
         VERBOSE_LOG("M2: receive thread running; entering kqueue wait\n");
 
         // Self-test: send a tickle message from this process to our own
@@ -1811,6 +1886,9 @@ int main(int argc, char* argv[]) try {
         // mach_vm_read still works against the held task-port send-right.
         // Use it to pull X87_PROFILE counters back into the .prof file.
         sidecar::dumpCountersIfEnabled(dbg.taskPort());
+        // The sampler thread is detached, so returning from main would kill it
+        // mid-interval and throw away everything since its last report.
+        sidecar::flushSamplerIfEnabled();
         close(kq);
     }
 

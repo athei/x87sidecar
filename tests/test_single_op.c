@@ -81,8 +81,7 @@ static void test_single_fld_m32(void) {
     __asm__ volatile(".byte 0xDB, 0xE3"); /* FNINIT */
     float src = 1.5f;
 
-    __asm__ volatile(FENCE
-                     "flds %0\n\t" /* isolated: run == 1 */
+    __asm__ volatile(FENCE "flds %0\n\t" /* isolated: run == 1 */
                      FENCE
                      :
                      : "m"(src)
@@ -96,8 +95,7 @@ static void test_single_fld_m32(void) {
     check_eq16("fld m32: TW (slot7 valid)", env_tw(env), 0x3FFF);
 
     double result = 0.0;
-    __asm__ volatile(FENCE
-                     "fstpl %0\n\t" /* isolated: run == 1 */
+    __asm__ volatile(FENCE "fstpl %0\n\t" /* isolated: run == 1 */
                      FENCE
                      : "=m"(result)
                      :
@@ -117,11 +115,7 @@ static void test_single_fld_fstp_m64(void) {
     double src = 3.14159265358979311600; /* 0x400921FB54442D18 */
     double result = 0.0;
 
-    __asm__ volatile(FENCE
-                     "fldl %1\n\t"
-                     FENCE
-                     "fstpl %0\n\t"
-                     FENCE
+    __asm__ volatile(FENCE "fldl %1\n\t" FENCE "fstpl %0\n\t" FENCE
                      : "=m"(result)
                      : "m"(src)
                      : "ecx", "memory");
@@ -134,15 +128,9 @@ static void test_single_fst_m32(void) {
     double src = 3.14159265358979311600;
     float narrowed = 0.0f;
 
-    __asm__ volatile(FENCE
-                     "fldl %0\n\t"
-                     FENCE
-                     :
-                     : "m"(src)
-                     : "ecx", "memory");
+    __asm__ volatile(FENCE "fldl %0\n\t" FENCE : : "m"(src) : "ecx", "memory");
 
-    __asm__ volatile(FENCE
-                     "fsts %0\n\t" /* isolated non-popping store */
+    __asm__ volatile(FENCE "fsts %0\n\t" /* isolated non-popping store */
                      FENCE
                      : "=m"(narrowed)
                      :

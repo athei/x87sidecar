@@ -207,8 +207,7 @@ int main(int argc, char** argv) try {
 
     std::printf("instrs=%zu fpr_pool=%s gpr_pool=%s split=%s\n", instrs.size(),
                 fpr_pool > 0 ? std::to_string(fpr_pool).c_str() : "full",
-                gpr_pool > 0 ? std::to_string(gpr_pool).c_str() : "full",
-                no_split ? "off" : "on");
+                gpr_pool > 0 ? std::to_string(gpr_pool).c_str() : "full", no_split ? "off" : "on");
     std::printf("arm_words,%zu\n", s.arm_words);
     std::printf("ir,%u\n", s.tally_ir);
     std::printf("peep,%u\n", s.tally_peep);
