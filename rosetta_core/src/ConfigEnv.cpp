@@ -268,6 +268,8 @@ RosettaConfig load_config_from_env() {
     cfg.loader_log_ops = env_truthy("X87_LOG_OPS") ? 1 : 0;
     cfg.loader_log_throughput = env_truthy("X87_LOG_THROUGHPUT") ? 1 : 0;
     cfg.loader_dump_emit = env_truthy("X87_DUMP_EMIT") ? 1 : 0;
+    cfg.loader_no_tco_cache = env_truthy("X87_NO_TCO_CACHE") ? 1 : 0;
+    cfg.loader_no_ir_cache = env_truthy("X87_NO_IR_CACHE") ? 1 : 0;
 
     if (const char* p = std::getenv("X87_PROFILE"); p != nullptr && p[0] != '\0') {
         cfg.profile_path = p;
@@ -303,6 +305,12 @@ void print_env_help(std::FILE* out) {
         "                                req/s every 2 s + an idle-transition line.\n"
         "                                Off by default; enable when telling 'stuck'\n"
         "                                apart from 'just slow' on long workloads.\n"
+        "  X87_NO_TCO_CACHE=1            disable the ThreadContextOffsets cache;\n"
+        "                                re-read the struct from the tracee on every\n"
+        "                                request (A/B / bisect hatch)\n"
+        "  X87_NO_IR_CACHE=1             disable the per-block IR array cache;\n"
+        "                                re-read the full IR array from the tracee on\n"
+        "                                every request (A/B / bisect hatch)\n"
         "  X87_DISABLE_CACHE=1           drop the cross-instruction GPR cache\n"
         "  X87_FAST_ROUND=1              skip RC dispatch; always emit FCVTNS/FRINTN\n"
         "                                (round-to-nearest only — UNSAFE for code that\n"

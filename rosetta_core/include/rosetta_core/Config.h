@@ -211,6 +211,14 @@ struct RosettaConfig {
                                     //                  bad encoding can be found by
                                     //                  disassembling the dump offline.
                                     //                  EXTREMELY high volume.
+    uint8_t loader_no_tco_cache;    // X87_NO_TCO_CACHE  disable the per-pointer
+                                    //                  ThreadContextOffsets cache; re-read the
+                                    //                  24-byte struct from the tracee on every
+                                    //                  request (pre-optimization behaviour).
+    uint8_t loader_no_ir_cache;     // X87_NO_IR_CACHE  disable the per-block IR array cache;
+                                    //                  re-read the full 80 B x num_instrs IR
+                                    //                  array from the tracee on every request
+                                    //                  (pre-optimization behaviour).
 
     // X87_PROFILE=<path>  When non-empty, sidecar appends a binary
     // record per first-seen IRBlock to this file (full IR stream).

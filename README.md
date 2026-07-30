@@ -55,7 +55,7 @@ So the fix is to keep all of our ARM64 code out of the Rosetta'd process entirel
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
-This is not free. Every cold-translated x87 block now pays a Mach IPC round-trip plus 4-6 `mach_vm_read` / `mach_vm_write` syscalls (for the IR buffer, insn buffer, and translation-result struct) that the in-process dylib didn't pay. Once stock has installed the ARM64 bytes the sidecar is off the hot path, so steady-state execution speed is unaffected, but cold translation is slower than it used to be. Profile counters are already `mach_vm_remap`'d (copy=FALSE) so JIT-emitted `LDADDAL` on a parent VA hits the same backing page the sidecar reads; doing the same for the IR / insn / TR buffers is a planned change to claw back the per-call syscalls.
+This is not free. Every cold-translated x87 block pays a Mach IPC round-trip that the in-process dylib didn't pay. Once stock has installed the ARM64 bytes the sidecar is off the hot path, so steady-state execution speed is unaffected; the remaining cost is cold-translation latency, and most of the per-request syscalls that used to accompany the round-trip have been clawed back. The sidecar caches the block's IR array across requests (revalidated with an 80-byte probe read, since one block generates one request per x87 run), caches the thread-context-offsets struct, and fuses the reply send with the next request receive into a single `mach_msg` trap. `X87_NO_TCO_CACHE` and `X87_NO_IR_CACHE` switch the caches back off. One tempting further step does not work and was reverted after testing: `mach_vm_remap`ing (copy=FALSE) the tracee's TR / output buffers into the sidecar so the remaining reads and writes become memcpys. The tracee is an x86_64-translated task with 4 KB VM pages, and remapping its private anonymous memory into the sidecar's 16 KB arm64 map silently degrades to copy semantics: the two views diverge in both directions. Sharing works only in the opposite direction, for pages the sidecar allocates and remaps into the tracee, which is exactly how the profile counter array is wired.
 
 In exchange, the sidecar is a normal arm64 process, free to use the C++ standard library and any arm64 dependencies. The in-process dylib had to stay close to no-std discipline: every call from our `__TEXT` into a library increased the wall-clock fraction the parent thread spent with its PC inside our pages, and with it the rate of the reverse-lookup panic. Out of process, that constraint is gone.
 
@@ -131,6 +131,7 @@ Knobs are environment variables read at startup. The most useful ones:
 | `X87_DISABLE_ALL_FUSIONS=1` | Disable all instruction fusions |
 | `X87_DISABLE_FUSIONS=f1,f2,…` | Disable specific fusions |
 | `X87_DISABLE_HOOK=1` | Skip the `translate_insn` patch (apples-to-apples baseline against stock Rosetta) |
+| `X87_NO_TCO_CACHE=1` / `X87_NO_IR_CACHE=1` | Disable the sidecar's per-request syscall optimizations (ThreadContextOffsets cache, per-block IR cache); A/B and bisect hatches |
 | `X87_LOGS=1` | Verbose loader logging |
 
 ## License
