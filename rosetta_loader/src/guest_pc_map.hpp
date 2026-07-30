@@ -46,6 +46,17 @@ enum class Status : uint8_t {
     Unavailable,    ///< a read failed or a structure was inconsistent; drop the sample
 };
 
+/// Which of the three ways an ARM pc can fail to have a guest pc applied.  Only
+/// meaningful alongside Status::NotTranslated, where it separates "the pc is in
+/// Rosetta's own arm64 code" from "the pc is in translated output whose map does
+/// not reach it", which a caller cannot tell apart from the status alone.
+enum class NoGuestReason : uint8_t {
+    Unknown = 0,
+    NoFragment,           ///< in no fragment at all: not Rosetta's translated output
+    RuntimeRoutines,      ///< a kind-0 fragment: the runtime's own code, wherever it is mapped
+    BeforeFirstBoundary,  ///< inside a translated fragment, before its first mapped boundary
+};
+
 /// Offset of the ARM-keyed fragment tree root within the runtime image.
 inline constexpr uint64_t kArmTreeRootOffset = 0x3ba08;
 
@@ -130,6 +141,9 @@ struct Resolution {
     Fragment fragment;
     uint32_t arm_offset;  ///< queried ARM pc relative to fragment.arm_begin
     MapPoint point;
+    /// Set on every Status::NotTranslated return, including the ones served from
+    /// the cache.  Untouched otherwise.
+    NoGuestReason reason = NoGuestReason::Unknown;
 };
 
 /// Walk the ARM-keyed tree for the fragment containing `armPc`.
