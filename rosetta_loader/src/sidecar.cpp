@@ -290,10 +290,19 @@ struct GuestModule {
     uint64_t base = 0;
     uint64_t size = 0;
     bool macho = false;  // else a PE mapped by wine
-    // Executable, but nothing on disk or in dyld accounts for it: JIT output,
-    // or a runtime's own generated code.  `path` is then a description of the
-    // mapping rather than a file, and there is nothing to symbolise against.
+    // Executable, but nothing on disk or in dyld accounts for it: JIT output.
+    // `path` is then a description of the mapping rather than a file, and there
+    // is nothing to symbolise against.
     bool anon = false;
+    // A mapping of PART of a file, with no image header of its own: the kernel
+    // names the file, but nothing can walk back to a Mach-O header and the
+    // mapping's offset into the file is NOT recoverable (mach_vm_region reports
+    // an offset within some VM object of Rosetta's own, measured: the runtime's
+    // own image reports 0x0, 0x1000, 0x2000 for regions at +0x0, +0xd000,
+    // +0xe000).  So the file names the row and nothing may be symbolised against
+    // it.  Rosetta maps a 16 KB slice of its runtime next to every guest image
+    // this way, holding the guest-syscall dispatcher a blocked thread parks in.
+    bool slice = false;
     // Cleared when a later scan no longer finds the image.  Kept rather than
     // dropped: samples taken while it was mapped still need its range.
     bool loaded = true;
@@ -687,6 +696,26 @@ const GuestModule* moduleAt(const std::map<uint64_t, GuestModule>& modules, uint
 // sampler hands over the addresses it actually saw and only those are looked up,
 // so once a module has been resolved the scanner touches the target no further.
 
+// Record a named image, dropping any `anon@` row it turns out to cover.  Order
+// alone decides otherwise, and gets it wrong: a region inside an image that no
+// header walk-back can find becomes an anon row first, dyld names the image
+// afterwards, and because a lookup takes the greatest base at or below the
+// address the row then shadows the image for the rest of the run.  Measured on
+// the client: two rows inside libRosettaRuntime hid 4200 samples that its export
+// table can name.  Only rows wholly inside the image go; one that straddles its
+// end also describes memory the image does not.
+void registerImage(std::map<uint64_t, GuestModule>& modules, const GuestModule& mod) {
+    const uint64_t limit = mod.base + mod.size;
+    for (auto it = modules.lower_bound(mod.base); it != modules.end() && it->first < limit;) {
+        if (it->second.anon && it->second.base + it->second.size <= limit) {
+            it = modules.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    modules[mod.base] = mod;
+}
+
 // Ask dyld where its images are.  This is the ONLY way to name anything in the
 // shared cache: a dylib's __TEXT there sits hundreds of megabytes inside a
 // single ~2 GB region that covers a thousand libraries, so there is no header
@@ -713,8 +742,8 @@ void refreshDyldImages(mach_port_t task, std::map<uint64_t, GuestModule>& module
           }
           GuestImage img;
           if (readGuestMachO(task, header, img, true)) {
-              (*known)[header] =
-                  GuestModule{.base = header, .size = img.size, .macho = true, .path = path};
+              const GuestModule mod{.base = header, .size = img.size, .macho = true, .path = path};
+              registerImage(*known, mod);
               learned++;
           }
         });
@@ -785,8 +814,8 @@ bool resolveAddress(mach_port_t task, pid_t pid, uint64_t addr,
         }
         name = installName;
     }
-    modules[img.base] =
-        GuestModule{.base = img.base, .size = img.size, .macho = img.macho, .path = name};
+    registerImage(
+        modules, GuestModule{.base = img.base, .size = img.size, .macho = img.macho, .path = name});
     g_modmap.learned.fetch_add(1, std::memory_order_relaxed);
     g_modmap.scan_us.fetch_add(static_cast<uint64_t>(nowUs() - started), std::memory_order_relaxed);
     return true;
@@ -799,9 +828,10 @@ bool resolveAddress(mach_port_t task, pid_t pid, uint64_t addr,
 //
 // Records are variable length because stacks are:
 //     [0] mach thread id
-//     [1] status | in_range | depth
-//     [2] leaf guest pc            (only when the status is Resolved)
-//     [3..] `depth` frames, root first
+//     [1] status | no-guest reason | in_range | depth
+//     [2] leaf guest pc, or the host pc when there is no guest one
+//     [3] x16                      (only when the status is NotTranslated)
+//     [3..] `depth` frames, root first (only when the status is Resolved)
 constexpr size_t kRingWords = 1U << 18;  // 2 MB, seconds of slack at 10 kHz
 constexpr size_t kRingMask = kRingWords - 1;
 
@@ -836,8 +866,12 @@ struct SampleRing {
 };
 SampleRing g_ring;
 
-uint64_t sampleHeader(SampleKind kind, bool inRange, uint64_t depth) {
-    return (static_cast<uint64_t>(kind) << 32) | (static_cast<uint64_t>(inRange) << 16) | depth;
+// The reason rides in bits 24..31, which the header already had spare, so a
+// record does not grow to carry it.
+uint64_t sampleHeader(SampleKind kind, bool inRange, uint64_t depth,
+                      guest_pc::NoGuestReason reason = guest_pc::NoGuestReason::Unknown) {
+    return (static_cast<uint64_t>(kind) << 32) | (static_cast<uint64_t>(reason) << 24) |
+           (static_cast<uint64_t>(inRange) << 16) | depth;
 }
 
 // What the sampler measures about itself.  Counters rather than records because
@@ -907,6 +941,17 @@ struct ThreadStats {
     // guest frame-pointer chain says nothing about native frames, and an empty
     // answer is better than a walk of whatever x5 happened to hold.
     std::unordered_map<uint64_t, uint64_t> host_pcs;
+    // Why each of those pcs had no guest pc, as a set of 1 << NoGuestReason
+    // bits.  A set rather than one value because a fragment can be freed and the
+    // same address reused, so the same pc can legitimately answer differently at
+    // different times; in practice one bit is set and it says whether the
+    // address is Rosetta's own code or translated output the map does not reach.
+    std::unordered_map<uint64_t, uint8_t> host_reasons;
+    // For the host pcs that are the instruction after `svc #0x80`: which syscalls
+    // the thread was seen inside there, and how often.  One park pc serves every
+    // blocking call the guest makes, so this is the difference between "18% of the
+    // thread is in one unnameable instruction" and knowing what it waits on.
+    std::unordered_map<uint64_t, std::map<int32_t, uint64_t>> host_syscalls;
 };
 
 struct SamplerStats {
@@ -950,6 +995,14 @@ void mergeStats(SamplerStats& into, const SamplerStats& from) {
         }
         for (const auto& [pc, n] : src.host_pcs) {
             dst.host_pcs[pc] += n;
+        }
+        for (const auto& [pc, bits] : src.host_reasons) {
+            dst.host_reasons[pc] |= bits;
+        }
+        for (const auto& [pc, calls] : src.host_syscalls) {
+            for (const auto& [call, n] : calls) {
+                dst.host_syscalls[pc][call] += n;
+            }
         }
     }
 }
@@ -1073,16 +1126,24 @@ void sampleThread(SamplerCtx* ctx, const guest_pc::Reader& reader, guest_pc::Cac
         case guest_pc::Status::NotTranslated:
             if (record) {
                 rec[0] = tid;
-                rec[1] = sampleHeader(SampleKind::NotTranslated, false, 0);
-                // The host pc, which is what the thread was actually running:
-                // no x86 was translated to this address because none is
-                // involved.  On the client this is around 40% of the samples on
-                // the game's own thread (the Rosetta runtime, the unix half of
-                // wine and of our d3d9, Metal, libsystem), and counting them
-                // without keeping the address made the largest single slice of
-                // the thread the one nothing could be said about.
+                rec[1] = sampleHeader(SampleKind::NotTranslated, false, 0, res.reason);
+                // The host pc, which is what the thread was actually running: no
+                // x86 was translated to this address because none is involved.
+                // Everything the guest runs is x86_64 and gets translated, so
+                // this is Rosetta's own arm64 code and nothing else: its runtime
+                // image, libRosettaRuntime, and the regions of generated
+                // routines a blocked thread parks in.  On the client that is
+                // ~30% of the samples on the game's own thread, and counting
+                // them without keeping the address made the largest single slice
+                // of the thread the one nothing could be said about.
                 rec[2] = arm_thread_state64_get_pc(state);
-                n = 3;
+                // x16, because a thread parked immediately after `svc #0x80` has
+                // the syscall number still in it, and the aggregator can tell
+                // which pcs those are.  Rosetta's guest-syscall dispatcher takes
+                // the number from the guest's own eax, so nothing static can name
+                // that call site: this register is the only witness.
+                rec[3] = state.__x[16];
+                n = 4;
             }
             break;
         case guest_pc::Status::Unavailable:
@@ -1128,6 +1189,10 @@ struct AggCtx {
     // walk invents return addresses out of ordinary data, and those must cost
     // one lookup, not one per sighting.
     std::unordered_set<uint64_t> unmapped;
+    // Host pcs already tested for being the instruction after `svc #0x80`.  One
+    // entry per distinct address, so a run pays one read per park point rather
+    // than anything per sample.
+    std::unordered_map<uint64_t, bool> host_svc_return;
     double last_dyld_us = 0;
     bool asked_dyld = false;
     // The fullest the ring has been seen.  Owned by this thread alone, so no
@@ -1137,6 +1202,37 @@ struct AggCtx {
 
 // How often dyld's image list may be consulted, at most.
 constexpr double kDyldAskEveryS = 1.0;
+
+// How the profile spells one NoGuestReason bit.  A pc normally carries exactly
+// one; more than one means the address was reused, and the reader joins them.
+const char* noGuestReasonName(guest_pc::NoGuestReason reason) {
+    switch (reason) {
+        case guest_pc::NoGuestReason::NoFragment:
+            return "nofrag";
+        case guest_pc::NoGuestReason::RuntimeRoutines:
+            return "routines";
+        case guest_pc::NoGuestReason::BeforeFirstBoundary:
+            return "preboundary";
+        case guest_pc::NoGuestReason::Unknown:
+            break;
+    }
+    return "unknown";
+}
+
+// The reason bits of one host pc as a `|`-joined field, never empty.
+std::string noGuestReasonField(uint8_t bits) {
+    std::string out;
+    for (int i = 0; i < 8; i++) {
+        if ((bits & (1U << i)) == 0) {
+            continue;
+        }
+        if (!out.empty()) {
+            out += "|";
+        }
+        out += noGuestReasonName(static_cast<guest_pc::NoGuestReason>(i));
+    }
+    return out.empty() ? "unknown" : out;
+}
 
 // Written by the aggregator, which owns everything in it.  The sampler is not
 // involved and does not pause: sampling continues through a write.
@@ -1177,7 +1273,9 @@ void writeProfile(const AggCtx* ctx, const SamplerStats& st, double elapsed,
     fprintf(fh, "# x87sidecar guest-pc sample profile\n");
     fprintf(fh, "# Addresses are guest x86 pcs. The [modules] section below is the map of the\n");
     fprintf(fh, "# run they came from, so symbolising needs nothing but this file.\n");
-    fprintf(fh, "version 1\n");
+    // 2 adds the `slice` module kind, the [host_leaves] reason column and the
+    // [host_syscalls] section.
+    fprintf(fh, "version 2\n");
     fprintf(fh, "pid %d\n", targetPid);
     fprintf(fh, "written %s\n", when);
     fprintf(fh, "runtime_base 0x%llx\n", static_cast<unsigned long long>(ctx->runtime_base));
@@ -1307,11 +1405,16 @@ void writeProfile(const AggCtx* ctx, const SamplerStats& st, double elapsed,
     // Copied straight out of the scanner thread's file rather than built here,
     // which is what keeps a scan of the whole address space off this thread
     // entirely.  Worst case the map is one scan interval old.
+    // A `slice` row is part of a file mapped with no header of its own: the file
+    // names it, but an offset into the row relates to the mapping only, not to the
+    // file, so nothing can be symbolised against it.
     fprintf(fh, "\n[modules]\n# base size kind state path\n");
     for (const auto& [base, mod] : ctx->modules) {
         const char* kind = "pe";
         if (mod.anon) {
             kind = "anon";
+        } else if (mod.slice) {
+            kind = "slice";
         } else if (mod.macho) {
             kind = "macho";
         }
@@ -1334,14 +1437,40 @@ void writeProfile(const AggCtx* ctx, const SamplerStats& st, double elapsed,
     // Host ARM pcs: the samples with no guest pc because no x86 was involved.
     // Counted against `samples`, not `resolved`, so a reader must weight them
     // against the whole to see how much of the thread they are.
-    fprintf(fh, "\n[host_leaves]\n# tid pc count   (host arm pcs, no guest translation)\n");
+    //
+    // `reason` is Rosetta's own answer for why there is no guest pc: `routines`
+    // is a kind-0 fragment, i.e. runtime code, `nofrag` is an address in no
+    // fragment at all, and `preboundary` is translated output before its map's
+    // first boundary.
+    fprintf(fh,
+            "\n[host_leaves]\n# tid pc count reason   (host arm pcs, no guest "
+            "translation)\n");
     for (const auto& [tid, ts] : st.threads) {
         std::vector<std::pair<uint64_t, uint64_t>> all(ts.host_pcs.begin(), ts.host_pcs.end());
         std::sort(all.begin(), all.end(),
                   [](const auto& a, const auto& b) { return a.second > b.second; });
         for (const auto& [pc, hits] : all) {
-            fprintf(fh, "0x%llx 0x%llx %llu\n", static_cast<unsigned long long>(tid),
-                    static_cast<unsigned long long>(pc), static_cast<unsigned long long>(hits));
+            const auto reason = ts.host_reasons.find(pc);
+            fprintf(
+                fh, "0x%llx 0x%llx %llu %s\n", static_cast<unsigned long long>(tid),
+                static_cast<unsigned long long>(pc), static_cast<unsigned long long>(hits),
+                noGuestReasonField(reason == ts.host_reasons.end() ? 0 : reason->second).c_str());
+        }
+    }
+
+    // Which syscall a blocked thread was inside, for the host pcs that sit right
+    // after a trap.  Taken from x16 per sample rather than from the code, because
+    // Rosetta's guest-syscall dispatcher takes the number from the guest's own
+    // register: one pc serves every blocking call the guest makes, and only the
+    // register tells them apart.  Negative numbers are the mach traps.
+    fprintf(fh, "\n[host_syscalls]\n# tid pc svc count   (pc is the insn after `svc #0x80`)\n");
+    for (const auto& [tid, ts] : st.threads) {
+        for (const auto& [pc, calls] : ts.host_syscalls) {
+            for (const auto& [call, hits] : calls) {
+                fprintf(fh, "0x%llx 0x%llx %d %llu\n", static_cast<unsigned long long>(tid),
+                        static_cast<unsigned long long>(pc), call,
+                        static_cast<unsigned long long>(hits));
+            }
         }
     }
 
@@ -1416,7 +1545,31 @@ void learnAddress(AggCtx* ctx, uint64_t addr) {
     if (moduleAt(ctx->modules, addr) != nullptr) {
         return;
     }
-    // Executable, no image, and dyld has never heard of it: generated code, and
+    // Executable, no image header, unknown to dyld — but the kernel still knows
+    // which file backs the mapping, and for these it is not JIT output at all:
+    // Rosetta maps a 16 KB slice of /usr/libexec/rosetta/runtime (file offset
+    // 0x20000, its guest-syscall dispatcher) next to every guest image, and a
+    // thread blocked in a guest syscall is observed in exactly that slice.  On
+    // the client it is the single largest host address in the profile.  Only the
+    // mapping's own file offset can relate an address in it to the file, since
+    // there is no header to walk back to, so it is recorded with the row.
+    if (regionSize != 0) {
+        char path[MAXPATHLEN];
+        path[0] = '\0';
+        const int len = proc_regionfilename(ctx->pid, regionBase, path, sizeof(path));
+        if (len > 0) {
+            path[std::min<size_t>(static_cast<size_t>(len), sizeof(path) - 1)] = '\0';
+            if (path[0] != '\0' && !std::string_view(path).contains("dyld_shared_cache")) {
+                registerImage(
+                    ctx->modules,
+                    GuestModule{
+                        .base = regionBase, .size = regionSize, .slice = true, .path = path});
+                g_modmap.learned.fetch_add(1, std::memory_order_relaxed);
+                return;
+            }
+        }
+    }
+    // Executable, no image, and no file either: generated code, and
     // on this target that is most of what runs.  Recording the mapping itself
     // keeps it in the profile as its own row instead of collapsing into one
     // "unmapped" total, which is the difference between "44% of the thread is
@@ -1448,6 +1601,28 @@ void learnAddress(AggCtx* ctx, uint64_t addr) {
     ctx->unmapped.insert(slot);
 }
 
+// Is this host pc the instruction after a syscall, i.e. where a thread INSIDE a
+// syscall is observed from outside?  That is the one thing worth knowing about an
+// address in Rosetta's own code: a blocked thread parks on such a pc, and x16
+// then still holds the number, which is the only way to name a call site whose
+// number is dynamic (the guest-syscall dispatcher takes it from the guest's eax).
+//
+// One read per distinct address, once, on this thread; an address already tested
+// is never read again, including the ones that are not syscall returns.
+bool isSyscallReturn(AggCtx* ctx, uint64_t pc) {
+    if (pc < 4) {
+        return false;
+    }
+    const auto known = ctx->host_svc_return.find(pc);
+    if (known != ctx->host_svc_return.end()) {
+        return known->second;
+    }
+    uint32_t insn = 0;
+    const bool is = readParent(ctx->task, pc - 4, &insn, sizeof(insn)) && insn == 0xD4001001;
+    ctx->host_svc_return[pc] = is;
+    return is;
+}
+
 // Consume everything the sampler has published.  Pure local work: no syscall
 // touches the target unless an address turns up that no module explains.
 // Samples land in `st`, the window being filled.  Every one is keyed by the
@@ -1472,10 +1647,11 @@ void drainRing(AggCtx* ctx, SamplerStats& st) {
         const uint64_t tid = g_ring.slots[tail & kRingMask].load(std::memory_order_relaxed);
         const uint64_t hdr = g_ring.slots[(tail + 1) & kRingMask].load(std::memory_order_relaxed);
         const auto kind = static_cast<SampleKind>((hdr >> 32) & 0xFF);
+        const auto reason = static_cast<guest_pc::NoGuestReason>((hdr >> 24) & 0xFF);
         const bool inRange = ((hdr >> 16) & 1) != 0;
         const uint64_t depth = hdr & 0xFFFF;
         const size_t words = kind == SampleKind::Resolved        ? 3 + depth
-                             : kind == SampleKind::NotTranslated ? 3
+                             : kind == SampleKind::NotTranslated ? 4
                                                                  : 2;
 
         {
@@ -1515,12 +1691,22 @@ void drainRing(AggCtx* ctx, SamplerStats& st) {
                 case SampleKind::NotTranslated: {
                     const uint64_t host =
                         g_ring.slots[(tail + 2) & kRingMask].load(std::memory_order_relaxed);
+                    const uint64_t x16 =
+                        g_ring.slots[(tail + 3) & kRingMask].load(std::memory_order_relaxed);
                     st.not_translated++;
                     ts.host_pcs[host]++;
+                    ts.host_reasons[host] |= static_cast<uint8_t>(1U << static_cast<int>(reason));
                     // Same lookup as a guest address: the map holds Mach-O
                     // images too, and dyld is the only thing that can name one
                     // inside the shared cache, which is where most of these are.
                     learnAddress(ctx, host);
+                    // A pc right after a trap says the thread is inside a
+                    // syscall, and x16 says which.  Bounded so a register that is
+                    // not a syscall number cannot invent an entry.
+                    const auto call = static_cast<int64_t>(x16);
+                    if (call >= -1024 && call <= 4096 && isSyscallReturn(ctx, host)) {
+                        ts.host_syscalls[host][static_cast<int32_t>(call)]++;
+                    }
                     break;
                 }
                 case SampleKind::Unavailable:
