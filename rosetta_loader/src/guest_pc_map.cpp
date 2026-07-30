@@ -363,6 +363,7 @@ bool nodeUnchanged(const Reader& reader, const Fragment& cached) {
 Status resolveInFragment(const Reader& reader, const Fragment& frag, uint64_t armPc,
                          Resolution& out) {
     if (frag.kind != static_cast<uint8_t>(FragmentKind::Translated)) {
+        out.reason = NoGuestReason::RuntimeRoutines;
         return Status::NotTranslated;
     }
     if (frag.map == 0 || frag.x86_size == 0) {
@@ -404,6 +405,9 @@ Status resolveInFragment(const Reader& reader, const Fragment& frag, uint64_t ar
     BitReader br(reader, frag.map + header.stream_offset, streamSize, chunk.stream_byte);
     const Status decoded = walkToTarget(br, header.rice_k, chunk, armOffset, point);
     if (decoded != Status::Resolved) {
+        if (decoded == Status::NotTranslated) {
+            out.reason = NoGuestReason::BeforeFirstBoundary;
+        }
         return decoded;
     }
     // The map's last boundary sits at the fragment's x86 end: an ARM pc there
@@ -533,6 +537,9 @@ Status resolve(const Reader& reader, uint64_t runtimeBase, uint64_t armPc, Resol
     Fragment frag{};
     const Status found = lookupFragment(reader, runtimeBase, armPc, frag);
     if (found != Status::Resolved) {
+        if (found == Status::NotTranslated) {
+            out.reason = NoGuestReason::NoFragment;
+        }
         return found;
     }
     return resolveInFragment(reader, frag, armPc, out);
@@ -581,6 +588,7 @@ Status resolve(const Reader& reader, uint64_t runtimeBase, uint64_t armPc, Resol
             // in such regions almost all the time.
             if (entry.fragment.kind != static_cast<uint8_t>(FragmentKind::Translated)) {
                 cache.stats_.negative_hits++;
+                out.reason = NoGuestReason::RuntimeRoutines;
                 return Status::NotTranslated;
             }
             if (entry.arm_pc == armPc) {
@@ -611,6 +619,7 @@ Status resolve(const Reader& reader, uint64_t runtimeBase, uint64_t armPc, Resol
         // costs a dropped sample, never a wrong answer.
         entry.recheck++;
         cache.stats_.negative_hits++;
+        out.reason = NoGuestReason::NoFragment;
         return Status::NotTranslated;
     }
 
@@ -623,6 +632,7 @@ Status resolve(const Reader& reader, uint64_t runtimeBase, uint64_t armPc, Resol
         entry.used = true;
         entry.arm_pc = armPc;
         entry.stamp = stamp;
+        out.reason = NoGuestReason::NoFragment;
         return found;
     }
     if (found != Status::Resolved) {
