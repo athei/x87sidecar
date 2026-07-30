@@ -59,6 +59,14 @@ struct ThreadArgs {
 // big workloads (e.g. WoW world-load) churn through cold translation.
 std::atomic<uint64_t> g_hits{0};
 
+// Translate-path syscall-optimization counters, read by the reporter.  All
+// writers are the single receive thread; atomics only because the reporter
+// thread reads them.
+std::atomic<uint64_t> g_statVmSyscalls{0};  // mach_vm_* traps on the translate path
+std::atomic<uint64_t> g_statTcoHits{0};     // TCO served from cache
+std::atomic<uint64_t> g_statIrHits{0};      // IR array served from cache (probe read only)
+std::atomic<uint64_t> g_statIrMisses{0};    // IR array read in full
+
 // X87_PROFILE state.  Opened once at sidecar startup; closed when the
 // receive thread exits (i.e. parent process death).  Block-id assignment
 // and de-dup live in profile::register_block (rosetta_core) so the JIT
@@ -196,6 +204,49 @@ static_assert(kStockTRSize <= offsetof(TranslationResult, x87_cache),
               "stock TR size must not exceed our struct's pre-x87_cache prefix");
 std::mutex g_x87CacheMu;
 std::unordered_map<uint64_t, X87Cache> g_x87Cache;
+
+// ThreadContextOffsets cache, keyed by the tracee-side pointer.  The struct
+// describes stock's thread-context layout (process-lifetime constants that
+// stock re-materialises on the calling thread's STACK, so the same pointer
+// recurs per thread with the same contents).  Each distinct pointer is read
+// from the tracee once; every miss cross-checks the new read against the
+// first cached copy and logs loudly if the constants assumption ever breaks.
+// Receive thread only, no lock.  X87_NO_TCO_CACHE restores the
+// read-every-request behaviour.
+std::unordered_map<uint64_t, ThreadContextOffsets> g_tcoCache;
+
+// Per-block IR array cache, keyed by TR address (one in-flight block per TR,
+// same keying rationale as g_x87Cache above).  The translator never mutates
+// the tracee's IR array (TranslatorX87Fusion works on a local copy), so it is
+// read-only cross-task and constant while stock walks the block.  But stock
+// walks it with one request per x87 run, and re-reading the whole array
+// (80 B × num_instrs) on every request was the single largest read on the
+// translate path.  Reuse requires the identity triple to match, the walk to
+// stay monotonic (a new translation pass restarts at a lower-or-equal index),
+// and an 80-byte probe of the current IRInstr to compare equal.  Residual
+// ABA needs recycled block/array pointers with a byte-identical current
+// IRInstr (incl. guest pc) but different lookahead entries, i.e. guest
+// self-modifying code re-decoded at the same pc: accepted, X87_NO_IR_CACHE
+// is the hatch.  Entry storage is reused across requests either way, which
+// also drops the old per-request vector malloc.  Receive thread only.
+struct IRCacheEntry {
+    uint64_t block = 0;
+    uint64_t instr_array = 0;
+    uint64_t num_instrs = 0;
+    uint64_t last_idx = 0;
+    std::vector<IRInstr> ir;
+};
+std::unordered_map<uint64_t, IRCacheEntry> g_irCache;
+
+// NOTE on the road not taken: mach_vm_remap(copy=FALSE) of TRACEE-owned pages
+// into the sidecar (to turn the TR / insn-buf / fixup reads and writes below
+// into memcpys) does NOT work.  The tracee is an x86_64-translated task with
+// 4 KB VM pages; remapping its private anonymous memory into our 16 KB arm64
+// map silently degrades to copy semantics, so the two views diverge in BOTH
+// directions (verified empirically 2026-07: reads return remap-time bytes,
+// writes through the local view never reach the tracee).  Sharing only works
+// in the other direction, for objects WE allocate and remap INTO the tracee
+// (the X87_PROFILE counter array in main.cpp).  Don't re-attempt.
 
 struct TranslateRequest {
     uint64_t tr_addr;
@@ -1991,6 +2042,25 @@ bool writeParent(mach_port_t task, uint64_t addr, const void* src, size_t size) 
            KERN_SUCCESS;
 }
 
+// Translate-path wrappers around readParent/writeParent, kept separate so
+// the reporter's vm/req metric counts only this path (the sampler thread
+// calls readParent directly).
+bool readTranslate(mach_port_t task, uint64_t addr, void* dst, size_t size) {
+    if (size == 0) {
+        return true;
+    }
+    g_statVmSyscalls.fetch_add(1, std::memory_order_relaxed);
+    return readParent(task, addr, dst, size);
+}
+
+bool writeTranslate(mach_port_t task, uint64_t addr, const void* src, size_t size) {
+    if (size == 0) {
+        return true;
+    }
+    g_statVmSyscalls.fetch_add(1, std::memory_order_relaxed);
+    return writeParent(task, addr, src, size);
+}
+
 // Allocate a parent-side replacement buffer of size `newCap`, copy parent's
 // existing live bytes, then append `tailSize` bytes from `tail`. On success
 // returns the parent VA of the new buffer. On any failure deallocates and
@@ -2001,19 +2071,20 @@ mach_vm_address_t allocAndAppendInParent(mach_port_t parentTask, uint64_t origAd
     // Round up to page granularity.
     newCap = (newCap + 0xFFF) & ~static_cast<uint64_t>(0xFFF);
     mach_vm_address_t parentNew = 0;
+    g_statVmSyscalls.fetch_add(1, std::memory_order_relaxed);
     if (mach_vm_allocate(parentTask, &parentNew, newCap, VM_FLAGS_ANYWHERE) != KERN_SUCCESS) {
         return 0;
     }
     if (origLive > 0) {
         std::vector<uint8_t> stash(origLive);
-        if (!readParent(parentTask, origAddr, stash.data(), origLive) ||
-            !writeParent(parentTask, parentNew, stash.data(), origLive)) {
+        if (!readTranslate(parentTask, origAddr, stash.data(), origLive) ||
+            !writeTranslate(parentTask, parentNew, stash.data(), origLive)) {
             mach_vm_deallocate(parentTask, parentNew, newCap);
             return 0;
         }
     }
     if (tailSize > 0) {
-        if (!writeParent(parentTask, parentNew + origLive, tail, tailSize)) {
+        if (!writeTranslate(parentTask, parentNew + origLive, tail, tailSize)) {
             mach_vm_deallocate(parentTask, parentNew, newCap);
             return 0;
         }
@@ -2054,7 +2125,7 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask, const Translate
     TranslationResult tr{};
     // Read only the stock-sized TR from the tracee; x87_cache lives in our own
     // per-thread map (keyed by TR address), not in the tracee's heap.
-    if (!readParent(parentTask, req.tr_addr, &tr, kStockTRSize)) {
+    if (!readTranslate(parentTask, req.tr_addr, &tr, kStockTRSize)) {
         return out;
     }
     {
@@ -2097,19 +2168,75 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask, const Translate
                         ._size = lists[i]->_size};
     }
 
-    // Read IR array + ThreadContextOffsets.
-    std::vector<IRInstr> localIR(req.num_instrs);
-    if (!readParent(parentTask, req.instr_array, localIR.data(),
-                    req.num_instrs * sizeof(IRInstr))) {
-        return out;
+    // IR array: serve from the per-block cache when possible (see the
+    // g_irCache comment for the reuse conditions and the ABA argument);
+    // otherwise read it in full from the tracee.
+    IRCacheEntry& irc = g_irCache[req.tr_addr];
+    {
+        const bool noIrCache =
+            g_rosetta_config != nullptr && g_rosetta_config->loader_no_ir_cache != 0U;
+        bool reuse = !noIrCache && irc.block == req.block && irc.instr_array == req.instr_array &&
+                     irc.num_instrs == req.num_instrs && req.insn_idx > irc.last_idx;
+        if (reuse) {
+            IRInstr probe;
+            if (!readTranslate(parentTask, req.instr_array + req.insn_idx * sizeof(IRInstr), &probe,
+                         sizeof(probe))) {
+                return out;
+            }
+            reuse = std::memcmp(&probe, &irc.ir[req.insn_idx], sizeof(IRInstr)) == 0;
+        }
+        if (reuse) {
+            g_statIrHits.fetch_add(1, std::memory_order_relaxed);
+        } else {
+            irc.ir.resize(req.num_instrs);
+            if (!readTranslate(parentTask, req.instr_array, irc.ir.data(),
+                         req.num_instrs * sizeof(IRInstr))) {
+                // Don't leave a half-valid entry behind: the vector was
+                // already resized, so stale keys could pair with the wrong
+                // length and index out of bounds on a later request.
+                irc = IRCacheEntry{};
+                return out;
+            }
+            irc.block = req.block;
+            irc.instr_array = req.instr_array;
+            irc.num_instrs = req.num_instrs;
+            g_statIrMisses.fetch_add(1, std::memory_order_relaxed);
+        }
+        irc.last_idx = req.insn_idx;
     }
+    IRInstr* const localIR = irc.ir.data();
 
     if (origTCO == nullptr) {
         return out;
     }
     ThreadContextOffsets localTCO{};
-    if (!readParent(parentTask, reinterpret_cast<uint64_t>(origTCO), &localTCO, sizeof(localTCO))) {
-        return out;
+    {
+        const bool noTcoCache =
+            g_rosetta_config != nullptr && g_rosetta_config->loader_no_tco_cache != 0U;
+        const uint64_t tcoAddr = reinterpret_cast<uint64_t>(origTCO);
+        auto it = noTcoCache ? g_tcoCache.end() : g_tcoCache.find(tcoAddr);
+        if (it != g_tcoCache.end()) {
+            localTCO = it->second;
+            g_statTcoHits.fetch_add(1, std::memory_order_relaxed);
+        } else {
+            if (!readTranslate(parentTask, tcoAddr, &localTCO, sizeof(localTCO))) {
+                return out;
+            }
+            if (!noTcoCache) {
+                // Canary for the constants assumption: all TCOs in a process
+                // must describe the same layout.
+                if (!g_tcoCache.empty() &&
+                    std::memcmp(&g_tcoCache.begin()->second, &localTCO, sizeof(localTCO)) != 0) {
+                    fprintf(stdout,
+                            "[rosettax87] WARNING: ThreadContextOffsets at 0x%llx differs from "
+                            "cached layout; TCO cache assumption broken, rerun with "
+                            "X87_NO_TCO_CACHE=1\n",
+                            static_cast<unsigned long long>(tcoAddr));
+                    fflush(stdout);
+                }
+                g_tcoCache.emplace(tcoAddr, localTCO);
+            }
+        }
     }
 
     // x87_cache (OPT-1) was loaded from g_x87Cache above, not from the tracee.
@@ -2149,10 +2276,10 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask, const Translate
     }
 
     dumpBlockIfNew(parentTask, reinterpret_cast<uint64_t>(tr.ir_module_data), req.block,
-                   localIR.data(), req.num_instrs);
+                   localIR, req.num_instrs);
 
     auto result = Translator::translate_instruction(
-        &tr, reinterpret_cast<IRBlock*>(req.block), localIR.data(),
+        &tr, reinterpret_cast<IRBlock*>(req.block), localIR,
         static_cast<int64_t>(req.num_instrs), static_cast<int64_t>(req.insn_idx));
 
     // Capture growth state. If insn_buf grew, Translator's grow() abandoned
@@ -2241,8 +2368,8 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask, const Translate
         uint64_t finalInsnCap = origInsnCap;
         if (!insnGrew && finalInsnEnd <= origInsnCap) {
             if (insnEmitted > 0) {
-                if (!writeParent(parentTask, reinterpret_cast<uint64_t>(origInsnData) + origInsnEnd,
-                                 localInsnData + origInsnEnd, insnEmitted)) {
+                if (!writeTranslate(parentTask, reinterpret_cast<uint64_t>(origInsnData) + origInsnEnd,
+                              localInsnData + origInsnEnd, insnEmitted)) {
                     return out;
                 }
             }
@@ -2274,8 +2401,8 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask, const Translate
 
             if (newLive <= parentCap) {
                 if (added > 0) {
-                    if (!writeParent(parentTask, reinterpret_cast<uint64_t>(orig.end),
-                                     localPushed[i], added)) {
+                    if (!writeTranslate(parentTask, reinterpret_cast<uint64_t>(orig.end), localPushed[i],
+                                  added)) {
                         return out;
                     }
                 }
@@ -2310,7 +2437,7 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask, const Translate
     // any pivoted buffer pointers from the Some path above). x87_cache is NOT
     // written to the tracee — it lives in g_x87Cache — so the tracee's TR needs
     // no enlargement and the M2 install needs no TR-size patch.
-    if (!writeParent(parentTask, req.tr_addr, &tr, kStockTRSize)) {
+    if (!writeTranslate(parentTask, req.tr_addr, &tr, kStockTRSize)) {
         return out;
     }
 
@@ -2355,26 +2482,63 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask, const Translate
     return out;
 }
 
+// True when `kr` is a receive-side mach_msg error (0x10004xxx, bit 14 set;
+// send-side errors are 0x10000xxx).  A combined SEND|RCV call can fail on
+// either half: a send-half failure means the reply was NOT queued (we still
+// own the SEND_ONCE right) and the receive half never ran; a receive-half
+// failure means the reply went out fine.
+constexpr bool machMsgRcvError(kern_return_t kr) {
+    return (kr & 0x00004000) != 0;
+}
+
 void runReceiveLoop(mach_port_t servicePort, mach_port_t parentTaskPort) {
     struct alignas(8) {
         uint8_t bytes[kRecvBufferSize];
     } buf;
 
+    struct ReplyMsg {
+        mach_msg_header_t hdr;
+        uint64_t result;
+        uint64_t some_flag;  // 1 = Some(result), 0 = None (fall through)
+    };
+
     uint64_t send_failures = 0;
+    bool replyPending = false;  // buf.bytes holds a ReplyMsg not yet sent
     for (;;) {
         auto* hdr = reinterpret_cast<mach_msg_header_t*>(buf.bytes);
-        hdr->msgh_local_port = servicePort;
-        hdr->msgh_size = sizeof(buf);
-
-        kern_return_t kr = mach_msg(hdr, MACH_RCV_MSG, 0, sizeof(buf), servicePort,
-                                    MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+        kern_return_t kr;
+        if (replyPending) {
+            // MIG-server shape: send the pending reply and block for the
+            // next request in ONE trap (the received message reuses the
+            // same buffer).  Halves the per-request mach_msg count vs the
+            // old separate SEND + RCV calls.
+            replyPending = false;
+            kr = mach_msg(hdr, MACH_SEND_MSG | MACH_RCV_MSG, sizeof(ReplyMsg), sizeof(buf),
+                          servicePort, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+            if (kr != KERN_SUCCESS && !machMsgRcvError(kr)) {
+                if (++send_failures <= 5) {
+                    fprintf(stdout, "sidecar: reply send failed 0x%x %s\n", kr,
+                            mach_error_string(kr));
+                }
+                // mach_msg consumes the SEND_ONCE on success; on send
+                // failure we must drop it ourselves, then retry as a
+                // plain receive.
+                mach_port_deallocate(mach_task_self(), hdr->msgh_remote_port);
+                continue;
+            }
+        } else {
+            hdr->msgh_local_port = servicePort;
+            hdr->msgh_size = sizeof(buf);
+            kr = mach_msg(hdr, MACH_RCV_MSG, 0, sizeof(buf), servicePort, MACH_MSG_TIMEOUT_NONE,
+                          MACH_PORT_NULL);
+        }
         if (kr != KERN_SUCCESS) {
             fprintf(stdout, "sidecar: mach_msg(RCV) returned 0x%x (%s)\n", kr,
                     mach_error_string(kr));
             return;
         }
 
-        const uint64_t hits = g_hits.fetch_add(1, std::memory_order_relaxed) + 1;
+        g_hits.fetch_add(1, std::memory_order_relaxed);
 
         // M3 payload: header (24 B) + 5 × 8-byte args (40 B) = 64 B.
         // Args are TR*, IRBlock*, IRInstr*, num_instrs, insn_idx — the
@@ -2396,32 +2560,20 @@ void runReceiveLoop(mach_port_t servicePort, mach_port_t parentTaskPort) {
 
             TranslateOutcome outcome = processTranslateRequest(parentTaskPort, req);
 
-            struct ReplyMsg {
-                mach_msg_header_t hdr;
-                uint64_t result;
-                uint64_t some_flag;  // 1 = Some(result), 0 = None (fall through)
-            } reply{};
-            reply.hdr.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_MOVE_SEND_ONCE, 0);
-            reply.hdr.msgh_size = sizeof(reply);
-            reply.hdr.msgh_remote_port = replyPort;
-            reply.hdr.msgh_local_port = MACH_PORT_NULL;
-            reply.hdr.msgh_id = reqId;  // echo for transaction match
-            reply.result = outcome.reply_some ? static_cast<uint64_t>(outcome.value) : 0;
-            reply.some_flag = outcome.reply_some ? 1U : 0U;
-
-            kern_return_t kr_send = mach_msg(&reply.hdr, MACH_SEND_MSG, sizeof(reply), 0,
-                                             MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
-            if (kr_send != KERN_SUCCESS) {
-                if (++send_failures <= 5) {
-                    fprintf(stdout, "sidecar: #%llu reply send failed 0x%x %s\n",
-                            static_cast<unsigned long long>(hits), kr_send,
-                            mach_error_string(kr_send));
-                }
-                // mach_msg consumes the SEND_ONCE on success; on failure
-                // we must drop it ourselves.
-                mach_port_deallocate(mach_task_self(), replyPort);
-            }
-            // mach_msg(SEND) on success consumed replyPort. Don't drop it.
+            // Build the reply in place over the request bytes; it goes out
+            // fused with the next receive at the top of the loop.  Every
+            // header field is set explicitly since the buffer holds the
+            // stale request header.
+            auto* reply = reinterpret_cast<ReplyMsg*>(buf.bytes);
+            reply->hdr.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_MOVE_SEND_ONCE, 0);
+            reply->hdr.msgh_size = sizeof(ReplyMsg);
+            reply->hdr.msgh_remote_port = replyPort;
+            reply->hdr.msgh_local_port = MACH_PORT_NULL;
+            reply->hdr.msgh_voucher_port = MACH_PORT_NULL;
+            reply->hdr.msgh_id = reqId;  // echo for transaction match
+            reply->result = outcome.reply_some ? static_cast<uint64_t>(outcome.value) : 0;
+            reply->some_flag = outcome.reply_some ? 1U : 0U;
+            replyPending = true;
         } else if (replyPort != MACH_PORT_NULL &&
                    (hdr->msgh_bits & MACH_MSGH_BITS_REMOTE_MASK) == MACH_MSG_TYPE_MOVE_SEND_ONCE) {
             // Other / malformed message — discard the SEND_ONCE.
@@ -2447,6 +2599,7 @@ constexpr unsigned kReporterPeriodSec = 2;
 void* reporterEntry(void* /*arg*/) {
     pthread_setname_np("rosettax87-reporter");
     uint64_t prev_total = 0;
+    uint64_t prev_vm = 0;
     bool printed_idle = false;
     for (;;) {
         const struct timespec ts = {.tv_sec = kReporterPeriodSec, .tv_nsec = 0};
@@ -2454,6 +2607,9 @@ void* reporterEntry(void* /*arg*/) {
         const uint64_t cur = g_hits.load(std::memory_order_relaxed);
         const uint64_t delta = cur - prev_total;
         prev_total = cur;
+        const uint64_t vm = g_statVmSyscalls.load(std::memory_order_relaxed);
+        const uint64_t vm_delta = vm - prev_vm;
+        prev_vm = vm;
         if (delta == 0) {
             if (!printed_idle && cur > 0) {
                 fprintf(stdout, "[rosettax87] sidecar: idle (total %llu)\n",
@@ -2464,9 +2620,18 @@ void* reporterEntry(void* /*arg*/) {
             continue;
         }
         printed_idle = false;
-        fprintf(stdout, "[rosettax87] sidecar: %llu req/s (total %llu)\n",
+        // vm/req counts mach_vm_* traps on the translate path this period
+        // (mach_msg excluded: 1/request by construction).  Cache columns are
+        // cumulative hits/misses so rates are readable at a glance.
+        fprintf(stdout,
+                "[rosettax87] sidecar: %llu req/s (total %llu) vm/req=%.2f "
+                "ir=%llu/%llu tco=%llu\n",
                 static_cast<unsigned long long>(delta / kReporterPeriodSec),
-                static_cast<unsigned long long>(cur));
+                static_cast<unsigned long long>(cur),
+                static_cast<double>(vm_delta) / static_cast<double>(delta),
+                static_cast<unsigned long long>(g_statIrHits.load(std::memory_order_relaxed)),
+                static_cast<unsigned long long>(g_statIrMisses.load(std::memory_order_relaxed)),
+                static_cast<unsigned long long>(g_statTcoHits.load(std::memory_order_relaxed)));
         fflush(stdout);
     }
 }
