@@ -54,12 +54,23 @@ void dumpCountersIfEnabled(mach_port_t parentTaskPort);
 // which thread it latched onto, the rate it actually achieved, the leaf
 // histogram and the folded stacks.
 struct SamplerConfig {
-    std::string path;             // X87_SAMPLE; empty = disabled
-    uint64_t interval_us = 1000;  // X87_SAMPLE_HZ, default 1 kHz
+    std::string path;  // X87_SAMPLE; empty = disabled
+    // X87_SAMPLE_HZ, default 10 kHz.  A sample costs ~10 us, so the rate buys
+    // resolution at almost exactly 1% of one core per kHz, and it holds: 10 kHz
+    // measured 9998 Hz achieved with nothing dropped and the ring under 2% full.
+    // Ten because resolution is the scarce thing and cpu is not.  A capture that
+    // came back too thin costs a whole session to retake, while the 10% of a core
+    // this spends is not felt on any machine the target runs on.  Cadence starts
+    // to get ragged above here (missed ticks are 0.1% at 8 kHz, 0.9% at 16 kHz):
+    // no bias, since a late tick moves the deadline rather than bursting to
+    // catch up, but there is no point paying for a rate the timer cannot hold.
+    uint64_t interval_us = 100;
     // Discovery has its own, slower cadence: a sweep touches every thread in the
     // task, so it costs more than a millisecond of work on a real target and
     // must not inherit a high sampling rate.  X87_SAMPLE_SWEEP_HZ, never faster
-    // than interval_us.
+    // than interval_us.  Left at 1 kHz while sampling went to 10, which is the
+    // whole point of it being a separate knob: latching takes a couple of
+    // hundred sweeps either way.
     uint64_t sweep_interval_us = 1000;
     // The guest pcs that mark the thread worth profiling.  Left unset, the
     // sampler finds the main executable image itself (see detectMainImage) and
@@ -77,12 +88,15 @@ struct SamplerConfig {
     // capture of a raid pull came back with the fight averaged into the login
     // screen and no way to separate them.
     double report_s = 10;
-    // Also write each report interval on its own, as <path>.NNNN, holding only
-    // the samples taken during it.  The cumulative profile answers "where does
-    // this run spend its time" and cannot answer "where does the fight spend
-    // its time", because every report it has ever written covers everything
-    // since the process started.  A window cannot be recovered afterwards, so
-    // it has to be written at the time.  X87_SAMPLE_WINDOWS=0 turns it off.
+    // Also write each report interval on its own, appended to <path>.windows,
+    // each record holding only the samples taken during that interval.  The
+    // cumulative profile answers "where does this run spend its time" and
+    // cannot answer "where does the fight spend its time", because every report
+    // it has ever written covers everything since the process started.  A
+    // window cannot be recovered afterwards, so it has to be written at the
+    // time.  One appended file rather than the file per window this started as:
+    // at a ten-second interval an hour of play left 360 of them in the
+    // directory.  X87_SAMPLE_WINDOWS=0 turns it off.
     bool windows = true;
     bool unwind = true;  // walk the guest frame-pointer chain
 };
