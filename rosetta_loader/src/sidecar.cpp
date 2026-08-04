@@ -1184,6 +1184,12 @@ struct AggCtx {
     unsigned window_seq = 0;
     double window_started_s = 0;
     double window_latched_us = 0;
+    // The whole series lives in one appended file, <path>.windows, opened on the
+    // first window written rather than at startup so a run that never latches
+    // leaves nothing behind.  One file per window was what this used to be, and
+    // at a ten-second interval an hour of play left 360 of them next to the
+    // profile.
+    FILE* window_file = nullptr;
     std::map<uint64_t, GuestModule> modules;
     // 64 KB slots holding an address no search could explain: a frame-pointer
     // walk invents return addresses out of ordinary data, and those must cost
@@ -1234,20 +1240,13 @@ std::string noGuestReasonField(uint8_t bits) {
     return out.empty() ? "unknown" : out;
 }
 
-// Written by the aggregator, which owns everything in it.  The sampler is not
-// involved and does not pause: sampling continues through a write.
-// `path` is where this one goes, which is ctx->path for the cumulative profile
-// and ctx->path.NNNN for a window.  A window passes its own span and the latched
-// time inside it; windowStart below zero means this is the cumulative profile
-// and the whole-run figures apply.
-void writeProfile(const AggCtx* ctx, const SamplerStats& st, double elapsed,
-                  const std::string& path, double windowStart = -1, double windowProfiled = 0) {
-    const std::string tmp = path + ".tmp";
-    FILE* fh = fopen(tmp.c_str(), "wb");
-    if (fh == nullptr) {
-        return;
-    }
-
+// One profile record, written into `fh`.  Written by the aggregator, which owns
+// everything in it; the sampler is not involved and does not pause, so sampling
+// continues through a write.  A window passes its own span and the latched time
+// inside it; windowStart below zero means this is the cumulative profile and the
+// whole-run figures apply.
+void emitProfile(FILE* fh, const AggCtx* ctx, const SamplerStats& st, double elapsed,
+                 double windowStart, double windowProfiled) {
     const std::scoped_lock latch(g_latch.mu);
     const bool windowed = windowStart >= 0;
     // The time samples actually accrued over: latched stretches only.  Dividing
@@ -1493,10 +1492,52 @@ void writeProfile(const AggCtx* ctx, const SamplerStats& st, double elapsed,
         }
     }
 
+    // Closes the record.  Only a window needs it: records are concatenated into
+    // one file, and a SIGKILL during a write leaves a partial one at the end,
+    // which a reader has to be able to drop rather than sum.
+    if (windowStart >= 0) {
+        fprintf(fh, "\nend_window %u\n", ctx->window_seq);
+    }
+}
+
+// The cumulative profile: written whole every report interval, via a temporary
+// and a rename, so a reader mid-run always sees a complete file.
+void writeProfile(const AggCtx* ctx, const SamplerStats& st, double elapsed,
+                  const std::string& path) {
+    const std::string tmp = path + ".tmp";
+    FILE* fh = fopen(tmp.c_str(), "wb");
+    if (fh == nullptr) {
+        return;
+    }
+    emitProfile(fh, ctx, st, elapsed, -1, 0);
     fclose(fh);
     if (rename(tmp.c_str(), path.c_str()) != 0) {
         unlink(tmp.c_str());
     }
+}
+
+// One window, appended to the series file.  Built in memory first so the record
+// reaches the file in a single write: it is appended rather than renamed into
+// place, so a reader can be part-way through the file at any moment.
+void appendWindow(AggCtx* ctx, const SamplerStats& st, double elapsed, double windowStart,
+                  double windowProfiled) {
+    if (ctx->window_file == nullptr) {
+        ctx->window_file = fopen((ctx->path + ".windows").c_str(), "wb");
+        if (ctx->window_file == nullptr) {
+            return;
+        }
+    }
+    char* buf = nullptr;
+    size_t len = 0;
+    FILE* mem = open_memstream(&buf, &len);
+    if (mem == nullptr) {
+        return;
+    }
+    emitProfile(mem, ctx, st, elapsed, windowStart, windowProfiled);
+    fclose(mem);
+    fwrite(buf, 1, len, ctx->window_file);
+    fflush(ctx->window_file);
+    free(buf);
 }
 
 // Take one address the map does not explain and try to name its image.  Only
@@ -1730,7 +1771,7 @@ void* aggregatorMain(void* raw) {
     auto* ctx = static_cast<AggCtx*>(raw);
     // Samples drain into the window; the run total is the windows merged.  Kept
     // this way round rather than as two independent tallies so the cumulative
-    // profile is the sum of the window files by construction, which is the one
+    // profile is the sum of the window records by construction, which is the one
     // property a reader adding them up depends on.
     SamplerStats win;
     SamplerStats run;
@@ -1767,10 +1808,8 @@ void* aggregatorMain(void* raw) {
             baseNs = nsNow;
 
             if (ctx->windows) {
-                char suffix[16];
-                snprintf(suffix, sizeof(suffix), ".%04u", ctx->window_seq);
-                writeProfile(ctx, win, elapsed - ctx->window_started_s, ctx->path + suffix,
-                             ctx->window_started_s, (latchedUs - ctx->window_latched_us) / 1e6);
+                appendWindow(ctx, win, elapsed - ctx->window_started_s, ctx->window_started_s,
+                             (latchedUs - ctx->window_latched_us) / 1e6);
                 ctx->window_seq++;
             }
             ctx->window_started_s = elapsed;
@@ -1784,6 +1823,10 @@ void* aggregatorMain(void* raw) {
             g_sampler_flush_done.store(true, std::memory_order_release);
         }
         if (!running) {
+            if (ctx->window_file != nullptr) {
+                fclose(ctx->window_file);
+                ctx->window_file = nullptr;
+            }
             return nullptr;
         }
         struct timespec ts{.tv_sec = 0, .tv_nsec = kDrainEveryNs};
@@ -2806,9 +2849,12 @@ void samplerConfigFromEnv(SamplerConfig& cfg) {
     }
 }
 
-// Delete every <path>.NNNN left by an earlier run.  Scanned rather than counted
-// up from zero, because a previous run may have written more windows than this
-// one will and stopping at the first gap would leave its tail behind.
+// Delete every <path>.NNNN left by an earlier run.  The series is one appended
+// file now, so this only clears what a build before that wrote: those files are
+// still a valid series to a reader, and left in place they would be summed into
+// a capture they have nothing to do with.  Scanned rather than counted up from
+// zero, because that run may have written more windows than this one will and
+// stopping at the first gap would leave its tail behind.
 void unlinkWindowSeries(const std::string& path) {
     const size_t slash = path.find_last_of('/');
     const std::string dir = slash == std::string::npos ? "." : path.substr(0, slash);
@@ -2842,10 +2888,13 @@ void startSampler(mach_port_t parentTaskPort, uint64_t runtimeBase, const Sample
     // Nothing from a previous run may survive into this one: a run that never
     // latches writes no profile, and the absence has to be the answer rather
     // than the last run's file still sitting there to be read as this one's.
-    // The windows go too, and matter more: a reader sums the series, so one
-    // stale .NNNN would be added into this run's totals rather than merely
-    // misread, and a shorter run would leave the tail of a longer one behind.
+    // The windows go too, and matter more: a reader sums the series, so a stale
+    // window would be added into this run's totals rather than merely misread.
+    // The series file is reopened truncating anyway, but only if this run gets
+    // as far as a window, and an old one sitting next to a fresh profile is
+    // exactly the confusion this is here to prevent.
     unlink(cfg.path.c_str());
+    unlink((cfg.path + ".windows").c_str());
     unlinkWindowSeries(cfg.path);
     // The target's pid is needed by both threads and pid_for_task only answers
     // while it is alive, so it is read here, once, before either starts.
