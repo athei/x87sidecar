@@ -229,6 +229,7 @@ constexpr uint32_t b_cond(uint32_t cond, int32_t imm19_words) {
 }
 constexpr uint32_t COND_EQ = 0x0;  // equal
 constexpr uint32_t COND_NE = 0x1;  // not equal
+constexpr uint32_t COND_HI = 0x8;  // unsigned >
 constexpr uint32_t COND_LS = 0x9;  // unsigned ≤
 constexpr uint32_t COND_LT = 0xB;  // signed <
 constexpr uint32_t COND_LE = 0xD;  // signed ≤
@@ -261,6 +262,43 @@ constexpr uint32_t str_d_offset(uint32_t dt, uint32_t rn, uint32_t imm) {
 constexpr uint32_t ldr_d_offset(uint32_t dt, uint32_t rn, uint32_t imm) {
     uint32_t imm12 = (imm / 8) & 0xFFF;
     return 0xFD400000U | (imm12 << 10) | ((rn & 0x1F) << 5) | (dt & 0x1F);
+}
+
+// BL +imm26*4   (PC-relative call, sets LR).  The decode_opcode hook uses it
+// to invoke the original through STASH and come back.
+//   1001_01_imm26
+constexpr uint32_t bl(int32_t imm26_words) {
+    return 0x94000000U | (static_cast<uint32_t>(imm26_words) & 0x03FFFFFF);
+}
+
+// MOV Wd, Wn   (alias for ORR Wd, WZR, Wn).  32-bit, so it also zero-extends
+// into the top half of Xd — which is how the decode hook narrows the `unsigned
+// offset` argument the same way decode_opcode itself does (uxtw).
+constexpr uint32_t mov_reg_w(uint32_t rd, uint32_t rm) {
+    return 0x2A0003E0U | ((rm & 0x1F) << 16) | (rd & 0x1F);
+}
+
+// ADD Xd, Xn, Xm   (64-bit shifted register, shift=0)
+constexpr uint32_t add_reg_x(uint32_t rd, uint32_t rn, uint32_t rm) {
+    return 0x8B000000U | ((rm & 0x1F) << 16) | ((rn & 0x1F) << 5) | (rd & 0x1F);
+}
+
+// CMP Xn, Xm   (= SUBS XZR, Xn, Xm — 64-bit register compare)
+constexpr uint32_t cmp_reg_x(uint32_t rn, uint32_t rm) {
+    return 0xEB00001FU | ((rm & 0x1F) << 16) | ((rn & 0x1F) << 5);
+}
+
+// LDRB Wt, [Xn|SP, #imm12]   (8-bit load-zero-extend, unsigned offset, unscaled)
+//   00_111_0_01_01_imm12_Rn_Rt
+constexpr uint32_t ldrb_w_offset(uint32_t wt, uint32_t rn, uint32_t imm) {
+    return 0x39400000U | ((imm & 0xFFF) << 10) | ((rn & 0x1F) << 5) | (wt & 0x1F);
+}
+
+// LDADDAL Xs, Xt, [Xn]   (LSE atomic add, acquire-release).  No offset form —
+// Xn must already hold the exact address.  With Xt = XZR this is STADDAL.
+//   1111_1000_1_1_1_Rs_0000_00_Rn_Rt
+constexpr uint32_t ldaddal_x(uint32_t rs, uint32_t rt, uint32_t rn) {
+    return 0xF8E00000U | ((rs & 0x1F) << 16) | ((rn & 0x1F) << 5) | (rt & 0x1F);
 }
 
 // RET (= BR x30)
@@ -961,6 +999,193 @@ StubBlobs build(uint64_t handlerAddr, uint64_t translateInsnAddr, const uint8_t 
         return blobs;
     }
     append_abort_msg_template(h);
+
+    return blobs;
+}
+
+StubBlobs buildDecodeHook(uint64_t handlerAddr, uint64_t decodeOpcodeAddr,
+                          const uint8_t origPrologue16[16]) {
+    StubBlobs blobs;
+
+    // The 3-mov+br abs-jump encoding, and the 3-mov address load below, only
+    // work while the top 16 bits are zero.  True for macOS userland (sub-256TB,
+    // top byte zeroed).  Caller reads a short entry as "refused".
+    if ((handlerAddr | decodeOpcodeAddr) & 0xFFFF000000000000ULL) {
+        return blobs;
+    }
+
+    blobs.entry.reserve(16);
+    emit_abs_jump_3movs(blobs.entry, handlerAddr);
+
+    // ── Instruction indices ─────────────────────────────────────────────────
+    // Named so the branch displacements below are derived rather than counted
+    // by hand; the size check at the end pins them.
+    constexpr int kFirstCall = 4;    // bl STASH  (original decode)
+    constexpr int kSecondCall = 35;  // bl STASH  (substitute decode)
+    constexpr int kDone = 47;        // DONE block
+    constexpr int kCodeInstrs = 50;  // handler code, before STASH
+
+    // Frame (64 B, keeps sp 16-aligned).  x0..x3 must survive the first call so
+    // the substitute path can re-issue it; code_base/code_end/&insn must
+    // survive the second one so they can be put back afterwards.
+    constexpr uint32_t kOffCtx = 0;       // x0, DecoderCtx*
+    constexpr uint32_t kOffOffset = 8;    // x1, unsigned offset
+    constexpr uint32_t kOffOut = 16;      // x2, DecodedInsn*
+    constexpr uint32_t kOffOutLen = 24;   // x3, uint8_t*
+    constexpr uint32_t kOffLr = 32;       // return address of the real caller
+    constexpr uint32_t kOffCodeBase = 40;
+    constexpr uint32_t kOffCodeEnd = 48;
+    constexpr uint32_t kOffInsn = 56;     // guest address of the instruction
+    constexpr uint32_t kFrame = 64;
+
+    // `DC D8` read as a little-endian halfword.
+    constexpr uint16_t kDcD8Halfword = 0xD8DC;
+
+    // The substitute bytes are the last thing in the blob, so they live in
+    // libRosettaRuntime's __TEXT padding along with the code.  That matters:
+    // the padding is part of an image mapping, so it is present in every
+    // process that inherits the patched runtime, and it needs no writable page
+    // of ours.  An earlier version kept them on a page the sidecar allocated
+    // and mach_vm_remap'd in with VM_INHERIT_NONE, which wedged wine — wine
+    // forks, and a forked child inherited the patched code but not the page,
+    // so every access from the handler faulted.
+    const uint64_t substAddr = handlerAddr + kCodeInstrs * 4 + 32;
+
+    auto& h = blobs.handler;
+    h.reserve(kCodeInstrs * 4 + 48);
+
+    //  0: sub sp, sp, #64
+    emit(h, sub_imm_x(SP, SP, kFrame));
+    //  1: stp x0, x1, [sp, #0]        ; ctx, offset
+    emit(h, stp_offset(0, 1, SP, kOffCtx));
+    //  2: stp x2, x3, [sp, #16]       ; out, out_len
+    emit(h, stp_offset(2, 3, SP, kOffOut));
+    //  3: str lr, [sp, #32]
+    emit(h, str_x_offset(LR, SP, kOffLr));
+    //  4: bl STASH                    ; w0 = original decode's status
+    emit(h, bl(kCodeInstrs - kFirstCall));
+    //  5: cmp w0, #1                  ; INVALID?  (FAULT is 2 and is not ours)
+    emit(h, cmp_imm_w(0, 1));
+    //  6: b.ne DONE                   ; hand back the original result verbatim.
+    //     Nothing above this clobbers a GPR, so the overwhelmingly common path
+    //     through decode_opcode stays register-transparent.
+    emit(h, b_cond(COND_NE, kDone - 6));
+    //  7: ldr x9, [sp, #24]           ; out_len*
+    emit(h, ldr_x_offset(9, SP, kOffOutLen));
+    //  8: ldrb w9, [x9]
+    emit(h, ldrb_w_offset(9, 9, 0));
+    //  9: cbnz w9, DONE               ; INVALID always leaves *out_len == 0
+    emit(h, cbnz_w(9, kDone - 9));
+    // 10: ldr x12, [sp, #0]           ; ctx  (x0 now holds the status, not ctx)
+    emit(h, ldr_x_offset(12, SP, kOffCtx));
+    // 11: ldr x10, [x12, #8]          ; code_base
+    emit(h, ldr_x_offset(10, 12, kDecoderCtxCodeBase));
+    // 12: ldr x11, [x12, #16]         ; code_end
+    emit(h, ldr_x_offset(11, 12, kDecoderCtxCodeEnd));
+    // 13: ldr x9, [sp, #8]            ; offset
+    emit(h, ldr_x_offset(9, SP, kOffOffset));
+    // 14: mov w9, w9                  ; narrow to 32 bits, as decode_opcode does
+    emit(h, mov_reg_w(9, 9));
+    // 15: add x13, x10, x9            ; &insn
+    emit(h, add_reg_x(13, 10, 9));
+    // 16: add x14, x13, #2
+    emit(h, add_imm(14, 13, 2));
+    // 17: cmp x14, x11                ; two bytes must be in bounds
+    emit(h, cmp_reg_x(14, 11));
+    // 18: b.hi DONE
+    emit(h, b_cond(COND_HI, kDone - 18));
+    // 19: ldrh w9, [x13]
+    emit(h, ldrh_w_offset(9, 13, 0));
+    // 20: movz x14, #0xD8DC
+    emit(h, movz(14, kDcD8Halfword, 0));
+    // 21: cmp w9, w14
+    emit(h, cmp_reg_w(9, 14));
+    // 22: b.ne DONE                   ; any other encoding Rosetta rejects is
+    //     handed back untouched.  That is the common case by far: Rosetta
+    //     decodes speculatively, past block ends and over data, so INVALID
+    //     results are routine and are not faults.
+    emit(h, b_cond(COND_NE, kDone - 22));
+    // 23: str x10, [sp, #40]          ; save code_base across the second call
+    emit(h, str_x_offset(10, SP, kOffCodeBase));
+    // 24: str x11, [sp, #48]          ; save code_end
+    emit(h, str_x_offset(11, SP, kOffCodeEnd));
+    // 25: str x13, [sp, #56]          ; save &insn; the call clobbers x13
+    emit(h, str_x_offset(13, SP, kOffInsn));
+    // 26..28: movz/movk/movk x15, #substAddr
+    emit(h, movz(15, static_cast<uint16_t>(substAddr & 0xFFFF), 0));
+    emit(h, movk(15, static_cast<uint16_t>((substAddr >> 16) & 0xFFFF), 16));
+    emit(h, movk(15, static_cast<uint16_t>((substAddr >> 32) & 0xFFFF), 32));
+    // 29: str x15, [x12, #8]          ; ctx->code_base = the substitute buffer
+    emit(h, str_x_offset(15, 12, kDecoderCtxCodeBase));
+    // 30: add x9, x15, #16
+    emit(h, add_imm(9, 15, 16));
+    // 31: str x9, [x12, #16]          ; ctx->code_end = substitute + 16
+    emit(h, str_x_offset(9, 12, kDecoderCtxCodeEnd));
+    // 32: ldr x0, [sp, #0]            ; ctx
+    emit(h, ldr_x_offset(0, SP, kOffCtx));
+    // 33: movz x1, #0                 ; decode at offset 0 of that buffer
+    emit(h, movz(1, 0, 0));
+    // 34: ldp x2, x3, [sp, #16]       ; out, out_len (the caller's, untouched)
+    emit(h, ldp_offset(2, 3, SP, kOffOut));
+    // 35: bl STASH                    ; w0 = substitute decode's status
+    emit(h, bl(kCodeInstrs - kSecondCall));
+    // 36: ldr x12, [sp, #0]
+    emit(h, ldr_x_offset(12, SP, kOffCtx));
+    // 37: ldr x10, [sp, #40]
+    emit(h, ldr_x_offset(10, SP, kOffCodeBase));
+    // 38: ldr x11, [sp, #48]
+    emit(h, ldr_x_offset(11, SP, kOffCodeEnd));
+    // 39: str x10, [x12, #8]          ; restore ctx->code_base
+    emit(h, str_x_offset(10, 12, kDecoderCtxCodeBase));
+    // 40: str x11, [x12, #16]         ; restore ctx->code_end
+    emit(h, str_x_offset(11, 12, kDecoderCtxCodeEnd));
+    // The inner decode also re-seeded insn_start and cursor from the substitute
+    // buffer.  Leaving them there hands the rest of the pipeline a pointer into
+    // the pad where it expects one into the guest's code, so put back what an
+    // in-place decode would have left: insn_start = &insn, cursor = &insn + len.
+    // 41: ldr x13, [sp, #56]          ; &insn
+    emit(h, ldr_x_offset(13, SP, kOffInsn));
+    // 42: str x13, [x12, #0x18]       ; ctx->insn_start
+    emit(h, str_x_offset(13, 12, kDecoderCtxInsnStart));
+    // 43: ldr x9, [sp, #24]           ; out_len*
+    emit(h, ldr_x_offset(9, SP, kOffOutLen));
+    // 44: ldrb w9, [x9]               ; the substitute's length (2)
+    emit(h, ldrb_w_offset(9, 9, 0));
+    // 45: add x13, x13, x9
+    emit(h, add_reg_x(13, 13, 9));
+    // 46: str x13, [x12, #0x20]       ; ctx->cursor
+    emit(h, str_x_offset(13, 12, kDecoderCtxCursor));
+
+    // ── DONE ────────────────────────────────────────────────────────────────
+    // 47: ldr lr, [sp, #32]
+    emit(h, ldr_x_offset(LR, SP, kOffLr));
+    // 48: add sp, sp, #64
+    emit(h, add_imm(SP, SP, kFrame));
+    // 49: ret                         ; w0 is whichever status we hand back
+    emit(h, RET_INSN);
+
+    if (h.size() != kCodeInstrs * 4) {
+        blobs.entry.clear();
+        blobs.handler.clear();
+        return blobs;
+    }
+
+    // STASH: the displaced 16 bytes, then an abs-jump back to decode_opcode+16.
+    // Both calls above target STASH rather than the patched entry, which is
+    // what stops the second decode from re-entering this handler.
+    h.insert(h.end(), origPrologue16, origPrologue16 + 16);
+    emit_abs_jump_3movs(h, decodeOpcodeAddr + 16);
+
+    // The substitute buffer: the canonical `D8 D8` encoding of FCOMP ST(0),
+    // then padding out to the 16 bytes ctx->code_end is set to.
+    const size_t substOff = h.size();
+    h.push_back(0xD8);
+    h.push_back(0xD8);
+    h.resize(substOff + 16, 0);
+    if (handlerAddr + substOff != substAddr) {
+        blobs.entry.clear();
+        blobs.handler.clear();
+    }
 
     return blobs;
 }

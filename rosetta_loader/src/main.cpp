@@ -1831,15 +1831,103 @@ int main(int argc, char* argv[]) try {
         }
         VERBOSE_LOG("M2: translate_insn entry patched (abs-jump to 0x%llx)\n", padStartAddr);
 
+        // ── decode_opcode hook: the `DC D8` fcomp alias ─────────────────────
+        // One stage earlier than translate_insn.  Rosetta's decoder rejects
+        // `DC D8` (the undocumented alias of `fcomp st(0)`), so that encoding
+        // never becomes an IRInstr and the translate_insn hook above can never
+        // see it — it raises an illegal-instruction trap instead.  Software in
+        // the field does emit it (WoW 1.12 at .text:006FA876), which is what
+        // winerosetta.dll was patching up from a vectored exception handler
+        // inside the guest.  Handling it here means no injected guest DLL.
+        //
+        // Best-effort: if the signature scan misses (a Rosetta build we have
+        // not seen), warn and carry on.  x87 acceleration does not depend on
+        // it, and the alternative — refusing to attach — would be worse.
+        uint64_t decodeEntryAddr = 0;
+        uint64_t decodeBlobEnd = padStartAddr + blobs.handler.size();
+        if (g_cfg.loader_no_decode_hook) {
+            VERBOSE_LOG("M2: X87_NO_DECODE_HOOK=1: skipping the decode_opcode hook\n");
+        } else if (const uint64_t decodeOpcodeAddr = dbg.scanForPattern(
+                       OffsetFinder::kDecodeOpcodePattern.data(),
+                       OffsetFinder::kDecodeOpcodePattern.size());
+                   decodeOpcodeAddr == 0) {
+            fprintf(stdout,
+                    "M2: decode_opcode not found by signature scan; the DC D8 fcomp "
+                    "alias will keep trapping\n");
+        } else {
+            VERBOSE_LOG("M2: decode_opcode (scanned) = 0x%llx\n", decodeOpcodeAddr);
+
+            uint8_t origDecodePrologue[16];
+            // The blob goes after the transcendental constants, which already
+            // sit behind the translate_insn handler in the pad. It is entirely
+            // self-contained: code, the displaced prologue, and the substitute
+            // bytes, all in the pad. Nothing it touches lives outside the
+            // runtime's own image, which is what makes it survive wine's forks.
+            const uint64_t decodeHandlerAddr = (constsEnd + 0x3) & ~static_cast<uint64_t>(0x3);
+            stub_asm::StubBlobs dblobs;
+            if (!dbg.readMemory(decodeOpcodeAddr, origDecodePrologue,
+                                sizeof(origDecodePrologue))) {
+                fprintf(stdout, "M2: failed to read decode_opcode prologue at 0x%llx\n",
+                        decodeOpcodeAddr);
+            } else if (dblobs = stub_asm::buildDecodeHook(decodeHandlerAddr, decodeOpcodeAddr,
+                                                          origDecodePrologue);
+                       dblobs.entry.size() != 16 || dblobs.handler.empty()) {
+                fprintf(stdout, "M2: stub_asm::buildDecodeHook refused the addresses\n");
+            } else if (decodeHandlerAddr + dblobs.handler.size() > padStartAddr + padBytes) {
+                fprintf(stdout,
+                        "M2: decode handler (%zu B) doesn't fit in trailing padding "
+                        "(free %llu B after the constants at 0x%llx)\n",
+                        dblobs.handler.size(), padStartAddr + padBytes - decodeHandlerAddr,
+                        decodeHandlerAddr);
+            } else if (!dbg.adjustMemoryProtection(decodeHandlerAddr,
+                                                   VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY,
+                                                   dblobs.handler.size()) ||
+                       !dbg.writeMemory(decodeHandlerAddr, dblobs.handler.data(),
+                                        dblobs.handler.size()) ||
+                       !dbg.adjustMemoryProtection(decodeHandlerAddr,
+                                                   VM_PROT_READ | VM_PROT_EXECUTE,
+                                                   dblobs.handler.size())) {
+                fprintf(stdout, "M2: failed to write the decode handler blob\n");
+            } else if (!dbg.adjustMemoryProtection(decodeOpcodeAddr,
+                                                   VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY,
+                                                   dblobs.entry.size()) ||
+                       !dbg.writeMemory(decodeOpcodeAddr, dblobs.entry.data(),
+                                        dblobs.entry.size()) ||
+                       !dbg.adjustMemoryProtection(decodeOpcodeAddr,
+                                                   VM_PROT_READ | VM_PROT_EXECUTE,
+                                                   dblobs.entry.size())) {
+                fprintf(stdout, "M2: failed to patch the decode_opcode entry\n");
+            } else {
+                decodeEntryAddr = decodeOpcodeAddr;
+                decodeBlobEnd = decodeHandlerAddr + dblobs.handler.size();
+                VERBOSE_LOG("M2: decode_opcode entry patched (abs-jump to 0x%llx, handler %zu B)\n",
+                            decodeHandlerAddr, dblobs.handler.size());
+            }
+        }
+
         // Record the patched code ranges so the tracee can invalidate its own
         // i-cache (cooperative mode). The entry (hot in the i-cache post-init)
         // is the one that MUST be flushed; the handler lives in never-executed
         // padding, but flush it too for safety. Default mode ignores these (it
         // patches pre-init, so no stale lines exist and it detaches instead).
+        //
+        // There are three patch sites now but only two slots, and growing
+        // x87_coop_reply_t would break the handshake against every wine build
+        // already carrying the current header (its receive buffer would be too
+        // small).  So slot 0 spans both entry patches instead: they are both in
+        // libRosettaRuntime's __TEXT, so the span is contiguous and mapped, and
+        // invalidating the lines in between is harmless.
         coopIcacheAddr[0] = translateInsnAddr;
         coopIcacheLen[0] = blobs.entry.size();
+        if (decodeEntryAddr != 0) {
+            const uint64_t lo = std::min(translateInsnAddr, decodeEntryAddr);
+            const uint64_t hi = std::max(translateInsnAddr + blobs.entry.size(),
+                                         decodeEntryAddr + 16);
+            coopIcacheAddr[0] = lo;
+            coopIcacheLen[0] = hi - lo;
+        }
         coopIcacheAddr[1] = padStartAddr;
-        coopIcacheLen[1] = blobs.handler.size();
+        coopIcacheLen[1] = decodeBlobEnd - padStartAddr;
 
         // Capture the tracee's task port BEFORE releasing it. The send-right is
         // held in MuhDebugger::taskPort_ and stays valid past release (default's

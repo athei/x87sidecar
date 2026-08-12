@@ -264,6 +264,7 @@ RosettaConfig load_config_from_env() {
     // ignores the loader_* fields anyway).
     cfg.loader_logs = env_truthy("X87_LOGS") ? 1 : 0;
     cfg.loader_disable_hook = env_truthy("X87_DISABLE_HOOK") ? 1 : 0;
+    cfg.loader_no_decode_hook = env_truthy("X87_NO_DECODE_HOOK") ? 1 : 0;
     cfg.loader_always_none = env_truthy("X87_ALWAYS_NONE") ? 1 : 0;
     cfg.loader_log_ops = env_truthy("X87_LOG_OPS") ? 1 : 0;
     cfg.loader_log_throughput = env_truthy("X87_LOG_THROUGHPUT") ? 1 : 0;

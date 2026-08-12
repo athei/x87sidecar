@@ -21,6 +21,9 @@
 #      phase keeps the unbridged dispatch under regression test)
 #  11. x87sidecar with X87_BRIDGE_V2=0 (v2 defaults ON; this phase keeps
 #      the v1-only bridged dispatch under regression test)
+#  12. test_decoder_fcomp_st three ways: it must trap under native Rosetta,
+#      pass under x87sidecar (the decode_opcode hook substitutes the
+#      canonical encoding), and trap again under X87_NO_DECODE_HOOK=1
 #   R. replay tests/data/geom_block_874c40.ir under --fpr-pool 8 and
 #      assert the pressure splits keep it on the IR path (fpr_fail=0)
 #
@@ -535,6 +538,51 @@ if [[ $NATIVE_ONLY -eq 0 ]]; then
         OUT=$(X87_BRIDGE_V2=0 "$LOADER" "$BINARY" 2>/dev/null | filter_runtime_lines) || EXIT=$?
         check_output "$t" "$OUT" "$EXIT"
     done
+fi
+
+# ── Phase 12: decode_opcode hook (DC D8 fcomp alias) ─────────────────────
+# test_decoder_fcomp_st is the one test whose expected result differs by
+# phase, so it is not in ALL_TESTS: stock Rosetta cannot decode `DC D8` and
+# traps, the sidecar's decode_opcode hook substitutes the canonical `D8 D8`
+# and it passes, and X87_NO_DECODE_HOOK=1 puts it back to trapping.  Assert
+# all three, so neither a silently dead hook nor a silently dead kill switch
+# can pass unnoticed.
+if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then
+    echo ""
+    echo -e "${BOLD}=== Phase 12: decode hook (DC D8 fcomp alias) ===${NC}"
+
+    DECODE_BIN="$TESTS_BIN/test_decoder_fcomp_st"
+    if [[ ! -x "$DECODE_BIN" ]]; then
+        echo -e "${YELLOW}SKIP${NC}  test_decoder_fcomp_st  (binary not found)"
+        ERRORS=$((ERRORS + 1))
+    else
+        # $1 = label, $2 = 'pass' or 'trap' (what the run must do), $3.. = command
+        expect_decode() {
+            local label="$1" want="$2"
+            shift 2
+            TOTAL=$((TOTAL + 1))
+            local out exit_code=0
+            out=$("$@" 2>/dev/null | filter_runtime_lines) || exit_code=$?
+            local got="trap"
+            if [[ $exit_code -eq 0 ]] && ! grep -qE 'FAIL' <<<"$out"; then
+                got="pass"
+            fi
+            local verb="traps"
+            [[ "$want" == "pass" ]] && verb="passes"
+            if [[ "$got" == "$want" ]]; then
+                echo -e "${GREEN}PASS${NC}  $label  (DC D8 $verb as expected)"
+                PASSED=$((PASSED + 1))
+            else
+                echo -e "${RED}FAIL${NC}  $label  (wanted $want, got $got)"
+                FAILED=$((FAILED + 1))
+                tail -6 <<<"$out" | sed 's/^/      /'
+            fi
+        }
+
+        expect_decode "native Rosetta"        trap "$DECODE_BIN"
+        expect_decode "x87sidecar"            pass "$LOADER" "$DECODE_BIN"
+        expect_decode "X87_NO_DECODE_HOOK=1"  trap env X87_NO_DECODE_HOOK=1 "$LOADER" "$DECODE_BIN"
+    fi
 fi
 
 # ── Replay: captured WoW geom block through the clamped pressure gate ────

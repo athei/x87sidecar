@@ -96,6 +96,16 @@ x87 coverage: arithmetic, memory ops, comparisons, the full transcendental set (
 
 Tested live against TurtleWoW (an x86 World of Warcraft client). Not a general-purpose drop-in for arbitrary x86 software: it has been hardened against the workloads it sees, and may need work on others.
 
+### The `DC D8` fcomp alias
+
+`FCOMP ST(0)` has two encodings real x87 silicon accepts: the canonical `D8 D8` that every assembler emits, and `DC D8`, an undocumented alias in the otherwise memory-form `DC D0..DF` row. Rosetta's decoder rejects the alias, so an x86 program containing one takes an illegal-instruction trap where hardware would just run it. WoW 1.12 ships exactly one, in `luaH_set`'s "table index is NaN" check (`fld qword [edi+8]; fcomp st; fnstsw ax` at `.text:006FA876`), which is why running it under wine has meant injecting [winerosetta.dll](https://github.com/Gcenx/winerosetta) into the guest to fix the encoding up from a vectored exception handler.
+
+x87sidecar handles it a stage earlier instead, so no guest-side DLL is needed. The `translate_insn` hook cannot: an encoding the decoder rejects never becomes an instruction to translate. So there is a second, much smaller stub on `decode_opcode`. It calls the original, and on an `INVALID` result whose two bytes are `DC D8` it points the decoder's `code_base`/`code_end` at a 16-byte buffer holding the canonical `D8 D8`, decodes that instead, then restores those two fields along with `insn_start` and `cursor` (which the inner decode re-seeded from the substitute buffer, and which the rest of the pipeline reads as guest addresses). The guest's own memory is never modified, and because the substitute is a 2-byte constant the stub decides in the tracee and never talks to the sidecar.
+
+The substitute buffer is emitted as the tail of the stub's own blob, so it sits in the same `__TEXT` padding as the code. That is load-bearing rather than incidental: the padding belongs to an image mapping, so it is present in every process that inherits the patched runtime. An earlier version kept the buffer on a page the sidecar allocated and `mach_vm_remap`'d in with `VM_INHERIT_NONE`. It passed every test binary and wedged wine, because wine forks and a forked child inherited the patched code but not that page, faulting once per decode. Anything the handler touches has to be reachable in every process that inherits the patch.
+
+Rosetta decodes speculatively, past block ends and over data, so `INVALID` results are routine: a test binary produces about forty of them with no `DC D8` anywhere in it. An `INVALID` only becomes a trap if the guest executes that address.
+
 ## Building
 
 ```bash
@@ -131,6 +141,7 @@ Knobs are environment variables read at startup. The most useful ones:
 | `X87_DISABLE_ALL_FUSIONS=1` | Disable all instruction fusions |
 | `X87_DISABLE_FUSIONS=f1,f2,…` | Disable specific fusions |
 | `X87_DISABLE_HOOK=1` | Skip the `translate_insn` patch (apples-to-apples baseline against stock Rosetta) |
+| `X87_NO_DECODE_HOOK=1` | Skip the `decode_opcode` patch, so the `DC D8` fcomp alias traps the way it does under stock Rosetta |
 | `X87_NO_TCO_CACHE=1` / `X87_NO_IR_CACHE=1` | Disable the sidecar's per-request syscall optimizations (ThreadContextOffsets cache, per-block IR cache); A/B and bisect hatches |
 | `X87_LOGS=1` | Verbose loader logging |
 

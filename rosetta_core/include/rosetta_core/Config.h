@@ -187,6 +187,10 @@ struct RosettaConfig {
                                     //                  apples-to-apples comparison against
                                     //                  the optimised path (both have AOT
                                     //                  cache + interpreter disabled).
+    uint8_t loader_no_decode_hook;  // X87_NO_DECODE_HOOK  skip the decode_opcode patch, so
+                                    //                  the `DC D8` fcomp alias goes back to
+                                    //                  raising an illegal-instruction trap
+                                    //                  the way stock Rosetta does.
     uint8_t loader_always_none;     // X87_ALWAYS_NONE  diagnostic: sidecar replies None for
                                     //                  every translate_insn request, so the
                                     //                  stub falls through to stock for all
