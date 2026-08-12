@@ -9,6 +9,17 @@
 # Output directory: ${X86_SAMPLE_OUTPUT_DIR} if set in the calling scope,
 # otherwise ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}.
 function(add_x86_sample name)
+    _add_x86_sample_impl("${name}" "")
+endfunction()
+
+# Variant linked with a shrunken __PAGEZERO, so the whole image sits below 4 GB.
+# Needed by a test that far-jumps into 32-bit compat mode: the m16:32 far
+# pointer reaching its gate stub only has 32 bits for the offset.
+function(add_x86_sample_lowzero name)
+    _add_x86_sample_impl("${name}" "-Wl,-pagezero_size,0x4000")
+endfunction()
+
+function(_add_x86_sample_impl name extra_flags)
     set(out_dir "${X86_SAMPLE_OUTPUT_DIR}")
     if(NOT out_dir)
         set(out_dir "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
@@ -24,7 +35,8 @@ function(add_x86_sample name)
     add_custom_command(
         OUTPUT  "${out}"
         COMMAND ${CMAKE_COMMAND} -E make_directory "${out_dir}"
-        COMMAND /usr/bin/clang -arch x86_64 -O2 -I "${coop_inc}" -o "${out}" "${src}" "${coop_src}"
+        COMMAND /usr/bin/clang -arch x86_64 -O2 ${extra_flags} -I "${coop_inc}" -o "${out}"
+                "${src}" "${coop_src}"
         DEPENDS "${src}" "${coop_src}" ${X86_SAMPLE_EXTRA_DEPS}
         COMMENT "Building x86_64 ${name}"
         VERBATIM

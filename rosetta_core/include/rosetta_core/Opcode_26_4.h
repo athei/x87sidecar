@@ -673,4 +673,8 @@ enum Opcode_26_4 {
     kOpcode_26_4_xrstor = 0x299,
     kOpcode_26_4_xsave = 0x29A,
     kOpcode_26_4_xsetbv = 0x29B,
+
+    // Synthetic; see kOpcodeName_arpl. Same id under both numberings, since it
+    // is appended past everything Rosetta itself defines.
+    kOpcode_26_4_arpl = 0x29C,
 };

@@ -1348,6 +1348,10 @@ auto opcode_host_to_internal(uint16_t opcode) -> uint16_t {
             return kOpcodeName_xsave;
         case kOpcode_26_4_xsetbv:
             return kOpcodeName_xsetbv;
+        // Synthetic; identical under both numberings, but it still has to be
+        // listed or the default would map it to 0 (== kOpcodeName_aaa).
+        case kOpcode_26_4_arpl:
+            return kOpcodeName_arpl;
         default:
             return 0;
     }
@@ -2695,6 +2699,8 @@ auto opcode_internal_to_host(uint16_t opcode) -> uint16_t {
             return kOpcode_26_4_xsave;
         case kOpcodeName_xsetbv:
             return kOpcode_26_4_xsetbv;
+        case kOpcodeName_arpl:
+            return kOpcode_26_4_arpl;
         default:
             return 0;
     }

@@ -14,6 +14,7 @@
 #include "rosetta_core/ProfileRuntime.h"
 #include "rosetta_core/Register.h"
 #include "rosetta_core/TranslationResult.h"
+#include "rosetta_core/TranslatorCustom.h"
 #include "rosetta_core/TranslatorHelpers.hpp"
 #include "rosetta_core/TranslatorX87.h"
 #include "rosetta_core/TranslatorX87Fusion.h"
@@ -172,6 +173,23 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                 }
             }
         }
+    }
+
+    // ── ARPL: the one non-x87 opcode we claim ───────────────────────────────
+    // Synthetic, produced by the decode hook for `63 /r`, which stock cannot
+    // decode at all (0x63 is MOVSXD in 64-bit mode, so its tables have no ARPL)
+    // and therefore cannot translate either — falling through to stock would
+    // hand it an opcode id it has never heard of.  Handled here, above the x87
+    // dispatch, because none of the x87 run / cache / bridging machinery
+    // applies: a run is a span of consecutive x87 opcodes and bridging only
+    // crosses a fixed set of mov/lea/ALU shapes, neither of which includes
+    // ARPL, so an ARPL can never land mid-run.  The mask handling mirrors the
+    // dispatch's own exit paths: allocate from the pool-restricted working
+    // mask (already restricted above), then hand stock back its own word.
+    if (opcode == kOpcodeName_arpl) {
+        TranslatorCustom::translate_arpl(translation_result, cur_instr);
+        translation_result->free_gpr_mask = cache.stock_free_gpr_mask;
+        return insn_idx + 1;
     }
 
     // X87_PROFILE — mirror the in-cache tally to ProfileRuntime so the sidecar
