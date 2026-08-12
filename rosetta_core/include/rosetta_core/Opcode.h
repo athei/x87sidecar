@@ -672,6 +672,14 @@ enum Opcode : uint16_t {
     kOpcodeName_xrstor = 0x299,
     kOpcodeName_xsave = 0x29A,
     kOpcodeName_xsetbv = 0x29B,
+
+    // Synthetic, past the end of Rosetta's own ids (which stop at 0x29B).
+    // Opcode 0x63 is ARPL in 32-/16-bit mode but MOVSXD in 64-bit mode, so
+    // Rosetta's tables have no ARPL and its decoder rejects the encoding. The
+    // decode hook borrows ADD r/m32,r32's identically-shaped decode and
+    // relabels it as this, which is why it must also be let through the JIT
+    // stub's FILTER prologue and translated here rather than by stock.
+    kOpcodeName_arpl = 0x29C,
 };
 
-extern std::array<const char*, 0x29c> kOpcodeNames;
+extern std::array<const char*, 0x29d> kOpcodeNames;

@@ -34,6 +34,8 @@
 #include "rosetta_core/Config.h"
 #include "rosetta_core/ConfigEnv.h"
 #include "rosetta_core/CoreConfig.h"
+#include "rosetta_core/Opcode.h"
+#include "rosetta_core/OpcodeCompatibility.h"
 #include "rosetta_core/ProfileRuntime.h"
 #include "rosetta_core/RosettaCore.h"
 #include "rosetta_core/TranscendentalHelper.h"
@@ -1869,8 +1871,9 @@ int main(int argc, char* argv[]) try {
                                 sizeof(origDecodePrologue))) {
                 fprintf(stdout, "M2: failed to read decode_opcode prologue at 0x%llx\n",
                         decodeOpcodeAddr);
-            } else if (dblobs = stub_asm::buildDecodeHook(decodeHandlerAddr, decodeOpcodeAddr,
-                                                          origDecodePrologue);
+            } else if (dblobs = stub_asm::buildDecodeHook(
+                           decodeHandlerAddr, decodeOpcodeAddr, origDecodePrologue,
+                           opcode_internal_to_host(kOpcodeName_arpl));
                        dblobs.entry.size() != 16 || dblobs.handler.empty()) {
                 fprintf(stdout, "M2: stub_asm::buildDecodeHook refused the addresses\n");
             } else if (decodeHandlerAddr + dblobs.handler.size() > padStartAddr + padBytes) {
