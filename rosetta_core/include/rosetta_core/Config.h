@@ -109,6 +109,30 @@ struct RosettaConfig {
     // workload.
     std::vector<uint64_t> x87_bridge_hash_list;     // sorted, binary-searched
     std::vector<uint64_t> x87_no_bridge_hash_list;  // sorted, binary-searched
+    // X87_STOCK_HASH_LIST — hand ENTIRE blocks to stock Rosetta by
+    // IR-content hash (same key as the lists above).  Unlike the bridge /
+    // rollback lists this skips the sidecar translator completely for the
+    // listed blocks: every translate request in such a block gets a None
+    // reply, exactly what X87_ALWAYS_NONE does process-wide, but
+    // block-precise.  This is the only per-block exclusion that works under
+    // wow64, where the sidecar sees host-side PCs only and guest-address
+    // range filtering cannot target a guest module.
+    std::vector<uint64_t> x87_stock_hash_list;      // sorted, binary-searched
+
+    // X87_LOG_HASH_LIST — diagnostic: append a timestamped line (uptime
+    // seconds, same clock as WINEDEBUG +timestamp) to the X87_DIAG_DIR file
+    // for every translate request whose block IR-content hash is listed.
+    // Answers "was this block (re)translated near the corruption moment, or
+    // was its code static for minutes" — the translation-side vs
+    // execution-side discriminator.
+    std::vector<uint64_t> x87_log_hash_list;        // sorted, binary-searched
+
+    // X87_STOCK_OPS — hand to stock every block CONTAINING any of the listed
+    // opcodes (comma-separated mnemonic names, e.g. "f2xm1,fscale").  Coarser
+    // than the hash list but robust against hash instability: use it to
+    // localize a miscompile to "blocks with opcode X" in one run, then narrow
+    // by hash.  Resolved to opcode ids at env-parse time.
+    std::vector<uint16_t> x87_stock_ops;            // sorted, binary-searched
     uint8_t force_x87_ir_gate;       // measurement-only flag for tools/profile_analyze: bypass
                                      // the IR-eligibility gate's pre-build refusal conditions
                                      // (run_remaining<3, top_dirty, deferred_pop_count,
