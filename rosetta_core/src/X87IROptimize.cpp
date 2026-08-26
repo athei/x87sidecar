@@ -697,7 +697,12 @@ static void pass_fma_reduce(Context& ctx) {
 
 void optimize(Context& ctx) {
     pass_dse(ctx);
-    pass_fma(ctx);
+    // FMA contraction changes numerics (no intermediate rounding of the
+    // product), so it must be opt-in.  pass_fma_reduce only matches FMAdd
+    // nodes pass_fma creates, so gating the former also starves the latter.
+    if (g_rosetta_config != nullptr && g_rosetta_config->enable_fma_contract != 0) {
+        pass_fma(ctx);
+    }
     pass_fma_reduce(ctx);
     pass_fcom_fstsw_fusion(ctx);
 }

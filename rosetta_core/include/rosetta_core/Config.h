@@ -45,6 +45,11 @@ struct RosettaConfig {
     uint8_t disable_x87_ir;         // X87_DISABLE_X87_IR        disable IR optimisation pipeline
     uint8_t disable_x87_single_fast;  // X87_DISABLE_SINGLE_FAST fall back to the generic
                                       // per-op emitters for isolated (run==1) fld/fst/fstp
+    uint8_t enable_fma_contract;      // X87_ENABLE_FMA_CONTRACT   contract FMul+FAdd/FSub into
+                                      //   one FMA node.  Default OFF: real x87 rounds the product
+                                      //   before the add, FMA does not, and the 1-ulp difference
+                                      //   amplifies through catastrophic cancellation (seen as
+                                      //   corrupted audio-resample steps in Call of Duty 2).
     uint8_t enable_fma_reduce;        // X87_ENABLE_FMA_REDUCE     NEON FMA-reduction pass
                                       //                           (default ON).  Pays off on
                                       //                           +4-contiguous dot products
