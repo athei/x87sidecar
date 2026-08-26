@@ -2,7 +2,10 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <unistd.h>
+
 #include <cstdio>
+#include <cstdlib>
 #include <optional>
 
 #include "rosetta_core/AssemblerHelpers.hpp"
@@ -33,7 +36,24 @@ static bool is_x87_opcode(uint16_t op) {
            (op >= kOpcodeName_f2xm1 && op <= kOpcodeName_fyl2xp1);
 }
 
+// Real body; the public translate_instruction wraps it to record the
+// consumed frontier (last_next_idx) after every exit path in one place.
+static auto translate_instruction_impl(TranslationResult* translation_result, IRBlock* block,
+                                       IRInstr* instr_array, int64_t num_instrs, int64_t insn_idx)
+    -> std::optional<int64_t>;
+
 auto Translator::translate_instruction(TranslationResult* translation_result, IRBlock* block,
+                                       IRInstr* instr_array, int64_t num_instrs, int64_t insn_idx)
+    -> std::optional<int64_t> {
+    const auto ret =
+        translate_instruction_impl(translation_result, block, instr_array, num_instrs, insn_idx);
+    translation_result->x87_cache.last_next_idx =
+        ret.has_value() ? static_cast<int32_t>(*ret) : -1;
+    translation_result->x87_cache.last_buf_end = translation_result->insn_buf.end;
+    return ret;
+}
+
+static auto translate_instruction_impl(TranslationResult* translation_result, IRBlock* block,
                                        IRInstr* instr_array, int64_t num_instrs, int64_t insn_idx)
     -> std::optional<int64_t> {
     auto* const cur_instr = &instr_array[insn_idx];
@@ -46,7 +66,72 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
     // Then, if no cache is active, scan ahead to find the length of the current
     // consecutive x87 run.  x87_cache_set_run only activates if run >= 2.
     {
-        if (block != cache.prev_block) {
+        // A restart of the same block's translation (the stock pass may
+        // start over from a smaller or equal index) must reset the cache
+        // exactly like a block change: base/top in registers refer to
+        // emitted code of the thrown-away pass.
+        //
+        // Mid-span re-ask: while a run is ACTIVE, the only legitimate
+        // continuation is insn_idx == last_next_idx (the previous call's
+        // consumption frontier).  Any other index means stock rolled its
+        // pass back INTO an already-consumed span (fusion/peephole/IR run)
+        // — the old last_insn_idx comparison does NOT catch this (it holds
+        // the call's entry index, not the frontier: the fld1;faddp pair
+        // enters at idx=6 and returns next=8, so a re-ask at idx=7 looked
+        // like a "continuation" and emitted faddp without fld1, losing the
+        // "+1" of the Miles pitch chain -> mixer #DE).  React like a
+        // restart: full cache reset, memory-based re-emission.
+        const bool midspan_reask = block == cache.prev_block && cache.active() &&
+                                   cache.last_next_idx >= 0 &&
+                                   insn_idx != static_cast<int64_t>(cache.last_next_idx);
+        const bool restart_same_block =
+            (block == cache.prev_block && insn_idx <= cache.last_insn_idx) || midspan_reask;
+        if (midspan_reask) {
+            static int midspan_count = 0;
+            ++midspan_count;
+            if (midspan_count <= 10 || midspan_count % 100 == 0) {
+                std::fprintf(stdout,
+                             "[x87midspan] #%d hash=0x%016llx ask=%lld frontier=%d last_in=%d "
+                             "run=%d st{td=%d tp=%d dp=%d pd=%d} buf_now=%llu buf_last=%llu\n",
+                             midspan_count, static_cast<unsigned long long>(cache.profile_hash),
+                             static_cast<long long>(insn_idx), cache.last_next_idx,
+                             cache.last_insn_idx, static_cast<int>(cache.run_remaining),
+                             static_cast<int>(cache.top_dirty),
+                             static_cast<int>(cache.tag_push_pending),
+                             static_cast<int>(cache.deferred_pop_count),
+                             static_cast<int>(cache.perm_dirty),
+                             static_cast<unsigned long long>(translation_result->insn_buf.end),
+                             static_cast<unsigned long long>(cache.last_buf_end));
+                std::fflush(stdout);
+                // A respawned CrossOver game process loses its stdout —
+                // mirror to a per-pid file when X87_DIAG_DIR is set.
+                static FILE* diag = []() -> FILE* {
+                    const char* dir = std::getenv("X87_DIAG_DIR");
+                    if (dir == nullptr || dir[0] == '\0') {
+                        return nullptr;
+                    }
+                    char path[1024];
+                    std::snprintf(path, sizeof(path), "%s/x87midspan.%d.log", dir, getpid());
+                    return std::fopen(path, "a");
+                }();
+                if (diag != nullptr) {
+                    std::fprintf(diag,
+                                 "[x87midspan] #%d hash=0x%016llx ask=%lld frontier=%d last_in=%d "
+                                 "run=%d st{td=%d tp=%d dp=%d pd=%d} buf_now=%llu buf_last=%llu\n",
+                                 midspan_count, static_cast<unsigned long long>(cache.profile_hash),
+                                 static_cast<long long>(insn_idx), cache.last_next_idx,
+                                 cache.last_insn_idx, static_cast<int>(cache.run_remaining),
+                                 static_cast<int>(cache.top_dirty),
+                                 static_cast<int>(cache.tag_push_pending),
+                                 static_cast<int>(cache.deferred_pop_count),
+                                 static_cast<int>(cache.perm_dirty),
+                                 static_cast<unsigned long long>(translation_result->insn_buf.end),
+                                 static_cast<unsigned long long>(cache.last_buf_end));
+                    std::fflush(diag);
+                }
+            }
+        }
+        if (block != cache.prev_block || restart_same_block) {
             cache.invalidate();
             cache.prev_block = block;
             // Stock carries its register-allocator state across the block
@@ -59,6 +144,7 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
             // our emits would clobber stock-live values at runtime.
             cache.stock_free_gpr_mask = translation_result->free_gpr_mask;
             translation_result->free_gpr_mask &= kGprScratchMask;
+            cache.last_insn_idx = -1;
             cache.tally_ir = 0;
             cache.tally_peep = 0;
             cache.tally_single = 0;
@@ -130,6 +216,9 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
             }
             translation_result->free_gpr_mask &= kGprScratchMask;
         }
+        // Translation progress inside the block: a following call with
+        // idx <= this means the stock pass restarted.
+        cache.last_insn_idx = static_cast<int32_t>(insn_idx);
         if (!cache.active()) {
             const bool cache_disabled = g_rosetta_config && g_rosetta_config->disable_x87_cache;
             if (!cache_disabled) {
