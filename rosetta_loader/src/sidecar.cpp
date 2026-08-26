@@ -2177,6 +2177,28 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask, const Translate
         tr.x87_cache = g_x87Cache[req.tr_addr];  // default-constructs on first use
     }
 
+    // Any None reply produced WITHOUT running the translator (the early
+    // failure returns below) must not leave the persisted per-TR X87Cache
+    // trusting mid-run registers: stock translates the op itself and
+    // clobbers the GPRs the cache thinks are holding TOP/base, so the next
+    // sidecar-translated op would miscompile.  The translator's own None
+    // paths invalidate in its default case; this guard covers every bypass
+    // in one place.
+    struct CacheBypassGuard {
+        uint64_t tr_addr;
+        bool ran_translator = false;
+        ~CacheBypassGuard() {
+            if (!ran_translator) {
+                std::scoped_lock lk(g_x87CacheMu);
+                auto it = g_x87Cache.find(tr_addr);
+                if (it != g_x87Cache.end()) {
+                    it->second.invalidate();
+                    it->second.prev_block = nullptr;
+                }
+            }
+        }
+    } _bypass_guard{.tr_addr = req.tr_addr};
+
     TransactionalList<Fixup>* lists[kListCount] = {
         &tr.external_fixups, &tr.internal_fixups,  &tr._fixups,
         &tr.field_B0,        &tr.dyld_stub_fixups, &tr.field_1A8,
@@ -2222,12 +2244,26 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask, const Translate
         bool reuse = !noIrCache && irc.block == req.block && irc.instr_array == req.instr_array &&
                      irc.num_instrs == req.num_instrs && req.insn_idx > irc.last_idx;
         if (reuse) {
-            IRInstr probe;
-            if (!readTranslate(parentTask, req.instr_array + req.insn_idx * sizeof(IRInstr), &probe,
-                         sizeof(probe))) {
+            // Probe a WINDOW, not a single instruction: the translator reads
+            // the whole run's lookahead (fusions, the IR pipeline, bridging
+            // via flag_liveness), so a stale cached tail miscompiles the
+            // block permanently.  The tail can go stale without any
+            // self-modification: IRInstr::flag_liveness depends on the
+            // block's successors and changes on re-decode.  Observed on
+            // Call of Duty 2 as the loss of fld1/faddp in the Miles pow2
+            // pitch chain (resample step 65536*(2^x-1) instead of
+            // 65536*2^x -> #DE in the mixer's division).
+            constexpr uint64_t kProbeWindow = 32;
+            IRInstr probe[kProbeWindow];
+            uint64_t win = req.num_instrs - req.insn_idx;
+            if (win > kProbeWindow) {
+                win = kProbeWindow;
+            }
+            if (!readTranslate(parentTask, req.instr_array + req.insn_idx * sizeof(IRInstr), probe,
+                         win * sizeof(IRInstr))) {
                 return out;
             }
-            reuse = std::memcmp(&probe, &irc.ir[req.insn_idx], sizeof(IRInstr)) == 0;
+            reuse = std::memcmp(probe, &irc.ir[req.insn_idx], win * sizeof(IRInstr)) == 0;
         }
         if (reuse) {
             g_statIrHits.fetch_add(1, std::memory_order_relaxed);
@@ -2322,6 +2358,7 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask, const Translate
     dumpBlockIfNew(parentTask, reinterpret_cast<uint64_t>(tr.ir_module_data), req.block,
                    localIR, req.num_instrs);
 
+    _bypass_guard.ran_translator = true;
     auto result = Translator::translate_instruction(
         &tr, reinterpret_cast<IRBlock*>(req.block), localIR,
         static_cast<int64_t>(req.num_instrs), static_cast<int64_t>(req.insn_idx));
