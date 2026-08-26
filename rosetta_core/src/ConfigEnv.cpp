@@ -136,6 +136,7 @@ RosettaConfig load_config_from_env() {
     cfg.disable_deferred_fxch = env_truthy("X87_DISABLE_DEFERRED_FXCH") ? 1 : 0;
     cfg.disable_x87_ir = env_truthy("X87_DISABLE_X87_IR") ? 1 : 0;
     cfg.disable_x87_single_fast = env_truthy("X87_DISABLE_SINGLE_FAST") ? 1 : 0;
+    cfg.enable_fma_contract = env_truthy("X87_ENABLE_FMA_CONTRACT") ? 1 : 0;
     cfg.enable_fma_reduce = env_default_on("X87_ENABLE_FMA_REDUCE");
     cfg.enable_ir_split = env_default_on("X87_ENABLE_IR_SPLIT");
     cfg.enable_ir_remat = env_default_on("X87_ENABLE_IR_REMAT");
@@ -328,6 +329,9 @@ void print_env_help(std::FILE* out) {
         "  X87_DISABLE_SINGLE_FAST=1     disable the fused single-op fast path for\n"
         "                                isolated (run==1) fld/fst/fstp — fall back\n"
         "                                to the generic per-op emitters\n"
+        "  X87_ENABLE_FMA_CONTRACT=1     contract FMul+FAdd/FSub into a single FMA\n"
+        "                                (off by default: skips the intermediate\n"
+        "                                rounding real x87 performs)\n"
         "  X87_ENABLE_FMA_REDUCE=0       disable NEON FMA-reduction lowering for serial\n"
         "                                FMADD chains.  Default ON.  Pays off only on\n"
         "                                workloads with +4-contiguous data/weight\n"
