@@ -104,7 +104,7 @@ The first is that every emitted instruction has to be one the runtime's own deco
 
 The second is that everything the guest can observe must be in the thread context at every map entry. A run of consecutive x87 instructions keeps TOP in a register and defers its tag-word and FXCH bookkeeping to the end of the run, so a run is answered with one reply: the map then has entries only at the run's start and its end, where the state is complete.
 
-`tests/test_x87_signal_storm.c` runs the reported chain and one case per x87 opcode under a SIGUSR1 storm and compares every iteration bit for bit, and `X87_TEST_STORM=1` puts any of the sample binaries under the same storm. Stock Rosetta itself shifts the x87 stack when a signal lands in its `fcomp`, `fcompp` or `ficomp` translations; the harness records that as a stock divergence.
+`tests/test_x87_signal_storm.c` runs the reported chain and one case per x87 opcode under a SIGUSR1 storm and compares every iteration bit for bit. Stock Rosetta itself shifts the x87 stack when a signal lands in its `fcomp`, `fcompp` or `ficomp` translations; the harness records that as a stock divergence.
 
 ### Encodings Rosetta's decoder rejects
 

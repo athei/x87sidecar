@@ -31,15 +31,13 @@ function(_add_x86_sample_impl name extra_flags)
     # X87_SIDECAR_BOOTSTRAP env var for THIS pid, so default-mode runs are
     # unaffected — but it lets the harness exercise --cooperative without wine.
     set(coop_src "${CMAKE_SOURCE_DIR}/tests/coop_handshake.c")
-    # Likewise the SIGUSR1 storm shim: inert unless X87_TEST_STORM is set.
-    set(storm_src "${CMAKE_SOURCE_DIR}/tests/storm_shim.c")
     set(coop_inc "${CMAKE_SOURCE_DIR}/rosetta_loader/src")
     add_custom_command(
         OUTPUT  "${out}"
         COMMAND ${CMAKE_COMMAND} -E make_directory "${out_dir}"
         COMMAND /usr/bin/clang -arch x86_64 -O2 ${extra_flags} -I "${coop_inc}" -o "${out}"
-                "${src}" "${coop_src}" "${storm_src}"
-        DEPENDS "${src}" "${coop_src}" "${storm_src}" ${X86_SAMPLE_EXTRA_DEPS}
+                "${src}" "${coop_src}"
+        DEPENDS "${src}" "${coop_src}" ${X86_SAMPLE_EXTRA_DEPS}
         COMMENT "Building x86_64 ${name}"
         VERBATIM
     )
