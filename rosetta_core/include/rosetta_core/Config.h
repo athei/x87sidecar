@@ -170,8 +170,7 @@ struct RosettaConfig {
     // The cascade has no tag_push_pending arm — incoming tag state is
     // handled by lower()'s prologue (X87IRLower.cpp:343-350), and
     // cache.tag_push_pending is preserved through compile_run bails by
-    // the pre-lower FPR/GPR pressure check.  See
-    // feedback_ir_gate_top_dirty_threshold.md for history.
+    // the pre-lower FPR/GPR pressure check.
     uint8_t x87_ir_gate_flush_threshold_top_dirty;
     uint8_t x87_ir_gate_flush_threshold_deferred_pop;
     uint8_t x87_ir_gate_flush_threshold_perm_dirty;

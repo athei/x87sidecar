@@ -25,10 +25,9 @@
 //
 // For all six: the run breaks before them, x87_end flushes deferred
 // state, the stub abs-jumps to STASH, and stock translates them in
-// isolation reading coherent X87State via x22.  See
-// feedback_no_per_opcode_fallback.md (transcendentals would clash on
-// stock's {x22, w23} helper-call ABI — that's why this list stays
-// short).
+// isolation reading coherent X87State via x22.  There is deliberately no
+// general per-opcode fallback: transcendentals would clash on stock's
+// {x22, w23} helper-call ABI, which is why this list stays short.
 //
 // fsave / frstor stay INLINE — see translate_fsave / translate_frstor
 // for the full story.  TL;DR: stock's m108 path uses an incompatible
