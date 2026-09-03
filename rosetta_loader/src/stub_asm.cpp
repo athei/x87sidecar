@@ -194,10 +194,9 @@ constexpr uint32_t lsl_imm_x(uint32_t rd, uint32_t rn, uint32_t shift) {
 }
 
 // AND Wd, Wn, #0xF   — 32-bit AND with bitmask immediate hardcoded for #0xF
-// (4 LSBs).  Bitmask-imm encoding (N=0, immr=0, imms=0b000011) per the
-// `feedback_is_bitmask_immediate_ub.md` rule about hardcoding known
-// constants instead of computing from is_bitmask_immediate (which has
-// signed-shift UB when inlined into separate-function helpers).
+// (4 LSBs).  Bitmask-imm encoding (N=0, immr=0, imms=0b000011) hardcoded
+// rather than computed from is_bitmask_immediate, whose original form had
+// signed-shift UB when inlined into separate-function helpers.
 constexpr uint32_t and_w_imm_0xf(uint32_t rd, uint32_t rn) {
     return 0x12000C00U | ((rn & 0x1F) << 5) | (rd & 0x1F);
 }
@@ -420,14 +419,14 @@ void emit_abs_jump_3movs(std::vector<uint8_t>& out, uint64_t target) {
 // with K = '0' + kind, and the two `........` slots overwritten in place
 // by 8 hex chars each.
 //
-// We can't write into the routine's own RX-mapped trailing pad — Apple
-// makes the whole region executable + read-only after install (see
-// `feedback_trailing_pad_page_protection.md`).  So we copy the 64-byte
+// We can't write into the routine's own RX-mapped trailing pad: Apple
+// makes the whole region executable + read-only after install.  So we
+// copy the 64-byte
 // template onto the stack first via ldp/stp pairs, patch in place, then
 // write(2) from the stack.
 //
 // Don't use BRK to crash: libRosettaRuntime's __TEXT eats EXC_BREAKPOINT
-// before SIGTRAP is delivered (`feedback_brk_vs_svc_in_rosetta_text.md`).
+// before SIGTRAP is delivered.
 // Use sys_write (#4) + sys_exit (#1) syscalls.
 constexpr size_t kAbortRoutineCodeSize = 48UL * 4;  // 48 instructions, 192 B
 constexpr size_t kAbortMsgSize = 64;                // template padded to 64 B

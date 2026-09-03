@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 #
-# run_benchmarks.sh -- Run x87 benchmarks under native Rosetta and the JIT and
-# print a comparison table.
+# run_benchmarks.sh -- Run x87 benchmarks under stock Rosetta's translation
+# and under the x87sidecar JIT and print a comparison table.
 #
 # Configurations:
-#   1. Native Rosetta    — binary run directly (baseline)
-#   2. Loader optimized  — x87sidecar with all JIT optimizations enabled
+#   1. Baseline   -- x87sidecar attached with X87_DISABLE_HOOK=1, so stock
+#                    Rosetta translates every x87 instruction itself
+#   2. JIT        -- x87sidecar with all optimizations enabled
 #
 # Usage:
 #   bash scripts/run_benchmarks.sh              # build + run
@@ -107,17 +108,14 @@ filter_runtime_lines() {
 
 # Run a benchmark binary through the loader.
 #
-# Both the "baseline" and "optimized" columns now go through the loader,
-# differing only in X87_DISABLE_HOOK=1.  This is a deliberate apples-to-apples
-# choice: with the loader attached, Apple's runtime drops out of AOT-cache
-# + interpreter mode (because the loader writes g_disable_aot=1 in
-# libRosettaRuntime).  Running the bare binary uses Apple's interpreter
-# fast path for tiny x87 loops, which is faster than any JIT translation
-# (the bench is ~0.55× of the interpreter "native" time even when our hook
-# is bypassed).  X87_DISABLE_HOOK=1 strips just the translate_insn entry
-# patch but keeps everything else, so both columns translate via the same
-# JIT pipeline; the "optimized" column adds our inline x87 emit, the
-# "baseline" column relies on stock libRosettaRuntime's JIT codegen.
+# Both columns go through the loader and differ only in X87_DISABLE_HOOK=1.
+# With the loader attached, Apple's runtime leaves AOT-cache and interpreter
+# mode (the loader writes g_disable_aot=1 in libRosettaRuntime), so both
+# columns translate through the same JIT pipeline: the "JIT" column adds
+# our inline x87 emit, the "baseline" column relies on stock's own codegen.
+# Running the binaries bare, with no sidecar attached, gives the same
+# baseline figures within run-to-run noise (measured 2026-09-03 on an M5
+# Max), so the baseline column is representative of stock Rosetta as shipped.
 #
 # Usage: run_bench <binary> <mode: baseline|optimized> [extra-env=val...]
 run_bench() {

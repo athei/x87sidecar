@@ -11,7 +11,8 @@
  *                       fxsave in a realistic context with an 8-deep
  *                       stack to save.  Headline speedup here is
  *                       dominated by our inline-JIT'd fld + fninit, NOT
- *                       fxsave itself — see feedback_bench_name_lies.md.
+ *                       fxsave itself; the benchmark's name overstates
+ *                       what it measures.
  */
 #include <stdint.h>
 #include <stdio.h>
