@@ -1,5 +1,7 @@
 #include "rosetta_core/Translator.h"
 
+#include "TranslatorX87Internal.hpp"
+
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
@@ -33,18 +35,67 @@ static bool is_x87_opcode(uint16_t op) {
            (op >= kOpcodeName_f2xm1 && op <= kOpcodeName_fyl2xp1);
 }
 
-// Real body.  The public translate_instruction wraps it so the reply's
-// frontier (last_next_idx) is recorded once, after every exit path.
+// Real body: one x87 instruction (or one fusion / one IR run).  The public
+// translate_instruction wraps it so the reply's frontier (last_next_idx) is
+// recorded once, after every exit path, and so that a run is one reply.
 static auto translate_instruction_impl(TranslationResult* translation_result, IRBlock* block,
                                        IRInstr* instr_array, int64_t num_instrs, int64_t insn_idx)
     -> std::optional<int64_t>;
 
+// Flush every deferred piece of x87 state to memory and release the run.
+// Only for the path that must not happen: an instruction inside a run the
+// lookahead counted as handled came back declined.  The ops already emitted
+// stay, stock takes over at the declined one, and it must see a complete
+// X87State when it does.
+static void flush_run_and_release(TranslationResult& tr) {
+    auto& cache = tr.x87_cache;
+    AssemblerBuffer& buf = tr.insn_buf;
+    cache.run_remaining = 1;
+    auto [Xbase, Wd_top] = TranslatorX87::x87_begin(tr, buf);
+    const int Wd_tmp = alloc_gpr(tr, 2);
+    TranslatorX87::x87_end(tr, buf, Xbase, Wd_top, Wd_tmp, /*consumed=*/1);
+    free_gpr(tr, Wd_tmp);
+    cache.tick();
+    tr.free_gpr_mask = cache.stock_free_gpr_mask;
+}
+
 auto Translator::translate_instruction(TranslationResult* translation_result, IRBlock* block,
                                        IRInstr* instr_array, int64_t num_instrs, int64_t insn_idx)
     -> std::optional<int64_t> {
-    const auto ret =
+    auto& cache = translation_result->x87_cache;
+    auto ret =
         translate_instruction_impl(translation_result, block, instr_array, num_instrs, insn_idx);
-    translation_result->x87_cache.last_next_idx = ret.has_value() ? static_cast<int32_t>(*ret) : -1;
+
+    // A run is one reply.  Stock records one instruction-map entry per
+    // translate_insn reply, and when an asynchronous signal lands in a
+    // translation Rosetta's runtime steps the ARM code forward to the next
+    // entry, takes the guest state from the thread context there, and resumes
+    // from that state after the handler.  Inside a run the architectural TOP
+    // lives in a register, tag updates are pending and FXCH is a compile-time
+    // permutation, none of which is in memory at an intermediate entry, so
+    // each such entry was a point where a signal silently shifted the x87
+    // stack (issue #23).  With the whole run in one reply the only entries
+    // are the run's start and its end, where x87_end has flushed everything.
+    while (ret.has_value() && cache.active() && *ret < num_instrs) {
+        cache.last_next_idx = static_cast<int32_t>(*ret);
+        const auto more =
+            translate_instruction_impl(translation_result, block, instr_array, num_instrs, *ret);
+        if (!more.has_value()) {
+            static int declined_count = 0;
+            if (++declined_count <= 10) {
+                std::fprintf(stdout,
+                             "[rosettax87] x87 run: instruction %lld of block hash=0x%016llx "
+                             "declined mid-run, flushing (#%d)\n",
+                             static_cast<long long>(*ret),
+                             static_cast<unsigned long long>(cache.profile_hash), declined_count);
+                std::fflush(stdout);
+            }
+            flush_run_and_release(*translation_result);
+            break;
+        }
+        ret = more;
+    }
+    cache.last_next_idx = ret.has_value() ? static_cast<int32_t>(*ret) : -1;
     return ret;
 }
 

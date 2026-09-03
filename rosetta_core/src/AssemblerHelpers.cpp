@@ -527,18 +527,25 @@ auto emit_csel_gpr(AssemblerBuffer& buf, int is_64bit, int Rd, int Rn, int Rm, i
 }
 
 // =============================================================================
-// FCSEL Dd, Dn, Dm, cond — conditional FP select (f64)
-//
-// Encoding: M=0, S=0, 11110, type=01(f64), 1, Rm, cond, 11, Rn, Rd
-// Base: 0x1E600C00
+// Conditional FP select (f64): Dd = cond ? Dn : Dm
 // =============================================================================
 auto emit_fcsel_f64(AssemblerBuffer& buf, int Dd, int Dn, int Dm, int cond) -> void {
-    uint32_t insn = 0x1E600C00U;
-    insn |= static_cast<uint32_t>(Dm & 0x1F) << 16;
-    insn |= static_cast<uint32_t>(cond & 0xF) << 12;
-    insn |= static_cast<uint32_t>(Dn & 0x1F) << 5;
-    insn |= static_cast<uint32_t>(Dd & 0x1F);
-    buf.emit(insn);
+    // Dd = cond ? Dn : Dm, as a conditional branch over a register move.
+    // The one-instruction FCSEL encoding is not decodable by Rosetta's
+    // state recovery (see emit_f64_const).  Condition codes pair up as
+    // cond ^ 1 for everything below AL, which is all the callers use.
+    // B.cond #2 skips exactly the one instruction after it.
+    if (Dd == Dm) {
+        emit_b_cond(buf, cond ^ 1, 2);
+        emit_fmov_f64_reg(buf, Dd, Dn);
+    } else if (Dd == Dn) {
+        emit_b_cond(buf, cond, 2);
+        emit_fmov_f64_reg(buf, Dd, Dm);
+    } else {
+        emit_fmov_f64_reg(buf, Dd, Dm);
+        emit_b_cond(buf, cond ^ 1, 2);
+        emit_fmov_f64_reg(buf, Dd, Dn);
+    }
 }
 
 // =============================================================================
@@ -628,16 +635,24 @@ auto emit_movi_d_zero(AssemblerBuffer& buf, int Dd) -> void {
     buf.emit(0x2F00E400U | static_cast<uint32_t>(Dd & 0x1F));
 }
 
-auto emit_fmov_d_one(AssemblerBuffer& buf, int Dd) -> void {
-    // FMOV Dd, #1.0
-    // FP scalar immediate, double-precision.
-    // Encoding: 0 00 11110 01 1 imm8 100 00000 Rd
-    //   imm8 for +1.0: sign=0 exp=0b111 frac=0b0000 → 0b01110000 = 0x70
-    //   base = 0x1E601000
-    //   full = 0x1E601000 | (0x70 << 13) | Rd = 0x1E6E1000 | Rd
-    // Single instruction, no GPR needed — replaces MOVZ+FMOV (2 insns +
-    // cross-domain latency).
-    buf.emit(0x1E6E1000U | static_cast<uint32_t>(Dd & 0x1F));
+auto emit_f64_const(AssemblerBuffer& buf, int Dd, uint64_t bits, int Xtmp) -> void {
+    // MOVZ for the first non-zero halfword (or #0), MOVK for the remaining
+    // non-zero ones, then FMOV Dd, Xtmp.  See the header for why neither an
+    // FP immediate nor an inline literal is used.
+    bool first = true;
+    for (int hw = 3; hw >= 0; --hw) {
+        const auto h = static_cast<uint16_t>((bits >> (hw * 16)) & 0xFFFFU);
+        if (h == 0 && !(first && hw == 0)) {
+            continue;
+        }
+        emit_movn(buf, /*is_64bit=*/1, first ? /*MOVZ*/ 2 : /*MOVK*/ 3, hw, h, Xtmp);
+        first = false;
+    }
+    emit_fmov_x_to_d(buf, Dd, Xtmp);
+}
+
+auto emit_fmov_d_one(AssemblerBuffer& buf, int Dd, int Xtmp) -> void {
+    emit_f64_const(buf, Dd, 0x3FF0000000000000ULL, Xtmp);
 }
 
 // ---------------------------------------------------------------------------
@@ -868,21 +883,6 @@ auto emit_ld1_lane_d(AssemblerBuffer& buf, int Vt, int Rn, int lane) -> void {
     insn |= static_cast<uint32_t>(Rn & 0x1F) << 5;
     insn |= static_cast<uint32_t>(Vt & 0x1F);
     buf.emit(insn);
-}
-
-auto emit_ldr_literal_f64(AssemblerBuffer& buf, int Dd, uint64_t constant) -> void {
-    // OPT-H: LDR Dd, [PC, #8] — load from 2 instructions ahead (the .quad)
-    // Encoding (LDR literal, SIMD&FP):
-    //   opc=01 (64-bit) | 011 | V=1 | 00 | imm19=2 | Rt
-    //   0b01_011_1_00_0000000000000000010_00000 = 0x5C000040
-    buf.emit(0x5C000040U | static_cast<uint32_t>(Dd & 0x1F));
-
-    // B #3 — skip over the 8 bytes of constant data, land on next real insn
-    emit_b(buf, 3);
-
-    // .quad constant — 8 bytes of raw data in 2 instruction slots
-    buf.emit(static_cast<uint32_t>(constant & 0xFFFFFFFFU));
-    buf.emit(static_cast<uint32_t>(constant >> 32));
 }
 
 auto emit_scvtf(AssemblerBuffer& buf, int is_64bit_int, int ftype, int Rd, int Rn) -> void {

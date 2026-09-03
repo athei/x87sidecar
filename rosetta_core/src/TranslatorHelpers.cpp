@@ -864,17 +864,22 @@ auto read_operand_to_gpr(TranslationResult& result, bool is_64bit, IROperand* op
 // (FCVT*S maps NaN to 0), so the FCMEQ sits on a rare side path and the
 // common case retires 3 instructions.
 //
-// Layout (fixed offsets, same style as the RC dispatch chains):
+// Layout (fixed offsets, same style as the RC dispatch chains).  Every
+// branch goes forward: Rosetta's state recovery walks the translation's
+// control flow when a signal lands in it and treats any backward edge as a
+// loop, which it refuses when the body writes guest state.  The NaN path
+// therefore carries its own copy of the MOVZ instead of jumping back to [3].
 //   [0] SUB Xt, Xd_int, Wd_int {SXTH|SXTW}   (S16/S32; range diff)
 //       EOR Xt, Xd_int, #INT64_MAX           (S64;     ==MAX detector)
 //   [1] CBZ  Xd_int, +4 → [5]                ; conv==0: NaN suspect
-//   [2] CBZ  Xt, +6 → [8]  (S16/S32: fits)   ; CBNZ for S64 (not MAX)
+//   [2] CBZ  Xt, +7 → [9]  (S16/S32: fits)   ; CBNZ for S64 (not MAX)
 //   [3] MOVZ Xd_int, #indef                  ; out of range
-//   [4] B    +4 → [8]
+//   [4] B    +5 → [9]
 //   [5] FCMEQ Dscr, Dd_val, Dd_val           ; 0 iff NaN
 //   [6] FMOV Xt, Dscr
-//   [7] CBZ  Xt, -4 → [3]                    ; NaN → indefinite
-//   [8] done
+//   [7] CBNZ Xt, +2 → [9]                    ; not NaN: keep the 0
+//   [8] MOVZ Xd_int, #indef                  ; NaN → indefinite
+//   [9] done
 //
 // Allocates one scratch GPR and one scratch FPR (both transient).
 // =============================================================================
@@ -894,27 +899,34 @@ auto emit_fist_indefinite_guard(TranslationResult& result, AssemblerBuffer& buf,
                              Xd_int, Xt);
     }
 
+    // width's integer indefinite, one instruction for every width
+    const auto emit_indefinite = [&] {
+        if (size == IROperandSize::S16) {
+            emit_movn(buf, /*is_64bit=*/0, /*opc=MOVZ*/ 2, /*hw=*/0, 0x8000, Xd_int);
+        } else if (size == IROperandSize::S32) {
+            emit_movn(buf, /*is_64bit=*/0, /*opc=MOVZ*/ 2, /*hw=*/1, 0x8000, Xd_int);
+        } else {
+            emit_movn(buf, /*is_64bit=*/1, /*opc=MOVZ*/ 2, /*hw=*/3, 0x8000, Xd_int);
+        }
+    };
+
     // [1] CBZ Xd_int, +4 → [5]  (conversion gave 0: input may be NaN)
     emit_cbz(buf, /*is_64bit=*/1, /*is_nz=*/0, Xd_int, 4);
-    // [2] in-range test → [8].  S16/S32: diff==0 ⇔ fits.  S64: diff!=0 ⇔ not MAX.
-    emit_cbz(buf, /*is_64bit=*/1, /*is_nz=*/size == IROperandSize::S64 ? 1 : 0, Xt, 6);
-    // [3] width's integer indefinite
-    if (size == IROperandSize::S16) {
-        emit_movn(buf, /*is_64bit=*/0, /*opc=MOVZ*/ 2, /*hw=*/0, 0x8000, Xd_int);
-    } else if (size == IROperandSize::S32) {
-        emit_movn(buf, /*is_64bit=*/0, /*opc=MOVZ*/ 2, /*hw=*/1, 0x8000, Xd_int);
-    } else {
-        emit_movn(buf, /*is_64bit=*/1, /*opc=MOVZ*/ 2, /*hw=*/3, 0x8000, Xd_int);
-    }
-    // [4] B +4 → [8]
-    emit_b(buf, 4);
+    // [2] in-range test → [9].  S16/S32: diff==0 ⇔ fits.  S64: diff!=0 ⇔ not MAX.
+    emit_cbz(buf, /*is_64bit=*/1, /*is_nz=*/size == IROperandSize::S64 ? 1 : 0, Xt, 7);
+    // [3] out of range
+    emit_indefinite();
+    // [4] B +5 → [9]
+    emit_b(buf, 5);
     // [5] FCMEQ Dscr, Dd_val, Dd_val — 0 iff NaN (no NZCV write)
     emit_fcmeq_f64(buf, Dscr, Dd_val, Dd_val);
     // [6] FMOV Xt, Dscr
     emit_fmov_d_to_x(buf, Xt, Dscr);
-    // [7] CBZ Xt, -4 → [3]  (NaN → store the indefinite)
-    emit_cbz(buf, /*is_64bit=*/1, /*is_nz=*/0, Xt, -4);
-    // [8] done
+    // [7] CBNZ Xt, +2 → [9]  (not NaN: the 0 stands)
+    emit_cbz(buf, /*is_64bit=*/1, /*is_nz=*/1, Xt, 2);
+    // [8] NaN → the indefinite
+    emit_indefinite();
+    // [9] done
 
     free_fpr(result, Dscr);
     free_gpr(result, Xt);

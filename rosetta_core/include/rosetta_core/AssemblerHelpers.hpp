@@ -215,17 +215,20 @@ auto emit_fmov_d_to_x(AssemblerBuffer& buf, int Xd, int Dn) -> void;
 //   Zeroes the D register with no GPR dependency, enabling parallel issue
 //   with the ADD Xbase instruction on superscalar cores.
 //
-// emit_fmov_d_one — FMOV Dd, #1.0  (FP scalar immediate)
-//   Loads +1.0 in a single instruction with no GPR intermediate.
-//   Replaces the previous MOVZ+FMOV pair (2 insns + cross-domain latency).
+// emit_f64_const — MOVZ/MOVK the bit pattern into Xtmp, then FMOV Dd, Xtmp.
+//   2 instructions for +1.0, up to 5 for an arbitrary double.
+//
+//   Two shorter forms are deliberately not used.  When an asynchronous signal
+//   lands inside translated code, Rosetta's runtime recovers the guest state
+//   by decoding and stepping the ARM instructions of the interrupted
+//   translation, and it only knows the encodings its own translator emits.
+//   FMOV (scalar, immediate) is not among them, and neither is an inline
+//   literal pool (the recovery walks the raw data words as instructions).
+//   Both abort the process on the macOS 27 runtime and silently drop the
+//   instruction on earlier ones (issue #23).
 auto emit_movi_d_zero(AssemblerBuffer& buf, int Dd) -> void;
-auto emit_fmov_d_one(AssemblerBuffer& buf, int Dd) -> void;
-
-// OPT-H: Inline constant pool — LDR Dd, [PC, #8] + B +3 + .quad
-// Loads a 64-bit constant into Dd using PC-relative literal load.
-// Emits 2 instructions + 8 bytes data (= 4 instruction slots total).
-// No GPR intermediate needed.
-auto emit_ldr_literal_f64(AssemblerBuffer& buf, int Dd, uint64_t constant) -> void;
+auto emit_f64_const(AssemblerBuffer& buf, int Dd, uint64_t bits, int Xtmp) -> void;
+auto emit_fmov_d_one(AssemblerBuffer& buf, int Dd, int Xtmp) -> void;
 
 // -----------------------------------------------------------------------------
 // 1e — NEON broadcast helpers (StoreF32-run coalescing)
@@ -309,9 +312,9 @@ auto emit_csel_gpr(AssemblerBuffer& buf, int is_64bit, int Rd, int Rn, int Rm, i
 // FCMEQ Dd, Dn, Dm — scalar f64 compare-equal, mask into Dd (no NZCV write)
 auto emit_fcmeq_f64(AssemblerBuffer& buf, int Dd, int Dn, int Dm) -> void;
 
-// FCSEL Dd, Dn, Dm, cond — conditional FP select (f64)
-// Dd = cond ? Dn : Dm
-// AArch64 cond codes same as above
+// Conditional FP select (f64): Dd = cond ? Dn : Dm, AArch64 cond codes as
+// above.  Emitted as a B.cond over an FMOV (2 or 3 insns), not as FCSEL: see
+// emit_f64_const for why the encoding matters.
 auto emit_fcsel_f64(AssemblerBuffer& buf, int Dd, int Dn, int Dm, int cond) -> void;
 
 // FCMP Dn, #0.0 — compare FP register against zero, sets NZCV
