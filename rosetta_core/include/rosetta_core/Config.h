@@ -196,6 +196,11 @@ struct RosettaConfig {
                                     //                  the `DC D8` fcomp alias goes back to
                                     //                  raising an illegal-instruction trap
                                     //                  the way stock Rosetta does.
+    uint8_t loader_no_preauth;      // X87_NO_PREAUTH   skip the pre-launch taskport
+                                    //                  authorization (default attach only);
+                                    //                  the post-exec task_for_pid then asks
+                                    //                  for it while the tracee is frozen at
+                                    //                  its exec stop.
     uint8_t loader_always_none;     // X87_ALWAYS_NONE  diagnostic: sidecar replies None for
                                     //                  every translate_insn request, so the
                                     //                  stub falls through to stock for all
