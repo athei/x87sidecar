@@ -57,8 +57,12 @@ enum class NoGuestReason : uint8_t {
     BeforeFirstBoundary,  ///< inside a translated fragment, before its first mapped boundary
 };
 
-/// Offset of the ARM-keyed fragment tree root within the runtime image.
+/// Offset of the ARM-keyed fragment tree root within the runtime image, as
+/// built in. The loader replaces it with the value it reads out of the
+/// installed runtime (OffsetFinder::armTreeRootOffset_) before sampling starts.
 inline constexpr uint64_t kArmTreeRootOffset = 0x3ba08;
+void setArmTreeRootOffset(uint64_t offset);
+uint64_t armTreeRootOffset();
 
 /// Field offsets within a CodeFragmentMetadata node.  The node is 0xA0 bytes
 /// and everything a lookup needs lies in [kWindowBegin, kWindowEnd), which is
