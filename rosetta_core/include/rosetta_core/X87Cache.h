@@ -13,23 +13,16 @@ struct IRInstr;
 // Caching these two values across instructions saves 3-4 emitted AArch64
 // instructions per x87 opcode after the first in a run.
 struct X87Cache {
-    int32_t last_insn_idx = -1;  // Last insn_idx asked for in this block: a
-                                 // stock pass restarting from a smaller or
-                                 // equal index invalidates the mid-run cache
-                                 // state — the code that loaded base/top has
-                                 // been thrown away with the aborted pass.
-    uint64_t last_buf_end = 0;   // insn_buf.end after the last call: on a
-                                 // mid-span re-ask this shows whether stock
-                                 // rolled back our emitted BYTES (end < frontier).
-    int32_t last_next_idx = -1;  // next_idx returned by the last call (the
-                                 // consumption frontier; -1 = None/unknown).
-                                 // A mid-run request with insn_idx != this
-                                 // frontier means stock rolled its pass back
-                                 // INTO an already-consumed span
-                                 // (fusion/peephole/IR run): continuing in
-                                 // register mode would emit the span's tail
-                                 // without its head (observed as faddp
-                                 // without fld1 -> Miles pitch 2^x-1).
+    // Where the previous translate_instruction call in this block entered
+    // (last_insn_idx) and where its reply told stock to continue
+    // (last_next_idx; -1 after a None reply).  Stock walks a block front to
+    // back, so the only continuation of an active run is a request at
+    // exactly last_next_idx.  A request at or before last_insn_idx, or
+    // anywhere else inside an active run, means stock started the block's
+    // translation over: the emitted code that holds base/TOP in registers
+    // is gone, and the cache is reset as on a block change.
+    int32_t last_insn_idx = -1;
+    int32_t last_next_idx = -1;
     int8_t base_gpr = 0;        // GPR holding X87State base
     int8_t top_gpr = 0;         // GPR holding TOP
     int16_t run_remaining = 0;  // Countdown; 0 = inactive
