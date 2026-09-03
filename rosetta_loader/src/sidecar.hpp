@@ -14,6 +14,11 @@
 // them. M3 will add real translation work + reply.
 namespace sidecar {
 
+// Size of the TranslationResult stock allocates for a translation. Reads and
+// writes of the tracee's TR are bounded by it (writing past it clobbered the
+// adjacent heap chunk holding the block's first emitted ARM word).
+constexpr size_t kStockTRSize = 0x268;
+
 // Mach IPC port plumbing for the inline stub.
 //
 // Two ports are involved:

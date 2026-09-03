@@ -199,7 +199,8 @@ constexpr size_t kListCount = 6;
 // WoW on nearly every fld block.  The translator only ever touches fields well
 // below 0x268 (insn_buf, fixup lists, free_gpr/fpr masks, thread_context_
 // offsets), so trimming to the real size loses no state.
-constexpr size_t kStockTRSize = 0x268;
+// kStockTRSize lives in sidecar.hpp; the loader checks it against the
+// immediate translator_translate hands its allocator at startup.
 static_assert(kStockTRSize <= offsetof(TranslationResult, x87_cache),
               "stock TR size must not exceed our struct's pre-x87_cache prefix");
 std::mutex g_x87CacheMu;
