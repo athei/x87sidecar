@@ -1,24 +1,101 @@
 # x87sidecar
 
-Faster x87 floating-point for x86 apps running under Apple's Rosetta 2 on Apple Silicon.
+Faster x87 floating-point for x86 programs running under Apple's Rosetta 2 on
+Apple Silicon, plus a profiler that sees through the translation. Most
+x87-heavy x86 software is Windows software, so in practice x87sidecar is
+wrapped around wine and pointed at old games.
 
-This project is a fork of [Lifeisawful/rosettax87_jit](https://github.com/Lifeisawful/rosettax87_jit). It started as a drop-in JIT replacement for stock Rosetta's x87 instruction handlers, but has since diverged so far in architecture and scope that upstreaming is no longer realistic, hence the rename.
+It began as a fork of
+[Lifeisawful/rosettax87_jit](https://github.com/Lifeisawful/rosettax87_jit),
+an in-process JIT for stock Rosetta's x87 handlers, and has since diverged in
+architecture and scope far enough to warrant its own name.
 
-## Why fork?
+## What you get
 
-The original `rosettax87` was a dylib injected into the wine/x86 process. It mapped its own anonymous pages with `MAP_TRANSLATED_ALLOW_EXECUTE`, dropped hand-rolled ARM64 into them, and patched stock's `translate_insn` to branch into that code.
+| | |
+|---|---|
+| Faster x87 | Runs of x87 instructions become inline ARM64 through an IR pipeline with fusions and inline transcendentals, in place of stock Rosetta's much slower translation. See [Benchmarks](#benchmarks). |
+| Two encodings Rosetta rejects | `DC D8` (`fcomp st(0)` alias) and legacy-mode `ARPL` trap under stock Rosetta. x87sidecar translates both, so winerosetta.dll is no longer needed. See [Compatibility](#compatibility-and-correctness). |
+| Sampling profiler | Samples a running program without stopping it and reports guest x86 addresses and stacks, not ARM ones. See [Profiling](#profiling). |
+| x87 block profiler | Per-block execution counters plus `profile_analyze`, which ranks the x87 code that costs the most and names the guest addresses it lives at. |
+| Notarizable | In cooperative mode the sidecar needs no entitlements, so it can ship inside a signed, notarized app bundle. See [Attaching](#attaching-to-the-target). |
+| Survives Rosetta updates | Hook sites are found by anchors, every assumption is checked against the installed runtime at startup, and `x87sidecar --probe` reports the verdict. |
 
-That approach has a fundamental problem with signals. Inside a process running under Rosetta, every ARM64 instruction the CPU executes is supposed to have been produced by Rosetta itself from x86. When a signal fires (or any other event makes the runtime walk the thread's PC), Rosetta does an ARM64-PC to x86-PC reverse lookup against its own translation tables. ARM64 code from an injected dylib is unknown to those tables, so the lookup misses and Rosetta aborts with:
+## Quick start
+
+Each [release](https://github.com/athei/x87sidecar/releases) ships two
+`.tar.xz` assets, `x87sidecar` (no entitlements, notarizable) and
+`x87sidecar_entitled` (can attach to any x86 binary without root). The two
+are byte-identical except for the signature. Downloads carry the quarantine
+attribute, so clear it first.
+
+```bash
+tar xf x87sidecar_entitled.tar.xz
+xattr -d com.apple.quarantine x87sidecar_entitled
+./x87sidecar_entitled --probe                  # is this Rosetta supported?
+./x87sidecar_entitled ./some_x86_program args  # run it faster
+```
+
+The first launch asks for developer-tools authorization once per login
+session. For Windows software use the prebuilt wine from
+[athei/wine-build](https://github.com/athei/wine-build): set
+`ROSETTA_X87_PATH` to the flat `x87sidecar` binary and its loader re-execs
+every 32-bit process through `x87sidecar --cooperative`, which needs no
+entitlements and no password.
+
+## Benchmarks
+
+Ticks from `scripts/run_benchmarks.sh` on an Apple M5 Max, macOS 27.0,
+2026-09-03. The baseline column is stock Rosetta's own JIT translation of
+the same loop (`X87_DISABLE_HOOK=1`, the sidecar attached but not
+translating); running the binaries bare, with no sidecar at all, gives the
+same baseline figures within noise. Steady-state execution only: every
+cold-translated x87 block pays one IPC round trip first.
+
+| benchmark | stock Rosetta | x87sidecar | speedup |
+|---|---:|---:|---:|
+| `load/fld_m64` | 9300800 | 453800 | 20.49x |
+| `add/fadd_m64` | 23969400 | 455400 | 52.63x |
+| `mul/fmul_m64` | 40994600 | 493000 | 83.15x |
+| `div/fdiv_m64` | 62845800 | 454600 | 138.24x |
+| `store/fstp_m64` | 7268600 | 492600 | 14.75x |
+| `compare/fcomi` | 42550600 | 799000 | 53.25x |
+| `unary/fsqrt` | 122184400 | 495400 | 246.63x |
+| `fsin/fsin_midrange` | 117391400 | 2641600 | 44.43x |
+| `fyl2x/fyl2x` | 116134400 | 2627000 | 44.20x |
+| `fpatan/fpatan` | 45748200 | 7251200 | 6.30x |
+| `dot_product/dot_product_n4` | 147243800 | 1059800 | 138.93x |
+| `fusion_fld_arith_fstp/fld_fmul_fstp` | 50546200 | 471400 | 107.22x |
+| `fstp_fld/chain_8x` | 182530000 | 2082000 | 87.67x |
+| `fbstp/fbstp_small` | 43726200 | 25734000 | 1.69x |
+| `frstor/frstor_loop` | 4980200 | 12904600 | 0.38x |
+
+The harness's arithmetic mean over all 179 micro-benchmarks is 61x. These
+are tight loops of x87 instructions and measure the translator, not a
+program: a game spends most of its time elsewhere, and the gain it sees
+depends on how much of it is x87. The state-management instructions are not
+the target and some are slower on their own, `frstor` above among them.
+
+## How it works
+
+The original in-process design mapped its own executable pages and patched
+stock's `translate_insn` to branch into them. That cannot be made safe: when
+a signal arrives, Rosetta looks the thread's ARM64 pc up in its own
+translation tables, code from an injected dylib is unknown to them, and the
+process dies with:
 
 ```
 rosetta error: no code fragment associated with the given arm pc
 ```
 
-The longer the JIT runs, the more time the thread spends with its PC inside the injected dylib's `__TEXT`, and the more likely a signal arrives at exactly the wrong moment. In real workloads (World of Warcraft under wine, for example) this surfaced as random crashes proportional to JIT load. There is no way to fix that without leaving the dylib model.
-
-So the fix is to keep all of our ARM64 code out of the Rosetta'd process entirely. The translator runs in a separate native arm64 process, the sidecar. The only ARM64 still needed inside the Rosetta'd process is a tiny IPC stub, written once at install time into the page padding at the tail of stock's translation-output buffer. We don't allocate any new executable mappings of our own; the stub sits on pages stock has already allocated and registered with Rosetta as translated-from-x86, so the reverse-lookup tables cover it for free. The one place we do touch stock code is the prologue of `translate_insn` itself: we overwrite the first few bytes with a branch into the stub, and preserve the displaced bytes inside the stub so they can run unchanged on the fall-through path. The stub's only runtime work is two bounds checks against the contiguous x87 opcode ranges in Rosetta's enum. If the opcode is in range, the stub sends a Mach message to the sidecar; if not, it executes the preserved prologue bytes and branches back into stock. On the IPC reply, the stub either returns to translate_insn's caller with the sidecar's result (handled) or falls through to stock (the sidecar reported unhandled).
-
-## Architecture
+The crash rate grows with the JIT's success, since a busier JIT means more
+time spent at an unknown pc. So the translator runs in a separate native
+arm64 process, the sidecar, and the only ARM64 left inside the target is a
+small IPC stub written once at install time into the page padding at the
+tail of stock's translation-output buffer: pages stock already registered as
+translated code, so the reverse lookup covers them for free. The prologue of
+`translate_insn` is overwritten with a branch into the stub, and the
+displaced bytes are preserved there for the fall-through path.
 
 ```
 ┌──────────────────── wine + x86 app (under Rosetta) ─────────────────────┐
@@ -55,116 +132,242 @@ So the fix is to keep all of our ARM64 code out of the Rosetta'd process entirel
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
-This is not free. Every cold-translated x87 block pays a Mach IPC round-trip that the in-process dylib didn't pay. Once stock has installed the ARM64 bytes the sidecar is off the hot path, so steady-state execution speed is unaffected; the remaining cost is cold-translation latency, and most of the per-request syscalls that used to accompany the round-trip have been clawed back. The sidecar caches the block's IR array across requests (revalidated with an 80-byte probe read, since one block generates one request per x87 run), caches the thread-context-offsets struct, and fuses the reply send with the next request receive into a single `mach_msg` trap. `X87_NO_TCO_CACHE` and `X87_NO_IR_CACHE` switch the caches back off. One tempting further step does not work and was reverted after testing: `mach_vm_remap`ing (copy=FALSE) the tracee's TR / output buffers into the sidecar so the remaining reads and writes become memcpys. The tracee is an x86_64-translated task with 4 KB VM pages, and remapping its private anonymous memory into the sidecar's 16 KB arm64 map silently degrades to copy semantics: the two views diverge in both directions. Sharing works only in the opposite direction, for pages the sidecar allocates and remaps into the tracee, which is exactly how the profile counter array is wired.
+The stub's runtime work is two bounds checks against the x87 opcode ranges.
+In range, it sends a Mach message to the sidecar and either returns the
+sidecar's bytes to `translate_insn`'s caller or falls through to stock when
+the sidecar declines. Out of range, it runs the preserved prologue and
+branches back. Every cold-translated x87 block pays one IPC round trip; once
+stock has installed the bytes the sidecar is off the hot path, so
+steady-state speed is unaffected. The sidecar caches the block's IR and the
+thread-context layout across requests and fuses each reply with the next
+receive, which leaves 5 traps per request. The `x87sidecar` binary plays
+both roles: it launches the target, attaches, installs the hooks, then drops
+into its receive loop. [docs/internals.md](docs/internals.md) has the
+details.
 
-In exchange, the sidecar is a normal arm64 process, free to use the C++ standard library and any arm64 dependencies. The in-process dylib had to stay close to no-std discipline: every call from our `__TEXT` into a library increased the wall-clock fraction the parent thread spent with its PC inside our pages, and with it the rate of the reverse-lookup panic. Out of process, that constraint is gone.
+## Profiling
 
-The hook install also got simpler. The dylib version rewrote `X19` mid-init so that Rosetta's loader called *our* exports instead of its own. That worked but was brittle, because it depended on undocumented loader semantics that drift between Rosetta versions. The sidecar just overwrites the prologue of `translate_insn` with a branch, a much smaller surface to maintain.
+Both profilers are enabled by naming an output file; neither costs anything
+when unset.
 
-The `x87sidecar` binary plays both roles: when invoked with a target x86 program, it launches the target under Rosetta, attaches, patches `translate_insn`, then drops into its own receive loop serving IPC requests.
+### Sampling profiler: where the guest was
 
-## Attach modes
+```bash
+X87_SAMPLE=/tmp/game.prof ./x87sidecar_entitled ./program
+```
 
-The sidecar has to obtain the tracee's Mach task port to read/write its memory and plant the stub. There are two ways it does this, with different deployment consequences.
+The sampler reads a running thread's ARM pc and resolves it to the guest x86
+pc it was translated from, using the per-fragment instruction maps Rosetta
+keeps for its own use. Nothing suspends the target: `thread_get_state` and
+`mach_vm_read` both work on a running task, so the target pays only memory
+read traffic and the rate is bounded by the sidecar's own CPU. It latches
+onto the thread that runs the program's main image, which it finds by
+reading the guest's own image headers, PE under wine or a plain Mach-O, then
+follows that thread alone. Stacks come from walking the guest frame-pointer
+chain; return addresses on the guest stack are already guest addresses, so
+only the leaf needs resolving.
 
-The default is `task_for_pid` + ptrace. The sidecar forks; the parent execs the target while a grandchild acts as the debugger, calls `task_for_pid`, and attaches via `PT_ATTACHEXC`. Unprivileged, this requires the [debugger entitlement](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.security.cs.debugger) (`com.apple.security.cs.debugger`) on the caller *and* `com.apple.security.get-task-allow` on the target. Because the port is grabbed just before the parent execs, the still-`x87sidecar` parent must itself carry `get-task-allow`. Running as root (CI under `sudo`, for example) bypasses both. This path is used by the local test/benchmark harness against the x86-64 Mach-O sample binaries.
+The profile is one self-describing text file, rewritten in full every report
+interval so it can be read while the target runs, and written again on every
+catchable exit. It carries its own module map, so symbolising needs nothing
+but the program's binaries and debug info.
 
-With `--cooperative` the direction flips: the sidecar `bootstrap_check_in`s a per-pid Mach service, passes its name to the target via the `X87_SIDECAR_BOOTSTRAP` env var, and the target voluntarily hands over its task *and* thread control ports over that service, then blocks on a handshake reply. No `task_for_pid`, no ptrace, and no entitlements. That last point matters for distribution: a hardened, Developer ID-signed cooperative binary passes notarization, so the sidecar can ship inside notarized third-party bundles. Bundling it with CrossOver, for instance, is now technically possible; CrossOver's wine would need the handshake patch described below, which already applies to its tree since [athei/wine](https://github.com/athei/wine) is CrossOver-based. Cooperative mode is what the [prebuilt wine](https://github.com/athei/wine-build) uses: its Rosetta re-exec always inserts `--cooperative`, and its startup performs the target side of the handshake.
+| section | contents |
+|---|---|
+| header | settings, the thread it latched onto, `effective_hz`, `missed_ticks`, `samples_dropped`, `avg_us`, `avg_depth`, cache statistics |
+| `[latch_history]` | every latch, unlatch and discard, so a profile that threw samples away says so |
+| `[threads]` | per thread: samples, resolved, in range, latched |
+| `[modules]` | base, size, kind (`pe`, `macho`, `anon`, `slice`), state, host path of every image a sample touched |
+| `[leaves]` | exclusive histogram of guest pcs |
+| `[host_leaves]` | samples with no guest pc, kept as host pcs with the reason (runtime code, no fragment, before the map's first boundary) |
+| `[host_syscalls]` | the guest syscall a host-only sample was blocked in, recovered from `x16` at the runtime's syscall dispatcher |
+| `[stacks]` | folded inclusive stacks, `root;...;leaf count` |
 
-Both modes converge on the same install and IPC loop once the port is in hand.
+A run leaves `<file>` and `<file>.windows`, the latter one record per report
+interval holding only that interval's samples, each closed by an
+`end_window` line so a record cut short by SIGKILL can be dropped. The
+cumulative profile is the sum of the windows. A sample costs about 10 us,
+roughly 1% of one core per kHz, and the header records the rate actually
+achieved.
 
-## Running under wine
+| knob | flag | default | effect |
+|---|---|---|---|
+| `X87_SAMPLE=<file>` | `--sample=<file>` | off | enable and name the profile |
+| `X87_SAMPLE_HZ=N` | `--sample-hz=N` | 10000 | rate for the latched thread |
+| `X87_SAMPLE_SWEEP_HZ=N` | `--sweep-hz=N` | 1000 | rate at which all threads are swept while looking for one to latch onto |
+| `X87_SAMPLE_REPORT=SECS` | | 10 | rewrite interval and window size |
+| `X87_SAMPLE_WINDOWS=0` | | on | stop writing `<file>.windows` |
+| `X87_GUEST_RANGE=LO-HI` | `--guest-range=LO-HI` | detected | pin the guest range that marks the thread worth profiling |
+| `X87_NO_UNWIND=1` | `--no-unwind` | off | leaf pcs only, about half the per-sample cost |
 
-Most x87-heavy x86 software is Windows software, so in practice x87sidecar is usually wrapped around wine. [athei/wine-build](https://github.com/athei/wine-build) publishes a prebuilt, relocatable x86_64 wine for macOS (CrossOver-based, WoW64) as `wine-cx-*-macos-x86_64.tar.xz` release assets. It carries both pieces x87sidecar needs: a Rosetta re-exec that inserts `--cooperative`, and the wine-side half of the cooperative handshake.
+The environment wins over the flags, so an app bundle can enable sampling
+without touching argv.
 
-Stock wine does not work in cooperative mode out of the box. Its unix loader needs a small patch to perform the tracee side of the handshake: look up the Mach service named by `X87_SIDECAR_BOOTSTRAP`, send the process's task and thread control ports, block for the reply, and invalidate the instruction cache for the code ranges the reply carries. That last step is required because a cooperative attach happens after Rosetta init, when `translate_insn` is already hot in the i-cache and a cross-process flush is not reliable; `sys_icache_invalidate` on the tracee's own thread is. The wire format is defined in [`rosetta_loader/src/coop_proto.h`](rosetta_loader/src/coop_proto.h), which is plain C so wine's unix loader can include it directly. The patch used by the prebuilt wine lives on the `cx-*-patched` branches of [athei/wine](https://github.com/athei/wine).
+### Block profiler: what the x87 code costs
 
-## Binaries
+```bash
+X87_PROFILE=/tmp/game.x87 ./x87sidecar_entitled ./program
+./build/bin/profile_analyze /tmp/game.x87 --rank-by emit --hot-addrs 50
+```
 
-The build emits two signed artifacts from one link. Both are published as `.tar.xz` assets on each GitHub release; which one you want depends on how you intend to attach.
+While translating, the sidecar writes each block's IR to the file the first
+time it sees it. The execution counters live in a page the sidecar allocates
+and shares into the target, where the emitted code increments them with a
+single atomic add, so at exit the sidecar reads its own mapping and appends
+the counts. `profile_analyze` then re-translates every x87 pattern three
+ways (production, IR pipeline off, IR gate forced) and ranks patterns by
+execution-weighted ARM output, which separates "the translator emits too
+much for this" from "this just runs a lot". `--hot-addrs N` collapses the
+cost onto guest block-entry addresses for mapping onto the program's
+functions, `--frag-rows N` lists blocks whose x87 runs are split by
+bridgeable integer instructions, and `--dump-block N` or
+`--dump-block-by-hash 0xH` prints a block's IR. Blocks are identified by a
+content hash that is stable across launches and host versions; the same
+hash keys the per-block knobs in [Configuration](#configuration).
 
-| Artifact | Signing | Trade-off |
+## Attaching to the target
+
+The sidecar needs the target's Mach task port to read its memory and plant
+the stub. There are two ways to get it.
+
+| | default | `--cooperative` |
 |---|---|---|
-| `x87sidecar` | ad-hoc, **no entitlements** | Can be notarized. The default (`task_for_pid`) attach then only works as root (`sudo`); cooperative attach works without it. |
-| `x87sidecar_entitled` | same Mach-O + `cs.debugger` + `get-task-allow` | Default attach works against any target without `sudo`; macOS asks for developer-tools authorization (a password dialog) once per login session, before the target is launched. Not notarizable (`get-task-allow` is rejected). |
+| how | `task_for_pid` + `ptrace(PT_ATTACHEXC)` around the target's exec | the target hands over its task and thread ports on a per-pid Mach service named by `X87_SIDECAR_BOOTSTRAP`, then blocks until the sidecar replies |
+| needs | `x87sidecar_entitled` (`cs.debugger` + `get-task-allow`, one developer-tools password per login) or root | nothing; the flat `x87sidecar` passes notarization |
+| target | any x86 binary | must perform the handshake ([`coop_proto.h`](rosetta_loader/src/coop_proto.h), plain C) |
+| used by | the test and benchmark harness, CI under `sudo` | the prebuilt wine, app bundles |
 
-The two are byte-identical except for the signature. Downloaded copies carry the quarantine attribute, so clear it with `xattr -d com.apple.quarantine <file>` before running. The test scripts point at `x87sidecar_entitled`; under CI's `sudo` either would work.
+Both modes converge on the same install and receive loop. Stock wine does
+not perform the handshake; the patch lives on the `cx-*-patched` branches of
+[athei/wine](https://github.com/athei/wine), which is what
+[athei/wine-build](https://github.com/athei/wine-build) packages. The
+handshake reply carries the code ranges the sidecar patched, and the target
+invalidates them from its own thread: a cooperative attach happens after
+Rosetta init, when `translate_insn` is already hot in the instruction cache
+and a cross-process flush is not reliable.
 
-## Status
+## Compatibility and correctness
 
-x87 coverage: arithmetic, memory ops, comparisons, the full transcendental set (fsin, fcos, fsincos, fpatan, f2xm1, fyl2x, fyl2xp1, fptan, fprem, fprem1, fxtract, fscale), state-management ops (fldenv, fstenv, fxsave, fxrstor, fsave, frstor, fclex, finit, fldcw, fstsw), and the typical fusion patterns produced by 3D-game pipelines.
+Nothing in the tree is tied to a macOS or Rosetta build number. At startup
+the loader locates what it patches by anchors that survive a rebuild, checks
+the assumptions the emitted code relies on against the installed runtime,
+and refuses a runtime that fails a check rather than patching guessed
+addresses. `x87sidecar --probe` prints that report and exits 0 only when
+every feature is supported; run it first after a macOS update. CI runs it
+on the current `macos-26` runner before the test suite, and it runs on
+macOS 27.
 
-Tested live against TurtleWoW (an x86 World of Warcraft client). Not a general-purpose drop-in for arbitrary x86 software: it has been hardened against the workloads it sees, and may need work on others.
+x87 coverage: arithmetic, memory operands, comparisons, the full
+transcendental set (`fsin`, `fcos`, `fsincos`, `fpatan`, `f2xm1`, `fyl2x`,
+`fyl2xp1`, `fptan`, `fprem`, `fprem1`, `fxtract`, `fscale`), state
+management (`fldenv`, `fstenv`, `fxsave`, `fxrstor`, `fsave`, `frstor`,
+`fclex`, `finit`, `fldcw`, `fstsw`) and the fusion patterns 3D-game
+pipelines produce. The test suite runs the same self-checking binaries under
+stock Rosetta and under the sidecar; anything stock gets right, the sidecar
+has to get right too. FMA contraction is opt-in (`X87_ENABLE_FMA_CONTRACT=1`) because real x87 rounds the product
+before the add, and at the 53-bit precision Windows processes run at the
+unfused form is the exact one.
 
-### Asynchronous signals
+The emitted code survives asynchronous signals: when one lands inside a
+translated run, Rosetta steps to the next instruction-map entry and takes
+the guest state from there, so every instruction the sidecar emits is one
+the runtime's decoder knows, control flow only goes forward, and a run is
+answered with one reply so the map has entries only where the state is
+complete. `tests/test_x87_signal_storm.c` pins this under a SIGUSR1 storm.
 
-When a signal is delivered to a thread that is executing translated code, Rosetta has to hand the guest handler a precise x86 context. It gets one by stepping the translated ARM code forward to the next entry of the translation's instruction map (there is one entry per `translate_insn` reply), taking the guest state from the thread context at that point, and resuming from that state once the handler returns. Two rules for the code the sidecar emits follow from this; both were found through issue #23, a Call of Duty 2 mixer thread that lost the effect of `fld1; faddp` in one execution out of thousands.
+Two encodings real hardware runs are missing from Rosetta's decode tables,
+so a program containing them traps under stock Rosetta. A second small stub
+on `decode_opcode` substitutes an encoding the decoder accepts, entirely
+inside the target and without modifying guest memory.
 
-The first is that every emitted instruction has to be one the runtime's own decoder knows, and control flow may only go forward. `FMOV` (scalar, immediate), `FCSEL` and inline literal pools (raw data words in the instruction stream) are not decodable, and a backward branch is treated as a loop and refused. The macOS 27 runtime aborts the process with `failed to decode instruction` when it meets one; earlier runtimes resume with part of the guest instruction unexecuted, which is what the report saw. Constants are therefore materialised through a GPR, a conditional select is a branch over a register move, and no emitter branches backwards.
-
-The second is that everything the guest can observe must be in the thread context at every map entry. A run of consecutive x87 instructions keeps TOP in a register and defers its tag-word and FXCH bookkeeping to the end of the run, so a run is answered with one reply: the map then has entries only at the run's start and its end, where the state is complete.
-
-`tests/test_x87_signal_storm.c` runs the reported chain and one case per x87 opcode under a SIGUSR1 storm and compares every iteration bit for bit. Stock Rosetta itself shifts the x87 stack when a signal lands in its `fcomp`, `fcompp` or `ficomp` translations; the harness records that as a stock divergence.
-
-### Encodings Rosetta's decoder rejects
-
-Two encodings that real hardware runs are absent from Rosetta's decode tables, so a program containing either takes an illegal-instruction trap instead of being translated. Both occur in WoW 1.12, and handling them is what [winerosetta.dll](https://github.com/Gcenx/winerosetta) was injected into the guest to do:
-
-| encoding | what it is | where |
+| encoding | what it is | seen in |
 |---|---|---|
-| `DC D8` | undocumented alias of `fcomp st(0)`, in the otherwise memory-form `DC D0..DF` row | `.text:006FA876`, `luaH_set`'s "table index is NaN" check |
-| `63 /r` | `ARPL r/m16, r16`, legacy mode only (`0x63` is `MOVSXD` in 64-bit mode, so the tables have no ARPL) | `63 D0` in downloaded, obfuscated code, reached after login |
+| `DC D8` | undocumented alias of `fcomp st(0)` | WoW 1.12, Lua's "table index is NaN" check |
+| `63 /r` | `ARPL r/m16, r16`, legacy mode only | WoW 1.12, obfuscated code reached after login |
 
-x87sidecar handles both a stage earlier than `translate_insn`, so no guest-side DLL is needed. The `translate_insn` hook structurally cannot help: an encoding the decoder rejects never becomes an instruction to translate. So there is a second, much smaller stub on `decode_opcode`. It calls the original, and on an `INVALID` result it builds a substitute the decoder does accept, points `code_base`/`code_end` at it, decodes that instead, and then restores those fields along with `insn_start` and `cursor` (which the inner decode re-seeds from the substitute buffer, and which the rest of the pipeline reads as guest addresses). The guest's own memory is never modified, and the stub decides entirely in the tracee without talking to the sidecar.
+Both deep-dives are in [docs/internals.md](docs/internals.md).
 
-The two cases differ in how much that buys. `D8 D8` *is* `fcomp st(0)`, same length, so substituting is the whole fix and stock translates the result. ARPL has no equivalent encoding, so the substitute borrows `0x01` (`ADD r/m32, r32`), whose ModRM/SIB/disp encoding is byte-identical, purely to decode the operands and the length; the mnemonic is then forced to a synthetic opcode id appended past Rosetta's own, which the JIT stub's filter passes through to `TranslatorCustom::translate_arpl` rather than letting stock emit a real `add`.
+Tested live against TurtleWoW (a World of Warcraft 1.12 client) and Call of
+Duty 2 under CrossOver. It is hardened against the workloads it has seen and
+may need work on others.
 
-The substitute is built on the stub's own stack frame, which is per-thread and always mapped. That is load-bearing rather than incidental. An earlier version kept it on a page the sidecar allocated and `mach_vm_remap`'d in with `VM_INHERIT_NONE`; it passed every test binary and wedged wine, because wine forks and a forked child inherited the patched code but not that page, faulting once per decode. Anything the handler touches has to be reachable in every process that inherits the patch.
-
-Rosetta decodes speculatively, past block ends and over data, so `INVALID` results are routine: a test binary produces about forty of them containing neither encoding. An `INVALID` only becomes a trap if the guest executes that address.
-
-## Building
+## Building and testing
 
 ```bash
 cmake -B build
 cmake --build build
 ```
 
-This produces both `build/bin/x87sidecar` (flat) and `build/bin/x87sidecar_entitled` (see [Binaries](#binaries)). Tests and benchmarks are built automatically.
-
-Nothing in the tree is tied to a particular macOS or Rosetta build number. At startup the loader locates what it patches in the installed Rosetta images by the anchors that survive a rebuild (the exported `translator_translate`, the name each function hands its own assert calls, the opcode mnemonic table) and checks the assumptions the emitted code relies on against the installed runtime: the opcode numbering behind the stub's x87 ranges, the size of a `TranslationResult`, the shape of `decode_opcode` around the fields the decode hook rewrites, and that the bytes each hook displaces are relocatable. A runtime that fails a check is refused before the target is launched rather than patched at guessed addresses. `x87sidecar --probe` runs exactly that analysis, prints what it found, and exits 0 only if this build supports the installed Rosetta with every feature, which is the first thing to run after a macOS update.
+This produces `build/bin/x87sidecar`, `build/bin/x87sidecar_entitled`, the
+tools, and the x86-64 test and benchmark binaries.
 
 ```bash
-bash scripts/run_tests.sh                # build + test (native Rosetta & x87sidecar)
-bash scripts/run_tests.sh --no-build     # skip build
-bash scripts/run_tests.sh --native-only  # baseline only
-bash scripts/run_tests.sh test_arith     # specific test
-bash scripts/run_benchmarks.sh           # build + benchmark
+bash scripts/run_tests.sh                # build + all phases
+bash scripts/run_tests.sh --no-build     # skip the build
+bash scripts/run_tests.sh --native-only  # stock Rosetta baseline only
+bash scripts/run_tests.sh test_arith     # one test
+bash scripts/run_benchmarks.sh           # build + benchmark table
 ```
 
-The harness uses the default (`task_for_pid` + ptrace) attach path, so it runs `x87sidecar_entitled`, which needs the debugger entitlements when unprivileged (see [Attach modes](#attach-modes)) or root via `sudo`. Cooperative attach (`--cooperative`, the mode the prebuilt wine uses) needs no entitlements at all.
+The harness runs 89 self-checking x86-64 test binaries under stock Rosetta
+and then under the sidecar in ten configurations (default, IR off, fusions
+off, hook bypassed, FMA contraction on, clamped register pool, pressure
+relief off, fast rounding, bridging off, bridging v2 off), plus a
+cooperative-attach smoke test, the two decoder tests three ways and an IR
+replay phase. The stock run is the baseline: a case that fails there is
+reported XFAIL in later phases rather than gating, and the stock run itself
+may only fail for tests listed in `KNOWN_STOCK_DIVERGENCE`. The harness uses
+the default attach path, so it needs `x87sidecar_entitled` or root.
+
+| tool | purpose |
+|---|---|
+| `profile_analyze` | rank and dump the blocks in an `X87_PROFILE` capture, see [Profiling](#profiling) |
+| `aotinvoke` | translate a serialized IR module through the sidecar's translator against the installed libRosettaRuntime, in process |
+| `scripts/inspect_function.sh` | extract a function from a test binary, translate it with `aotinvoke`, disassemble the result |
+| `ir_pressure_replay` | replay a captured block under a clamped register-pressure gate and report splits and emit |
+| `rollback_diff` | replay a captured block with the IR-gate rollback off and on and diff the ARM |
+| `scripts/run_fusion_sweep.sh` | enable fusions one at a time, then cumulatively, to find the one that breaks a test |
 
 ## Configuration
 
-Knobs are environment variables read at startup. The most useful ones:
+Knobs are environment variables read once at startup. `x87sidecar --help`
+prints the complete list with defaults; the tables list the ones worth
+knowing. Bracketed values are defaults.
 
-| Variable | Effect |
+| variable | effect |
 |---|---|
-| `X87_FAST_ROUND=1` | Skip rounding-mode dispatch (faster but unsafe for FLDCW-heavy code; `=2` skips it only in blocks with no control-word writer, which is safer but still speculative) |
-| `X87_ENABLE_BRIDGE=0` | Disable run bridging (default on): carrying one IR run across short `mov`/`lea` gaps between x87 segments |
-| `X87_BRIDGE_V2=0` | Disable bridging of flag-writing ALU gaps (`add`/`sub`/`and`/`or`/`xor`/`inc`/`dec`) whose written flags Rosetta's own liveness analysis proves dead (default on) |
-| `X87_ENABLE_IR_SPLIT=0` / `X87_ENABLE_IR_REMAT=0` | Disable register-pressure relief (splitting over-pressure runs / sinking long-lived values) |
-| `X87_DISABLE_CACHE=1` | Disable x87 translation cache |
-| `X87_DISABLE_X87_IR=1` | Disable IR optimization pipeline (direct translator only) |
-| `X87_ENABLE_FMA_CONTRACT=1` | Fold `fmul`+`fadd`/`fsub` into one FMA. Off by default: real x87 rounds the product before the add, and at the 53-bit precision Windows processes run at the unfused form is bit-exact |
-| `X87_DISABLE_SINGLE_FAST=1` | Disable the fused single-op fast path for isolated `fld`/`fst`/`fstp` |
-| `X87_DISABLE_ALL_FUSIONS=1` | Disable all instruction fusions |
-| `X87_DISABLE_FUSIONS=f1,f2,…` | Disable specific fusions |
-| `X87_DISABLE_HOOK=1` | Skip the `translate_insn` patch (apples-to-apples baseline against stock Rosetta) |
-| `X87_NO_DECODE_HOOK=1` | Skip the `decode_opcode` patch, so `DC D8` and 32-bit `ARPL` trap the way they do under stock Rosetta |
-| `X87_NO_TCO_CACHE=1` / `X87_NO_IR_CACHE=1` | Disable the sidecar's per-request syscall optimizations (ThreadContextOffsets cache, per-block IR cache); A/B and bisect hatches |
-| `X87_STOCK_HASH_LIST=0xH,…` | Hand the listed blocks to stock Rosetta entirely, keyed by IR-content hash (`profile_analyze --dump-block` prints it). Bisects a suspected per-block miscompile in a live workload and works around one block at no steady-state cost; `X87_STOCK_OPS=f2xm1,…` does the same for every block containing an opcode |
-| `X87_LOGS=1` | Verbose loader logging |
+| `X87_ENABLE_FMA_CONTRACT=1` | fold `fmul` + `fadd`/`fsub` into one FMA [off, see above] |
+| `X87_FAST_ROUND=1` | skip rounding-mode dispatch; unsafe for code that uses `fldcw`. `=2` skips it only in blocks with no control-word writer, still speculative [off] |
+| `X87_ENABLE_BRIDGE=0` | disable carrying one IR run across short `mov`/`lea` gaps between x87 segments [on] |
+| `X87_BRIDGE_V2=0` | disable bridging across flag-writing ALU whose flags Rosetta's liveness proves dead [on] |
+| `X87_ENABLE_IR_SPLIT=0`, `X87_ENABLE_IR_REMAT=0` | disable register-pressure relief: splitting over-pressure runs, sinking long-lived values [on] |
+| `X87_DISABLE_X87_IR=1` | direct translator only, no IR pipeline |
+| `X87_DISABLE_ALL_FUSIONS=1`, `X87_DISABLE_FUSIONS=f1,f2` | disable every fusion, or the named ones (`--help` lists the names) |
+| `X87_DISABLE_SINGLE_FAST=1`, `X87_DISABLE_CACHE=1` | disable the single-op fast path, the cross-instruction register cache |
+
+Per-block knobs, keyed by the content hash `profile_analyze` prints, for
+bisecting a suspected miscompile in a live workload or working around one at
+no steady-state cost:
+
+| variable | effect |
+|---|---|
+| `X87_STOCK_HASH_LIST=0xH,...` | hand the listed blocks to stock Rosetta entirely |
+| `X87_STOCK_OPS=f2xm1,...` | hand every block containing one of the opcodes to stock |
+| `X87_LOG_HASH_LIST=0xH,...` | log every translate request of the listed blocks with an uptime stamp |
+| `X87_DIAG_DIR=<dir>` | mirror those logs to `<dir>/x87diag.<pid>.log`, for hosts that lose stdout |
+| `X87_ALWAYS_NONE=1` | the sidecar declines every request; separates a JIT bug from an IPC one |
+| `X87_DISABLE_HOOK=1` | skip the `translate_insn` patch, the benchmark baseline |
+| `X87_NO_DECODE_HOOK=1` | skip the `decode_opcode` patch, so `DC D8` and `ARPL` trap as under stock |
+
+Loader and sidecar diagnostics:
+
+| variable | effect |
+|---|---|
+| `X87_LOGS=1` | verbose loader logging |
+| `X87_LOG_THROUGHPUT=1` | requests per second, traps per request and cache hit rates every 2 s |
+| `X87_LOG_OPS=1` | one line per translated op; high volume, for freeze bisects |
+| `X87_NO_IR_CACHE=1`, `X87_NO_TCO_CACHE=1` | re-read the IR array or the thread-context layout on every request |
+| `X87_NO_PREAUTH=1` | skip acquiring the developer-tools right before launch (default attach only) |
 
 ## License
 
