@@ -146,6 +146,7 @@ Knobs are environment variables read at startup. The most useful ones:
 | `X87_ENABLE_IR_SPLIT=0` / `X87_ENABLE_IR_REMAT=0` | Disable register-pressure relief (splitting over-pressure runs / sinking long-lived values) |
 | `X87_DISABLE_CACHE=1` | Disable x87 translation cache |
 | `X87_DISABLE_X87_IR=1` | Disable IR optimization pipeline (direct translator only) |
+| `X87_ENABLE_FMA_CONTRACT=1` | Fold `fmul`+`fadd`/`fsub` into one FMA. Off by default: real x87 rounds the product before the add, and at the 53-bit precision Windows processes run at the unfused form is bit-exact |
 | `X87_DISABLE_SINGLE_FAST=1` | Disable the fused single-op fast path for isolated `fld`/`fst`/`fstp` |
 | `X87_DISABLE_ALL_FUSIONS=1` | Disable all instruction fusions |
 | `X87_DISABLE_FUSIONS=f1,f2,…` | Disable specific fusions |

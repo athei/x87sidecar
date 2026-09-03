@@ -9,8 +9,10 @@
 #   3. x87sidecar with X87_DISABLE_X87_IR=1 (direct translator only)
 #   4. x87sidecar with X87_DISABLE_X87_IR=1 + X87_DISABLE_ALL_FUSIONS=1
 #   5. x87sidecar with X87_DISABLE_HOOK=1 (stock translate_insn only)
-#   6. x87sidecar with X87_ENABLE_FMA_REDUCE=0 (legacy scalar FMADD path —
-#      regression catch since FMA-reduce now defaults ON)
+#   6. x87sidecar with X87_ENABLE_FMA_CONTRACT=1 (FMA contraction is off by
+#      default; this phase keeps the IR FMA nodes, the FMA-reduce lowering
+#      and the fusion FMA paths under test).  Skips test_fma_pc53, which
+#      asserts the unfused numerics.
 #   7. x87sidecar with X87_FPR_POOL_LIMIT=5 (deterministic pressure
 #      splitting / remat-sink exercise on every test)
 #   8. x87sidecar with X87_ENABLE_IR_SPLIT=0 X87_ENABLE_IR_REMAT=0
@@ -109,6 +111,7 @@ ALL_TESTS=(
     test_ir_gate_tag_push
     test_fma_reduce
     test_fma_reduce_strided
+    test_fma_pc53
     test_fbld
     test_fclex
     test_fdecstp
@@ -405,17 +408,27 @@ if [[ $NATIVE_ONLY -eq 0 ]]; then
     done
 fi
 
-# ── Phase 6: x87sidecar X87_ENABLE_FMA_REDUCE=0 ──────────────────────────
-# FMA-reduce defaults ON in production, so Phase 2 already covers the
-# vector-lowered path.  This phase forces the pass OFF to keep the
-# scalar FMADD path under continuous test — protects against regressions
-# in the legacy lowering (or in places that take a different path when
-# the pass doesn't pre-tag chain heads).
+# ── Phase 6: x87sidecar X87_ENABLE_FMA_CONTRACT=1 ────────────────────────
+# FMA contraction is OFF by default (real x87 rounds the product before
+# the add), so Phase 2 no longer emits a single FMA anywhere.  This phase
+# turns contraction on so the IR FMAdd/FMSub/FNMSub nodes, the FMA-reduce
+# lowering they feed, and the fusion FMA paths stay under continuous test.
+# test_fma_pc53 asserts the unfused numerics and is skipped here by design.
+FMA_CONTRACT_SKIP=(
+    test_fma_pc53
+)
 if [[ $NATIVE_ONLY -eq 0 ]]; then
     echo ""
-    echo -e "${BOLD}=== Phase 6: x87sidecar X87_ENABLE_FMA_REDUCE=0 (scalar FMADD) ===${NC}"
+    echo -e "${BOLD}=== Phase 6: x87sidecar X87_ENABLE_FMA_CONTRACT=1 (fused FMA paths) ===${NC}"
 
     for t in "${TESTS[@]}"; do
+        skip=0
+        for s in "${FMA_CONTRACT_SKIP[@]}"; do
+            [[ "$t" == "$s" ]] && skip=1
+        done
+        if [[ $skip -eq 1 ]]; then
+            continue
+        fi
         BINARY="$TESTS_BIN/$t"
         if [[ ! -x "$BINARY" ]]; then
             echo -e "${YELLOW}SKIP${NC}  $t  (binary not found)"
@@ -423,7 +436,7 @@ if [[ $NATIVE_ONLY -eq 0 ]]; then
             continue
         fi
         EXIT=0
-        OUT=$(X87_ENABLE_FMA_REDUCE=0 "$LOADER" "$BINARY" 2>/dev/null | filter_runtime_lines) || EXIT=$?
+        OUT=$(X87_ENABLE_FMA_CONTRACT=1 "$LOADER" "$BINARY" 2>/dev/null | filter_runtime_lines) || EXIT=$?
         check_output "$t" "$OUT" "$EXIT"
     done
 fi

@@ -45,18 +45,25 @@ struct RosettaConfig {
     uint8_t disable_x87_ir;         // X87_DISABLE_X87_IR        disable IR optimisation pipeline
     uint8_t disable_x87_single_fast;  // X87_DISABLE_SINGLE_FAST fall back to the generic
                                       // per-op emitters for isolated (run==1) fld/fst/fstp
-    uint8_t enable_fma_contract;      // X87_ENABLE_FMA_CONTRACT   contract FMul+FAdd/FSub into
-                                      //   one FMA node.  Default OFF: real x87 rounds the product
-                                      //   before the add, FMA does not, and the 1-ulp difference
-                                      //   amplifies through catastrophic cancellation (seen as
-                                      //   corrupted audio-resample steps in Call of Duty 2).
+    uint8_t enable_fma_contract;      // X87_ENABLE_FMA_CONTRACT   fold fmul+fadd/fsub into one
+                                      //   FMA (IR pass_fma, the fld_arith_arithp fusion's FMA
+                                      //   path, the arith_faddp peephole).  Default OFF: real
+                                      //   x87 rounds the product to the precision-control
+                                      //   width before the add, and Windows processes run at
+                                      //   PC=53, where a separate double multiply and add is
+                                      //   bit-exact and a fused one is not.  The difference
+                                      //   amplifies through cancellation (corrupted audio
+                                      //   resample steps in Call of Duty 2).
     uint8_t enable_fma_reduce;        // X87_ENABLE_FMA_REDUCE     NEON FMA-reduction pass
-                                      //                           (default ON).  Pays off on
-                                      //                           +4-contiguous dot products
-                                      //                           (audio DSP, sw vertex pipelines).
-                                      //                           Set =0 to disable.  Diagnostic
-                                      //                           counters via fma_reduce_stats()
-                                      //                           and X87_LOG_FMA_REDUCE=1.
+                                      //                           (default ON, but it only sees
+                                      //                           FMAdd nodes pass_fma creates,
+                                      //                           so it does nothing unless
+                                      //                           X87_ENABLE_FMA_CONTRACT=1).
+                                      //                           Pays off on +4-contiguous dot
+                                      //                           products (audio DSP, sw vertex
+                                      //                           pipelines).  Diagnostic counters
+                                      //                           via fma_reduce_stats() and
+                                      //                           X87_LOG_FMA_REDUCE=1.
     uint8_t enable_ir_split;          // X87_ENABLE_IR_SPLIT       (default ON) when compile_run's
                                       //                           FPR/GPR pressure gate refuses a
                                       //                           run, retry with the prefix ending
