@@ -19,6 +19,14 @@
 
 namespace TranslatorX87 {
 
+// FMA contraction changes numerics: at the 53-bit precision Windows
+// processes run at, a separate multiply and add is bit-exact against real
+// x87, a fused one is not.  Every site that folds fmul+fadd/fsub into one
+// FMA is gated on X87_ENABLE_FMA_CONTRACT, same as pass_fma in the IR.
+static inline bool fma_contract_enabled() {
+    return g_rosetta_config != nullptr && g_rosetta_config->enable_fma_contract != 0;
+}
+
 static inline bool fusion_disabled(uint64_t mask, FusionId id) {
     return (mask >> static_cast<int>(id)) & 1U;
 }
@@ -1177,8 +1185,8 @@ static auto try_fuse_fld_arith_arithp(TranslationResult* a1, IRInstr* fld_instr,
     //     kSubR → Dd_st0 = Dd_fld * Dm - Dd_st0    (FNMSUB)
     //   where Dm = Dd_st0 (register) or Dd_mem (memory operand).
 
-    const bool fma_eligible =
-        (arith1 == kMul) && (arith2 == kAdd || arith2 == kSub || arith2 == kSubR);
+    const bool fma_eligible = fma_contract_enabled() && (arith1 == kMul) &&
+                              (arith2 == kAdd || arith2 == kSub || arith2 == kSubR);
 
     if (fma_eligible && arith1_is_mem) {
         // FMA with memory multiply operand: load mem → Dd_mem, then single FMA.
@@ -2323,7 +2331,9 @@ static auto try_fuse_fstp_arith_fstp(TranslationResult* a1, IRInstr* fstp1_instr
 static auto try_fuse_arith_faddp(TranslationResult* a1, IRInstr* mul_instr, IRInstr* addp_instr)
     -> std::optional<int> {
     // ── 1. Gate on FMUL only — FMA requires multiply as the first op ────────
-    if (mul_instr->opcode() != kOpcodeName_fmul) {
+    // This fusion has no non-FMA form, so with contraction off it does not
+    // fire and the two ops translate separately.
+    if (!fma_contract_enabled() || mul_instr->opcode() != kOpcodeName_fmul) {
         return std::nullopt;
     }
 

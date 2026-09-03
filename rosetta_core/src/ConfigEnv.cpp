@@ -136,6 +136,7 @@ RosettaConfig load_config_from_env() {
     cfg.disable_deferred_fxch = env_truthy("X87_DISABLE_DEFERRED_FXCH") ? 1 : 0;
     cfg.disable_x87_ir = env_truthy("X87_DISABLE_X87_IR") ? 1 : 0;
     cfg.disable_x87_single_fast = env_truthy("X87_DISABLE_SINGLE_FAST") ? 1 : 0;
+    cfg.enable_fma_contract = env_truthy("X87_ENABLE_FMA_CONTRACT") ? 1 : 0;
     cfg.enable_fma_reduce = env_default_on("X87_ENABLE_FMA_REDUCE");
     cfg.enable_ir_split = env_default_on("X87_ENABLE_IR_SPLIT");
     cfg.enable_ir_remat = env_default_on("X87_ENABLE_IR_REMAT");
@@ -335,14 +336,19 @@ void print_env_help(std::FILE* out) {
         "  X87_DISABLE_SINGLE_FAST=1     disable the fused single-op fast path for\n"
         "                                isolated (run==1) fld/fst/fstp — fall back\n"
         "                                to the generic per-op emitters\n"
+        "  X87_ENABLE_FMA_CONTRACT=1     fold fmul+fadd/fsub into a single FMA (IR pass,\n"
+        "                                fld_arith_arithp fusion, arith_faddp peephole).\n"
+        "                                Off by default: real x87 rounds the product\n"
+        "                                before the add, and at the 53-bit precision\n"
+        "                                Windows processes run at the unfused form is\n"
+        "                                bit-exact while the fused one is not\n"
         "  X87_ENABLE_FMA_REDUCE=0       disable NEON FMA-reduction lowering for serial\n"
-        "                                FMADD chains.  Default ON.  Pays off only on\n"
-        "                                workloads with +4-contiguous data/weight\n"
-        "                                streams (audio FIR/IIR, software vertex\n"
-        "                                pipelines).  TurtleWoW's matrix-vector idiom\n"
-        "                                is stride-16, so the pass detects no chains\n"
-        "                                there but is correctness-clean and ships ON\n"
-        "                                so it stays exercised.\n"
+        "                                FMADD chains.  Default ON, but it only acts on\n"
+        "                                the FMAdd nodes contraction creates, so it\n"
+        "                                needs X87_ENABLE_FMA_CONTRACT=1 to do anything.\n"
+        "                                Pays off only on workloads with +4-contiguous\n"
+        "                                data/weight streams (audio FIR/IIR, software\n"
+        "                                vertex pipelines)\n"
         "  X87_ENABLE_IR_SPLIT=0         disable pressure splitting: when the FPR/GPR\n"
         "                                gate refuses a run, compile_run normally\n"
         "                                retries with the prefix ending just before\n"
