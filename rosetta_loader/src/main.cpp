@@ -1,3 +1,4 @@
+#include <Security/Authorization.h>
 #include <mach-o/dyld.h>
 #include <mach-o/dyld_images.h>
 #include <mach/mach_vm.h>
@@ -9,6 +10,7 @@
 #include <sys/ptrace.h>
 #include <sys/sysctl.h>
 #include <sys/wait.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <cctype>
@@ -29,6 +31,7 @@
 
 #include "coop_proto.h"
 #include "dyld_process_info.hpp"
+#include "guest_pc_map.hpp"
 #include "mach_exception.hpp"
 #include "offset_finder.hpp"
 #include "rosetta_core/Config.h"
@@ -36,6 +39,7 @@
 #include "rosetta_core/CoreConfig.h"
 #include "rosetta_core/Opcode.h"
 #include "rosetta_core/OpcodeCompatibility.h"
+#include "rosetta_core/Opcode_26_4.h"
 #include "rosetta_core/ProfileRuntime.h"
 #include "rosetta_core/RosettaCore.h"
 #include "rosetta_core/TranscendentalHelper.h"
@@ -102,6 +106,179 @@ static bool xnuBuildAtLeast(const int* threshold, size_t nThreshold, bool fallba
 // where the debugserver-style detach (detach_golden_gate) is correct; older
 // kernels need the classic detach().
 static const int kGoldenGateXnuBuild[] = {13432, 0, 94, 501, 4};
+
+// The default attach path's post-exec task_for_pid on the translated tracee
+// needs the system.privilege.taskport right, which macOS grants to the login
+// session through a password dialog, once per session. Acquire it here, ahead
+// of launching anything: while that dialog waits, a tracee already frozen at
+// its exec stop stalls every other Rosetta launch on the machine, and it stays
+// stalled after the dialog is answered. The right is shared, so the credential
+// authd caches for this call satisfies the kernel's later check from the
+// sidecar, which is a different process by then.
+static bool preauthorizeTaskport() {
+    AuthorizationRef ref = nullptr;
+    const OSStatus created = AuthorizationCreate(nullptr, kAuthorizationEmptyEnvironment,
+                                                 kAuthorizationFlagDefaults, &ref);
+    if (created != errAuthorizationSuccess) {
+        fprintf(stdout, "[rosettax87] AuthorizationCreate failed (status %d)\n",
+                static_cast<int>(created));
+        return false;
+    }
+    AuthorizationItem item = {"system.privilege.taskport", 0, nullptr, 0};
+    AuthorizationRights rights = {1, &item};
+    // Silent first: succeeds outright when the session already holds the right.
+    OSStatus st = AuthorizationCopyRights(
+        ref, &rights, kAuthorizationEmptyEnvironment,
+        kAuthorizationFlagExtendRights | kAuthorizationFlagPreAuthorize, nullptr);
+    if (st == errAuthorizationInteractionNotAllowed) {
+        fprintf(stdout,
+                "[rosettax87] macOS is asking for developer-tools authorization; enter your "
+                "password in the dialog\n");
+        fflush(stdout);
+        st = AuthorizationCopyRights(
+            ref, &rights, kAuthorizationEmptyEnvironment,
+            kAuthorizationFlagExtendRights | kAuthorizationFlagInteractionAllowed, nullptr);
+    }
+    if (st != errAuthorizationSuccess) {
+        fprintf(stdout, "[rosettax87] system.privilege.taskport not granted (status %d)\n",
+                static_cast<int>(st));
+        return false;
+    }
+    // Deliberately not freed: this process execs into the target right after,
+    // and the cached credential lives in authd, not in the ref.
+    return true;
+}
+
+// NOTE_EXIT watch on the tracee. The sidecar is not its parent, so waitpid is
+// out and kqueue's EVFILT_PROC is the way to learn that it exited. It has to be
+// armed while the tracee is still held (before the detach or the handshake
+// reply): a small target can run to completion during the release itself, and
+// registering on a pid that is already gone fails with ESRCH, after which a
+// wait on the empty queue never returns.
+static int armExitWatch(pid_t pid) {
+    int kq = kqueue();
+    if (kq == -1) {
+        return -1;
+    }
+    struct kevent ev;
+    EV_SET(&ev, pid, EVFILT_PROC, EV_ADD, NOTE_EXIT, 0, nullptr);
+    if (kevent(kq, &ev, 1, nullptr, 0, nullptr) == -1) {
+        fprintf(stdout, "[rosettax87] kevent(NOTE_EXIT, %d): %s\n", pid, strerror(errno));
+        close(kq);
+        return -1;
+    }
+    return kq;
+}
+
+// Block until the watched tracee exits. Without a watch, poll for the pid.
+static void waitExitWatch(int kq, pid_t pid) {
+    if (kq == -1) {
+        while (kill(pid, 0) == 0) {
+            sleep(1);
+        }
+        return;
+    }
+    struct kevent ev;
+    kevent(kq, nullptr, 0, &ev, 1, nullptr);
+    close(kq);
+}
+
+// The stub filter routes an opcode by its host id against two contiguous x87
+// ranges and one synthetic id (stub_asm.cpp). Check the entries those depend
+// on against the runtime's own mnemonic table, so a renumbered runtime is
+// refused instead of misrouting instructions.
+static bool opcodeTableMatches(const std::vector<std::string>& names) {
+    struct Sentinel {
+        uint16_t internal;
+        const char* name;
+    };
+    static const Sentinel kSentinels[] = {
+        {kOpcodeName_aaa, "aaa"},         {kOpcodeName_fcmovb, "fcmovb"},
+        {kOpcodeName_fucomip, "fucomip"}, {kOpcodeName_f2xm1, "f2xm1"},
+        {kOpcodeName_fyl2xp1, "fyl2xp1"}, {kOpcodeName_fxsave, "fxsave"},
+        {kOpcodeName_fxrstor, "fxrstor"}, {kOpcodeName_xsetbv, "xsetbv"},
+    };
+    bool ok = true;
+    for (const auto& s : kSentinels) {
+        const uint16_t host = opcode_internal_to_host(s.internal);
+        if (host >= names.size() || names[host] != s.name) {
+            fprintf(stdout, "[rosettax87] opcode %s: expected host id %u, runtime has %s there\n",
+                    s.name, host, host < names.size() ? names[host].c_str() : "nothing");
+            ok = false;
+        }
+    }
+    // The synthetic ARPL id must not be a real entry of the runtime's table.
+    const uint16_t hostArpl = opcode_internal_to_host(kOpcodeName_arpl);
+    if (hostArpl < names.size() && names[hostArpl] == "arpl") {
+        fprintf(stdout, "[rosettax87] the runtime now defines arpl at id %u\n", hostArpl);
+        ok = false;
+    }
+    return ok;
+}
+
+// The checks every launch runs against the installed Rosetta once the on-disk
+// analysis is done. Prints what failed; the caller decides what that means.
+static bool runtimeAssumptionsHold(const OffsetFinder& f) {
+    bool ok = true;
+    if (f.opcodeNames_.empty()) {
+        fprintf(stdout, "[rosettax87] opcode mnemonic table not found; numbering unchecked\n");
+    } else if (!opcodeTableMatches(f.opcodeNames_)) {
+        fprintf(stdout,
+                "[rosettax87] libRosettaRuntime numbers opcodes differently from this build\n");
+        ok = false;
+    }
+    if (f.translationResultSize_ == 0) {
+        fprintf(stdout, "[rosettax87] TranslationResult size not found; unchecked\n");
+    } else if (f.translationResultSize_ != sidecar::kStockTRSize) {
+        fprintf(stdout, "[rosettax87] TranslationResult is 0x%x bytes, this build expects 0x%zx\n",
+                f.translationResultSize_, sidecar::kStockTRSize);
+        ok = false;
+    }
+    return ok;
+}
+
+// --probe: locate and validate everything in the installed Rosetta, print the
+// report, launch nothing. Exit status 0 means this build can hook this
+// Rosetta with every feature; 1 means something is off (the report says what).
+static int probeRuntime() {
+    OffsetFinder f;
+    const bool runtimeOk = f.determineOffsets();
+    const bool libOk = runtimeOk && f.determineRuntimeOffsets();
+    printf("/usr/libexec/rosetta/runtime: %s\n", runtimeOk ? "ok" : "NOT SUPPORTED");
+    if (runtimeOk) {
+        printf(
+            "  exports_fetch      0x%llx\n  mmap wrapper       0x%llx\n  g_disable_aot      "
+            "0x%llx\n",
+            f.offsetExportsFetch_, f.offsetSvcCallEntry_, f.offsetDisableAot_);
+        printf("  fragment tree root %s0x%llx\n",
+               f.armTreeRootOffset_ ? "" : "not found, sampler uses built-in ",
+               f.armTreeRootOffset_ ? f.armTreeRootOffset_ : guest_pc::kArmTreeRootOffset);
+    }
+    printf("libRosettaRuntime: %s\n", libOk ? "ok" : (runtimeOk ? "NOT SUPPORTED" : "not checked"));
+    if (!libOk) {
+        return 1;
+    }
+    rosetta_core_set_runtime_version(f.runtimeVersion_);
+    printf("  version            0x%llx (%s)\n", f.runtimeVersion_,
+           f.runtimeVersion_ > kVersion_26_4 ? "opcodes identity-mapped" : "26.4 opcode table");
+    printf("  translator_translate %s0x%llx\n",
+           f.offsetTranslatorTranslate_ ? "" : "not exported, ", f.offsetTranslatorTranslate_);
+    printf("  translate_insn     0x%llx (x87 hook)\n", f.offsetTranslateInsn_);
+    if (f.offsetDecodeOpcode_) {
+        printf("  decode_opcode      0x%llx (DC D8 / ARPL hook)\n", f.offsetDecodeOpcode_);
+    } else {
+        printf("  decode_opcode      not located or layout changed: DC D8 and ARPL would trap\n");
+    }
+    printf("  TranslationResult  %s0x%x\n",
+           f.translationResultSize_ ? "" : "size not found; expected ",
+           f.translationResultSize_ ? f.translationResultSize_
+                                    : static_cast<uint32_t>(sidecar::kStockTRSize));
+    printf("  opcode table       %zu entries\n", f.opcodeNames_.size());
+    const bool ok =
+        runtimeAssumptionsHold(f) && f.offsetDecodeOpcode_ != 0 && f.armTreeRootOffset_ != 0;
+    printf("%s\n", ok ? "supported" : "NOT fully supported");
+    return ok ? 0 : 1;
+}
 
 // bootstrap_register2 is a private libSystem symbol (the non-deprecated way to
 // publish a dynamic service name). It isn't in <servers/bootstrap.h>, so declare
@@ -447,10 +624,14 @@ public:
         //    the running task, and suspend only once the SIGSTOP exception is
         //    in hand.
 
-        // 1. PrivateResume: reply to the held BRK so the task runs. (Our "stopped
-        //    at BRK" state is a held Mach exception, not a Mach suspend, so there
-        //    is no task_resume to pair here; just release the exception.)
-        exc_.release();
+        // 1. PrivateResume: reply to the held stop so the task runs. (Our
+        //    "stopped" state is a held Mach exception, not a Mach suspend, so
+        //    there is no task_resume to pair here.) The held stop is a BRK on
+        //    the hook path but the exec SIGTRAP on the passthrough path
+        //    (X87_DISABLE_HOOK=1), and that one must be suppressed on resume,
+        //    not delivered: reply(0) does PT_THUPDATE(0) for a soft signal and
+        //    is a plain reply for a breakpoint.
+        exc_.reply(0);
 
         // 2. Signal(SIGSTOP) on the RUNNING task, then wait for the SIGSTOP to
         //    come back as EXC_SOFT_SIGNAL. Suppress any other soft signal and
@@ -898,6 +1079,7 @@ const unsigned int MuhDebugger::AARCH64_BREAKPOINT = 0xD4200000;
 static void print_loader_usage(const char* prog) {
     std::printf(
         "usage: %s [--cooperative] <program> [program-args...]\n"
+        "       %s --probe\n"
         "\n"
         "Flags:\n"
         "  --cooperative  attach via a voluntary task-port handshake instead of\n"
@@ -907,13 +1089,16 @@ static void print_loader_usage(const char* prog) {
         " env var (set automatically). Needs no\n"
         "                 get-task-allow entitlement, so the binary is notarizable.\n"
         "                 Non-cooperative targets keep using the default path.\n"
+        "  --probe        locate and validate everything this build hooks in the\n"
+        "                 installed Rosetta, print the report and exit; launches\n"
+        "                 nothing. Exit status 0 when fully supported.\n"
         "  --help         print this message and exit\n"
         "\n"
         "Sampling profiler (see also the X87_SAMPLE* variables below, which win\n"
         "over these flags so an app bundle can enable it without touching argv):\n"
         "  --sample=<file>       write a guest-pc sample profile here; enables it\n"
         "  --sample-hz=<rate>    sample rate for the latched thread, default 10000\n"
-        "                        (a sample costs ~10 us: about 1% of a core per kHz)\n"
+        "                        (a sample costs ~10 us: about 1%% of a core per kHz)\n"
         "  --sweep-hz=<rate>     rate at which every thread is swept while\n"
         "                        looking for one to latch onto, default 1000;\n"
         "                        never faster than --sample-hz\n"
@@ -928,7 +1113,7 @@ static void print_loader_usage(const char* prog) {
         "\n"
         "All other configuration is via environment variables:\n"
         "\n",
-        prog);
+        prog, prog);
     print_env_help(stdout);
 }
 
@@ -967,6 +1152,9 @@ int main(int argc, char* argv[]) try {
         return 0;
     }
     bool cooperative = false;
+    if (argi < argc && std::string_view(argv[argi]) == "--probe") {
+        return probeRuntime();
+    }
     if (argi < argc && std::string_view(argv[argi]) == "--cooperative") {
         cooperative = true;
         ++argi;
@@ -1042,6 +1230,68 @@ int main(int argc, char* argv[]) try {
         setenv(X87_COOP_ENV, coopName.c_str(), 1);
     }
 
+    // Locate what we patch by scanning the installed Rosetta binaries on disk.
+    // This runs before anything is launched: a runtime whose code does not
+    // match is unsupported, and the right answer is to say so and not start
+    // the target at all rather than patch guessed addresses.
+    OffsetFinder offsetFinder;
+    if (!offsetFinder.determineOffsets()) {
+        fprintf(stdout,
+                "[rosettax87] unsupported Rosetta: /usr/libexec/rosetta/runtime does not "
+                "match the expected code patterns; not launching %s\n",
+                progArgv[0]);
+        return 1;
+    }
+    VERBOSE_LOG("offset_exports_fetch=%llx offset_svc_call_entry=%llx offset_svc_call_ret=%llx\n",
+                offsetFinder.offsetExportsFetch_, offsetFinder.offsetSvcCallEntry_,
+                offsetFinder.offsetSvcCallRet_);
+    if (!offsetFinder.determineRuntimeOffsets()) {
+        fprintf(stdout,
+                "[rosettax87] unsupported Rosetta: libRosettaRuntime does not match the "
+                "expected code patterns; not launching %s\n",
+                progArgv[0]);
+        return 1;
+    }
+    VERBOSE_LOG("offset_translate_insn=%llx offset_transaction_result_size=%llx\n",
+                offsetFinder.offsetTranslateInsn_, offsetFinder.offsetTransactionResultSize_);
+    VERBOSE_LOG("translator_translate=%llx decode_opcode=%llx tr_size=0x%x arm_tree_root=%llx\n",
+                offsetFinder.offsetTranslatorTranslate_, offsetFinder.offsetDecodeOpcode_,
+                offsetFinder.translationResultSize_, offsetFinder.armTreeRootOffset_);
+
+    // Seed the runtime version (OpcodeCompatibility gates 26.4<->26.5 on it)
+    // from the on-disk Exports.version; the loader never calls
+    // rosetta_core_init(), so it must seed this itself. Set here, before the
+    // fork, so the sidecar inherits it and the checks below can use it.
+    VERBOSE_LOG("Rosetta version: %llx\n", offsetFinder.runtimeVersion_);
+    rosetta_core_set_runtime_version(offsetFinder.runtimeVersion_);
+
+    // What the emitted code and the stub filter assume about this runtime,
+    // checked against the runtime itself rather than trusted.
+    if (!runtimeAssumptionsHold(offsetFinder)) {
+        fprintf(stdout, "[rosettax87] unsupported Rosetta; not launching %s\n", progArgv[0]);
+        return 1;
+    }
+    if (offsetFinder.armTreeRootOffset_ != 0) {
+        if (offsetFinder.armTreeRootOffset_ != guest_pc::kArmTreeRootOffset) {
+            VERBOSE_LOG("fragment tree root moved: 0x%llx (built in: 0x%llx)\n",
+                        offsetFinder.armTreeRootOffset_, guest_pc::kArmTreeRootOffset);
+        }
+        guest_pc::setArmTreeRootOffset(offsetFinder.armTreeRootOffset_);
+    }
+
+    // Default attach only: hold the taskport right before anything is forked
+    // or launched. Root needs no authorization (and headless CI has no dialog),
+    // and cooperative mode never calls task_for_pid. This has to happen here,
+    // in the original process: authd is not reachable from the double-forked
+    // sidecar once launchd has adopted it.
+    if (!cooperative && geteuid() != 0 && !g_cfg.loader_no_preauth && !preauthorizeTaskport()) {
+        fprintf(stdout, "[rosettax87] not launching %s\n", progArgv[0]);
+        return 1;
+    }
+
+    // Nothing buffered may cross the forks below, or it is written twice.
+    fflush(stdout);
+
     int syncPipe[2];
     if (pipe(syncPipe) == -1) {
         fprintf(stdout, "pipe: %s\n", strerror(errno));
@@ -1059,10 +1309,20 @@ int main(int argc, char* argv[]) try {
         // PARENT → tracee: wait until the sidecar has attached/registered, then
         // exec the target (keeps the original pid).
         close(syncPipe[1]);
-        char buf;
-        read(syncPipe[0], &buf, 1);
+        char buf = 0;
+        ssize_t got;
+        // The sidecar's ptrace attach stops this process mid-read, which comes
+        // back as EINTR; the go byte is written after that.
+        while ((got = read(syncPipe[0], &buf, 1)) == -1 && errno == EINTR) {
+        }
         close(syncPipe[0]);
         waitpid(child, nullptr, WNOHANG);  // reap intermediate double-fork child
+        if (got != 1 || buf != 'x') {
+            // The sidecar gave up before attaching (authorization refused, or
+            // it died); there is nothing to trace, so do not run the target.
+            fprintf(stdout, "parent: sidecar did not attach; not launching %s\n", progArgv[0]);
+            return 1;
+        }
         VERBOSE_LOG("parent: launching into program: %s\n", progArgv[0]);
         execv(progArgv[0], progArgv);
         fprintf(stdout, "parent: execv: %s\n", strerror(errno));
@@ -1141,6 +1401,8 @@ int main(int argc, char* argv[]) try {
         }
         if (!dbg.attach(parentPid)) {
             fprintf(stdout, "Failed to attach to parent process\n");
+            write(syncPipe[1], "n", 1);
+            close(syncPipe[1]);
             return 1;
         }
         printf("[rosettax87] attached: %s\n", progArgv[0]);
@@ -1197,24 +1459,6 @@ int main(int argc, char* argv[]) try {
         }
     };
 
-    // Set up offsets dynamically
-    OffsetFinder offsetFinder;
-    // Set default offsets temporarily (or just in case we need to fall back)
-    offsetFinder.setDefaultOffsets();
-    // Search the rosetta runtime binary for offsets.
-    if (offsetFinder.determineOffsets()) {
-        VERBOSE_LOG("Found rosetta runtime offsets successfully!\n");
-        VERBOSE_LOG(
-            "offset_exports_fetch=%llx offset_svc_call_entry=%llx offset_svc_call_ret=%llx\n",
-            offsetFinder.offsetExportsFetch_, offsetFinder.offsetSvcCallEntry_,
-            offsetFinder.offsetSvcCallRet_);
-    }
-    if (offsetFinder.determineRuntimeOffsets()) {
-        VERBOSE_LOG("Found additional rosetta runtime offsets successfully!\n");
-        VERBOSE_LOG("offset_translate_insn=%llx offset_transaction_result_size=%llx\n",
-                    offsetFinder.offsetTranslateInsn_, offsetFinder.offsetTransactionResultSize_);
-    }
-
     static const uint8_t kExportsFetchPat[8] = {0x62, 0x06, 0x40, 0xF9, 0x63, 0x12, 0x40, 0xB9};
     const auto runtimeBase = dbg.findRuntimeMatching(offsetFinder.offsetExportsFetch_,
                                                      kExportsFetchPat, sizeof(kExportsFetchPat));
@@ -1242,16 +1486,10 @@ int main(int argc, char* argv[]) try {
     // run_benchmarks.sh compares against. Release without installing the hook.
     if (g_cfg.loader_disable_hook) {
         VERBOSE_LOG("X87_DISABLE_HOOK=1: passthrough mode; releasing without hook\n");
+        const int exitWatch = armExitWatch(parentPid);
         releaseTracee();
         // Block until parent exits (mirror the post-stub-install path below).
-        int kq = kqueue();
-        if (kq != -1) {
-            struct kevent ev;
-            EV_SET(&ev, parentPid, EVFILT_PROC, EV_ADD, NOTE_EXIT, 0, nullptr);
-            kevent(kq, &ev, 1, nullptr, 0, nullptr);
-            kevent(kq, nullptr, 0, &ev, 1, nullptr);
-            close(kq);
-        }
+        waitExitWatch(exitWatch, parentPid);
         return 0;
     }
 
@@ -1275,19 +1513,25 @@ int main(int argc, char* argv[]) try {
         dbg.disarmThreadBreakpoint();
     }
 
-    // Seed the runtime version (OpcodeCompatibility gates 26.4↔26.5 on it) from
-    // the on-disk Exports.version — no live Exports struct (X19) needed. The
-    // loader never calls rosetta_core_init(), so it must seed this itself.
-    VERBOSE_LOG("Rosetta version: %llx\n", offsetFinder.runtimeVersion_);
-    rosetta_core_set_runtime_version(offsetFinder.runtimeVersion_);
-
-    // Locate translate_insn by its 36-byte prologue signature (both modes; no
-    // X19 / initLibrary offset math). Valid because the barrier above (default)
-    // or the post-init handshake (cooperative) guarantees oah is mapped.
-    uint64_t translateInsnAddr = dbg.scanForPattern(OffsetFinder::kTranslateInsnPattern.data(),
-                                                    OffsetFinder::kTranslateInsnPattern.size());
+    // Locate libRosettaRuntime in the tracee by content: the image whose
+    // bytes at translate_insn's on-disk offset are translate_insn's prologue.
+    // Valid because the barrier above (default) or the post-init handshake
+    // (cooperative) guarantees oah is mapped. Every hook address is then
+    // image base + on-disk offset; a live prologue scan remains the fallback.
+    const uint64_t libBase = dbg.findRuntimeMatching(offsetFinder.offsetTranslateInsn_,
+                                                     offsetFinder.translateInsnPrologue_.data(),
+                                                     offsetFinder.translateInsnPrologue_.size());
+    uint64_t translateInsnAddr = 0;
+    if (libBase != 0) {
+        VERBOSE_LOG("libRosettaRuntime base: 0x%llx\n", libBase);
+        translateInsnAddr = libBase + offsetFinder.offsetTranslateInsn_;
+    } else {
+        fprintf(stdout, "libRosettaRuntime not found by content; scanning for translate_insn\n");
+        translateInsnAddr = dbg.scanForPattern(OffsetFinder::kTranslateInsnPattern.data(),
+                                               OffsetFinder::kTranslateInsnPattern.size());
+    }
     if (translateInsnAddr == 0) {
-        fprintf(stdout, "Failed to locate translate_insn by signature scan\n");
+        fprintf(stdout, "Failed to locate translate_insn\n");
         return 1;
     }
     VERBOSE_LOG("translate_insn (scanned) = 0x%llx\n", translateInsnAddr);
@@ -1303,6 +1547,9 @@ int main(int argc, char* argv[]) try {
     //    @ trailing padding) referencing that port name.
     // 4. COW + mach_vm_write the bytes; restore RX.
     // 5. After detach, run the receive loop alongside kqueue parent-exit.
+    // NOTE_EXIT watch on the tracee, armed inside the install scope before the
+    // release and waited on after it.
+    int exitWatch = -1;
     {
         // translate_insn's live address came from the signature scan above.
         // No live Mach-O header walk, no Exports/init_library math, and no
@@ -1315,6 +1562,14 @@ int main(int argc, char* argv[]) try {
         uint8_t origPrologue[16];
         if (!dbg.readMemory(translateInsnAddr, origPrologue, sizeof(origPrologue))) {
             fprintf(stdout, "M2: failed to read translate_insn prologue at 0x%llx\n",
+                    translateInsnAddr);
+            return 1;
+        }
+        if (memcmp(origPrologue, offsetFinder.translateInsnPrologue_.data(),
+                   sizeof(origPrologue)) != 0) {
+            fprintf(stdout,
+                    "translate_insn bytes at 0x%llx differ from the on-disk image (already "
+                    "patched?); refusing to hook\n",
                     translateInsnAddr);
             return 1;
         }
@@ -1847,15 +2102,42 @@ int main(int argc, char* argv[]) try {
         // it, and the alternative — refusing to attach — would be worse.
         uint64_t decodeEntryAddr = 0;
         uint64_t decodeBlobEnd = padStartAddr + blobs.handler.size();
+        // decode_opcode was located and shape-checked on disk; its live
+        // address is the image base plus that offset, and the live bytes must
+        // still be the on-disk ones. Without an image base, fall back to the
+        // prologue signatures in live memory.
+        auto scanDecodeOpcode = [&]() -> uint64_t {
+            if (offsetFinder.offsetDecodeOpcode_ == 0) {
+                return 0;
+            }
+            if (libBase != 0) {
+                const uint64_t a = libBase + offsetFinder.offsetDecodeOpcode_;
+                uint8_t live[16];
+                if (dbg.readMemory(a, live, sizeof(live)) &&
+                    memcmp(live, offsetFinder.decodeOpcodePrologue_.data(), sizeof(live)) == 0) {
+                    return a;
+                }
+                fprintf(stdout, "M2: decode_opcode bytes at 0x%llx differ from the on-disk image\n",
+                        a);
+                return 0;
+            }
+            for (const auto& [pat, len] :
+                 {std::pair{OffsetFinder::kDecodeOpcodePattern.data(),
+                            OffsetFinder::kDecodeOpcodePattern.size()},
+                  std::pair{OffsetFinder::kDecodeOpcodePatternV2.data(),
+                            OffsetFinder::kDecodeOpcodePatternV2.size()}}) {
+                if (const uint64_t a = dbg.scanForPattern(pat, len)) {
+                    return a;
+                }
+            }
+            return 0;
+        };
         if (g_cfg.loader_no_decode_hook) {
             VERBOSE_LOG("M2: X87_NO_DECODE_HOOK=1: skipping the decode_opcode hook\n");
-        } else if (const uint64_t decodeOpcodeAddr = dbg.scanForPattern(
-                       OffsetFinder::kDecodeOpcodePattern.data(),
-                       OffsetFinder::kDecodeOpcodePattern.size());
-                   decodeOpcodeAddr == 0) {
+        } else if (const uint64_t decodeOpcodeAddr = scanDecodeOpcode(); decodeOpcodeAddr == 0) {
             fprintf(stdout,
-                    "M2: decode_opcode not found by signature scan; the DC D8 fcomp "
-                    "alias will keep trapping\n");
+                    "M2: decode_opcode not located, or its layout changed; the DC D8 fcomp "
+                    "alias and 32-bit ARPL will keep trapping\n");
         } else {
             VERBOSE_LOG("M2: decode_opcode (scanned) = 0x%llx\n", decodeOpcodeAddr);
 
@@ -1938,6 +2220,7 @@ int main(int argc, char* argv[]) try {
         // releases it. The receive thread uses it for mach_vm_read on
         // TranslationResult / IRInstr structs.
         mach_port_t parentTaskPort = dbg.taskPort();
+        exitWatch = armExitWatch(parentPid);
         releaseTracee();
 
         // Spawn the Mach receive thread BEFORE the kqueue wait below so
@@ -1969,24 +2252,16 @@ int main(int argc, char* argv[]) try {
         }
     }
 
-    // Block until the parent (wine) exits. We can't use waitpid since
-    // the parent is not our child, so use kqueue with EVFILT_PROC.
-    int kq = kqueue();
-    if (kq != -1) {
-        struct kevent ev;
-        EV_SET(&ev, parentPid, EVFILT_PROC, EV_ADD, NOTE_EXIT, 0, nullptr);
-        kevent(kq, &ev, 1, nullptr, 0, nullptr);
-        // Block until parent exits
-        kevent(kq, nullptr, 0, &ev, 1, nullptr);
-        // Window after NOTE_EXIT but before kernel reaps the parent task:
-        // mach_vm_read still works against the held task-port send-right.
-        // Use it to pull X87_PROFILE counters back into the .prof file.
-        sidecar::dumpCountersIfEnabled(dbg.taskPort());
-        // The sampler thread is detached, so returning from main would kill it
-        // mid-interval and throw away everything since its last report.
-        sidecar::flushSamplerIfEnabled();
-        close(kq);
-    }
+    // Block until the parent (wine) exits, on the watch armed before the
+    // release above.
+    waitExitWatch(exitWatch, parentPid);
+    // Window after NOTE_EXIT but before kernel reaps the parent task:
+    // mach_vm_read still works against the held task-port send-right.
+    // Use it to pull X87_PROFILE counters back into the .prof file.
+    sidecar::dumpCountersIfEnabled(dbg.taskPort());
+    // The sampler thread is detached, so returning from main would kill it
+    // mid-interval and throw away everything since its last report.
+    sidecar::flushSamplerIfEnabled();
 
     return 0;
 } catch (const std::exception& e) {

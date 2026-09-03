@@ -265,6 +265,7 @@ RosettaConfig load_config_from_env() {
     cfg.loader_logs = env_truthy("X87_LOGS") ? 1 : 0;
     cfg.loader_disable_hook = env_truthy("X87_DISABLE_HOOK") ? 1 : 0;
     cfg.loader_no_decode_hook = env_truthy("X87_NO_DECODE_HOOK") ? 1 : 0;
+    cfg.loader_no_preauth = env_truthy("X87_NO_PREAUTH") ? 1 : 0;
     cfg.loader_always_none = env_truthy("X87_ALWAYS_NONE") ? 1 : 0;
     cfg.loader_log_ops = env_truthy("X87_LOG_OPS") ? 1 : 0;
     cfg.loader_log_throughput = env_truthy("X87_LOG_THROUGHPUT") ? 1 : 0;
@@ -293,6 +294,12 @@ void print_env_help(std::FILE* out) {
         "                                apples-to-apples baseline against the\n"
         "                                optimised path (both have AOT cache +\n"
         "                                interpreter disabled).\n"
+        "  X87_NO_PREAUTH=1              skip the pre-launch developer-tools\n"
+        "                                authorization (default attach only).  The\n"
+        "                                post-exec task_for_pid then prompts for it\n"
+        "                                while the target is frozen at its exec stop,\n"
+        "                                which stalls every other Rosetta launch on\n"
+        "                                the machine until the dialog is answered.\n"
         "  X87_ALWAYS_NONE=1             diagnostic: sidecar always replies None,\n"
         "                                so the stub falls through to stock for every\n"
         "                                request.  Use to A/B whether a freeze is in\n"
