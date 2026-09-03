@@ -132,6 +132,10 @@ uint64_t hash_ir_stream(const IRInstr* instrs, size_t num_instrs) {
     //   - used operands rebuilt field-by-field per kind: the union's dead
     //     value fields (IROperandRegister::_unused et al.) and pad bytes
     //     carry the same per-run garbage.
+    //   - absolute addresses (AbsMem, which is what rip-relative lea/mov
+    //     decode to, and fixup-carrying Immediates) keep only their page
+    //     offset: the image slides by whole pages between launches, so the
+    //     low 12 bits are the part of the address that survives ASLR.
     // Zeroing only `pc` (the old behaviour) left that garbage in the hash
     // input, so the hash was NOT stable across launches — which silently
     // broke every cross-run use of X87_*_HASH_LIST and profile_analyze
@@ -166,14 +170,15 @@ uint64_t hash_ir_stream(const IRInstr* instrs, size_t num_instrs) {
                         canon.abs_mem.kind = src.abs_mem.kind;
                         canon.abs_mem.size = src.abs_mem.size;
                         canon.abs_mem.addr_size = src.abs_mem.addr_size;
-                        canon.abs_mem.value = src.abs_mem.value;
+                        canon.abs_mem.value = src.abs_mem.value & 0xfff;
                         break;
                     case IROperandKind::Immediate:
                         canon.imm.kind = src.imm.kind;
                         canon.imm.size = src.imm.size;
                         canon.imm.addr_size = src.imm.addr_size;
                         canon.imm.mem_flags = src.imm.mem_flags;
-                        canon.imm.value = src.imm.value;
+                        canon.imm.value =
+                            src.imm.mem_flags != 0 ? (src.imm.value & 0xfff) : src.imm.value;
                         break;
                     case IROperandKind::BranchOffset:
                         canon.branch.kind = src.branch.kind;

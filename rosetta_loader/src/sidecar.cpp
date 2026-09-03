@@ -235,9 +235,29 @@ struct IRCacheEntry {
     uint64_t instr_array = 0;
     uint64_t num_instrs = 0;
     uint64_t next_idx = 0;  // where the previous reply told stock to continue
+    uint64_t hash = 0;      // profile::hash_ir_stream of ir, when hash_valid
+    bool hash_valid = false;
     std::vector<IRInstr> ir;
 };
 std::unordered_map<uint64_t, IRCacheEntry> g_irCache;
+
+// X87_DIAG_DIR=<dir>: append diagnostic lines to <dir>/x87diag.<pid>.log.
+// Some hosts (CrossOver respawning the game process, for one) lose the
+// process's stdout entirely; a per-pid file is the one channel out of that
+// process's sidecar that survives.  Opened on first use; nullptr, and every
+// caller a no-op, when the knob is unset.
+FILE* diagLog() {
+    static FILE* f = []() -> FILE* {
+        if (g_rosetta_config == nullptr || g_rosetta_config->diag_dir.empty()) {
+            return nullptr;
+        }
+        char path[1024];
+        std::snprintf(path, sizeof(path), "%s/x87diag.%d.log", g_rosetta_config->diag_dir.c_str(),
+                      getpid());
+        return std::fopen(path, "a");
+    }();
+    return f;
+}
 
 // NOTE on the road not taken: mach_vm_remap(copy=FALSE) of TRACEE-owned pages
 // into the sidecar (to turn the TR / insn-buf / fixup reads and writes below
@@ -2280,6 +2300,7 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask, const Translate
             irc.block = req.block;
             irc.instr_array = req.instr_array;
             irc.num_instrs = req.num_instrs;
+            irc.hash_valid = false;
             g_statIrMisses.fetch_add(1, std::memory_order_relaxed);
         }
         // Conservative until the reply is known; the Some path below moves it.
@@ -2359,12 +2380,87 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask, const Translate
     dumpBlockIfNew(parentTask, reinterpret_cast<uint64_t>(tr.ir_module_data), req.block,
                    localIR, req.num_instrs);
 
-    _bypass_guard.ran_translator = true;
-    auto result = Translator::translate_instruction(
-        &tr, reinterpret_cast<IRBlock*>(req.block), localIR,
-        static_cast<int64_t>(req.num_instrs), static_cast<int64_t>(req.insn_idx));
-    if (result.has_value()) {
-        irc.next_idx = result.value();
+    // X87_STOCK_HASH_LIST / X87_STOCK_OPS hand whole blocks to stock, by
+    // IR-content hash (profile::hash_ir_stream, the key the bridge and
+    // rollback lists use) or by contained opcode.  Under wow64 the sidecar
+    // sees host-side PCs only, so content is the one per-block selector
+    // that can target a guest module's code.  Requests arrive on
+    // (re)translation, never per execution, so this is cold path; the hash
+    // is still computed once per IR-cache fill rather than per request.
+    // X87_LOG_HASH_LIST writes an uptime-stamped line per request for the
+    // listed blocks (the clock WINEDEBUG=+timestamp prints), so a crash
+    // moment in a wine log can be put next to the block's last translation.
+    bool stock_hash_hit = false;
+    const bool haveStockHashes =
+        g_rosetta_config != nullptr && !g_rosetta_config->x87_stock_hash_list.empty();
+    const bool haveStockOps =
+        g_rosetta_config != nullptr && !g_rosetta_config->x87_stock_ops.empty();
+    const bool haveLogHashes =
+        g_rosetta_config != nullptr && !g_rosetta_config->x87_log_hash_list.empty();
+    if (haveStockHashes || haveStockOps || haveLogHashes) {
+        if (!irc.hash_valid) {
+            irc.hash = profile::hash_ir_stream(localIR, req.num_instrs);
+            irc.hash_valid = true;
+        }
+        const uint64_t block_hash = irc.hash;
+        if (haveLogHashes &&
+            std::ranges::binary_search(g_rosetta_config->x87_log_hash_list, block_hash)) {
+            static int log_hits = 0;
+            ++log_hits;
+            if (log_hits <= 1000 || log_hits % 100 == 0) {
+                const double up =
+                    static_cast<double>(clock_gettime_nsec_np(CLOCK_UPTIME_RAW)) / 1e9;
+                if (FILE* df = diagLog()) {
+                    fprintf(df, "[x87trace] up=%.3f hit#%d hash=0x%016llx idx=%llu/%llu tr=%llx\n",
+                            up, log_hits, static_cast<unsigned long long>(block_hash),
+                            static_cast<unsigned long long>(req.insn_idx),
+                            static_cast<unsigned long long>(req.num_instrs),
+                            static_cast<unsigned long long>(req.tr_addr));
+                    fflush(df);
+                }
+            }
+        }
+        if (haveStockHashes) {
+            stock_hash_hit =
+                std::ranges::binary_search(g_rosetta_config->x87_stock_hash_list, block_hash);
+        }
+        if (!stock_hash_hit && haveStockOps) {
+            for (uint64_t i = 0; i < req.num_instrs && !stock_hash_hit; ++i) {
+                stock_hash_hit = std::ranges::binary_search(g_rosetta_config->x87_stock_ops,
+                                                            localIR[i].opcode());
+            }
+        }
+        if (stock_hash_hit) {
+            static int stock_hits = 0;
+            ++stock_hits;
+            if (stock_hits <= 5 || stock_hits % 1000 == 0) {
+                char line[160];
+                snprintf(line, sizeof(line), "[x87stock] hit #%d hash=0x%016llx idx=%llu/%llu\n",
+                         stock_hits, static_cast<unsigned long long>(block_hash),
+                         static_cast<unsigned long long>(req.insn_idx),
+                         static_cast<unsigned long long>(req.num_instrs));
+                fputs(line, stdout);
+                fflush(stdout);
+                if (FILE* df = diagLog()) {
+                    fputs(line, df);
+                    fflush(df);
+                }
+            }
+        }
+    }
+
+    // On a stock hit ran_translator stays false and the bypass guard
+    // invalidates the persisted X87Cache, which is what a None reply that
+    // skipped the translator needs.
+    std::optional<int64_t> result;
+    if (!stock_hash_hit) {
+        _bypass_guard.ran_translator = true;
+        result = Translator::translate_instruction(
+            &tr, reinterpret_cast<IRBlock*>(req.block), localIR,
+            static_cast<int64_t>(req.num_instrs), static_cast<int64_t>(req.insn_idx));
+        if (result.has_value()) {
+            irc.next_idx = result.value();
+        }
     }
 
     // Capture growth state. If insn_buf grew, Translator's grow() abandoned
@@ -2552,7 +2648,10 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask, const Translate
             kOpcodeName_fxrstor,  // SSE-era extended
         };
         const uint16_t op = localIR[req.insn_idx].opcode();
-        const bool deliberate = std::ranges::find(kKnownFallThrough, op) != kKnownFallThrough.end();
+        // stock_hash_hit: the None reply is a deliberate whole-block
+        // exclusion, not a missing handler.
+        const bool deliberate = stock_hash_hit ||
+                                std::ranges::find(kKnownFallThrough, op) != kKnownFallThrough.end();
         if (!deliberate) {
             const char* name = (op < kOpcodeNames.size()) ? kOpcodeNames[op] : "?";
             fprintf(stdout,
