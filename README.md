@@ -96,6 +96,16 @@ x87 coverage: arithmetic, memory ops, comparisons, the full transcendental set (
 
 Tested live against TurtleWoW (an x86 World of Warcraft client). Not a general-purpose drop-in for arbitrary x86 software: it has been hardened against the workloads it sees, and may need work on others.
 
+### Asynchronous signals
+
+When a signal is delivered to a thread that is executing translated code, Rosetta has to hand the guest handler a precise x86 context. It gets one by stepping the translated ARM code forward to the next entry of the translation's instruction map (there is one entry per `translate_insn` reply), taking the guest state from the thread context at that point, and resuming from that state once the handler returns. Two rules for the code the sidecar emits follow from this; both were found through issue #23, a Call of Duty 2 mixer thread that lost the effect of `fld1; faddp` in one execution out of thousands.
+
+The first is that every emitted instruction has to be one the runtime's own decoder knows, and control flow may only go forward. `FMOV` (scalar, immediate), `FCSEL` and inline literal pools (raw data words in the instruction stream) are not decodable, and a backward branch is treated as a loop and refused. The macOS 27 runtime aborts the process with `failed to decode instruction` when it meets one; earlier runtimes resume with part of the guest instruction unexecuted, which is what the report saw. Constants are therefore materialised through a GPR, a conditional select is a branch over a register move, and no emitter branches backwards.
+
+The second is that everything the guest can observe must be in the thread context at every map entry. A run of consecutive x87 instructions keeps TOP in a register and defers its tag-word and FXCH bookkeeping to the end of the run, so a run is answered with one reply: the map then has entries only at the run's start and its end, where the state is complete.
+
+`tests/test_x87_signal_storm.c` runs the reported chain and one case per x87 opcode under a SIGUSR1 storm and compares every iteration bit for bit. Stock Rosetta itself shifts the x87 stack when a signal lands in its `fcomp`, `fcompp` or `ficomp` translations; the harness records that as a stock divergence.
+
 ### Encodings Rosetta's decoder rejects
 
 Two encodings that real hardware runs are absent from Rosetta's decode tables, so a program containing either takes an illegal-instruction trap instead of being translated. Both occur in WoW 1.12, and handling them is what [winerosetta.dll](https://github.com/Gcenx/winerosetta) was injected into the guest to do:

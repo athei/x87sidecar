@@ -169,12 +169,11 @@ static void emit_fld_value(AssemblerBuffer& buf, TranslationResult& a1,
             break;
 
         case kFldOne:
-            emit_fmov_d_one(buf, Dd_val);
+            emit_fmov_d_one(buf, Dd_val, Wd_tmp);
             break;
 
         case kFldConst64:
-            // OPT-H: Inline constant pool — 2 insns + 8 bytes data
-            emit_ldr_literal_f64(buf, Dd_val, cls.const_bits);
+            emit_f64_const(buf, Dd_val, cls.const_bits, Wd_tmp);
             break;
 
         case kFldInvalid:

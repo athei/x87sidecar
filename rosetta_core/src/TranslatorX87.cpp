@@ -87,7 +87,7 @@ auto translate_fld1(TranslationResult* a1, IRInstr* /*a2*/) -> void {
     x87_push(buf, *a1, Xbase, Wd_top, Wd_tmp, Wd_tmp2);
 
     // OPT-5: FMOV Dd, #1.0 — single instruction, no GPR intermediate.
-    emit_fmov_d_one(buf, Dd_val);
+    emit_fmov_d_one(buf, Dd_val, Wd_tmp);
     emit_store_st(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Dd_val, Xst_base);
 
     free_fpr(*a1, Dd_val);
@@ -117,9 +117,7 @@ static void translate_fld_const(TranslationResult* a1, uint64_t bits) {
     x87_push(buf, *a1, Xbase, Wd_top, Wd_tmp, Wd_tmp2);
     free_gpr(*a1, Wd_tmp2);
 
-    // OPT-H: Inline constant pool — LDR Dd, [PC, #8] + B + .quad
-    // Replaces MOVZ/MOVK chain + FMOV (4-5 insns) with 2 insns + 8 bytes data.
-    emit_ldr_literal_f64(buf, Dd_val, bits);
+    emit_f64_const(buf, Dd_val, bits, Wd_tmp);
     emit_store_st(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Dd_val, Xst_base);
 
     free_fpr(*a1, Dd_val);
@@ -3873,7 +3871,11 @@ auto translate_fbstp(TranslationResult* a1, IRInstr* a2) -> void {
     const int Dd_abs = alloc_free_fpr(*a1);
 
     constexpr auto k1e18_bits = std::bit_cast<uint64_t>(1e18);
-    emit_ldr_literal_f64(buf, Dd_thresh, k1e18_bits);
+    {
+        const int Xk = alloc_free_gpr(*a1);
+        emit_f64_const(buf, Dd_thresh, k1e18_bits, Xk);
+        free_gpr(*a1, Xk);
+    }
     emit_fabs_f64(buf, Dd_abs, Dd_round);
     emit_fcmp_f64(buf, Dd_abs, Dd_thresh);
     const int Wovf = alloc_free_gpr(*a1);
@@ -4426,7 +4428,7 @@ auto translate_fptan(TranslationResult* a1, IRInstr* /*a2*/) -> void {
     // Push and write 1.0 at new ST(0).
     x87_push(buf, *a1, Xbase, Wd_top, Wd_tmp, Wd_tmp2);
     const int Dd_one = alloc_free_fpr(*a1);
-    emit_fmov_d_one(buf, Dd_one);
+    emit_fmov_d_one(buf, Dd_one, Wd_tmp);
     emit_store_st(buf, Xbase, Wd_top, /*stack_depth=*/0, Wd_tmp, Dd_one, Xst_base);
     free_fpr(*a1, Dd_one);
 

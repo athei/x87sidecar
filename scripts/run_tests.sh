@@ -145,6 +145,7 @@ ALL_TESTS=(
     test_fyl2xp1
     test_fprem
     test_fprem1
+    test_x87_signal_storm
 )
 
 RED='\033[0;31m'
@@ -210,6 +211,11 @@ KNOWN_STOCK_DIVERGENCE=(
     # runner in every phase including native, and on no M5 Max seen so
     # far, so it is stock Rosetta's and it is hardware-dependent.
     test_flags_across_vex
+    # Stock Rosetta shifts the x87 stack by one when an asynchronous signal
+    # lands in its translation of fcomp, fcompp or ficomp (the compare-and-pop
+    # forms; the pop is lost or doubled).  The storm test reproduces it on
+    # every run natively and in the phases that hand these ops to stock.
+    test_x87_signal_storm
 )
 
 STOCK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/x87sidecar-stock.XXXXXX")"

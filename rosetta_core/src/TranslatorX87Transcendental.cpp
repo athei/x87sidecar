@@ -694,8 +694,9 @@ void emit_inline_log2(TranslationResult& a1, AssemblerBuffer& buf, int Din, int 
     const int Dr = alloc_free_fpr(a1);
     {
         const int Dneg_one = alloc_free_fpr(a1);
-        emit_fmov_d_one(buf, Dneg_one);
-        emit_fneg_f64(buf, Dneg_one, Dneg_one);
+        const int Xk = alloc_free_gpr(a1);
+        emit_f64_const(buf, Dneg_one, 0xBFF0000000000000ULL, Xk);  // -1.0
+        free_gpr(a1, Xk);
         emit_fmadd_f64(buf, Dr, Dz, Dinvc, Dneg_one);
         free_fpr(a1, Dneg_one);
     }
@@ -868,7 +869,11 @@ int emit_inline_fpatan_core(TranslationResult& a1, AssemblerBuffer& buf, int Dy_
         const int Dzero = alloc_free_fpr(a1);
         const int Done = alloc_free_fpr(a1);
         emit_movi_d_zero(buf, Dzero);
-        emit_fmov_d_one(buf, Done);
+        {
+            const int Xk = alloc_free_gpr(a1);
+            emit_fmov_d_one(buf, Done, Xk);
+            free_gpr(a1, Xk);
+        }
         emit_fcsel_f64(buf, Dshift_b, Done, Dzero, /*cond=GT*/ 12);
         free_fpr(a1, Dzero);
         free_fpr(a1, Done);
@@ -1111,8 +1116,9 @@ int emit_inline_fptan_core(TranslationResult& a1, AssemblerBuffer& buf, int Dx_i
     const int Dn = alloc_free_fpr(a1);
     {
         const int Dneg_one = alloc_free_fpr(a1);
-        emit_fmov_d_one(buf, Dneg_one);
-        emit_fneg_f64(buf, Dneg_one, Dneg_one);
+        const int Xk = alloc_free_gpr(a1);
+        emit_f64_const(buf, Dneg_one, 0xBFF0000000000000ULL, Xk);  // -1.0
+        free_gpr(a1, Xk);
         emit_fmadd_f64(buf, Dn, Dp_acc, Dp_acc, Dneg_one);  // n = -1 + p·p
         free_fpr(a1, Dneg_one);
     }
@@ -1284,7 +1290,7 @@ int emit_inline_fyl2xp1(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, 
     // Dx := Dx + 1.0   (in-place; the "+1" of fyl2xp1).
     {
         const int Done = alloc_free_fpr(a1);
-        emit_fmov_d_one(buf, Done);
+        emit_fmov_d_one(buf, Done, Wd_tmp);
         emit_fadd_f64(buf, Dx, Dx, Done);
         free_fpr(a1, Done);
     }
@@ -1304,7 +1310,7 @@ int emit_inline_fyl2xp1(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, 
     emit_load_st(buf, Xbase, Wd_top, depth_st0, Wd_tmp, Dx2, Xst_base);
     const int Du = alloc_free_fpr(a1);
     const int Dt = alloc_free_fpr(a1);
-    emit_fmov_d_one(buf, Dt);
+    emit_fmov_d_one(buf, Dt, Wd_tmp);
     emit_fadd_f64(buf, Du, Dx2, Dt);  // u = x + 1  (same rounding as above)
     emit_fsub_f64(buf, Dt, Du, Dt);   // t = u - 1
     emit_fsub_f64(buf, Dt, Dx2, Dt);  // c = x - (u - 1)

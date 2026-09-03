@@ -705,13 +705,13 @@ void lower(Context& ctx, TranslationResult* result) {
             case Op::ConstOne: {
                 int Dd = alloc_free_fpr(*result);
                 fprs.node_fpr[i] = static_cast<int8_t>(Dd);
-                emit_fmov_d_one(buf, Dd);
+                emit_fmov_d_one(buf, Dd, Wd_tmp);
                 break;
             }
             case Op::ConstF64: {
                 int Dd = alloc_free_fpr(*result);
                 fprs.node_fpr[i] = static_cast<int8_t>(Dd);
-                emit_ldr_literal_f64(buf, Dd, n.imm_bits);
+                emit_f64_const(buf, Dd, n.imm_bits, Wd_tmp);
                 break;
             }
 
