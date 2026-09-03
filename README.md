@@ -86,7 +86,7 @@ The build emits two signed artifacts from one link. Both are published as `.tar.
 | Artifact | Signing | Trade-off |
 |---|---|---|
 | `x87sidecar` | ad-hoc, **no entitlements** | Can be notarized. The default (`task_for_pid`) attach then only works as root (`sudo`); cooperative attach works without it. |
-| `x87sidecar_entitled` | same Mach-O + `cs.debugger` + `get-task-allow` | Default attach works against any target without `sudo`; the first attach just triggers a one-time macOS developer-tools authorization dialog. Not notarizable (`get-task-allow` is rejected). |
+| `x87sidecar_entitled` | same Mach-O + `cs.debugger` + `get-task-allow` | Default attach works against any target without `sudo`; macOS asks for developer-tools authorization (a password dialog) once per login session, before the target is launched. Not notarizable (`get-task-allow` is rejected). |
 
 The two are byte-identical except for the signature. Downloaded copies carry the quarantine attribute, so clear it with `xattr -d com.apple.quarantine <file>` before running. The test scripts point at `x87sidecar_entitled`; under CI's `sudo` either would work.
 
@@ -121,6 +121,8 @@ cmake --build build
 ```
 
 This produces both `build/bin/x87sidecar` (flat) and `build/bin/x87sidecar_entitled` (see [Binaries](#binaries)). Tests and benchmarks are built automatically.
+
+Nothing in the tree is tied to a particular macOS or Rosetta build number. At startup the loader locates what it patches in the installed Rosetta images by the anchors that survive a rebuild (the exported `translator_translate`, the name each function hands its own assert calls, the opcode mnemonic table) and checks the assumptions the emitted code relies on against the installed runtime: the opcode numbering behind the stub's x87 ranges, the size of a `TranslationResult`, the shape of `decode_opcode` around the fields the decode hook rewrites, and that the bytes each hook displaces are relocatable. A runtime that fails a check is refused before the target is launched rather than patched at guessed addresses. `x87sidecar --probe` runs exactly that analysis, prints what it found, and exits 0 only if this build supports the installed Rosetta with every feature, which is the first thing to run after a macOS update.
 
 ```bash
 bash scripts/run_tests.sh                # build + test (native Rosetta & x87sidecar)

@@ -40,7 +40,9 @@ add_executable(x87sidecar
 # mach_exception.cpp includes the generated mach_excServer.h from the build dir.
 target_include_directories(x87sidecar PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 
-target_link_libraries(x87sidecar PRIVATE rosetta_core)
+# Security.framework: the pre-launch system.privilege.taskport authorization
+# (AuthorizationCopyRights) in the default attach path.
+target_link_libraries(x87sidecar PRIVATE rosetta_core "-framework Security")
 
 # Two signed artifacts from the one build:
 #
