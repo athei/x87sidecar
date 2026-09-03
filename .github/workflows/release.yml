@@ -35,40 +35,12 @@ jobs:
           tar --xz -cf x87sidecar.tar.xz -C build/bin x87sidecar
           tar --xz -cf x87sidecar_entitled.tar.xz -C build/bin x87sidecar_entitled
 
-      - name: Generate changelog
-        id: changelog
-        run: |
-          set -euo pipefail
-          PREV=$(git tag --list 'v*' --sort=-creatordate \
-                  | grep -v "^${GITHUB_REF_NAME}$" | head -1 || true)
-          if [ -n "$PREV" ]; then
-            RANGE="${PREV}..${GITHUB_REF_NAME}"
-            HEADER="Changes since ${PREV}"
-          else
-            RANGE="${GITHUB_REF_NAME}"
-            HEADER="Initial release"
-          fi
-          REPO_URL="https://github.com/${GITHUB_REPOSITORY}"
-          {
-            echo "## ${HEADER}"
-            echo
-            git log "$RANGE" --no-merges \
-              --pretty=format:"- [\`%h\`](${REPO_URL}/commit/%H) %s"
-            echo
-          } > CHANGELOG.md
-          {
-            echo 'body<<EOF'
-            cat CHANGELOG.md
-            echo 'EOF'
-          } >> "$GITHUB_OUTPUT"
-
       - name: Create draft release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
           name: x87sidecar ${{ github.ref_name }}
           draft: true
-          body: ${{ steps.changelog.outputs.body }}
           files: |
             x87sidecar.tar.xz
             x87sidecar_entitled.tar.xz
