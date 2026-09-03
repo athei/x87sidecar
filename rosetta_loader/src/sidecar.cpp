@@ -234,7 +234,7 @@ struct IRCacheEntry {
     uint64_t block = 0;
     uint64_t instr_array = 0;
     uint64_t num_instrs = 0;
-    uint64_t last_idx = 0;
+    uint64_t next_idx = 0;  // where the previous reply told stock to continue
     std::vector<IRInstr> ir;
 };
 std::unordered_map<uint64_t, IRCacheEntry> g_irCache;
@@ -2177,6 +2177,28 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask, const Translate
         tr.x87_cache = g_x87Cache[req.tr_addr];  // default-constructs on first use
     }
 
+    // Any None reply produced WITHOUT running the translator (the early
+    // failure returns below) must not leave the persisted per-TR X87Cache
+    // trusting mid-run registers: stock translates the op itself and
+    // clobbers the GPRs the cache thinks are holding TOP/base, so the next
+    // sidecar-translated op would miscompile.  The translator's own None
+    // paths invalidate in its default case; this guard covers every bypass
+    // in one place.
+    struct CacheBypassGuard {
+        uint64_t tr_addr;
+        bool ran_translator = false;
+        ~CacheBypassGuard() {
+            if (!ran_translator) {
+                std::scoped_lock lk(g_x87CacheMu);
+                auto it = g_x87Cache.find(tr_addr);
+                if (it != g_x87Cache.end()) {
+                    it->second.invalidate();
+                    it->second.prev_block = nullptr;
+                }
+            }
+        }
+    } _bypass_guard{.tr_addr = req.tr_addr};
+
     TransactionalList<Fixup>* lists[kListCount] = {
         &tr.external_fixups, &tr.internal_fixups,  &tr._fixups,
         &tr.field_B0,        &tr.dyld_stub_fixups, &tr.field_1A8,
@@ -2219,15 +2241,29 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask, const Translate
     {
         const bool noIrCache =
             g_rosetta_config != nullptr && g_rosetta_config->loader_no_ir_cache != 0U;
+        // Reuse only for a request at or past the frontier the previous
+        // reply set: stock walks a block front to back, so anything behind
+        // it is a pass started over, whose IR may have been re-decoded into
+        // the same array.
         bool reuse = !noIrCache && irc.block == req.block && irc.instr_array == req.instr_array &&
-                     irc.num_instrs == req.num_instrs && req.insn_idx > irc.last_idx;
+                     irc.num_instrs == req.num_instrs && req.insn_idx >= irc.next_idx;
         if (reuse) {
-            IRInstr probe;
-            if (!readTranslate(parentTask, req.instr_array + req.insn_idx * sizeof(IRInstr), &probe,
-                         sizeof(probe))) {
+            // Probe a window, not one instruction: the translator reads the
+            // whole run's lookahead (fusions, the IR pipeline, bridging via
+            // flag_liveness), and flag_liveness is recomputed from the
+            // block's successors on every decode, so the cached tail can go
+            // stale without the guest code changing.
+            constexpr uint64_t kProbeWindow = 32;
+            IRInstr probe[kProbeWindow];
+            uint64_t win = req.num_instrs - req.insn_idx;
+            if (win > kProbeWindow) {
+                win = kProbeWindow;
+            }
+            if (!readTranslate(parentTask, req.instr_array + req.insn_idx * sizeof(IRInstr), probe,
+                         win * sizeof(IRInstr))) {
                 return out;
             }
-            reuse = std::memcmp(&probe, &irc.ir[req.insn_idx], sizeof(IRInstr)) == 0;
+            reuse = std::memcmp(probe, &irc.ir[req.insn_idx], win * sizeof(IRInstr)) == 0;
         }
         if (reuse) {
             g_statIrHits.fetch_add(1, std::memory_order_relaxed);
@@ -2246,7 +2282,8 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask, const Translate
             irc.num_instrs = req.num_instrs;
             g_statIrMisses.fetch_add(1, std::memory_order_relaxed);
         }
-        irc.last_idx = req.insn_idx;
+        // Conservative until the reply is known; the Some path below moves it.
+        irc.next_idx = req.insn_idx + 1;
     }
     IRInstr* const localIR = irc.ir.data();
 
@@ -2322,9 +2359,13 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask, const Translate
     dumpBlockIfNew(parentTask, reinterpret_cast<uint64_t>(tr.ir_module_data), req.block,
                    localIR, req.num_instrs);
 
+    _bypass_guard.ran_translator = true;
     auto result = Translator::translate_instruction(
         &tr, reinterpret_cast<IRBlock*>(req.block), localIR,
         static_cast<int64_t>(req.num_instrs), static_cast<int64_t>(req.insn_idx));
+    if (result.has_value()) {
+        irc.next_idx = result.value();
+    }
 
     // Capture growth state. If insn_buf grew, Translator's grow() abandoned
     // localInsnVec for a calloc'd buffer (we own that and must free it).

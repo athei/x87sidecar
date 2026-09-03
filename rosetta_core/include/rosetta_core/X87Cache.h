@@ -13,6 +13,16 @@ struct IRInstr;
 // Caching these two values across instructions saves 3-4 emitted AArch64
 // instructions per x87 opcode after the first in a run.
 struct X87Cache {
+    // Where the previous translate_instruction call in this block entered
+    // (last_insn_idx) and where its reply told stock to continue
+    // (last_next_idx; -1 after a None reply).  Stock walks a block front to
+    // back, so the only continuation of an active run is a request at
+    // exactly last_next_idx.  A request at or before last_insn_idx, or
+    // anywhere else inside an active run, means stock started the block's
+    // translation over: the emitted code that holds base/TOP in registers
+    // is gone, and the cache is reset as on a block change.
+    int32_t last_insn_idx = -1;
+    int32_t last_next_idx = -1;
     int8_t base_gpr = 0;        // GPR holding X87State base
     int8_t top_gpr = 0;         // GPR holding TOP
     int16_t run_remaining = 0;  // Countdown; 0 = inactive

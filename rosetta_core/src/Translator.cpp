@@ -33,7 +33,22 @@ static bool is_x87_opcode(uint16_t op) {
            (op >= kOpcodeName_f2xm1 && op <= kOpcodeName_fyl2xp1);
 }
 
+// Real body.  The public translate_instruction wraps it so the reply's
+// frontier (last_next_idx) is recorded once, after every exit path.
+static auto translate_instruction_impl(TranslationResult* translation_result, IRBlock* block,
+                                       IRInstr* instr_array, int64_t num_instrs, int64_t insn_idx)
+    -> std::optional<int64_t>;
+
 auto Translator::translate_instruction(TranslationResult* translation_result, IRBlock* block,
+                                       IRInstr* instr_array, int64_t num_instrs, int64_t insn_idx)
+    -> std::optional<int64_t> {
+    const auto ret =
+        translate_instruction_impl(translation_result, block, instr_array, num_instrs, insn_idx);
+    translation_result->x87_cache.last_next_idx = ret.has_value() ? static_cast<int32_t>(*ret) : -1;
+    return ret;
+}
+
+static auto translate_instruction_impl(TranslationResult* translation_result, IRBlock* block,
                                        IRInstr* instr_array, int64_t num_instrs, int64_t insn_idx)
     -> std::optional<int64_t> {
     auto* const cur_instr = &instr_array[insn_idx];
@@ -46,7 +61,35 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
     // Then, if no cache is active, scan ahead to find the length of the current
     // consecutive x87 run.  x87_cache_set_run only activates if run >= 2.
     {
-        if (block != cache.prev_block) {
+        // Same block, but not a continuation: stock started the block's
+        // translation over.  Either it asks at or before an index we already
+        // handled, or a run is active and it asks anywhere but the frontier
+        // the previous reply set (a re-ask inside a span a fusion or IR run
+        // consumed).  In both cases the emitted code that holds base/TOP in
+        // registers belongs to a pass stock discarded, so the cache is reset
+        // as on a block change and this op is emitted from memory state.
+        // Neither has been observed in a real run so far; the line below is
+        // there so a run that does hit one says so.
+        const bool midspan_reask = block == cache.prev_block && cache.active() &&
+                                   cache.last_next_idx >= 0 &&
+                                   insn_idx != static_cast<int64_t>(cache.last_next_idx);
+        const bool restart_same_block =
+            (block == cache.prev_block && insn_idx <= cache.last_insn_idx) || midspan_reask;
+        if (restart_same_block) {
+            static int restart_count = 0;
+            ++restart_count;
+            if (restart_count <= 10 || restart_count % 1000 == 0) {
+                std::fprintf(stdout,
+                             "[rosettax87] x87 cache: block hash=0x%016llx translated again "
+                             "(ask=%lld last_in=%d frontier=%d run=%d), resetting cache (#%d)\n",
+                             static_cast<unsigned long long>(cache.profile_hash),
+                             static_cast<long long>(insn_idx), cache.last_insn_idx,
+                             cache.last_next_idx, static_cast<int>(cache.run_remaining),
+                             restart_count);
+                std::fflush(stdout);
+            }
+        }
+        if (block != cache.prev_block || restart_same_block) {
             cache.invalidate();
             cache.prev_block = block;
             // Stock carries its register-allocator state across the block
@@ -59,6 +102,8 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
             // our emits would clobber stock-live values at runtime.
             cache.stock_free_gpr_mask = translation_result->free_gpr_mask;
             translation_result->free_gpr_mask &= kGprScratchMask;
+            cache.last_insn_idx = -1;
+            cache.last_next_idx = -1;
             cache.tally_ir = 0;
             cache.tally_peep = 0;
             cache.tally_single = 0;
@@ -130,6 +175,7 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
             }
             translation_result->free_gpr_mask &= kGprScratchMask;
         }
+        cache.last_insn_idx = static_cast<int32_t>(insn_idx);
         if (!cache.active()) {
             const bool cache_disabled = g_rosetta_config && g_rosetta_config->disable_x87_cache;
             if (!cache_disabled) {
