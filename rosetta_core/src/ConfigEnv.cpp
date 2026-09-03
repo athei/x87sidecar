@@ -216,6 +216,9 @@ RosettaConfig load_config_from_env() {
         std::printf("[rosettax87] X87_LOG_HASH_LIST: %zu unique hashes\n",
                     cfg.x87_log_hash_list.size());
     }
+    if (const char* v = std::getenv("X87_DIAG_DIR"); v != nullptr && v[0] != '\0') {
+        cfg.diag_dir = v;
+    }
     if (const char* v = std::getenv("X87_STOCK_OPS"); v != nullptr && v[0] != '\0') {
         char buf[4096];
         std::strncpy(buf, v, sizeof(buf) - 1);
@@ -429,14 +432,24 @@ void print_env_help(std::FILE* out) {
         "  X87_NO_BRIDGE_HASH_LIST=H,... never bridge the listed blocks (wins over\n"
         "                                the include list)\n"
         "  X87_STOCK_HASH_LIST=H,...     hand the listed blocks to stock Rosetta\n"
-        "                                ENTIRELY (every translate request in a block\n"
+        "                                entirely: every translate request in a block\n"
         "                                whose IR-content hash is listed replies None,\n"
-        "                                as X87_ALWAYS_NONE does process-wide).  The\n"
+        "                                as X87_ALWAYS_NONE does process-wide.  The\n"
         "                                per-block exclusion that works under wow64,\n"
-        "                                where guest-PC filtering cannot see a module\n"
-        "  X87_STOCK_OPS=name,...        hand to stock every block CONTAINING any of\n"
+        "                                where guest-PC filtering cannot see a module.\n"
+        "                                Such a block never reaches the translator, so\n"
+        "                                it has no X87_PROFILE entry or counter\n"
+        "  X87_STOCK_OPS=name,...        hand to stock every block containing any of\n"
         "                                the listed opcodes (mnemonics, e.g. f2xm1);\n"
         "                                coarse one-run localizer, narrow by hash next\n"
+        "  X87_LOG_HASH_LIST=H,...       write an uptime-stamped line per translate\n"
+        "                                request of the listed blocks to the\n"
+        "                                X87_DIAG_DIR file (same clock as WINEDEBUG\n"
+        "                                +timestamp), to place a crash next to the\n"
+        "                                block's last (re)translation\n"
+        "  X87_DIAG_DIR=<dir>            mirror the [x87stock] and [x87trace] lines to\n"
+        "                                <dir>/x87diag.<pid>.log, for hosts that lose\n"
+        "                                the process's stdout (CrossOver respawns)\n"
         "  X87_SAMPLE=<file>             sampling profiler: write a guest-pc sample\n"
         "                                profile here (rosettax87 only).  Setting it\n"
         "                                enables sampling, as X87_PROFILE does for the\n"

@@ -2398,14 +2398,11 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask, const Translate
     const bool haveLogHashes =
         g_rosetta_config != nullptr && !g_rosetta_config->x87_log_hash_list.empty();
     if (haveStockHashes || haveStockOps || haveLogHashes) {
-        uint64_t block_hash = 0;
-        if (haveStockHashes || haveLogHashes) {
-            if (!irc.hash_valid) {
-                irc.hash = profile::hash_ir_stream(localIR, req.num_instrs);
-                irc.hash_valid = true;
-            }
-            block_hash = irc.hash;
+        if (!irc.hash_valid) {
+            irc.hash = profile::hash_ir_stream(localIR, req.num_instrs);
+            irc.hash_valid = true;
         }
+        const uint64_t block_hash = irc.hash;
         if (haveLogHashes &&
             std::ranges::binary_search(g_rosetta_config->x87_log_hash_list, block_hash)) {
             static int log_hits = 0;

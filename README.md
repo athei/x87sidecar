@@ -153,6 +153,7 @@ Knobs are environment variables read at startup. The most useful ones:
 | `X87_DISABLE_HOOK=1` | Skip the `translate_insn` patch (apples-to-apples baseline against stock Rosetta) |
 | `X87_NO_DECODE_HOOK=1` | Skip the `decode_opcode` patch, so `DC D8` and 32-bit `ARPL` trap the way they do under stock Rosetta |
 | `X87_NO_TCO_CACHE=1` / `X87_NO_IR_CACHE=1` | Disable the sidecar's per-request syscall optimizations (ThreadContextOffsets cache, per-block IR cache); A/B and bisect hatches |
+| `X87_STOCK_HASH_LIST=0xH,…` | Hand the listed blocks to stock Rosetta entirely, keyed by IR-content hash (`profile_analyze --dump-block` prints it). Bisects a suspected per-block miscompile in a live workload and works around one block at no steady-state cost; `X87_STOCK_OPS=f2xm1,…` does the same for every block containing an opcode |
 | `X87_LOGS=1` | Verbose loader logging |
 
 ## License

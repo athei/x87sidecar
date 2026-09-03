@@ -129,7 +129,7 @@ struct RosettaConfig {
     // block-precise.  This is the only per-block exclusion that works under
     // wow64, where the sidecar sees host-side PCs only and guest-address
     // range filtering cannot target a guest module.
-    std::vector<uint64_t> x87_stock_hash_list;      // sorted, binary-searched
+    std::vector<uint64_t> x87_stock_hash_list;  // sorted, binary-searched
 
     // X87_LOG_HASH_LIST — diagnostic: append a timestamped line (uptime
     // seconds, same clock as WINEDEBUG +timestamp) to the X87_DIAG_DIR file
@@ -137,14 +137,19 @@ struct RosettaConfig {
     // Answers "was this block (re)translated near the corruption moment, or
     // was its code static for minutes" — the translation-side vs
     // execution-side discriminator.
-    std::vector<uint64_t> x87_log_hash_list;        // sorted, binary-searched
+    std::vector<uint64_t> x87_log_hash_list;  // sorted, binary-searched
 
     // X87_STOCK_OPS — hand to stock every block CONTAINING any of the listed
     // opcodes (comma-separated mnemonic names, e.g. "f2xm1,fscale").  Coarser
     // than the hash list but robust against hash instability: use it to
     // localize a miscompile to "blocks with opcode X" in one run, then narrow
     // by hash.  Resolved to opcode ids at env-parse time.
-    std::vector<uint16_t> x87_stock_ops;            // sorted, binary-searched
+    std::vector<uint16_t> x87_stock_ops;  // sorted, binary-searched
+
+    // X87_DIAG_DIR — directory for <dir>/x87diag.<pid>.log, where the
+    // sidecar mirrors the X87_LOG_HASH_LIST and X87_STOCK_HASH_LIST lines.
+    // For hosts that lose the process's stdout.  Empty = off.
+    std::string diag_dir;
     uint8_t force_x87_ir_gate;       // measurement-only flag for tools/profile_analyze: bypass
                                      // the IR-eligibility gate's pre-build refusal conditions
                                      // (run_remaining<3, top_dirty, deferred_pop_count,
