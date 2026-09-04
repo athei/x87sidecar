@@ -201,7 +201,11 @@ achieved.
 | `X87_NO_UNWIND=1` | `--no-unwind` | off | leaf pcs only, about half the per-sample cost |
 
 The environment wins over the flags, so an app bundle can enable sampling
-without touching argv.
+without touching argv. `%p` in the `X87_SAMPLE` or `X87_PROFILE` path expands
+to the pid of the process the sidecar is attached to, not the sidecar's own.
+Wine starts one cooperative sidecar per i386 process and all of them inherit
+the same environment, so a fixed path would let the injector's sidecar
+truncate the game's profile, or the reverse.
 
 ### Block profiler: what the x87 code costs
 
