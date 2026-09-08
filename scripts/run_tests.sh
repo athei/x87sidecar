@@ -147,6 +147,8 @@ ALL_TESTS=(
     test_fprem
     test_fprem1
     test_x87_signal_storm
+    test_x87_signal_context
+    test_x87_native_state
 )
 
 RED='\033[0;31m'

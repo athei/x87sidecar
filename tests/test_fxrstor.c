@@ -5,13 +5,8 @@
  * opcode ourselves — it falls through the sidecar's nullopt path to
  * stock Rosetta.
  *
- * We DON'T try to manually encode an Intel-spec f80 buffer: Apple's
- * Rosetta uses an internal representation that doesn't match Intel.
- * Instead, we let stock's `fxsave` produce a buffer (round-trip through
- * Apple's own encoding) and then exercise `fxrstor` on it. That keeps
- * the test independent of the buffer's byte format and verifies the
- * one architectural property we care about: an `fxsave/fxrstor` pair
- * preserves FPU state.
+ * These cases use buffers from FXSAVE. test_x87_native_state additionally
+ * restores manually encoded f80 values to verify the native layout.
  *
  * This complements test_fxsave.c by emphasizing the *restore* side
  * and composition with JIT-handled ops that follow the fxrstor.
