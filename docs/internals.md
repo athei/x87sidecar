@@ -30,6 +30,29 @@ semantics: the two views diverge in both directions. Sharing works only in
 the opposite direction, for pages the sidecar allocates and remaps into the
 tracee, which is exactly how the block profiler's counter array is wired.
 
+## Releasing the default attach stop
+
+The default loader attaches with `PT_ATTACHEXC`, so its stops arrive as
+Mach exceptions. Dropping the ptrace attachment and replying to the held
+exception are separate operations. On macOS 26.6.2 (XNU 12377.161.14), the
+classic sequence successfully detached, but the target stopped again after
+the reply to the synthetic SIGSTOP. The sidecar then waited for the stopped
+target to exit. This reproduced on unchanged master after the CI runner
+moved from macOS 26.5.2 to 26.6.2.
+
+That Tahoe kernel family now uses the same reply-before-detach sequence as
+newer Golden Gate kernels: catch SIGSTOP, hold a Mach task suspend, suppress
+and reply to the signal while still traced, restore exception ports,
+attempt ptrace detach, then balance the task suspend. Older Tahoe builds and early Golden
+Gate kernels retain their existing sequence. The Tahoe cutoff is the
+verified build, not a claim about the first build to change this behavior.
+
+`test_detach_signals` checks that a released target can receive SIGUSR1 in
+its own handler without involving x87 arithmetic. CI also watches the test
+harness for stalled output and captures process state, pipe descriptors and
+stack samples before terminating a stalled invocation. A timeout fails the
+run even if the test PID exited but a sidecar still holds stdout open.
+
 ## Asynchronous signals inside emitted code
 
 When a signal is delivered to a thread that is executing translated code,

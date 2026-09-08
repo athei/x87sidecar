@@ -1,6 +1,7 @@
 set(X86_SAMPLE_OUTPUT_DIR "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/tests")
 
 add_x86_sample(test_fldconst)
+add_x86_sample(test_detach_signals)
 add_x86_sample(test_fld)
 add_x86_sample(test_fld_m80fp)
 add_x86_sample(test_fmul)

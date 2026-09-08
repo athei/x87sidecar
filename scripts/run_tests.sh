@@ -58,6 +58,7 @@ TESTS_BIN="$BIN/tests"
 
 ALL_TESTS=(
     test_fldconst
+    test_detach_signals
     test_fld
     test_fld_m80fp
     test_fmul
