@@ -1,4 +1,5 @@
 #include <Security/Authorization.h>
+#include <libproc.h>
 #include <mach-o/dyld.h>
 #include <mach-o/dyld_images.h>
 #include <mach/mach_vm.h>
@@ -305,6 +306,30 @@ private:
     MachExceptionSession exc_;
     MachExceptionSession::Event lastEvent_{};
 
+    void logStopState(const char* stage) {
+        if (!logsEnabled) {
+            return;
+        }
+        proc_bsdinfo proc{};
+        int bytes = proc_pidinfo(childPid_, PROC_PIDTBSDINFO, 0, &proc, sizeof(proc));
+        task_basic_info_64_data_t task{};
+        mach_msg_type_number_t taskCount = TASK_BASIC_INFO_64_COUNT;
+        kern_return_t taskResult = task_info(taskPort_, TASK_BASIC_INFO_64,
+                                             reinterpret_cast<task_info_t>(&task), &taskCount);
+        thread_basic_info_data_t thread{};
+        mach_msg_type_number_t threadCount = THREAD_BASIC_INFO_COUNT;
+        kern_return_t threadResult = thread_info(lastEvent_.thread, THREAD_BASIC_INFO,
+                                                 reinterpret_cast<thread_info_t>(&thread),
+                                                 &threadCount);
+        printf("[detach] %s pid=%d bsd_bytes=%d bsd_status=%u traced=%d "
+               "task_result=%d task_suspend=%d thread_result=%d thread_run=%d "
+               "thread_suspend=%d event=%d signal=%d\n", stage, childPid_, bytes,
+               proc.pbi_status, !!(proc.pbi_flags & PROC_FLAG_TRACED), taskResult,
+               task.suspend_count, threadResult, thread.run_state, thread.suspend_count,
+               lastEvent_.type, lastEvent_.softSignal());
+        fflush(stdout);
+    }
+
     // Receive the next event, suppressing soft-signal stops other than
     // expectedSignal (0 = return on any stop), mirroring the old
     // suppress-and-continue loop. An EXC_BREAKPOINT is always a stop. An
@@ -557,6 +582,7 @@ public:
     }
 
     bool detach() {
+        logStopState("classic begin");
         // PT_DETACH requires the tracee to be in a BSD signal-stop. Under
         // PT_ATTACHEXC our stops arrive as Mach exceptions (the BRK is a bare
         // EXC_BREAKPOINT carrying no signal), which PT_DETACH rejects with
@@ -576,17 +602,21 @@ public:
             fprintf(stdout, "detach: failed to reach SIGSTOP stop\n");
             return false;
         }
+        logStopState("classic SIGSTOP received");
         // Restore the task's exception ports, PT_DETACH from the held SIGSTOP
         // stop, then release the exception (unblocking the thread). Order
         // matters: PT_DETACH must run while the SIGSTOP exception is still held,
         // and the release must run after (ptrace is no longer valid post-detach).
         exc_.restoreAndTearDown();
+        logStopState("classic ports restored");
         bool ok = true;
         if (ptrace(PT_DETACH, childPid_, reinterpret_cast<caddr_t>(1), 0) < 0) {
             fprintf(stdout, "ptrace(PT_DETACH): %s\n", strerror(errno));
             ok = false;
         }
+        logStopState("classic PT_DETACH returned");
         exc_.release();
+        logStopState("classic exception released");
         if (ok) {
             VERBOSE_LOG("Debugger detached.\n");
         }
@@ -1199,6 +1229,9 @@ int main(int argc, char* argv[]) try {
     static RosettaConfig g_cfg = load_config_from_env();
     rosetta_set_config(&g_cfg);
     logsEnabled = g_cfg.loader_logs ? "1" : nullptr;
+    if (logsEnabled) {
+        setvbuf(stdout, nullptr, _IONBF, 0);
+    }
 
     VERBOSE_LOG("Launching debugger.\n");
 
