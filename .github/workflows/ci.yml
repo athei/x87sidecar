@@ -27,15 +27,12 @@ jobs:
         # validates the assumptions behind them; exits non-zero if any is off.
         run: build/bin/x87sidecar --probe
 
-      - name: Run attach diagnostic
-        run: sudo python3 scripts/diagnose_ci.py --idle-timeout 40 --total-timeout 120 --output-dir build/ci-diagnostics/attach -- env X87_LOGS=1 build/bin/x87sidecar_entitled build/bin/tests/test_fldconst
-
       - name: Run tests
         # PT_ATTACH on macOS needs either the debugger entitlement (granted
         # via an interactive system dialog on first launch — not available
         # in headless CI, would hang the job) or root.  GitHub's macos-26
         # runners give passwordless sudo, so just use that.
-        run: sudo python3 scripts/diagnose_ci.py --output-dir build/ci-diagnostics/suite -- bash scripts/run_tests.sh --no-build
+        run: sudo python3 scripts/diagnose_ci.py --output-dir build/ci-diagnostics -- bash scripts/run_tests.sh --no-build
 
       - name: Upload test diagnostics
         if: always()

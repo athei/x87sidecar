@@ -1,5 +1,4 @@
 #include <Security/Authorization.h>
-#include <libproc.h>
 #include <mach-o/dyld.h>
 #include <mach-o/dyld_images.h>
 #include <mach/mach_vm.h>
@@ -103,9 +102,8 @@ static bool xnuBuildAtLeast(const int* threshold, size_t nThreshold, bool fallba
     return true;
 }
 
-// XNU build 13432.0.94.501.4~1 (Golden Gate Dev Beta 4) is the first kernel
-// where the debugserver-style detach (detach_golden_gate) is correct; older
-// kernels need the classic detach().
+// Golden Gate uses the debugserver-style detach from this XNU build.
+// Earlier Golden Gate kernels need the classic detach().
 static const int kGoldenGateXnuBuild[] = {13432, 0, 94, 501, 4};
 // Tahoe 26.6.2 also needs the reply-before-detach ordering. Keep the
 // exception to that XNU family so it does not include early Golden Gate
@@ -310,30 +308,6 @@ private:
     // docs/investigations/ci-flaky-sigtrap-attach.md).
     MachExceptionSession exc_;
     MachExceptionSession::Event lastEvent_{};
-
-    void logStopState(const char* stage) {
-        if (!logsEnabled) {
-            return;
-        }
-        proc_bsdinfo proc{};
-        int bytes = proc_pidinfo(childPid_, PROC_PIDTBSDINFO, 0, &proc, sizeof(proc));
-        task_basic_info_64_data_t task{};
-        mach_msg_type_number_t taskCount = TASK_BASIC_INFO_64_COUNT;
-        kern_return_t taskResult = task_info(taskPort_, TASK_BASIC_INFO_64,
-                                             reinterpret_cast<task_info_t>(&task), &taskCount);
-        thread_basic_info_data_t thread{};
-        mach_msg_type_number_t threadCount = THREAD_BASIC_INFO_COUNT;
-        kern_return_t threadResult = thread_info(lastEvent_.thread, THREAD_BASIC_INFO,
-                                                 reinterpret_cast<thread_info_t>(&thread),
-                                                 &threadCount);
-        printf("[detach] %s pid=%d bsd_bytes=%d bsd_status=%u traced=%d "
-               "task_result=%d task_suspend=%d thread_result=%d thread_run=%d "
-               "thread_suspend=%d event=%d signal=%d\n", stage, childPid_, bytes,
-               proc.pbi_status, !!(proc.pbi_flags & PROC_FLAG_TRACED), taskResult,
-               task.suspend_count, threadResult, thread.run_state, thread.suspend_count,
-               lastEvent_.type, lastEvent_.softSignal());
-        fflush(stdout);
-    }
 
     // Receive the next event, suppressing soft-signal stops other than
     // expectedSignal (0 = return on any stop), mirroring the old
@@ -587,7 +561,6 @@ public:
     }
 
     bool detach() {
-        logStopState("classic begin");
         // PT_DETACH requires the tracee to be in a BSD signal-stop. Under
         // PT_ATTACHEXC our stops arrive as Mach exceptions (the BRK is a bare
         // EXC_BREAKPOINT carrying no signal), which PT_DETACH rejects with
@@ -607,29 +580,24 @@ public:
             fprintf(stdout, "detach: failed to reach SIGSTOP stop\n");
             return false;
         }
-        logStopState("classic SIGSTOP received");
         // Restore the task's exception ports, PT_DETACH from the held SIGSTOP
         // stop, then release the exception (unblocking the thread). Order
         // matters: PT_DETACH must run while the SIGSTOP exception is still held,
         // and the release must run after (ptrace is no longer valid post-detach).
         exc_.restoreAndTearDown();
-        logStopState("classic ports restored");
         bool ok = true;
         if (ptrace(PT_DETACH, childPid_, reinterpret_cast<caddr_t>(1), 0) < 0) {
             fprintf(stdout, "ptrace(PT_DETACH): %s\n", strerror(errno));
             ok = false;
         }
-        logStopState("classic PT_DETACH returned");
         exc_.release();
-        logStopState("classic exception released");
         if (ok) {
             VERBOSE_LOG("Debugger detached.\n");
         }
         return ok;
     }
 
-    bool detachGoldenGate() {
-        logStopState("resume-first begin");
+    bool detachReplyFirst() {
         // Exact 1:1 port of lldb debugserver's MachProcess::Detach()
         // (llvm lldb/tools/debugserver/source/MacOSX/MachProcess.mm). Order:
         //
@@ -699,7 +667,6 @@ public:
         //     of the bundle). This is the balanced counterpart to m_task.Resume()
         //     at the end. It freezes the task at Mach level while we tear down.
         task_suspend(taskPort_);
-        logStopState("resume-first SIGSTOP suspended");
 
         // 3. ReplyToAllExceptions: reply to the SIGSTOP exception WHILE STILL
         //    TRACED. reply(0) does PT_THUPDATE(0) to suppress the signal and
@@ -708,11 +675,9 @@ public:
         //    SSTOP cleanly, so no dangling stop is left for a future signal to
         //    wedge on. (The task stays frozen by the Mach suspend from 2b.)
         exc_.reply(0);
-        logStopState("resume-first SIGSTOP replied");
 
         // 4. ShutDownExceptionThread: restore original exception ports, drop ours.
         exc_.restoreAndTearDown();
-        logStopState("resume-first ports restored");
 
         // 5. PT_DETACH, best-effort, exactly as debugserver treats it (it logs
         //    the return but never requires success). Because step 3 SRUN'd the
@@ -725,15 +690,13 @@ public:
         if (ptrace(PT_DETACH, childPid_, reinterpret_cast<caddr_t>(1), 0) < 0 && errno != EBUSY) {
             fprintf(stdout, "ptrace(PT_DETACH): %s\n", strerror(errno));
         }
-        logStopState("resume-first PT_DETACH returned");
 
         // 6. m_task.Resume(): balance the task_suspend from 2b. This is what
         //    actually runs the process; no SIGCONT is needed because the SSTOP was
         //    already lifted by the reply-while-traced in step 3.
         task_resume(taskPort_);
-        logStopState("resume-first task resumed");
 
-        VERBOSE_LOG("Debugger detached (golden gate path).\n");
+        VERBOSE_LOG("Debugger detached (reply-first path).\n");
         return true;
     }
 
@@ -1240,9 +1203,6 @@ int main(int argc, char* argv[]) try {
     static RosettaConfig g_cfg = load_config_from_env();
     rosetta_set_config(&g_cfg);
     logsEnabled = g_cfg.loader_logs ? "1" : nullptr;
-    if (logsEnabled) {
-        setvbuf(stdout, nullptr, _IONBF, 0);
-    }
 
     VERBOSE_LOG("Launching debugger.\n");
 
@@ -1487,11 +1447,10 @@ int main(int argc, char* argv[]) try {
                         mach_error_string(kr));
             }
         } else {
-            // Pick the detach path by kernel version. detachGoldenGate() (a 1:1
-            // port of debugserver's MachProcess::Detach) is correct only on
-            // new-enough XNU; on older kernels it leaves the tracee P_LTRACED
-            // (forces SIG_DFL on all signals, freezing signal-driven GUI apps),
-            // so those use the classic detach().
+            // Both kernel families need reply-before-detach from the verified
+            // builds below. Earlier builds retain the classic sequence; using
+            // reply-first there leaves the tracee P_LTRACED and interferes
+            // with later signal delivery.
             if (xnuBuildAtLeast(kGoldenGateXnuBuild,
                                sizeof(kGoldenGateXnuBuild) / sizeof(kGoldenGateXnuBuild[0])) ||
                 (xnuBuildAtLeast(kTahoeResumeFirstXnuBuild,
@@ -1499,9 +1458,9 @@ int main(int argc, char* argv[]) try {
                                     sizeof(kTahoeResumeFirstXnuBuild[0])) &&
                  !xnuBuildAtLeast(kAfterTahoeXnuBuild, 1))) {
                 VERBOSE_LOG("Using reply-before-detach ordering\n");
-                (void)dbg.detachGoldenGate();
+                (void)dbg.detachReplyFirst();
             } else {
-                VERBOSE_LOG("Using classic detach (xnu < 13432.0.94.501.4)\n");
+                VERBOSE_LOG("Using classic detach\n");
                 (void)dbg.detach();
             }
         }
