@@ -41,14 +41,14 @@ enum X87ControlWord : uint16_t {
     kInfinityControl = 0x1000
 };
 
-// ── x87 state — stride-8 layout ─────────────────────────────────────────────
+// Private x87 state within one translation reply. Values use binary64 at
+// an 8-byte stride for scaled register-offset addressing:
+//   LDR Dd, [Xbase_st, Windex, SXTW #3]
 //
-// All x87 values are stored as IEEE 754 double (64-bit).  The 80-bit extended
-// precision is deliberately dropped.  This puts the st[] register file at
-// 8-byte stride, enabling AArch64 scaled register-offset addressing:
-//   LDR Dd, [Xbase_st, Windex, SXTW #3]   ; one instruction, zero offset math
-//
-// 2-byte padding at +0x06 aligns st[0] to offset 0x08.
+// Rosetta's native register file instead starts at +0x06 with eight packed
+// 80-bit values at stride 10. The translation wrapper converts in place
+// on entry and exit so signal contexts and stock instructions see native
+// values. This struct describes only the temporary compact representation.
 #pragma pack(push, 1)
 
 struct X87State {

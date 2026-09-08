@@ -5,14 +5,9 @@
  * opcode ourselves — it falls through the sidecar's nullopt path to stock
  * Rosetta, which handles the encoding (including the XMM area + MXCSR).
  *
- * We avoid asserting on the raw bytes of the saved area: Apple's Rosetta
- * uses an internal f80 representation that does not match Intel's
- * spec (verified empirically — `fxsave` of a `fld 1.5` writes
- * `00 00 00 00 00 00 00 c0 ff ff` for the ST(0) slot, which Intel would
- * read as -NaN). Testing the bytes against the Intel spec would give
- * spurious failures. Instead we test what the architecture guarantees:
- * fxsave + fxrstor must round-trip the FPU state, regardless of the
- * intermediate representation.
+ * These cases check opaque round trips. test_x87_native_state also checks
+ * the actual f80 payload and edits it before restoring, because a symmetric
+ * layout mismatch can pass an opaque save/restore round trip.
  *
  * What we DO assert:
  *   - The two architecturally documented header fields we actually

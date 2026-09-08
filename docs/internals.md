@@ -47,16 +47,30 @@ decoder knows, and control flow may only go forward. `FMOV` (scalar,
 immediate), `FCSEL` and inline literal pools (raw data words in the
 instruction stream) are not decodable, and a backward branch is treated as a
 loop and refused. The macOS 27 runtime aborts the process with `failed to
-decode instruction` when it meets one; earlier runtimes resume with part of
-the guest instruction unexecuted, which is what the report saw. Constants are
-therefore materialised through a GPR, a conditional select is a branch over a
-register move, and no emitter branches backwards.
+decode instruction` when it meets one. The original report on an earlier
+runtime lost an x87 addition without that diagnostic. The decoder fix alone
+did not resolve the game crash. Constants are therefore materialised through
+a GPR, a conditional select is a branch over a register move, and no emitter
+branches backwards.
 
 The second is that everything the guest can observe must be in the thread
 context at every map entry. A run of consecutive x87 instructions keeps TOP in
 a register and defers its tag-word and FXCH bookkeeping to the end of the run,
 so a run is answered with one reply: the map then has entries only at the
-run's start and its end, where the state is complete.
+run's start and its end, where the state is complete. This includes the
+register payload format: Rosetta stores physical x87 slots as packed 80-bit
+values at offset `0x06`, stride 10. Its signal-context import/export routines
+copy those fields directly. The sidecar's compact binary64 slots at offset
+`0x08`, stride 8 are private to a reply. The wrapper converts on entry and
+exit, after flushing deferred TOP, tags and permutations.
+
+An opaque save/restore round trip can hide a layout mismatch: the same
+misinterpreted bytes can be copied out and back unchanged. It fails when a
+handler reads or edits the saved registers. `test_x87_signal_context` checks
+the actual native payload at the reported chain's end and replaces it before
+resuming, in both 64-bit and LDT compatibility mode with nested x87 work in
+the handler. `test_x87_native_state` checks all eight FXSAVE/FXRSTOR slots and
+binary64 bit preservation across separate replies, including subnormals.
 
 `tests/test_x87_signal_storm.c` runs the reported chain and one case per x87
 opcode under a SIGUSR1 storm and compares every iteration bit for bit. Stock

@@ -268,12 +268,14 @@ has to get right too. FMA contraction is opt-in (`X87_ENABLE_FMA_CONTRACT=1`) be
 before the add, and at the 53-bit precision Windows processes run at the
 unfused form is the exact one.
 
-The emitted code survives asynchronous signals: when one lands inside a
-translated run, Rosetta steps to the next instruction-map entry and takes
+When an asynchronous signal lands inside a translated run, Rosetta steps to the next instruction-map entry and takes
 the guest state from there, so every instruction the sidecar emits is one
 the runtime's decoder knows, control flow only goes forward, and a run is
 answered with one reply so the map has entries only where the state is
-complete. `tests/test_x87_signal_storm.c` pins this under a SIGUSR1 storm.
+complete. The private binary64 register file is converted to Rosetta's native
+80-bit layout at those boundaries. The signal tests check both arithmetic
+under a SIGUSR1 storm and reading or replacing the saved x87 context in
+64-bit and 32-bit compatibility mode.
 
 Two encodings real hardware runs are missing from Rosetta's decode tables,
 so a program containing them traps under stock Rosetta. A second small stub

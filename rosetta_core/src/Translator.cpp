@@ -1,12 +1,11 @@
 #include "rosetta_core/Translator.h"
 
-#include "TranslatorX87Internal.hpp"
-
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <optional>
 
+#include "TranslatorX87Internal.hpp"
 #include "rosetta_core/AssemblerHelpers.hpp"
 #include "rosetta_core/Config.h"
 #include "rosetta_core/CoreConfig.h"
@@ -19,6 +18,7 @@
 #include "rosetta_core/TranslatorCustom.h"
 #include "rosetta_core/TranslatorHelpers.hpp"
 #include "rosetta_core/TranslatorX87.h"
+#include "rosetta_core/TranslatorX87F80.hpp"
 #include "rosetta_core/TranslatorX87Fusion.h"
 #include "rosetta_core/TranslatorX87Helpers.hpp"
 #include "rosetta_core/X87Cache.h"
@@ -63,6 +63,17 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                                        IRInstr* instr_array, int64_t num_instrs, int64_t insn_idx)
     -> std::optional<int64_t> {
     auto& cache = translation_result->x87_cache;
+    const auto start = translation_result->insn_buf.end;
+    const auto op = instr_array[insn_idx].opcode();
+    // Metadata-only ops and FXSAVE/FXRSTOR go to stock, which consumes
+    // native state directly. Every handled x87 reply uses compact state
+    // internally and must export native f80 after its cache is flushed.
+    const bool native_boundary = is_x87_opcode(op) && op != kOpcodeName_fclex &&
+                                 op != kOpcodeName_finit && op != kOpcodeName_fldenv &&
+                                 op != kOpcodeName_fstenv && op != kOpcodeName_fxsave &&
+                                 op != kOpcodeName_fxrstor;
+    if (native_boundary)
+        TranslatorX87::emit_native_state_boundary(*translation_result, true);
     auto ret =
         translate_instruction_impl(translation_result, block, instr_array, num_instrs, insn_idx);
 
@@ -94,6 +105,12 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
             break;
         }
         ret = more;
+    }
+    if (native_boundary) {
+        if (ret)
+            TranslatorX87::emit_native_state_boundary(*translation_result, false);
+        else
+            translation_result->insn_buf.end = start;
     }
     cache.last_next_idx = ret.has_value() ? static_cast<int32_t>(*ret) : -1;
     return ret;
