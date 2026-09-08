@@ -107,6 +107,11 @@ static bool xnuBuildAtLeast(const int* threshold, size_t nThreshold, bool fallba
 // where the debugserver-style detach (detach_golden_gate) is correct; older
 // kernels need the classic detach().
 static const int kGoldenGateXnuBuild[] = {13432, 0, 94, 501, 4};
+// Tahoe 26.6.2 also needs the reply-before-detach ordering. Keep the
+// exception to that XNU family so it does not include early Golden Gate
+// kernels that still require the classic path.
+static const int kTahoeResumeFirstXnuBuild[] = {12377, 161, 14};
+static const int kAfterTahoeXnuBuild[] = {12378};
 
 // The default attach path's post-exec task_for_pid on the translated tracee
 // needs the system.privilege.taskport right, which macOS grants to the login
@@ -624,6 +629,7 @@ public:
     }
 
     bool detachGoldenGate() {
+        logStopState("resume-first begin");
         // Exact 1:1 port of lldb debugserver's MachProcess::Detach()
         // (llvm lldb/tools/debugserver/source/MacOSX/MachProcess.mm). Order:
         //
@@ -693,6 +699,7 @@ public:
         //     of the bundle). This is the balanced counterpart to m_task.Resume()
         //     at the end. It freezes the task at Mach level while we tear down.
         task_suspend(taskPort_);
+        logStopState("resume-first SIGSTOP suspended");
 
         // 3. ReplyToAllExceptions: reply to the SIGSTOP exception WHILE STILL
         //    TRACED. reply(0) does PT_THUPDATE(0) to suppress the signal and
@@ -701,9 +708,11 @@ public:
         //    SSTOP cleanly, so no dangling stop is left for a future signal to
         //    wedge on. (The task stays frozen by the Mach suspend from 2b.)
         exc_.reply(0);
+        logStopState("resume-first SIGSTOP replied");
 
         // 4. ShutDownExceptionThread: restore original exception ports, drop ours.
         exc_.restoreAndTearDown();
+        logStopState("resume-first ports restored");
 
         // 5. PT_DETACH, best-effort, exactly as debugserver treats it (it logs
         //    the return but never requires success). Because step 3 SRUN'd the
@@ -716,11 +725,13 @@ public:
         if (ptrace(PT_DETACH, childPid_, reinterpret_cast<caddr_t>(1), 0) < 0 && errno != EBUSY) {
             fprintf(stdout, "ptrace(PT_DETACH): %s\n", strerror(errno));
         }
+        logStopState("resume-first PT_DETACH returned");
 
         // 6. m_task.Resume(): balance the task_suspend from 2b. This is what
         //    actually runs the process; no SIGCONT is needed because the SSTOP was
         //    already lifted by the reply-while-traced in step 3.
         task_resume(taskPort_);
+        logStopState("resume-first task resumed");
 
         VERBOSE_LOG("Debugger detached (golden gate path).\n");
         return true;
@@ -1482,8 +1493,12 @@ int main(int argc, char* argv[]) try {
             // (forces SIG_DFL on all signals, freezing signal-driven GUI apps),
             // so those use the classic detach().
             if (xnuBuildAtLeast(kGoldenGateXnuBuild,
-                                sizeof(kGoldenGateXnuBuild) / sizeof(kGoldenGateXnuBuild[0]))) {
-                VERBOSE_LOG("Using detachGoldenGate (xnu >= 13432.0.94.501.4)\n");
+                               sizeof(kGoldenGateXnuBuild) / sizeof(kGoldenGateXnuBuild[0])) ||
+                (xnuBuildAtLeast(kTahoeResumeFirstXnuBuild,
+                                sizeof(kTahoeResumeFirstXnuBuild) /
+                                    sizeof(kTahoeResumeFirstXnuBuild[0])) &&
+                 !xnuBuildAtLeast(kAfterTahoeXnuBuild, 1))) {
+                VERBOSE_LOG("Using reply-before-detach ordering\n");
                 (void)dbg.detachGoldenGate();
             } else {
                 VERBOSE_LOG("Using classic detach (xnu < 13432.0.94.501.4)\n");
