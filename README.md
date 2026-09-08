@@ -309,7 +309,7 @@ bash scripts/run_tests.sh test_arith     # one test
 bash scripts/run_benchmarks.sh           # build + benchmark table
 ```
 
-The harness runs 89 self-checking x86-64 test binaries under stock Rosetta
+The harness runs 90 self-checking x86-64 test binaries under stock Rosetta
 and then under the sidecar in ten configurations (default, IR off, fusions
 off, hook bypassed, FMA contraction on, clamped register pool, pressure
 relief off, fast rounding, bridging off, bridging v2 off), plus a
