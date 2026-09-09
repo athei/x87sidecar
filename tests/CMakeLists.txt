@@ -95,3 +95,7 @@ add_x86_sample_lowzero(test_decoder_arpl)
 add_x86_sample(test_x87_signal_storm)
 add_x86_sample_lowzero(test_x87_signal_context)
 add_x86_sample(test_x87_native_state)
+
+# Invoked by the opt-in tracing regression, not the arithmetic phase matrix.
+add_x86_sample(test_x87_trace_threads)
+add_x86_sample(test_x87_trace_freeze)

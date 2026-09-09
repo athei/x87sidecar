@@ -131,6 +131,11 @@ struct RosettaConfig {
     // range filtering cannot target a guest module.
     std::vector<uint64_t> x87_stock_hash_list;  // sorted, binary-searched
 
+    // Opt-in execution trace. Empty path disables both allocation and emission.
+    uint64_t x87_trace_hash;
+    std::string x87_trace_path;
+    bool x87_trace_stop_negative;
+
     // X87_LOG_HASH_LIST — diagnostic: append a timestamped line (uptime
     // seconds, same clock as WINEDEBUG +timestamp) to the X87_DIAG_DIR file
     // for every translate request whose block IR-content hash is listed.
