@@ -296,6 +296,11 @@ check_output() {
     fi
 }
 
+# Exercise the accelerated implementation even for compatibility-excluded
+# blocks. The separate stock_compat regression below checks default dispatch,
+# so adding a fallback cannot silently turn signal recovery coverage stock-only.
+export X87_DISABLE_STOCK_COMPAT=1
+
 # ── Phase 1: native Rosetta ───────────────────────────────────────────────────
 echo -e "${BOLD}=== Phase 1: native Rosetta ===${NC}"
 
@@ -643,6 +648,15 @@ if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then
 fi
 
 echo ""
+# Verify the automatic compatibility fallback and its explicit diagnostic
+# opt-out. The signal-context fixture contains the exact CoD2 IR hash in
+# both 32-bit and 64-bit mode, plus other accelerated x87 blocks.
+if [[ $NATIVE_ONLY -eq 0 && " ${TESTS[*]} " == *" test_x87_signal_context "* ]]; then
+    EXIT=0
+    OUT=$(bash "$SCRIPT_DIR/test_stock_compat.sh" "$BUILD_DIR" 2>&1) || EXIT=$?
+    check_output "stock_compat" "$OUT" "$EXIT"
+fi
+
 echo "================================================================"
 echo -e "Results: ${GREEN}${PASSED} passed${NC}, ${RED}${FAILED} failed${NC}, ${YELLOW}${XFAILED} stock divergences${NC}, ${YELLOW}${ERRORS} skipped${NC} / ${TOTAL} total"
 

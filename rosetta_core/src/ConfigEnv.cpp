@@ -211,6 +211,19 @@ RosettaConfig load_config_from_env() {
         std::printf("[rosettax87] X87_STOCK_HASH_LIST: %zu unique hashes\n",
                     cfg.x87_stock_hash_list.size());
     }
+    // CoD2's Miles pitch block still corrupts a multiplier in live play
+    // after #29 and #32. Stock execution of this exact IR stream survived
+    // the reporter's 2.5-hour control; the accelerated root cause is open
+    // in #23. Keep that proven fallback enabled without an environment
+    // workaround. User exclusions are additive, including a dummy list.
+    // The opt-out is for investigating the failing accelerated path.
+    if (!env_truthy("X87_DISABLE_STOCK_COMPAT")) {
+        cfg.x87_stock_hash_list.push_back(UINT64_C(0x129250d0f7976b3f));
+        std::ranges::sort(cfg.x87_stock_hash_list);
+        cfg.x87_stock_hash_list.erase(
+            std::unique(cfg.x87_stock_hash_list.begin(), cfg.x87_stock_hash_list.end()),
+            cfg.x87_stock_hash_list.end());
+    }
     if (const char* v = std::getenv("X87_LOG_HASH_LIST"); v != nullptr && v[0] != '\0') {
         parse_hash_list(v, cfg.x87_log_hash_list);
         std::printf("[rosettax87] X87_LOG_HASH_LIST: %zu unique hashes\n",
@@ -443,6 +456,9 @@ void print_env_help(std::FILE* out) {
         "                                or profile_analyze)\n"
         "  X87_NO_BRIDGE_HASH_LIST=H,... never bridge the listed blocks (wins over\n"
         "                                the include list)\n"
+        "  X87_DISABLE_STOCK_COMPAT=1   disable built-in stock compatibility fallbacks\n"
+        "                                for diagnosis. Re-enables the CoD2 Miles\n"
+        "                                pitch-block crash tracked in issue #23.\n"
         "  X87_STOCK_HASH_LIST=H,...     hand the listed blocks to stock Rosetta\n"
         "                                entirely: every translate request in a block\n"
         "                                whose IR-content hash is listed replies None,\n"
@@ -450,7 +466,8 @@ void print_env_help(std::FILE* out) {
         "                                per-block exclusion that works under wow64,\n"
         "                                where guest-PC filtering cannot see a module.\n"
         "                                Such a block never reaches the translator, so\n"
-        "                                it has no X87_PROFILE entry or counter\n"
+        "                                its X87_PROFILE execution counter stays zero.\n"
+        "                                Adds to the built-in compatibility list.\n"
         "  X87_STOCK_OPS=name,...        hand to stock every block containing any of\n"
         "                                the listed opcodes (mnemonics, e.g. f2xm1);\n"
         "                                coarse one-run localizer, narrow by hash next\n"

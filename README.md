@@ -353,13 +353,24 @@ no steady-state cost:
 
 | variable | effect |
 |---|---|
-| `X87_STOCK_HASH_LIST=0xH,...` | hand the listed blocks to stock Rosetta entirely |
+| `X87_STOCK_HASH_LIST=0xH,...` | hand additional blocks to stock Rosetta entirely |
+| `X87_DISABLE_STOCK_COMPAT=1` | disable built-in stock fallbacks for diagnosis; re-enables the CoD2 crash in [#23](https://github.com/athei/x87sidecar/issues/23) |
 | `X87_STOCK_OPS=f2xm1,...` | hand every block containing one of the opcodes to stock |
 | `X87_LOG_HASH_LIST=0xH,...` | log every translate request of the listed blocks with an uptime stamp |
 | `X87_DIAG_DIR=<dir>` | mirror those logs to `<dir>/x87diag.<pid>.log`, for hosts that lose stdout |
 | `X87_ALWAYS_NONE=1` | the sidecar declines every request; separates a JIT bug from an IPC one |
 | `X87_DISABLE_HOOK=1` | skip the `translate_insn` patch, the benchmark baseline |
 | `X87_NO_DECODE_HOOK=1` | skip the `decode_opcode` patch, so `DC D8` and `ARPL` trap as under stock |
+
+CoD2's ten-instruction Miles pitch block (IR hash `0x129250d0f7976b3f`)
+uses stock Rosetta automatically. The reporter reproduced the live mixer
+crash after both #29 and #32, despite passing the signal tests. Handing
+only this block to stock survived 2.5 hours of play, with no measurable
+FPS loss reported. This is a compatibility fallback, not a resolution of
+the accelerated block's underlying fault. Other blocks remain accelerated.
+`X87_STOCK_HASH_LIST` adds exclusions; an empty or dummy list does not
+remove the built-in fallback. Use `X87_DISABLE_STOCK_COMPAT=1` only when
+investigating the accelerated failure.
 
 Loader and sidecar diagnostics:
 
