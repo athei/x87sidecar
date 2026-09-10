@@ -10,6 +10,7 @@ add_library(rosetta_core STATIC
     src/Translator.cpp
     src/TranslatorCustom.cpp
     src/ProfileRuntime.cpp
+    src/X87Trace.cpp
     src/TranscendentalHelper.cpp
     src/TranslatorX87.cpp
     src/TranslatorX87F80.cpp

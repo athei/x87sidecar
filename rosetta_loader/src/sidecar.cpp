@@ -2390,6 +2390,13 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask, const Translate
     // X87_LOG_HASH_LIST writes an uptime-stamped line per request for the
     // listed blocks (the clock WINEDEBUG=+timestamp prints), so a crash
     // moment in a wine log can be put next to the block's last translation.
+    if (g_rosetta_config != nullptr && !g_rosetta_config->x87_trace_path.empty()) {
+        if (!irc.hash_valid) {
+            irc.hash = profile::hash_ir_stream(localIR, req.num_instrs);
+            irc.hash_valid = true;
+        }
+        maybeEnableX87Trace(parentTask, irc.hash);
+    }
     bool stock_hash_hit = false;
     const bool haveStockHashes =
         g_rosetta_config != nullptr && !g_rosetta_config->x87_stock_hash_list.empty();

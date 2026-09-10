@@ -323,6 +323,19 @@ RosettaConfig load_config_from_env() {
         cfg.profile_path = p;
     }
 
+    if (const char* v = std::getenv("X87_TRACE_BLOCK"); v != nullptr && v[0] != '\0') {
+        std::vector<uint64_t> hashes;
+        parse_hash_list(v, hashes);
+        if (hashes.size() == 1) {
+            cfg.x87_trace_hash = hashes[0];
+            const char* path = std::getenv("X87_TRACE_OUTPUT");
+            cfg.x87_trace_path = path != nullptr && path[0] != '\0' ? path : "/tmp/x87trace";
+            cfg.x87_trace_stop_negative = env_truthy("X87_TRACE_STOP_NEGATIVE");
+        } else {
+            std::fprintf(stderr, "X87_TRACE_BLOCK requires one IR hash; trace disabled\n");
+        }
+    }
+
     return cfg;
 }
 
@@ -443,6 +456,12 @@ void print_env_help(std::FILE* out) {
         "                                or profile_analyze)\n"
         "  X87_NO_BRIDGE_HASH_LIST=H,... never bridge the listed blocks (wins over\n"
         "                                the include list)\n"
+        "  X87_TRACE_BLOCK=H            record native x87 state at entry/exit of this\n"
+        "                                IR hash; keeps the last 65536 boundary records\n"
+        "  X87_TRACE_OUTPUT=path        output prefix (default /tmp/x87trace); appends\n"
+        "                                .<target-pid>.x87trace, refuses existing files\n"
+        "  X87_TRACE_STOP_NEGATIVE=1    freeze the trace on a negative ST(0) at exit;\n"
+        "                                execution continues unchanged\n"
         "  X87_STOCK_HASH_LIST=H,...     hand the listed blocks to stock Rosetta\n"
         "                                entirely: every translate request in a block\n"
         "                                whose IR-content hash is listed replies None,\n"

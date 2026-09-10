@@ -643,6 +643,14 @@ if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then
 fi
 
 echo ""
+# Tracing must also survive Rosetta's recovery interpreter, not just execute
+# correctly on ARM hardware. The fixture includes the selected hash in both modes.
+if [[ $NATIVE_ONLY -eq 0 && " ${TESTS[*]} " == *" test_x87_signal_context "* ]]; then
+    EXIT=0
+    OUT=$(bash "$SCRIPT_DIR/test_x87_trace.sh" "$BUILD_DIR" 2>&1) || EXIT=$?
+    check_output "x87_trace" "$OUT" "$EXIT"
+fi
+
 echo "================================================================"
 echo -e "Results: ${GREEN}${PASSED} passed${NC}, ${RED}${FAILED} failed${NC}, ${YELLOW}${XFAILED} stock divergences${NC}, ${YELLOW}${ERRORS} skipped${NC} / ${TOTAL} total"
 

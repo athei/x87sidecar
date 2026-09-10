@@ -361,6 +361,23 @@ no steady-state cost:
 | `X87_DISABLE_HOOK=1` | skip the `translate_insn` patch, the benchmark baseline |
 | `X87_NO_DECODE_HOOK=1` | skip the `decode_opcode` patch, so `DC D8` and `ARPL` trap as under stock |
 
+For an execution trace of one IR block, set `X87_TRACE_BLOCK=0xH` and
+optionally `X87_TRACE_OUTPUT=/path/prefix` (default `/tmp/x87trace`). The
+sidecar records native x87 state, ARM X0 through X14, NZCV and FPCR at each
+handled reply's entry and exit. A shared ring retains the last 65,536
+records, with per-thread identity and dropped-reservation reporting.
+It allocates 16 MiB only when the selected block is encountered, and writes
+`<prefix>.<target-pid>.x87trace` at exit. Existing files are never overwritten.
+
+`X87_TRACE_STOP_NEGATIVE=1` freezes and writes the ring when ST(0) is negative
+at a reply ending the selected block. This only freezes the diagnostic
+buffer; the guest continues with the same result. For the CoD2 pitch hash
+`0x129250d0f7976b3f`, `python3 tools/x87_trace_analyze.py capture.x87trace`
+checks complete entry/exit pairs against `2^input` and reports the first
+disagreements. Other hashes are decoded without assuming that invariant.
+Tracing changes execution timing; a clean trace is not proof that the live
+bug is fixed. It does not change stock exclusions or repair recorded values.
+
 Loader and sidecar diagnostics:
 
 | variable | effect |

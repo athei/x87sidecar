@@ -23,6 +23,7 @@
 #include "rosetta_core/TranslatorX87Helpers.hpp"
 #include "rosetta_core/X87Cache.h"
 #include "rosetta_core/X87IR.h"
+#include "rosetta_core/X87Trace.h"
 
 // True for opcode IDs in the two x87 ranges that Rosetta assigns to x87
 // instructions.  Mirrors the JIT stub's FILTER prologue range check at
@@ -72,6 +73,11 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                                  op != kOpcodeName_finit && op != kOpcodeName_fldenv &&
                                  op != kOpcodeName_fstenv && op != kOpcodeName_fxsave &&
                                  op != kOpcodeName_fxrstor;
+    const bool traced =
+        native_boundary && x87trace::matches(instr_array, static_cast<size_t>(num_instrs));
+    const uint64_t trace_site = uint64_t(instr_array[insn_idx].pc) << 32;
+    if (traced)
+        x87trace::emit_boundary(*translation_result, trace_site | (uint64_t(insn_idx) << 1));
     if (native_boundary)
         TranslatorX87::emit_native_state_boundary(*translation_result, true);
     auto ret =
@@ -107,9 +113,12 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
         ret = more;
     }
     if (native_boundary) {
-        if (ret)
+        if (ret) {
             TranslatorX87::emit_native_state_boundary(*translation_result, false);
-        else
+            if (traced)
+                x87trace::emit_boundary(*translation_result, trace_site | (uint64_t(*ret) << 1) | 1,
+                                        *ret == num_instrs);
+        } else
             translation_result->insn_buf.end = start;
     }
     cache.last_next_idx = ret.has_value() ? static_cast<int32_t>(*ret) : -1;

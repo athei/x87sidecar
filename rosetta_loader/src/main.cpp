@@ -2265,6 +2265,7 @@ int main(int argc, char* argv[]) try {
     // Window after NOTE_EXIT but before kernel reaps the parent task:
     // mach_vm_read still works against the held task-port send-right.
     // Use it to pull X87_PROFILE counters back into the .prof file.
+    sidecar::flushX87Trace();
     sidecar::dumpCountersIfEnabled(dbg.taskPort());
     // The sampler thread is detached, so returning from main would kill it
     // mid-interval and throw away everything since its last report.
