@@ -617,7 +617,6 @@ static void pass_fma_reduce(Context& ctx) {
             // Deep-debug: when X87_LOG_FMA_REDUCE_VERBOSE=1, print the
             // chain's address layout on stride-fail so the actual workload
             // shape (e.g. WoW's stride-16 matrix-vector) is visible.
-            // stdout per feedback_logging_preferences.md.
             if (reject_reason == FmaRejectReason::Stride && chain_len >= 2) {
                 static const char* verbose = std::getenv("X87_LOG_FMA_REDUCE_VERBOSE");
                 if (verbose != nullptr && verbose[0] == '1') {

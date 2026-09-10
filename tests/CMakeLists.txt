@@ -1,6 +1,7 @@
 set(X86_SAMPLE_OUTPUT_DIR "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/tests")
 
 add_x86_sample(test_fldconst)
+add_x86_sample(test_detach_signals)
 add_x86_sample(test_fld)
 add_x86_sample(test_fld_m80fp)
 add_x86_sample(test_fmul)
@@ -92,3 +93,9 @@ add_x86_sample(test_bridge_ext)
 add_x86_sample(test_decoder_fcomp_st)
 add_x86_sample_lowzero(test_decoder_arpl)
 add_x86_sample(test_x87_signal_storm)
+add_x86_sample_lowzero(test_x87_signal_context)
+add_x86_sample(test_x87_native_state)
+
+# Invoked by the opt-in tracing regression, not the arithmetic phase matrix.
+add_x86_sample(test_x87_trace_threads)
+add_x86_sample(test_x87_trace_freeze)

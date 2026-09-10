@@ -14,6 +14,10 @@
 // them. M3 will add real translation work + reply.
 namespace sidecar {
 
+// Allocate tracing only after the selected IR stream is encountered.
+void maybeEnableX87Trace(mach_port_t parentTaskPort, uint64_t hash);
+void flushX87Trace();
+
 // Size of the TranslationResult stock allocates for a translation. Reads and
 // writes of the tracee's TR are bounded by it (writing past it clobbered the
 // adjacent heap chunk holding the block's first emitted ARM word).

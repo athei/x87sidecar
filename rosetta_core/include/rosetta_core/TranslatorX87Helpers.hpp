@@ -33,7 +33,7 @@ inline bool x87_fast_round_active(const TranslationResult& a1) {
 // =============================================================================
 // X87State layout constants  (all offsets within X87State, relative to Xbase)
 //
-//   X87State (packed, 0x56 bytes)
+//   Private compact X87State (packed, 0x48 bytes, inside one reply)
 //   +0x00  uint16_t  control_word
 //   +0x02  uint16_t  status_word    ← TOP in bits [13:11]
 //   +0x04  int16_t   tag_word

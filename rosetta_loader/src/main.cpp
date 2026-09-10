@@ -102,10 +102,14 @@ static bool xnuBuildAtLeast(const int* threshold, size_t nThreshold, bool fallba
     return true;
 }
 
-// XNU build 13432.0.94.501.4~1 (Golden Gate Dev Beta 4) is the first kernel
-// where the debugserver-style detach (detach_golden_gate) is correct; older
-// kernels need the classic detach().
+// Golden Gate uses the debugserver-style detach from this XNU build.
+// Earlier Golden Gate kernels need the classic detach().
 static const int kGoldenGateXnuBuild[] = {13432, 0, 94, 501, 4};
+// Tahoe 26.6.2 also needs the reply-before-detach ordering. Keep the
+// exception to that XNU family so it does not include early Golden Gate
+// kernels that still require the classic path.
+static const int kTahoeResumeFirstXnuBuild[] = {12377, 161, 14};
+static const int kAfterTahoeXnuBuild[] = {12378};
 
 // The default attach path's post-exec task_for_pid on the translated tracee
 // needs the system.privilege.taskport right, which macOS grants to the login
@@ -593,7 +597,7 @@ public:
         return ok;
     }
 
-    bool detachGoldenGate() {
+    bool detachReplyFirst() {
         // Exact 1:1 port of lldb debugserver's MachProcess::Detach()
         // (llvm lldb/tools/debugserver/source/MacOSX/MachProcess.mm). Order:
         //
@@ -692,7 +696,7 @@ public:
         //    already lifted by the reply-while-traced in step 3.
         task_resume(taskPort_);
 
-        VERBOSE_LOG("Debugger detached (golden gate path).\n");
+        VERBOSE_LOG("Debugger detached (reply-first path).\n");
         return true;
     }
 
@@ -1443,17 +1447,20 @@ int main(int argc, char* argv[]) try {
                         mach_error_string(kr));
             }
         } else {
-            // Pick the detach path by kernel version. detachGoldenGate() (a 1:1
-            // port of debugserver's MachProcess::Detach) is correct only on
-            // new-enough XNU; on older kernels it leaves the tracee P_LTRACED
-            // (forces SIG_DFL on all signals, freezing signal-driven GUI apps),
-            // so those use the classic detach().
+            // Both kernel families need reply-before-detach from the verified
+            // builds below. Earlier builds retain the classic sequence; using
+            // reply-first there leaves the tracee P_LTRACED and interferes
+            // with later signal delivery.
             if (xnuBuildAtLeast(kGoldenGateXnuBuild,
-                                sizeof(kGoldenGateXnuBuild) / sizeof(kGoldenGateXnuBuild[0]))) {
-                VERBOSE_LOG("Using detachGoldenGate (xnu >= 13432.0.94.501.4)\n");
-                (void)dbg.detachGoldenGate();
+                               sizeof(kGoldenGateXnuBuild) / sizeof(kGoldenGateXnuBuild[0])) ||
+                (xnuBuildAtLeast(kTahoeResumeFirstXnuBuild,
+                                sizeof(kTahoeResumeFirstXnuBuild) /
+                                    sizeof(kTahoeResumeFirstXnuBuild[0])) &&
+                 !xnuBuildAtLeast(kAfterTahoeXnuBuild, 1))) {
+                VERBOSE_LOG("Using reply-before-detach ordering\n");
+                (void)dbg.detachReplyFirst();
             } else {
-                VERBOSE_LOG("Using classic detach (xnu < 13432.0.94.501.4)\n");
+                VERBOSE_LOG("Using classic detach\n");
                 (void)dbg.detach();
             }
         }
@@ -2258,6 +2265,7 @@ int main(int argc, char* argv[]) try {
     // Window after NOTE_EXIT but before kernel reaps the parent task:
     // mach_vm_read still works against the held task-port send-right.
     // Use it to pull X87_PROFILE counters back into the .prof file.
+    sidecar::flushX87Trace();
     sidecar::dumpCountersIfEnabled(dbg.taskPort());
     // The sampler thread is detached, so returning from main would kill it
     // mid-interval and throw away everything since its last report.

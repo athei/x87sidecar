@@ -323,6 +323,19 @@ RosettaConfig load_config_from_env() {
         cfg.profile_path = p;
     }
 
+    if (const char* v = std::getenv("X87_TRACE_BLOCK"); v != nullptr && v[0] != '\0') {
+        std::vector<uint64_t> hashes;
+        parse_hash_list(v, hashes);
+        if (hashes.size() == 1) {
+            cfg.x87_trace_hash = hashes[0];
+            const char* path = std::getenv("X87_TRACE_OUTPUT");
+            cfg.x87_trace_path = path != nullptr && path[0] != '\0' ? path : "/tmp/x87trace";
+            cfg.x87_trace_stop_negative = env_truthy("X87_TRACE_STOP_NEGATIVE");
+        } else {
+            std::fprintf(stderr, "X87_TRACE_BLOCK requires one IR hash; trace disabled\n");
+        }
+    }
+
     return cfg;
 }
 
@@ -340,6 +353,9 @@ void print_env_help(std::FILE* out) {
         "                                apples-to-apples baseline against the\n"
         "                                optimised path (both have AOT cache +\n"
         "                                interpreter disabled).\n"
+        "  X87_NO_DECODE_HOOK=1          skip the decode_opcode patch, so the DC D8\n"
+        "                                fcomp alias and 32-bit ARPL trap the way they\n"
+        "                                do under stock Rosetta\n"
         "  X87_NO_PREAUTH=1              skip the pre-launch developer-tools\n"
         "                                authorization (default attach only).  The\n"
         "                                post-exec task_for_pid then prompts for it\n"
@@ -355,6 +371,10 @@ void print_env_help(std::FILE* out) {
         "                                deterministic freeze repro, the last few\n"
         "                                lines name the suspect.  HIGH-VOLUME — only\n"
         "                                enable when bisecting.\n"
+        "  X87_DUMP_EMIT=1               diagnostic: sidecar hexdumps the emitted\n"
+        "                                AArch64 words of every handled request with\n"
+        "                                guest pc and opcode, for offline disassembly\n"
+        "                                of a suspect encoding.  EXTREMELY high volume.\n"
         "  X87_LOG_THROUGHPUT=1          diagnostic: sidecar reporter thread prints\n"
         "                                req/s every 2 s + an idle-transition line.\n"
         "                                Off by default; enable when telling 'stuck'\n"
@@ -394,6 +414,11 @@ void print_env_help(std::FILE* out) {
         "                                Pays off only on workloads with +4-contiguous\n"
         "                                data/weight streams (audio FIR/IIR, software\n"
         "                                vertex pipelines)\n"
+        "  X87_LOG_FMA_REDUCE=1          print the FMA-reduce pass counters at exit\n"
+        "                                (invocations, candidates, chains tagged,\n"
+        "                                rejections by reason)\n"
+        "  X87_LOG_FMA_REDUCE_VERBOSE=1  also print the address layout of every chain\n"
+        "                                the pass rejects for its stride\n"
         "  X87_ENABLE_IR_SPLIT=0         disable pressure splitting: when the FPR/GPR\n"
         "                                gate refuses a run, compile_run normally\n"
         "                                retries with the prefix ending just before\n"
@@ -431,6 +456,12 @@ void print_env_help(std::FILE* out) {
         "                                or profile_analyze)\n"
         "  X87_NO_BRIDGE_HASH_LIST=H,... never bridge the listed blocks (wins over\n"
         "                                the include list)\n"
+        "  X87_TRACE_BLOCK=H            record native x87 state at entry/exit of this\n"
+        "                                IR hash; keeps the last 65536 boundary records\n"
+        "  X87_TRACE_OUTPUT=path        output prefix (default /tmp/x87trace); appends\n"
+        "                                .<target-pid>.x87trace, refuses existing files\n"
+        "  X87_TRACE_STOP_NEGATIVE=1    freeze the trace on a negative ST(0) at exit;\n"
+        "                                execution continues unchanged\n"
         "  X87_STOCK_HASH_LIST=H,...     hand the listed blocks to stock Rosetta\n"
         "                                entirely: every translate request in a block\n"
         "                                whose IR-content hash is listed replies None,\n"
@@ -450,6 +481,11 @@ void print_env_help(std::FILE* out) {
         "  X87_DIAG_DIR=<dir>            mirror the [x87stock] and [x87trace] lines to\n"
         "                                <dir>/x87diag.<pid>.log, for hosts that lose\n"
         "                                the process's stdout (CrossOver respawns)\n"
+        "  X87_PROFILE=<file>            block profiler: write each block's IR the\n"
+        "                                first time the sidecar sees it, and at exit\n"
+        "                                the per-block execution counters the emitted\n"
+        "                                code keeps in a page shared with the tracee.\n"
+        "                                Read with tools/profile_analyze.\n"
         "  X87_SAMPLE=<file>             sampling profiler: write a guest-pc sample\n"
         "                                profile here (rosettax87 only).  Setting it\n"
         "                                enables sampling, as X87_PROFILE does for the\n"

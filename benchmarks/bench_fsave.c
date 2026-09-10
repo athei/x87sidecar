@@ -13,8 +13,8 @@
  *                      to f80.  This is the loop body that exercises the
  *                      8-slot conversion path.  Note: 8 of the 9 ops are
  *                      our inline-JIT'd fld; the speedup vs stock is real
- *                      for the whole body but most comes from the flds
- *                      (see feedback_bench_name_lies.md).
+ *                      for the whole body but most comes from the flds,
+ *                      so the benchmark's name overstates what it measures.
  */
 #include <stdint.h>
 #include <stdio.h>

@@ -358,8 +358,8 @@ static int emit_inline_sin_or_cos(TranslationResult& a1, AssemblerBuffer& buf, i
 //
 // Pattern is from the FCOM+FSTSW fusion's OPT-F1
 // (TranslatorX87Fusion.cpp:597-598): BFI from XZR.  4 instructions
-// + 1 GPR slot — measured negligible (≤2%) on the hot transcendental
-// benches.  See `feedback_apple_silicon_ilp_absorbs_prologue.md`.
+// + 1 GPR slot, measured negligible (at most 2%) on the hot transcendental
+// benches: Apple Silicon's ILP absorbs the prologue.
 void emit_clear_x87_cc_bits(TranslationResult& a1, AssemblerBuffer& buf, int Xbase) {
     static constexpr int16_t kX87SwImm12 = kX87StatusWordOff / 2;
     const int Wd_sw = alloc_free_gpr(a1);

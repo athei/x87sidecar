@@ -9,6 +9,7 @@ on:
 jobs:
   build-and-test:
     runs-on: macos-26
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -31,4 +32,11 @@ jobs:
         # via an interactive system dialog on first launch — not available
         # in headless CI, would hang the job) or root.  GitHub's macos-26
         # runners give passwordless sudo, so just use that.
-        run: sudo scripts/run_tests.sh --no-build
+        run: sudo python3 scripts/diagnose_ci.py --output-dir build/ci-diagnostics -- bash scripts/run_tests.sh --no-build
+
+      - name: Upload test diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-diagnostics
+          path: build/ci-diagnostics

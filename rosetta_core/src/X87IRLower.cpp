@@ -156,9 +156,6 @@ struct FPRState {
 // only merge MemRefs that have a base register but no index register and no
 // segment override — anything more complex is left to the scalar fallback
 // where compute_operand_address handles the full addressing mode.
-//
-// See ~/.claude/plans/recall-memory-analyze-the-snappy-scott.md and
-// feedback_ir_pipeline_storef32_baseline.md for the motivation.
 
 struct SimpleMemRef {
     bool ok;           // true → operand is a "simple" base+disp MemRef

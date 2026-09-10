@@ -234,9 +234,7 @@ auto emit_fmov_d_one(AssemblerBuffer& buf, int Dd, int Xtmp) -> void;
 // 1e — NEON broadcast helpers (StoreF32-run coalescing)
 //
 // Used by X87IRLower's StoreF32-run path to collapse N consecutive scalar
-// f32 stores into one DUP + (STR Q | STP S, S) pairs/quads.  See
-// project_peephole_fusion.md and ~/.claude/plans/recall-memory-analyze-the-
-// snappy-scott.md for the rationale.
+// f32 stores into one DUP + (STR Q | STP S, S) pairs/quads.
 //
 // Encodings are decoded inline in the .cpp following emit_movi_d_zero's style.
 // -----------------------------------------------------------------------------

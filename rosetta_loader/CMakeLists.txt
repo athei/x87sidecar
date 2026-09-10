@@ -33,6 +33,7 @@ add_executable(x87sidecar
     src/mach_exception.cpp
     src/offset_finder.cpp
     src/sidecar.cpp
+    src/x87_trace.cpp
     src/stub_asm.cpp
     ${MACH_EXC_SERVER}
 )

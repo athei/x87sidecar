@@ -19,7 +19,7 @@
  * `fstps` to drain ST(0).  The compiler can't reorder via the
  * "memory" clobber + volatile asm.
  *
- * Run via the rosettax87 loader (per feedback_runtime_loader.md).
+ * Run through the x87sidecar loader; bare, the x87 is not translated by us.
  * Compare three configs:
  *   - X87_DISABLE_HOOK=1     (stock Rosetta, no JIT hook)
  *   - X87_DISABLE_X87_IR=1   (peephole + single-op only)

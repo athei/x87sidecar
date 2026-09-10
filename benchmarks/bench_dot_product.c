@@ -1,24 +1,22 @@
 /*
- * bench_dot_product.c — Benchmark for matrix-vector dot-product chains
- * `(fld m32 + fmul m32 + faddp st1, st0) × N` against contiguous f32
+ * bench_dot_product.c: benchmark for matrix-vector dot-product chains
+ * `(fld m32 + fmul m32 + faddp st1, st0) x N` against contiguous f32
  * data and weight streams.
  *
- * Models the dominant hot pattern in the 2026-05-06 WoW capture
- * (rank-1 / rank-2 / rank-10 / rank-12 in /tmp/epoch.prof, ≈20% of
- * total exec-weighted ARM emit).
+ * Models the dominant hot pattern of a WoW 1.12 profile, where these
+ * chains were about 20% of the exec-weighted ARM emit.
  *
  * Three configurations exercise the relevant lowering paths:
  *   - X87_DISABLE_HOOK=1                  (stock Rosetta, baseline)
  *   - default                             (scalar FMADD chain via FMA pass)
  *   - X87_ENABLE_FMA_REDUCE=1             (NEON FMLA .2D reduction)
  *
- * Per the plan in ~/.claude/plans/elegant-petting-hammock.md, the
- * NEON path's expected per-pair cost is ~5 ARM (LDR D × 2 + FCVTL × 2
- * + FMLA .2D) covering 2 trios, vs ~10 ARM for two scalar FMADD trios.
- * We expect ≥1.3× speedup on n_8 / n_16 chains (LDR-D path; ILP and
- * memory subsystem absorb some of the ARM-instruction win).
+ * The NEON path's expected per-pair cost is ~5 ARM (LDR D x 2 + FCVTL x 2
+ * + FMLA .2D) covering 2 trios, vs ~10 ARM for two scalar FMADD trios,
+ * so n_8 / n_16 chains should gain at least 1.3x on the LDR-D path; ILP
+ * and the memory subsystem absorb some of the ARM-instruction win.
  *
- * Run via the rosettax87 loader (per feedback_runtime_loader.md).
+ * Run through the x87sidecar loader; bare, the x87 is not translated by us.
  */
 #include <stdint.h>
 #include <stdio.h>
