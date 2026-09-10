@@ -811,9 +811,21 @@ int emit_inline_fyl2x(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, in
 //   ret = z + shift·(π/2) + z³·poly
 //   result = bits_to_double(bits(ret) ^ sign_xy)
 //
-// Special cases (zero/inf/NaN) follow whatever IEEE FP arithmetic does;
-// no scalar fallback as in the AdvSIMD source (real game workloads
-// don't feed degenerate inputs to fpatan).
+// Special cases: the AdvSIMD source routes zero/inf/NaN inputs to a
+// scalar fallback; this port has none, so the two degenerate shapes real
+// code does feed it are folded into the main path instead:
+//   • x = -0.0 — "x < 0" is decided on the SIGN BIT (integer compare of
+//     the raw bits), not on an FCMP against zero, which treats -0.0 as
+//     not-negative and leaves shift_a = 0 while sign_xy still flips the
+//     result: atan2(1, -0.0) came out as -π/2 instead of +π/2.  The CRT
+//     acos() (fld1; fadd; fld1; fsub; fmulp; fsqrt; fxch; fpatan) hits this
+//     for every d = -0.0 — Miles' msssoft.m3d pans a source straight ahead
+//     with acos(dot)/π and got a pan of -0.5, i.e. a NEGATIVE left channel
+//     volume, which the MSSMIXER merge divides into #DE (CoD2 crash, #23).
+//   • both inputs ±0 — z = num/den would be 0/0 = NaN; z is forced to 0
+//     (only when num AND den are zero, so a NaN input still propagates)
+//     and the quadrant shift alone yields ±0 / ±π as IEEE atan2 does.
+// inf/inf (both infinite) still yields NaN instead of ±π/4 / ±3π/4.
 // FPR-level core of fpatan: returns a freshly-owned pool FPR holding
 // atan2(Dy_in, Dx_in).  Both inputs must be scratch-pool FPRs; the core
 // takes ownership (Dy_in is freed after the step-2 FABS, Dx_in after the
@@ -879,16 +891,44 @@ int emit_inline_fpatan_core(TranslationResult& a1, AssemblerBuffer& buf, int Dy_
         free_fpr(a1, Done);
     }
 
-    // 4. z = num / den
+    // 4. z = num / den; both inputs ±0 (num == 0 AND den == 0) → z = 0
+    //    instead of the 0/0 NaN.  den == 0 alone is not enough: for
+    //    y = NaN, x = ±0 the unordered step-3 FCMP leaves num = NaN with
+    //    den = |x| = 0, and the quotient must stay NaN.  Both FCMP-zero
+    //    tests are false for NaN, so a NaN in either input keeps z.
+    //    Dnum is reused as the select scratch (its value is consumed by
+    //    the first FCMP) and Dzero takes the slot Dnum would have freed,
+    //    so the live FPR count stays at the step-3 peak.
     const int Dz = alloc_free_fpr(a1);
     emit_fdiv_f64(buf, Dz, Dnum, Dden);
+    {
+        const int Dzero = alloc_free_fpr(a1);
+        emit_movi_d_zero(buf, Dzero);
+        // Dnum := (num == 0) ? 0 : z
+        emit_fcmp_zero_f64(buf, Dnum);
+        emit_fcsel_f64(buf, Dnum, Dzero, Dz, /*cond=EQ*/ 0);
+        // z := (den == 0) ? Dnum : z   — i.e. 0 only when both are zero
+        emit_fcmp_zero_f64(buf, Dden);
+        emit_fcsel_f64(buf, Dz, Dnum, Dz, /*cond=EQ*/ 0);
+        free_fpr(a1, Dzero);
+    }
     free_fpr(a1, Dnum);
     free_fpr(a1, Dden);
 
     // 5. shift_a = (x < 0) ? -2.0 : 0.0;  shift = shift_a + shift_b
-    //    The FCMP-zero is the last read of Dx_in — free it before the
-    //    polynomial's peak-pressure window.
-    emit_fcmp_zero_f64(buf, Dx_in);
+    //    "x < 0" is the sign bit of x, so -0.0 counts as negative (IEEE
+    //    atan2(y, -0.0) = ±π/2, atan2(±0, -0.0) = ±π): FMOV the raw bits
+    //    to a GPR and CMP against zero — N is then the sign bit and the
+    //    MI select below reads it.  This is the last read of Dx_in — free
+    //    it before the polynomial's peak-pressure window.
+    {
+        const int Xbits = alloc_free_gpr(a1);
+        emit_fmov_d_to_x(buf, Xbits, Dx_in);
+        // SUBS XZR, Xbits, #0  (CMP Xbits, #0)
+        emit_add_imm(buf, /*is_64bit=*/1, /*is_sub=*/1, /*is_set_flags=*/1, /*shift=*/0,
+                     /*imm12=*/0, Xbits, GPR::XZR);
+        free_gpr(a1, Xbits);
+    }
     free_fpr(a1, Dx_in);
     const int Dshift = alloc_free_fpr(a1);
     {
