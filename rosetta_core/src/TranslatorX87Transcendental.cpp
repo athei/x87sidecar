@@ -822,8 +822,9 @@ int emit_inline_fyl2x(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, in
 //     for every d = -0.0 — Miles' msssoft.m3d pans a source straight ahead
 //     with acos(dot)/π and got a pan of -0.5, i.e. a NEGATIVE left channel
 //     volume, which the MSSMIXER merge divides into #DE (CoD2 crash, #23).
-//   • den = 0 (both inputs ±0) — z = num/den would be NaN; z is forced to
-//     0 so the quadrant shift alone yields ±0 / ±π as IEEE atan2 does.
+//   • both inputs ±0 — z = num/den would be 0/0 = NaN; z is forced to 0
+//     (only when num AND den are zero, so a NaN input still propagates)
+//     and the quadrant shift alone yields ±0 / ±π as IEEE atan2 does.
 // inf/inf (both infinite) still yields NaN instead of ±π/4 / ±3π/4.
 // FPR-level core of fpatan: returns a freshly-owned pool FPR holding
 // atan2(Dy_in, Dx_in).  Both inputs must be scratch-pool FPRs; the core
@@ -890,19 +891,28 @@ int emit_inline_fpatan_core(TranslationResult& a1, AssemblerBuffer& buf, int Dy_
         free_fpr(a1, Done);
     }
 
-    // 4. z = num / den; den == 0 (both inputs ±0) → z = 0 instead of NaN.
-    //    Dzero is allocated after Dnum's release so the live FPR count
-    //    stays at the step-3 peak.
+    // 4. z = num / den; both inputs ±0 (num == 0 AND den == 0) → z = 0
+    //    instead of the 0/0 NaN.  den == 0 alone is not enough: for
+    //    y = NaN, x = ±0 the unordered step-3 FCMP leaves num = NaN with
+    //    den = |x| = 0, and the quotient must stay NaN.  Both FCMP-zero
+    //    tests are false for NaN, so a NaN in either input keeps z.
+    //    Dnum is reused as the select scratch (its value is consumed by
+    //    the first FCMP) and Dzero takes the slot Dnum would have freed,
+    //    so the live FPR count stays at the step-3 peak.
     const int Dz = alloc_free_fpr(a1);
     emit_fdiv_f64(buf, Dz, Dnum, Dden);
-    free_fpr(a1, Dnum);
     {
         const int Dzero = alloc_free_fpr(a1);
         emit_movi_d_zero(buf, Dzero);
+        // Dnum := (num == 0) ? 0 : z
+        emit_fcmp_zero_f64(buf, Dnum);
+        emit_fcsel_f64(buf, Dnum, Dzero, Dz, /*cond=EQ*/ 0);
+        // z := (den == 0) ? Dnum : z   — i.e. 0 only when both are zero
         emit_fcmp_zero_f64(buf, Dden);
-        emit_fcsel_f64(buf, Dz, Dzero, Dz, /*cond=EQ*/ 0);
+        emit_fcsel_f64(buf, Dz, Dnum, Dz, /*cond=EQ*/ 0);
         free_fpr(a1, Dzero);
     }
+    free_fpr(a1, Dnum);
     free_fpr(a1, Dden);
 
     // 5. shift_a = (x < 0) ? -2.0 : 0.0;  shift = shift_a + shift_b
