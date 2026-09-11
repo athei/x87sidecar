@@ -148,7 +148,12 @@ details.
 ## Profiling
 
 Both profilers are enabled by naming an output file; neither costs anything
-when unset.
+when unset. Both always append `.<pid>` to the provided path, using the pid
+of the process the sidecar is attached to, not the sidecar's own. For example,
+`/tmp/game.prof` becomes `/tmp/game.prof.12345`. Paths are otherwise literal;
+there is no placeholder or extension parsing. Wine starts one cooperative
+sidecar per i386 process with the same environment, so the suffix keeps
+those processes from truncating one another's profiles.
 
 ### Sampling profiler: where the guest was
 
@@ -183,7 +188,7 @@ but the program's binaries and debug info.
 | `[host_syscalls]` | the guest syscall a host-only sample was blocked in, recovered from `x16` at the runtime's syscall dispatcher |
 | `[stacks]` | folded inclusive stacks, `root;...;leaf count` |
 
-A run leaves `<file>` and `<file>.windows`, the latter one record per report
+A run leaves `<file>.<pid>` and `<file>.<pid>.windows`, the latter one record per report
 interval holding only that interval's samples, each closed by an
 `end_window` line so a record cut short by SIGKILL can be dropped. The
 cumulative profile is the sum of the windows. A sample costs about 10 us,
@@ -192,11 +197,11 @@ achieved.
 
 | knob | flag | default | effect |
 |---|---|---|---|
-| `X87_SAMPLE=<file>` | `--sample=<file>` | off | enable and name the profile |
+| `X87_SAMPLE=<file>` | `--sample=<file>` | off | write the profile to `<file>.<pid>` |
 | `X87_SAMPLE_HZ=N` | `--sample-hz=N` | 10000 | rate for the latched thread |
 | `X87_SAMPLE_SWEEP_HZ=N` | `--sweep-hz=N` | 1000 | rate at which all threads are swept while looking for one to latch onto |
 | `X87_SAMPLE_REPORT=SECS` | | 10 | rewrite interval and window size |
-| `X87_SAMPLE_WINDOWS=0` | | on | stop writing `<file>.windows` |
+| `X87_SAMPLE_WINDOWS=0` | | on | stop writing `<file>.<pid>.windows` |
 | `X87_GUEST_RANGE=LO-HI` | `--guest-range=LO-HI` | detected | pin the guest range that marks the thread worth profiling |
 | `X87_NO_UNWIND=1` | `--no-unwind` | off | leaf pcs only, about half the per-sample cost |
 
@@ -207,7 +212,8 @@ without touching argv.
 
 ```bash
 X87_PROFILE=/tmp/game.x87 ./x87sidecar_entitled ./program
-./build/bin/profile_analyze /tmp/game.x87 --rank-by emit --hot-addrs 50
+# Replace 12345 with the target pid printed in the output path.
+./build/bin/profile_analyze /tmp/game.x87.12345 --rank-by emit --hot-addrs 50
 ```
 
 While translating, the sidecar writes each block's IR to the file the first
@@ -308,6 +314,7 @@ bash scripts/run_tests.sh                # build + all phases
 bash scripts/run_tests.sh --no-build     # skip the build
 bash scripts/run_tests.sh --native-only  # stock Rosetta baseline only
 bash scripts/run_tests.sh test_arith     # one test
+python3 scripts/test_profile_paths.py    # concurrent profiler output paths
 bash scripts/run_benchmarks.sh           # build + benchmark table
 ```
 
