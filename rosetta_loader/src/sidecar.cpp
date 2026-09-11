@@ -2903,27 +2903,19 @@ bool installPortInParent(mach_port_t parentTaskPort, mach_port_t* outServicePort
 }
 
 // A launcher can start several independently wrapped processes with the same
-// profiler environment.  Expand against the process whose task port the
+// profiler environment.  Append the pid of the process whose task port the
 // sidecar received, not the sidecar's own pid, so they cannot truncate one
 // another's output.
-static bool expandTargetPid(std::string& path, pid_t targetPid, const char* variable) {
-    if (path.find("%p") == std::string::npos) {
-        return true;
-    }
+static bool appendTargetPid(std::string& path, pid_t targetPid, const char* variable) {
     if (targetPid <= 0) {
         fprintf(stdout,
-                "[rosettax87] %s: cannot expand %%p because the target pid is unavailable; "
+                "[rosettax87] %s: cannot append the target pid because it is unavailable; "
                 "profiling disabled\n",
                 variable);
         return false;
     }
 
-    const std::string replacement = std::to_string(targetPid);
-    size_t offset = 0;
-    while ((offset = path.find("%p", offset)) != std::string::npos) {
-        path.replace(offset, 2, replacement);
-        offset += replacement.size();
-    }
+    path += "." + std::to_string(targetPid);
     return true;
 }
 
@@ -2932,7 +2924,7 @@ bool spawnReceiveThread(mach_port_t servicePort, mach_port_t parentTaskPort) {
         std::string path = g_rosetta_config->profile_path;
         pid_t targetPid = 0;
         pid_for_task(parentTaskPort, &targetPid);
-        if (!expandTargetPid(path, targetPid, "X87_PROFILE")) {
+        if (!appendTargetPid(path, targetPid, "X87_PROFILE")) {
             path.clear();
         }
         g_profile.file = path.empty() ? nullptr : std::fopen(path.c_str(), "wb");
@@ -3064,7 +3056,7 @@ void startSampler(mach_port_t parentTaskPort, uint64_t runtimeBase, const Sample
     // while it is alive, so read it before touching the output path.
     pid_t targetPid = 0;
     pid_for_task(parentTaskPort, &targetPid);
-    if (!expandTargetPid(cfg.path, targetPid, "X87_SAMPLE")) {
+    if (!appendTargetPid(cfg.path, targetPid, "X87_SAMPLE")) {
         return;
     }
     // Nothing from a previous run may survive into this one: a run that never

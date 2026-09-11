@@ -34,6 +34,9 @@ jobs:
         # runners give passwordless sudo, so just use that.
         run: sudo python3 scripts/diagnose_ci.py --output-dir build/ci-diagnostics -- bash scripts/run_tests.sh --no-build
 
+      - name: Check concurrent profiler output paths
+        run: sudo python3 scripts/test_profile_paths.py
+
       - name: Upload test diagnostics
         if: always()
         uses: actions/upload-artifact@v4

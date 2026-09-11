@@ -270,7 +270,7 @@ struct RosettaConfig {
                                     //                  (pre-optimization behaviour).
 
     // X87_PROFILE=<path>  When non-empty, sidecar appends a binary
-    // record per first-seen IRBlock to this file (full IR stream).
+    // record per first-seen IRBlock to <path>.<target-pid> (full IR stream).
     // Drives offline fusion-candidate analysis via tools/profile_analyze.
     std::string profile_path;
 };
