@@ -213,6 +213,13 @@ static bool opcodeTableMatches(const std::vector<std::string>& names) {
     bool ok = true;
     for (const auto& s : kSentinels) {
         const uint16_t host = opcode_internal_to_host(s.internal);
+        if (opcode_host_table_active() && host == kOpcodeUnmapped) {
+            // Mapped by name from the runtime's own table, and this runtime
+            // simply has no such opcode: nothing can be misrouted through it.
+            fprintf(stdout, "[rosettax87] opcode %s: not defined by this runtime, skipped\n",
+                    s.name);
+            continue;
+        }
         if (host >= names.size() || names[host] != s.name) {
             fprintf(stdout, "[rosettax87] opcode %s: expected host id %u, runtime has %s there\n",
                     s.name, host, host < names.size() ? names[host].c_str() : "nothing");
@@ -224,6 +231,35 @@ static bool opcodeTableMatches(const std::vector<std::string>& names) {
     if (hostArpl < names.size() && names[hostArpl] == "arpl") {
         fprintf(stdout, "[rosettax87] the runtime now defines arpl at id %u\n", hostArpl);
         ok = false;
+    }
+    // What the stub filter (stub_asm.cpp) really relies on: both x87 ranges are
+    // contiguous and in canonical order under the host numbering, so a
+    // host-translated range start plus the canonical range size selects
+    // exactly the x87 opcodes. Check it directly rather than through sentinels.
+    struct Range {
+        uint16_t first, last;
+        const char* name;
+    };
+    static const Range kRanges[] = {
+        {kOpcodeName_fcmovb, kOpcodeName_fucomip, "fcmovb..fucomip"},
+        {kOpcodeName_f2xm1, kOpcodeName_fyl2xp1, "f2xm1..fyl2xp1"},
+    };
+    for (const auto& r : kRanges) {
+        const uint16_t base = opcode_internal_to_host(r.first);
+        for (uint16_t op = r.first; op <= r.last; ++op) {
+            const uint16_t host = opcode_internal_to_host(op);
+            const uint16_t want = static_cast<uint16_t>(base + (op - r.first));
+            if (host != want || host >= names.size() || names[host] != kOpcodeNames[op]) {
+                fprintf(
+                    stdout,
+                    "[rosettax87] x87 range %s is not contiguous in this runtime: %s expected at "
+                    "host id %u, found %s\n",
+                    r.name, kOpcodeNames[op], want,
+                    want < names.size() ? names[want].c_str() : "nothing");
+                ok = false;
+                break;
+            }
+        }
     }
     return ok;
 }
@@ -271,8 +307,13 @@ static int probeRuntime() {
         return 1;
     }
     rosetta_core_set_runtime_version(f.runtimeVersion_);
+    if (!f.opcodeNames_.empty()) {
+        opcode_set_host_table(f.opcodeNames_);
+    }
     printf("  version            0x%llx (%s)\n", f.runtimeVersion_,
-           f.runtimeVersion_ > kVersion_26_4 ? "opcodes identity-mapped" : "26.4 opcode table");
+           opcode_host_table_active()          ? "opcodes mapped by name from the runtime table"
+           : f.runtimeVersion_ > kVersion_26_4 ? "opcodes identity-mapped"
+                                               : "26.4 opcode table");
     printf("  translator_translate %s0x%llx\n",
            f.offsetTranslatorTranslate_ ? "" : "not exported, ", f.offsetTranslatorTranslate_);
     printf("  translate_insn     0x%llx (x87 hook)\n", f.offsetTranslateInsn_);
@@ -1431,6 +1472,12 @@ int main(int argc, char* argv[]) try {
     // fork, so the sidecar inherits it and the checks below can use it.
     VERBOSE_LOG("Rosetta version: %llx\n", offsetFinder.runtimeVersion_);
     rosetta_core_set_runtime_version(offsetFinder.runtimeVersion_);
+    // Map opcode ids by name from the runtime's own mnemonic table when it was
+    // found; the version-keyed tables stay as the fallback for a runtime that
+    // has no readable table. Also before the fork, for the same reason.
+    if (!offsetFinder.opcodeNames_.empty()) {
+        opcode_set_host_table(offsetFinder.opcodeNames_);
+    }
 
     // What the emitted code and the stub filter assume about this runtime,
     // checked against the runtime itself rather than trusted.

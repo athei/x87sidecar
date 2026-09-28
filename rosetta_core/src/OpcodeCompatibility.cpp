@@ -1,12 +1,58 @@
 #include "rosetta_core/OpcodeCompatibility.h"
 
 #include <cstdint>
+#include <string>
+#include <unordered_map>
+#include <vector>
 
 #include "rosetta_core/Opcode.h"
 #include "rosetta_core/Opcode_26_4.h"
 #include "rosetta_core/RosettaCore.h"
 
+namespace {
+bool g_table_active = false;
+std::vector<uint16_t> g_host_to_internal;  // indexed by host id
+std::vector<uint16_t> g_internal_to_host;  // indexed by kOpcodeName_*
+uint16_t g_host_arpl = kOpcodeName_arpl;
+}  // namespace
+
+void opcode_set_host_table(const std::vector<std::string>& hostNames) {
+    std::unordered_map<std::string, uint16_t> internalByName;
+    for (uint16_t i = 0; i < kOpcodeNames.size(); ++i) {
+        if (i != kOpcodeName_arpl && kOpcodeNames[i] != nullptr) {
+            internalByName.emplace(kOpcodeNames[i], i);
+        }
+    }
+    g_host_to_internal.assign(hostNames.size(), kOpcodeUnmapped);
+    g_internal_to_host.assign(kOpcodeNames.size(), kOpcodeUnmapped);
+    for (size_t h = 0; h < hostNames.size(); ++h) {
+        const auto it = internalByName.find(hostNames[h]);
+        if (it == internalByName.end()) {
+            continue;
+        }
+        g_host_to_internal[h] = it->second;
+        if (g_internal_to_host[it->second] == kOpcodeUnmapped) {
+            g_internal_to_host[it->second] = static_cast<uint16_t>(h);
+        }
+    }
+    // Synthetic ARPL: appended past everything the runtime defines, as before,
+    // but past *this* runtime's table rather than the 26.4 one.
+    g_host_arpl = static_cast<uint16_t>(hostNames.size());
+    g_internal_to_host[kOpcodeName_arpl] = g_host_arpl;
+    g_table_active = true;
+}
+
+bool opcode_host_table_active() {
+    return g_table_active;
+}
+
 auto opcode_host_to_internal(uint16_t opcode) -> uint16_t {
+    if (g_table_active) {
+        if (opcode == g_host_arpl) {
+            return kOpcodeName_arpl;
+        }
+        return opcode < g_host_to_internal.size() ? g_host_to_internal[opcode] : kOpcodeUnmapped;
+    }
     if (rosetta_core_runtime_version() > kVersion_26_4) {
         return opcode;
     }
@@ -1358,6 +1404,9 @@ auto opcode_host_to_internal(uint16_t opcode) -> uint16_t {
 }
 
 auto opcode_internal_to_host(uint16_t opcode) -> uint16_t {
+    if (g_table_active) {
+        return opcode < g_internal_to_host.size() ? g_internal_to_host[opcode] : kOpcodeUnmapped;
+    }
     if (rosetta_core_runtime_version() > kVersion_26_4) {
         return opcode;
     }
