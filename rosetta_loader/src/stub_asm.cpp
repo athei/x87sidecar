@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <vector>
 
@@ -966,10 +967,20 @@ StubBlobs build(uint64_t handlerAddr, uint64_t translateInsnAddr, const uint8_t 
     // the compat layer.  rosetta_core_init must have run before stub injection.
     const auto host_fcmovb = opcode_internal_to_host(kOpcodeName_fcmovb);
     const auto host_f2xm1 = opcode_internal_to_host(kOpcodeName_f2xm1);
-    // Synthetic, so it is the same id under either numbering, but route it
-    // through the compat layer anyway rather than hardcoding the assumption.
+    // Synthetic: the first id past the runtime's own opcodes, so it comes from
+    // the compat layer too.
     const auto host_arpl = opcode_internal_to_host(kOpcodeName_arpl);
-    static_assert(kOpcodeName_arpl <= 0xFFF, "filter compares the arpl id with a 12-bit immediate");
+    // sub_imm_w and cmp_imm_w keep 12 bits of their immediate, and these ids
+    // are the runtime's, so this cannot be a static_assert. It also catches an
+    // id the host table has no entry for (kOpcodeUnmapped).
+    if (host_fcmovb > 0xFFF || host_f2xm1 > 0xFFF || host_arpl > 0xFFF) {
+        fprintf(stdout,
+                "[rosettax87] stub filter: host opcode ids do not fit a 12-bit immediate "
+                "(fcmovb=%u f2xm1=%u arpl=%u)\n",
+                host_fcmovb, host_f2xm1, host_arpl);
+        blobs.entry.clear();  // the caller's failure signal
+        return blobs;
+    }
 
     std::vector<uint8_t> filter;
     filter.reserve(kFilterBytes);

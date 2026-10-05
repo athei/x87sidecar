@@ -99,3 +99,8 @@ add_x86_sample(test_x87_native_state)
 # Invoked by the opt-in tracing regression, not the arithmetic phase matrix.
 add_x86_sample(test_x87_trace_threads)
 add_x86_sample(test_x87_trace_freeze)
+
+# Host-side (arm64) check of the name-derived opcode maps against the pinned
+# tables. Not an x86 sample: it links rosetta_core and runs natively.
+add_executable(test_opcode_host_table host/test_opcode_host_table.cpp)
+target_link_libraries(test_opcode_host_table PRIVATE rosetta_core)
