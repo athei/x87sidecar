@@ -273,6 +273,10 @@ struct RosettaConfig {
                                     //                  re-read the full 80 B x num_instrs IR
                                     //                  array from the tracee on every request
                                     //                  (pre-optimization behaviour).
+    uint8_t loader_force_unsupported;  // X87_FORCE_UNSUPPORTED  treat the installed Rosetta
+                                       //                  as unsupported at launch, which
+                                       //                  exercises the fallback that runs a
+                                       //                  cooperative target without the hook.
 
     // X87_PROFILE=<path>  When non-empty, sidecar appends a binary
     // record per first-seen IRBlock to <path>.<target-pid> (full IR stream).

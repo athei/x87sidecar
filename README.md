@@ -252,13 +252,28 @@ invalidates them from its own thread: a cooperative attach happens after
 Rosetta init, when `translate_insn` is already hot in the instruction cache
 and a cross-process flush is not reliable.
 
+When the hook cannot be set up, the two modes differ. The default attach
+refuses to launch the target, so a test or benchmark run never reports
+results that were not hooked. Cooperative mode always lets the program run,
+since wine sends every 32-bit process through it. A failure before launch,
+such as an unsupported Rosetta or a sidecar that could not start, prints
+`running <program> without the x87 hook` on stderr and execs the target in
+place, keeping its pid, with the arguments and environment wine passed:
+`X87_SIDECAR_BOOTSTRAP` is not set for it and `ROSETTA_DISABLE_AOT` keeps
+whatever value it inherited. A failure after launch puts back any entry
+patch already written and releases the target, which continues without the
+hook, and the sidecar prints `hook not installed; <program> continues
+without the x87 hook`. `X87_FORCE_UNSUPPORTED=1` makes the loader treat the
+installed Rosetta as unsupported, to exercise this path.
+
 ## Compatibility and correctness
 
 Nothing in the tree is tied to a macOS or Rosetta build number. At startup
 the loader locates what it patches by anchors that survive a rebuild, checks
 the assumptions the emitted code relies on against the installed runtime,
 and refuses a runtime that fails a check rather than patching guessed
-addresses. `x87sidecar --probe` prints that report and exits 0 only when
+addresses; [Attaching](#attaching-to-the-target) says what then happens to
+the program. `x87sidecar --probe` prints that report and exits 0 only when
 every feature is supported; run it first after a macOS update. CI runs it
 on the current `macos-26` runner before the test suite, and it runs on
 macOS 27.
@@ -394,6 +409,7 @@ Loader and sidecar diagnostics:
 | `X87_LOG_OPS=1` | one line per translated op; high volume, for freeze bisects |
 | `X87_NO_IR_CACHE=1`, `X87_NO_TCO_CACHE=1` | re-read the IR array or the thread-context layout on every request |
 | `X87_NO_PREAUTH=1` | skip acquiring the developer-tools right before launch (default attach only) |
+| `X87_FORCE_UNSUPPORTED=1` | treat the installed Rosetta as unsupported at launch; a cooperative target then runs without the hook |
 
 ## License
 

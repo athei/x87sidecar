@@ -318,6 +318,7 @@ RosettaConfig load_config_from_env() {
     cfg.loader_dump_emit = env_truthy("X87_DUMP_EMIT") ? 1 : 0;
     cfg.loader_no_tco_cache = env_truthy("X87_NO_TCO_CACHE") ? 1 : 0;
     cfg.loader_no_ir_cache = env_truthy("X87_NO_IR_CACHE") ? 1 : 0;
+    cfg.loader_force_unsupported = env_truthy("X87_FORCE_UNSUPPORTED") ? 1 : 0;
 
     if (const char* p = std::getenv("X87_PROFILE"); p != nullptr && p[0] != '\0') {
         cfg.profile_path = p;
@@ -362,6 +363,11 @@ void print_env_help(std::FILE* out) {
         "                                while the target is frozen at its exec stop,\n"
         "                                which stalls every other Rosetta launch on\n"
         "                                the machine until the dialog is answered.\n"
+        "  X87_FORCE_UNSUPPORTED=1       treat the installed Rosetta as unsupported at\n"
+        "                                launch.  With --cooperative the target then\n"
+        "                                runs without the x87 hook, as on a Rosetta\n"
+        "                                the loader does not recognise; otherwise the\n"
+        "                                loader refuses to launch it.\n"
         "  X87_ALWAYS_NONE=1             diagnostic: sidecar always replies None,\n"
         "                                so the stub falls through to stock for every\n"
         "                                request.  Use to A/B whether a freeze is in\n"

@@ -24,6 +24,7 @@
 #include <exception>
 #include <map>
 #include <numbers>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -1149,6 +1150,49 @@ static std::string coop_service_name(pid_t pid) {
     return std::string("x87sidecar.") + std::to_string(pid);
 }
 
+// Wine runs every i386 process through `x87sidecar --cooperative`, so a
+// failure to set up the hook must not keep the program from starting. When it
+// happens before the target is launched, cooperative mode execs the target in
+// place without the hook. The pid Wine's parent tracks stays the same and the
+// target gets the argv and environment it would have had if Wine had exec'd it
+// directly: the variables the loader adds for it are put back the way they
+// were inherited. g_unhookedArgv is set in the original process only.
+static char** g_unhookedArgv = nullptr;
+static std::optional<std::string> g_inheritedDisableAot;
+
+static int runUnhooked(const std::string& reason) {
+    fprintf(stderr, "[rosettax87] %s; running %s without the x87 hook\n", reason.c_str(),
+            g_unhookedArgv[0]);
+    fflush(stdout);
+    fflush(stderr);
+    unsetenv(X87_COOP_ENV);
+    if (g_inheritedDisableAot) {
+        setenv("ROSETTA_DISABLE_AOT", g_inheritedDisableAot->c_str(), 1);
+    } else {
+        unsetenv("ROSETTA_DISABLE_AOT");
+    }
+    execv(g_unhookedArgv[0], g_unhookedArgv);
+    fprintf(stderr, "[rosettax87] execv %s: %s\n", g_unhookedArgv[0], strerror(errno));
+    return 1;
+}
+
+// Once the cooperative tracee has been launched, a sidecar that gives up
+// before releasing it leaves it running without the hook: the tracee is
+// blocked in the handshake and resumes when this process exits and the reply
+// right dies with it. Say so on the way out, whichever return path is taken.
+struct UnhookedNotice {
+    const char* prog = nullptr;
+    UnhookedNotice() = default;
+    UnhookedNotice(const UnhookedNotice&) = delete;
+    UnhookedNotice& operator=(const UnhookedNotice&) = delete;
+    ~UnhookedNotice() {
+        if (prog != nullptr) {
+            fprintf(stderr, "[rosettax87] hook not installed; %s continues without the x87 hook\n",
+                    prog);
+        }
+    }
+};
+
 int main(int argc, char* argv[]) try {
     int argi = 1;
     if (argi < argc && std::string_view(argv[argi]) == "--help") {
@@ -1217,44 +1261,44 @@ int main(int argc, char* argv[]) try {
     bool needsInitBarrier = true;
     mach_port_t coopReplyPort = MACH_PORT_NULL;
 
-    // Force Rosetta to JIT (call translate_insn) instead of using its AOT /
-    // interpreter path — libRosettaRuntime reads ROSETTA_DISABLE_AOT at init, so
-    // it MUST be in the environment before the target execs. This is what makes
-    // the JIT hook reachable in cooperative mode (which attaches post-init and
-    // so can't win the race to write the g_disable_aot global in time); it is
-    // harmless for default mode, which also wants AOT off.
-    setenv("ROSETTA_DISABLE_AOT", "1", 1);
-
-    // Cooperative mode publishes its bootstrap service name (derived from the
-    // pid the parent keeps across execv) BEFORE forking, so the target inherits
-    // it via the environment.
-    std::string coopName;
+    // A failure before the target is launched: cooperative mode runs the
+    // target without the hook (see runUnhooked), the default attach refuses
+    // to launch it. The default attach serves the test and benchmark harness
+    // and explicit command lines, where running unhooked would hide the
+    // failure behind results that look hooked.
     if (cooperative) {
-        coopName = coop_service_name(parentPid);
-        setenv(X87_COOP_ENV, coopName.c_str(), 1);
+        g_unhookedArgv = progArgv;
+        if (const char* v = getenv("ROSETTA_DISABLE_AOT")) {
+            g_inheritedDisableAot = v;
+        }
     }
+    auto notLaunching = [&](const std::string& reason) -> int {
+        if (cooperative) {
+            return runUnhooked(reason);
+        }
+        fprintf(stdout, "[rosettax87] %s; not launching %s\n", reason.c_str(), progArgv[0]);
+        return 1;
+    };
 
     // Locate what we patch by scanning the installed Rosetta binaries on disk.
     // This runs before anything is launched: a runtime whose code does not
-    // match is unsupported, and the right answer is to say so and not start
-    // the target at all rather than patch guessed addresses.
+    // match is unsupported, and the right answer is to say so rather than
+    // patch guessed addresses.
     OffsetFinder offsetFinder;
+    if (g_cfg.loader_force_unsupported) {
+        return notLaunching("unsupported Rosetta (X87_FORCE_UNSUPPORTED)");
+    }
     if (!offsetFinder.determineOffsets()) {
-        fprintf(stdout,
-                "[rosettax87] unsupported Rosetta: /usr/libexec/rosetta/runtime does not "
-                "match the expected code patterns; not launching %s\n",
-                progArgv[0]);
-        return 1;
+        return notLaunching(
+            "unsupported Rosetta: /usr/libexec/rosetta/runtime does not match the expected code "
+            "patterns");
     }
     VERBOSE_LOG("offset_exports_fetch=%llx offset_svc_call_entry=%llx offset_svc_call_ret=%llx\n",
                 offsetFinder.offsetExportsFetch_, offsetFinder.offsetSvcCallEntry_,
                 offsetFinder.offsetSvcCallRet_);
     if (!offsetFinder.determineRuntimeOffsets()) {
-        fprintf(stdout,
-                "[rosettax87] unsupported Rosetta: libRosettaRuntime does not match the "
-                "expected code patterns; not launching %s\n",
-                progArgv[0]);
-        return 1;
+        return notLaunching(
+            "unsupported Rosetta: libRosettaRuntime does not match the expected code patterns");
     }
     VERBOSE_LOG("offset_translate_insn=%llx offset_transaction_result_size=%llx\n",
                 offsetFinder.offsetTranslateInsn_, offsetFinder.offsetTransactionResultSize_);
@@ -1272,8 +1316,7 @@ int main(int argc, char* argv[]) try {
     // What the emitted code and the stub filter assume about this runtime,
     // checked against the runtime itself rather than trusted.
     if (!runtimeAssumptionsHold(offsetFinder)) {
-        fprintf(stdout, "[rosettax87] unsupported Rosetta; not launching %s\n", progArgv[0]);
-        return 1;
+        return notLaunching("unsupported Rosetta");
     }
     if (offsetFinder.armTreeRootOffset_ != 0) {
         if (offsetFinder.armTreeRootOffset_ != guest_pc::kArmTreeRootOffset) {
@@ -1293,20 +1336,41 @@ int main(int argc, char* argv[]) try {
         return 1;
     }
 
+    // Force Rosetta to JIT (call translate_insn) instead of using its AOT /
+    // interpreter path: libRosettaRuntime reads ROSETTA_DISABLE_AOT at init, so
+    // it MUST be in the environment before the target execs. This is what makes
+    // the JIT hook reachable in cooperative mode (which attaches post-init and
+    // so can't win the race to write the g_disable_aot global in time); it is
+    // harmless for default mode, which also wants AOT off. Set only once the
+    // runtime is known to be supported, so a target run without the hook keeps
+    // its AOT path.
+    setenv("ROSETTA_DISABLE_AOT", "1", 1);
+
+    // Cooperative mode publishes its bootstrap service name (derived from the
+    // pid the parent keeps across execv) BEFORE forking, so the target inherits
+    // it via the environment.
+    std::string coopName;
+    if (cooperative) {
+        coopName = coop_service_name(parentPid);
+        setenv(X87_COOP_ENV, coopName.c_str(), 1);
+    }
+
     // Nothing buffered may cross the forks below, or it is written twice.
     fflush(stdout);
+    fflush(stderr);
 
     int syncPipe[2];
     if (pipe(syncPipe) == -1) {
-        fprintf(stdout, "pipe: %s\n", strerror(errno));
-        return 1;
+        return notLaunching(std::string("pipe: ") + strerror(errno));
     }
 
     pid_t child = fork();
 
     if (child == -1) {
-        fprintf(stdout, "fork: %s\n", strerror(errno));
-        return 1;
+        const int err = errno;
+        close(syncPipe[0]);
+        close(syncPipe[1]);
+        return notLaunching(std::string("fork: ") + strerror(err));
     }
 
     if (child != 0) {
@@ -1322,10 +1386,9 @@ int main(int argc, char* argv[]) try {
         close(syncPipe[0]);
         waitpid(child, nullptr, WNOHANG);  // reap intermediate double-fork child
         if (got != 1 || buf != 'x') {
-            // The sidecar gave up before attaching (authorization refused, or
-            // it died); there is nothing to trace, so do not run the target.
-            fprintf(stdout, "parent: sidecar did not attach; not launching %s\n", progArgv[0]);
-            return 1;
+            // The sidecar gave up before attaching (authorization refused,
+            // its service could not be registered, or it died).
+            return notLaunching("sidecar did not attach");
         }
         VERBOSE_LOG("parent: launching into program: %s\n", progArgv[0]);
         execv(progArgv[0], progArgv);
@@ -1337,6 +1400,8 @@ int main(int argc, char* argv[]) try {
     // this also breaks the ptrace PID cycle that crashes Terminal's
     // process-tree walker.)
     close(syncPipe[0]);
+    // Only the original process may exec the target.
+    g_unhookedArgv = nullptr;
     pid_t intermediatePid = getpid();  // valid in C; G inherits via fork copy
     pid_t grandchild = fork();
     if (grandchild == -1) {
@@ -1348,6 +1413,7 @@ int main(int argc, char* argv[]) try {
     }
 
     // ── GRANDCHILD == the sidecar ───────────────────────────────────────────
+    UnhookedNotice unhookedNotice;
     if (cooperative) {
         // Publish a receive port under the pid-based name; the target looks it
         // up, hands over its task+thread control ports, and blocks for a reply.
@@ -1366,6 +1432,7 @@ int main(int argc, char* argv[]) try {
         VERBOSE_LOG("[rosettax87] cooperative service registered: %s\n", coopName.c_str());
         write(syncPipe[1], "x", 1);
         close(syncPipe[1]);
+        unhookedNotice.prog = progArgv[0];  // the target is launched from here on
 
         x87_coop_request_rcv_t rcv{};
         kr = mach_msg(&rcv.req.header, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof(rcv), servicePort,
@@ -1495,6 +1562,7 @@ int main(int argc, char* argv[]) try {
         VERBOSE_LOG("X87_DISABLE_HOOK=1: passthrough mode; releasing without hook\n");
         const int exitWatch = armExitWatch(parentPid);
         releaseTracee();
+        unhookedNotice.prog = nullptr;  // asked for
         // Block until parent exits (mirror the post-stub-install path below).
         waitExitWatch(exitWatch, parentPid);
         return 0;
@@ -2077,21 +2145,60 @@ int main(int argc, char* argv[]) try {
             }
         }
 
+        // Once an entry is patched, the tracee branches into a stub on its
+        // next translation, and the translate_insn stub aborts the process
+        // when the sidecar is gone. What is written before that lands in
+        // padding that nothing executes. So a failure from the first entry
+        // write until the release puts the displaced bytes back before giving
+        // up, and a cooperative tracee then runs without the hook instead of
+        // aborting. The default attach is otherwise unchanged: its tracee is
+        // still traced when this process exits.
+        struct PatchedEntry {
+            uint64_t addr;
+            uint8_t orig[16];
+        };
+        std::vector<PatchedEntry> patchedEntries;
+        auto restoreEntry = [&](const PatchedEntry& e) {
+            if (!dbg.adjustMemoryProtection(e.addr, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY,
+                                            sizeof(e.orig)) ||
+                !dbg.writeMemory(e.addr, e.orig, sizeof(e.orig)) ||
+                !dbg.adjustMemoryProtection(e.addr, VM_PROT_READ | VM_PROT_EXECUTE,
+                                            sizeof(e.orig))) {
+                fprintf(stdout, "M2: failed to restore the original bytes at 0x%llx\n", e.addr);
+            }
+        };
+        auto abandonHook = [&](const char* what) -> int {
+            fprintf(stdout, "M2: %s\n", what);
+            for (const auto& e : patchedEntries) {
+                restoreEntry(e);
+            }
+            if (cooperative) {
+                // Release now rather than by exiting, so the tracee also
+                // invalidates its i-cache over the restored entries.
+                for (size_t i = 0; i < 2; ++i) {
+                    coopIcacheAddr[i] = i < patchedEntries.size() ? patchedEntries[i].addr : 0;
+                    coopIcacheLen[i] = i < patchedEntries.size() ? sizeof(PatchedEntry::orig) : 0;
+                }
+                releaseTracee();
+            }
+            return 1;
+        };
+
         // ── Patch translate_insn[0..16] with the abs-jump ENTRY ────────────
+        PatchedEntry translateEntry{.addr = translateInsnAddr, .orig = {}};
+        memcpy(translateEntry.orig, origPrologue, sizeof(translateEntry.orig));
+        patchedEntries.push_back(translateEntry);
         if (!dbg.adjustMemoryProtection(translateInsnAddr,
                                         VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY,
                                         blobs.entry.size())) {
-            fprintf(stdout, "M2: failed to make translate_insn writable\n");
-            return 1;
+            return abandonHook("failed to make translate_insn writable");
         }
         if (!dbg.writeMemory(translateInsnAddr, blobs.entry.data(), blobs.entry.size())) {
-            fprintf(stdout, "M2: failed to write translate_insn entry\n");
-            return 1;
+            return abandonHook("failed to write translate_insn entry");
         }
         if (!dbg.adjustMemoryProtection(translateInsnAddr, VM_PROT_READ | VM_PROT_EXECUTE,
                                         blobs.entry.size())) {
-            fprintf(stdout, "M2: failed to restore translate_insn protection\n");
-            return 1;
+            return abandonHook("failed to restore translate_insn protection");
         }
         VERBOSE_LOG("M2: translate_insn entry patched (abs-jump to 0x%llx)\n", padStartAddr);
 
@@ -2189,7 +2296,13 @@ int main(int argc, char* argv[]) try {
                                                    VM_PROT_READ | VM_PROT_EXECUTE,
                                                    dblobs.entry.size())) {
                 fprintf(stdout, "M2: failed to patch the decode_opcode entry\n");
+                PatchedEntry decodeEntry{.addr = decodeOpcodeAddr, .orig = {}};
+                memcpy(decodeEntry.orig, origDecodePrologue, sizeof(decodeEntry.orig));
+                restoreEntry(decodeEntry);
             } else {
+                PatchedEntry decodeEntry{.addr = decodeOpcodeAddr, .orig = {}};
+                memcpy(decodeEntry.orig, origDecodePrologue, sizeof(decodeEntry.orig));
+                patchedEntries.push_back(decodeEntry);
                 decodeEntryAddr = decodeOpcodeAddr;
                 decodeBlobEnd = decodeHandlerAddr + dblobs.handler.size();
                 VERBOSE_LOG("M2: decode_opcode entry patched (abs-jump to 0x%llx, handler %zu B)\n",
@@ -2227,16 +2340,17 @@ int main(int argc, char* argv[]) try {
         // releases it. The receive thread uses it for mach_vm_read on
         // TranslationResult / IRInstr structs.
         mach_port_t parentTaskPort = dbg.taskPort();
-        exitWatch = armExitWatch(parentPid);
-        releaseTracee();
 
-        // Spawn the Mach receive thread BEFORE the kqueue wait below so
+        // Spawn the Mach receive thread before the release, so a failure
+        // can still undo the patch, and before the kqueue wait below so
         // any in-flight tickle messages from the parent get drained while
         // we sit on kqueue. Detached thread; cleaned up on process exit.
         if (!sidecar::spawnReceiveThread(servicePort, parentTaskPort)) {
-            fprintf(stdout, "M2: failed to spawn receive thread\n");
-            return 1;
+            return abandonHook("failed to spawn receive thread");
         }
+        exitWatch = armExitWatch(parentPid);
+        releaseTracee();
+        unhookedNotice.prog = nullptr;
         // Env wins over the flags: an app bundle can set variables but not argv.
         sidecar::samplerConfigFromEnv(samplerCfg);
         sidecar::startSampler(parentTaskPort, runtimeBase, samplerCfg);
@@ -2274,5 +2388,8 @@ int main(int argc, char* argv[]) try {
     return 0;
 } catch (const std::exception& e) {
     fprintf(stderr, "rosettax87: %s\n", e.what());
+    if (g_unhookedArgv != nullptr) {
+        return runUnhooked(e.what());
+    }
     return 1;
 }
