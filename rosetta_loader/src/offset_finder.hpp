@@ -50,8 +50,12 @@ struct OffsetFinder {
     std::array<std::uint8_t, 16> translateInsnPrologue_{};
     std::array<std::uint8_t, 16> decodeOpcodePrologue_{};
     // Host opcode id -> mnemonic, from the runtime's own table. Empty when the
-    // table was not found.
+    // table was not found. Trimmed to opcodeCount_ when that is known; otherwise
+    // it runs on into whatever strings follow the table.
     std::vector<std::string> opcodeNames_;
+    // How many opcodes the runtime has, from the bound in its opcode_to_string
+    // assert ("index < N"). 0 when not found.
+    std::uint32_t opcodeCount_ = 0;
 
     // Exports.version, read from the on-disk runtime by determineRuntimeOffsets.
     // Seeds the OpcodeCompatibility layer (26.4<->26.5) without needing the live

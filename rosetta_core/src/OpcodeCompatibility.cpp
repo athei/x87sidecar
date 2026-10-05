@@ -35,8 +35,9 @@ void opcode_set_host_table(const std::vector<std::string>& hostNames) {
             g_internal_to_host[it->second] = static_cast<uint16_t>(h);
         }
     }
-    // Synthetic ARPL: appended past everything the runtime defines, as before,
-    // but past *this* runtime's table rather than the 26.4 one.
+    // Synthetic ARPL: the first id past the runtime's opcodes, as before, but
+    // past *this* runtime's table rather than the 26.4 one. The caller hands
+    // over exactly the runtime's opcodes, so this is 668 wherever it was.
     g_host_arpl = static_cast<uint16_t>(hostNames.size());
     g_internal_to_host[kOpcodeName_arpl] = g_host_arpl;
     g_table_active = true;
@@ -44,6 +45,44 @@ void opcode_set_host_table(const std::vector<std::string>& hostNames) {
 
 bool opcode_host_table_active() {
     return g_table_active;
+}
+
+void opcode_clear_host_table() {
+    g_table_active = false;
+    g_host_to_internal.clear();
+    g_internal_to_host.clear();
+    g_host_arpl = kOpcodeName_arpl;
+}
+
+auto opcode_first_unmapped_required() -> uint16_t {
+    if (!g_table_active) {
+        return kOpcodeUnmapped;
+    }
+    // The two ranges the stub filter claims and the translator handles.
+    static constexpr uint16_t kRanges[][2] = {
+        {kOpcodeName_fcmovb, kOpcodeName_fucomip},
+        {kOpcodeName_f2xm1, kOpcodeName_fyl2xp1},
+    };
+    for (const auto& r : kRanges) {
+        for (uint16_t op = r[0]; op <= r[1]; ++op) {
+            if (g_internal_to_host[op] == kOpcodeUnmapped) {
+                return op;
+            }
+        }
+    }
+    // What run bridging reads between x87 instructions (X87Bridge.h,
+    // X87IRBuild.cpp). Keep in step with those.
+    static constexpr uint16_t kBridged[] = {
+        kOpcodeName_wait,   kOpcodeName_mov, kOpcodeName_lea, kOpcodeName_movzx, kOpcodeName_movsx,
+        kOpcodeName_movsxd, kOpcodeName_add, kOpcodeName_sub, kOpcodeName_and,   kOpcodeName_or,
+        kOpcodeName_xor,    kOpcodeName_inc, kOpcodeName_dec,
+    };
+    for (const uint16_t op : kBridged) {
+        if (g_internal_to_host[op] == kOpcodeUnmapped) {
+            return op;
+        }
+    }
+    return kOpcodeUnmapped;
 }
 
 auto opcode_host_to_internal(uint16_t opcode) -> uint16_t {

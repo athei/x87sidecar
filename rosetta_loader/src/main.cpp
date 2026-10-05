@@ -196,46 +196,37 @@ static void waitExitWatch(int kq, pid_t pid) {
 }
 
 // The stub filter routes an opcode by its host id against two contiguous x87
-// ranges and one synthetic id (stub_asm.cpp). Check the entries those depend
-// on against the runtime's own mnemonic table, so a renumbered runtime is
-// refused instead of misrouting instructions.
-static bool opcodeTableMatches(const std::vector<std::string>& names) {
-    struct Sentinel {
-        uint16_t internal;
-        const char* name;
-    };
-    static const Sentinel kSentinels[] = {
-        {kOpcodeName_aaa, "aaa"},         {kOpcodeName_fcmovb, "fcmovb"},
-        {kOpcodeName_fucomip, "fucomip"}, {kOpcodeName_f2xm1, "f2xm1"},
-        {kOpcodeName_fyl2xp1, "fyl2xp1"}, {kOpcodeName_fxsave, "fxsave"},
-        {kOpcodeName_fxrstor, "fxrstor"}, {kOpcodeName_xsetbv, "xsetbv"},
-    };
-    bool ok = true;
-    for (const auto& s : kSentinels) {
-        const uint16_t host = opcode_internal_to_host(s.internal);
-        if (opcode_host_table_active() && host == kOpcodeUnmapped) {
-            // Mapped by name from the runtime's own table, and this runtime
-            // simply has no such opcode: nothing can be misrouted through it.
-            fprintf(stdout, "[rosettax87] opcode %s: not defined by this runtime, skipped\n",
-                    s.name);
-            continue;
-        }
-        if (host >= names.size() || names[host] != s.name) {
-            fprintf(stdout, "[rosettax87] opcode %s: expected host id %u, runtime has %s there\n",
-                    s.name, host, host < names.size() ? names[host].c_str() : "nothing");
-            ok = false;
-        }
+// ranges and one synthetic id (stub_asm.cpp), and the translator reads a few
+// more opcodes by id. The ids come from the runtime's own mnemonic table by
+// name, so comparing names against ids proves nothing; what can be wrong is
+// the table itself and its shape. Check those, so a runtime this build cannot
+// route correctly is refused instead of misrouting instructions.
+static bool opcodeTableMatches(const OffsetFinder& f) {
+    const std::vector<std::string>& names = f.opcodeNames_;
+    // The list must be the runtime's opcodes and nothing else. Without the
+    // runtime's own count there is no telling where the table ends, and the
+    // synthetic ARPL id is the first id past it.
+    if (f.opcodeCount_ == 0) {
+        fprintf(stdout,
+                "[rosettax87] opcode table found, but not the bound in opcode_to_string that "
+                "says where it ends\n");
+        return false;
     }
-    // The synthetic ARPL id must not be a real entry of the runtime's table.
-    const uint16_t hostArpl = opcode_internal_to_host(kOpcodeName_arpl);
-    if (hostArpl < names.size() && names[hostArpl] == "arpl") {
-        fprintf(stdout, "[rosettax87] the runtime now defines arpl at id %u\n", hostArpl);
+    if (names.size() != f.opcodeCount_) {
+        fprintf(stdout, "[rosettax87] opcode table read as %zu names, the runtime has %u opcodes\n",
+                names.size(), f.opcodeCount_);
+        return false;
+    }
+    bool ok = true;
+    // Every opcode the translator inspects needs an id here. A missing one
+    // would silently never match (and a short parse shows up this way too).
+    if (const uint16_t op = opcode_first_unmapped_required(); op != kOpcodeUnmapped) {
+        fprintf(stdout, "[rosettax87] opcode %s: not in this runtime's table\n", kOpcodeNames[op]);
         ok = false;
     }
-    // What the stub filter (stub_asm.cpp) really relies on: both x87 ranges are
-    // contiguous and in canonical order under the host numbering, so a
-    // host-translated range start plus the canonical range size selects
-    // exactly the x87 opcodes. Check it directly rather than through sentinels.
+    // What the stub filter relies on: both x87 ranges are contiguous and in
+    // canonical order under the host numbering, so a host-translated range
+    // start plus the canonical range size selects exactly the x87 opcodes.
     struct Range {
         uint16_t first, last;
         const char* name;
@@ -246,19 +237,32 @@ static bool opcodeTableMatches(const std::vector<std::string>& names) {
     };
     for (const auto& r : kRanges) {
         const uint16_t base = opcode_internal_to_host(r.first);
+        if (base == kOpcodeUnmapped) {
+            continue;  // reported above
+        }
         for (uint16_t op = r.first; op <= r.last; ++op) {
             const uint16_t host = opcode_internal_to_host(op);
-            const uint16_t want = static_cast<uint16_t>(base + (op - r.first));
-            if (host != want || host >= names.size() || names[host] != kOpcodeNames[op]) {
-                fprintf(
-                    stdout,
-                    "[rosettax87] x87 range %s is not contiguous in this runtime: %s expected at "
-                    "host id %u, found %s\n",
-                    r.name, kOpcodeNames[op], want,
-                    want < names.size() ? names[want].c_str() : "nothing");
+            const auto want = static_cast<uint16_t>(base + (op - r.first));
+            if (host != want) {
+                fprintf(stdout,
+                        "[rosettax87] x87 range %s is not contiguous in this runtime: %s expected "
+                        "at host id %u, found %s\n",
+                        r.name, kOpcodeNames[op], want,
+                        want < names.size() ? names[want].c_str() : "nothing");
                 ok = false;
                 break;
             }
+        }
+    }
+    // A runtime that grows its own arpl still works: the decode hook only acts
+    // on encodings the decoder rejects, and the synthetic id stays past the
+    // table. Say so, because the hook is then likely redundant.
+    for (size_t i = 0; i < names.size(); ++i) {
+        if (names[i] == "arpl") {
+            fprintf(stdout,
+                    "[rosettax87] the runtime now defines arpl itself (id %zu); the synthetic id "
+                    "stays %u\n",
+                    i, opcode_internal_to_host(kOpcodeName_arpl));
         }
     }
     return ok;
@@ -270,9 +274,8 @@ static bool runtimeAssumptionsHold(const OffsetFinder& f) {
     bool ok = true;
     if (f.opcodeNames_.empty()) {
         fprintf(stdout, "[rosettax87] opcode mnemonic table not found; numbering unchecked\n");
-    } else if (!opcodeTableMatches(f.opcodeNames_)) {
-        fprintf(stdout,
-                "[rosettax87] libRosettaRuntime numbers opcodes differently from this build\n");
+    } else if (!opcodeTableMatches(f)) {
+        fprintf(stdout, "[rosettax87] cannot route opcodes for this libRosettaRuntime\n");
         ok = false;
     }
     if (f.translationResultSize_ == 0) {
@@ -326,7 +329,12 @@ static int probeRuntime() {
            f.translationResultSize_ ? "" : "size not found; expected ",
            f.translationResultSize_ ? f.translationResultSize_
                                     : static_cast<uint32_t>(sidecar::kStockTRSize));
-    printf("  opcode table       %zu entries\n", f.opcodeNames_.size());
+    if (f.opcodeCount_ != 0) {
+        printf("  opcode table       %zu names, runtime bound %u\n", f.opcodeNames_.size(),
+               f.opcodeCount_);
+    } else {
+        printf("  opcode table       %zu names, runtime bound not found\n", f.opcodeNames_.size());
+    }
     printf("  MXCSR FTZ/DAZ in   %s (X87_IGNORE_FTZ_DAZ)\n",
            TranslatorX87::flush_control_name(TranslatorX87::flush_control()));
     const bool ok =

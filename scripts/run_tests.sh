@@ -69,6 +69,8 @@
 #  20. every test with X87_NATIVE_SLOTS=0, the kill switch, where
 #      test_x87_cross_reply_exact has to fail; exporting X87_NATIVE_SLOTS=0
 #      for the whole run makes every phase run that way
+#   H. test_opcode_host_table, natively: the name-derived opcode maps
+#      against the pinned 26.4 table and the identity mapping
 #   R. replay tests/data/geom_block_874c40.ir under --fpr-pool 8 and
 #      assert the pressure splits keep it on the IR path (fpr_fail=0), then
 #      replay tests/data/fist_pressure.ir the same way and assert it exits 0
@@ -1365,6 +1367,27 @@ if [[ $NATIVE_ONLY -eq 0 ]] && ! native_slots_off; then
         unset X87_NATIVE_SLOTS
     else
         export X87_NATIVE_SLOTS="$SAVED_NATIVE_SLOTS"
+    fi
+fi
+
+# ── Host: name-derived opcode maps against the pinned tables ─────────────
+# Native arm64, no Rosetta: opcode_set_host_table fed the internal names, the
+# 26.4 names and a macOS 15.7.8-shaped list.
+if [[ ${#SELECTED_TESTS[@]} -eq 0 ]]; then
+    echo ""
+    echo -e "${BOLD}=== Host: opcode host table ===${NC}"
+    TOTAL=$((TOTAL + 1))
+    HOST_TABLE_BIN="$BIN/test_opcode_host_table"
+    if [[ ! -x "$HOST_TABLE_BIN" ]]; then
+        echo -e "${YELLOW}SKIP${NC}  opcode_host_table  (binary not found)"
+        ERRORS=$((ERRORS + 1))
+    elif HOUT=$("$HOST_TABLE_BIN" 2>&1); then
+        echo -e "${GREEN}PASS${NC}  opcode_host_table"
+        PASSED=$((PASSED + 1))
+    else
+        echo -e "${RED}FAIL${NC}  opcode_host_table"
+        echo "$HOUT" | sed 's/^/      /'
+        FAILED=$((FAILED + 1))
     fi
 fi
 

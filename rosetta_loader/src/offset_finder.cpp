@@ -1,6 +1,7 @@
 #include "offset_finder.hpp"
 
 #include <algorithm>
+#include <charconv>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -8,6 +9,7 @@
 #include <iterator>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <vector>
 
 #include "macho_loader.hpp"
@@ -505,8 +507,11 @@ auto OffsetFinder::determineRuntimeOffsets() -> bool {
     }
 
     // The opcode mnemonic table, in host enum order: what the runtime's own
-    // module printer uses. Read it whole; the loader checks the entries the
-    // stub filter's opcode ranges depend on against it.
+    // module printer uses. The strings that follow it in __cstring belong to
+    // other tables (the AArch64 encoding-class names come next), so the list is
+    // cut at the runtime's own count: opcode_to_string asserts "index < N", and
+    // that string sits just ahead of the table, after "Opcode.cpp" and
+    // "opcode_to_string" and before "out-of-bounds opcode index".
     static const char kTableHead[] = "\0aaa\0aad\0aam\0aas\0adc\0add\0";
     const auto heads =
         findAll(image, reinterpret_cast<const std::uint8_t*>(kTableHead), sizeof(kTableHead) - 1);
@@ -521,6 +526,35 @@ auto OffsetFinder::determineRuntimeOffsets() -> bool {
             }
             opcodeNames_.emplace_back(s, n);
             p += n + 1;
+        }
+
+        // Walk back over the few strings ahead of the table for the bound.
+        static constexpr std::string_view kBoundPrefix = "index < ";
+        std::uint64_t strEnd = heads[0];  // the NUL that ends the previous string
+        for (int back = 0; back < 4 && strEnd > cstrings.begin; ++back) {
+            std::uint64_t strBegin = strEnd;
+            while (strBegin > cstrings.begin && image[strBegin - 1] != 0) {
+                --strBegin;
+            }
+            const std::string_view prev(reinterpret_cast<const char*>(image.data() + strBegin),
+                                        strEnd - strBegin);
+            if (prev.starts_with(kBoundPrefix)) {
+                std::uint32_t count = 0;
+                const char* first = prev.data() + kBoundPrefix.size();
+                const char* last = prev.data() + prev.size();
+                const auto [ptr, ec] = std::from_chars(first, last, count);
+                if (ec == std::errc() && ptr == last && first != last) {
+                    opcodeCount_ = count;
+                }
+                break;
+            }
+            if (strBegin == cstrings.begin) {
+                break;
+            }
+            strEnd = strBegin - 1;
+        }
+        if (opcodeCount_ != 0 && opcodeNames_.size() > opcodeCount_) {
+            opcodeNames_.resize(opcodeCount_);
         }
     }
 
