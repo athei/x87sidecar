@@ -254,17 +254,23 @@ and a cross-process flush is not reliable.
 
 When the hook cannot be set up, the two modes differ. The default attach
 refuses to launch the target, so a test or benchmark run never reports
-results that were not hooked. Cooperative mode always lets the program run,
-since wine sends every 32-bit process through it. A failure before launch,
-such as an unsupported Rosetta or a sidecar that could not start, prints
-`running <program> without the x87 hook` on stderr and execs the target in
-place, keeping its pid, with the arguments and environment wine passed:
-`X87_SIDECAR_BOOTSTRAP` is not set for it and `ROSETTA_DISABLE_AOT` keeps
-whatever value it inherited. A failure after launch puts back any entry
-patch already written and releases the target, which continues without the
-hook, and the sidecar prints `hook not installed; <program> continues
-without the x87 hook`. `X87_FORCE_UNSUPPORTED=1` makes the loader treat the
-installed Rosetta as unsupported, to exercise this path.
+results that were not hooked. Cooperative mode, which wine sends every
+32-bit process through, lets the program run when hook setup fails. A
+failure before launch, such as an unsupported Rosetta or a sidecar that
+could not start, prints `running <program> without the x87 hook` on stderr
+and execs the target in place, keeping its pid, with the arguments and
+environment wine passed: `X87_SIDECAR_BOOTSTRAP` is not set for it and
+`ROSETTA_DISABLE_AOT` keeps whatever value it inherited. A failure after
+the target has handed over its ports, by an error or an exception, puts
+back any entry patch already written and releases the target without the
+hook. The sidecar then prints `x87 hook not installed for <program>`.
+
+Two switches exercise these paths. `X87_FORCE_UNSUPPORTED=1` makes the
+loader treat the installed Rosetta as unsupported. `X87_FORCE_ABANDON` makes
+the sidecar give up after hooking: `entry` after the `translate_insn` entry
+patch, `decode` after the `decode_opcode` step, `thread` with an exception
+where the receive thread is spawned. `scripts/test_unhooked_fallback.py`
+checks the first without privileges.
 
 ## Compatibility and correctness
 
@@ -330,6 +336,7 @@ bash scripts/run_tests.sh --no-build     # skip the build
 bash scripts/run_tests.sh --native-only  # stock Rosetta baseline only
 bash scripts/run_tests.sh test_arith     # one test
 python3 scripts/test_profile_paths.py    # concurrent profiler output paths
+python3 scripts/test_unhooked_fallback.py  # unhooked fallback, no privileges
 bash scripts/run_benchmarks.sh           # build + benchmark table
 ```
 
@@ -410,6 +417,7 @@ Loader and sidecar diagnostics:
 | `X87_NO_IR_CACHE=1`, `X87_NO_TCO_CACHE=1` | re-read the IR array or the thread-context layout on every request |
 | `X87_NO_PREAUTH=1` | skip acquiring the developer-tools right before launch (default attach only) |
 | `X87_FORCE_UNSUPPORTED=1` | treat the installed Rosetta as unsupported at launch; a cooperative target then runs without the hook |
+| `X87_FORCE_ABANDON=entry\|decode\|thread` | give up after the named hook step; a cooperative target is rolled back and runs without the hook |
 
 ## License
 

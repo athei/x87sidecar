@@ -25,6 +25,7 @@
 #include <map>
 #include <numbers>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -1161,9 +1162,9 @@ static char** g_unhookedArgv = nullptr;
 static std::optional<std::string> g_inheritedDisableAot;
 
 static int runUnhooked(const std::string& reason) {
+    fflush(stdout);
     fprintf(stderr, "[rosettax87] %s; running %s without the x87 hook\n", reason.c_str(),
             g_unhookedArgv[0]);
-    fflush(stdout);
     fflush(stderr);
     unsetenv(X87_COOP_ENV);
     if (g_inheritedDisableAot) {
@@ -1176,10 +1177,12 @@ static int runUnhooked(const std::string& reason) {
     return 1;
 }
 
-// Once the cooperative tracee has been launched, a sidecar that gives up
-// before releasing it leaves it running without the hook: the tracee is
-// blocked in the handshake and resumes when this process exits and the reply
-// right dies with it. Say so on the way out, whichever return path is taken.
+// Once the cooperative target has been launched, a sidecar that gives up
+// before releasing it leaves it running without the hook: a tracee blocked in
+// the handshake resumes when this process exits and the reply right dies with
+// it. Say so on the way out, whichever return path is taken. The wording does
+// not claim the target is running: its exec may have failed, or it may never
+// have performed the handshake.
 struct UnhookedNotice {
     const char* prog = nullptr;
     UnhookedNotice() = default;
@@ -1187,8 +1190,23 @@ struct UnhookedNotice {
     UnhookedNotice& operator=(const UnhookedNotice&) = delete;
     ~UnhookedNotice() {
         if (prog != nullptr) {
-            fprintf(stderr, "[rosettax87] hook not installed; %s continues without the x87 hook\n",
-                    prog);
+            fprintf(stderr, "[rosettax87] x87 hook not installed for %s\n", prog);
+        }
+    }
+};
+
+// Runs a callable when the scope is left by any return or exception, unless
+// dismissed first.
+template <class F>
+struct ScopeExit {
+    F fn;
+    bool armed = true;
+    explicit ScopeExit(F f) : fn(std::move(f)) {}
+    ScopeExit(const ScopeExit&) = delete;
+    ScopeExit& operator=(const ScopeExit&) = delete;
+    ~ScopeExit() {
+        if (armed) {
+            fn();
         }
     }
 };
@@ -1384,7 +1402,10 @@ int main(int argc, char* argv[]) try {
         while ((got = read(syncPipe[0], &buf, 1)) == -1 && errno == EINTR) {
         }
         close(syncPipe[0]);
-        waitpid(child, nullptr, WNOHANG);  // reap intermediate double-fork child
+        // Reap the intermediate double-fork child, which exits right after
+        // forking the sidecar, so the target does not inherit a zombie.
+        while (waitpid(child, nullptr, 0) == -1 && errno == EINTR) {
+        }
         if (got != 1 || buf != 'x') {
             // The sidecar gave up before attaching (authorization refused,
             // its service could not be registered, or it died).
@@ -1748,19 +1769,25 @@ int main(int argc, char* argv[]) try {
         VERBOSE_LOG("M2: handler blob = %zu bytes (fits in %llu padding)\n", blobs.handler.size(),
                     padBytes);
 
+        // Write into the tracee's executable text. The pad and the patch
+        // sites share pages with libRosettaRuntime's own code, so once a page
+        // has been made writable it is put back to read+execute whether or
+        // not the write succeeded; a page left without execute would crash a
+        // tracee that later runs without the hook.
+        auto writeText = [&](uint64_t addr, const void* data, size_t len) -> bool {
+            if (!dbg.adjustMemoryProtection(addr, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY,
+                                            len)) {
+                return false;
+            }
+            const bool wrote = dbg.writeMemory(addr, data, len);
+            const bool executable =
+                dbg.adjustMemoryProtection(addr, VM_PROT_READ | VM_PROT_EXECUTE, len);
+            return wrote && executable;
+        };
+
         // ── Write OUR_HANDLER + STASH + STASH_JUMP into trailing padding ───
-        if (!dbg.adjustMemoryProtection(padStartAddr, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY,
-                                        blobs.handler.size())) {
-            fprintf(stdout, "M2: failed to make padding writable\n");
-            return 1;
-        }
-        if (!dbg.writeMemory(padStartAddr, blobs.handler.data(), blobs.handler.size())) {
+        if (!writeText(padStartAddr, blobs.handler.data(), blobs.handler.size())) {
             fprintf(stdout, "M2: failed to write handler blob\n");
-            return 1;
-        }
-        if (!dbg.adjustMemoryProtection(padStartAddr, VM_PROT_READ | VM_PROT_EXECUTE,
-                                        blobs.handler.size())) {
-            fprintf(stdout, "M2: failed to restore padding protection\n");
             return 1;
         }
         VERBOSE_LOG("M2: handler installed at 0x%llx\n", padStartAddr);
@@ -2076,21 +2103,11 @@ int main(int argc, char* argv[]) try {
                     sizeof(kTransConstants), padStartAddr + padBytes - constsAddr, constsAddr);
             return 1;
         }
-        if (!dbg.adjustMemoryProtection(constsAddr, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY,
-                                        sizeof(kTransConstants))) {
-            fprintf(stdout, "M2: failed to make constants padding writable\n");
-            return 1;
-        }
-        if (!dbg.writeMemory(constsAddr, &kTransConstants, sizeof(kTransConstants))) {
+        // writeText restores RX, not just R: the trailing pad is
+        // page-granular RX and the constants live on the same 4 KB page as
+        // OUR_HANDLER. Stripping EXECUTE here would kill the handler.
+        if (!writeText(constsAddr, &kTransConstants, sizeof(kTransConstants))) {
             fprintf(stdout, "M2: failed to write transcendental constants\n");
-            return 1;
-        }
-        // Restore RX, not just R: the trailing pad is page-granular RX and
-        // the constants live on the same 4 KB page as OUR_HANDLER.
-        // Stripping EXECUTE here would kill the handler.
-        if (!dbg.adjustMemoryProtection(constsAddr, VM_PROT_READ | VM_PROT_EXECUTE,
-                                        sizeof(kTransConstants))) {
-            fprintf(stdout, "M2: failed to restore constants padding protection\n");
             return 1;
         }
         rosetta_core::set_transcendental_constants_addr(constsAddr);
@@ -2148,59 +2165,76 @@ int main(int argc, char* argv[]) try {
         // Once an entry is patched, the tracee branches into a stub on its
         // next translation, and the translate_insn stub aborts the process
         // when the sidecar is gone. What is written before that lands in
-        // padding that nothing executes. So a failure from the first entry
-        // write until the release puts the displaced bytes back before giving
-        // up, and a cooperative tracee then runs without the hook instead of
-        // aborting. The default attach is otherwise unchanged: its tracee is
-        // still traced when this process exits.
+        // padding that nothing executes. So in cooperative mode, leaving this
+        // scope between the first entry write and the release, by a return or
+        // an exception, puts the displaced bytes back and releases the tracee,
+        // which then runs without the hook instead of aborting. The default
+        // attach keeps its existing behaviour on failure.
         struct PatchedEntry {
             uint64_t addr;
             uint8_t orig[16];
         };
         std::vector<PatchedEntry> patchedEntries;
-        auto restoreEntry = [&](const PatchedEntry& e) {
-            if (!dbg.adjustMemoryProtection(e.addr, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY,
-                                            sizeof(e.orig)) ||
-                !dbg.writeMemory(e.addr, e.orig, sizeof(e.orig)) ||
-                !dbg.adjustMemoryProtection(e.addr, VM_PROT_READ | VM_PROT_EXECUTE,
-                                            sizeof(e.orig))) {
+        patchedEntries.reserve(2);  // push_back below must not throw
+        // Every entry written, including a decode_opcode entry that was
+        // written and then restored, for the tracee's i-cache invalidation.
+        uint64_t decodeTouchedAddr = 0;
+        auto setEntryIcacheSpan = [&]() {
+            uint64_t lo = translateInsnAddr;
+            uint64_t hi = translateInsnAddr + sizeof(PatchedEntry::orig);
+            if (decodeTouchedAddr != 0) {
+                lo = std::min(lo, decodeTouchedAddr);
+                hi = std::max(hi, decodeTouchedAddr + sizeof(PatchedEntry::orig));
+            }
+            coopIcacheAddr[0] = lo;
+            coopIcacheLen[0] = hi - lo;
+        };
+        auto restoreEntry = [&](const PatchedEntry& e) -> bool {
+            if (!writeText(e.addr, e.orig, sizeof(e.orig))) {
                 fprintf(stdout, "M2: failed to restore the original bytes at 0x%llx\n", e.addr);
+                return false;
             }
+            return true;
         };
-        auto abandonHook = [&](const char* what) -> int {
-            fprintf(stdout, "M2: %s\n", what);
+        ScopeExit rollback([&]() noexcept {
+            if (!cooperative) {
+                return;
+            }
+            size_t restored = 0;
             for (const auto& e : patchedEntries) {
-                restoreEntry(e);
+                restored += restoreEntry(e) ? 1 : 0;
             }
-            if (cooperative) {
-                // Release now rather than by exiting, so the tracee also
-                // invalidates its i-cache over the restored entries.
-                for (size_t i = 0; i < 2; ++i) {
-                    coopIcacheAddr[i] = i < patchedEntries.size() ? patchedEntries[i].addr : 0;
-                    coopIcacheLen[i] = i < patchedEntries.size() ? sizeof(PatchedEntry::orig) : 0;
-                }
-                releaseTracee();
+            fprintf(stdout,
+                    "M2: hook abandoned; restored %zu of %zu patched entries, releasing the "
+                    "target without the hook\n",
+                    restored, patchedEntries.size());
+            if (restored != patchedEntries.size()) {
+                fprintf(stdout,
+                        "M2: a patched entry could not be restored; the target will abort on "
+                        "its next translation\n");
             }
-            return 1;
-        };
+            fflush(stdout);
+            // Release now rather than by exiting, so the tracee also
+            // invalidates its i-cache over the restored entries.
+            setEntryIcacheSpan();
+            coopIcacheAddr[1] = 0;
+            coopIcacheLen[1] = 0;
+            releaseTracee();
+        });
 
         // ── Patch translate_insn[0..16] with the abs-jump ENTRY ────────────
         PatchedEntry translateEntry{.addr = translateInsnAddr, .orig = {}};
         memcpy(translateEntry.orig, origPrologue, sizeof(translateEntry.orig));
         patchedEntries.push_back(translateEntry);
-        if (!dbg.adjustMemoryProtection(translateInsnAddr,
-                                        VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY,
-                                        blobs.entry.size())) {
-            return abandonHook("failed to make translate_insn writable");
-        }
-        if (!dbg.writeMemory(translateInsnAddr, blobs.entry.data(), blobs.entry.size())) {
-            return abandonHook("failed to write translate_insn entry");
-        }
-        if (!dbg.adjustMemoryProtection(translateInsnAddr, VM_PROT_READ | VM_PROT_EXECUTE,
-                                        blobs.entry.size())) {
-            return abandonHook("failed to restore translate_insn protection");
+        if (!writeText(translateInsnAddr, blobs.entry.data(), blobs.entry.size())) {
+            fprintf(stdout, "M2: failed to patch the translate_insn entry\n");
+            return 1;
         }
         VERBOSE_LOG("M2: translate_insn entry patched (abs-jump to 0x%llx)\n", padStartAddr);
+        if (g_cfg.loader_force_abandon == 1) {
+            fprintf(stdout, "M2: X87_FORCE_ABANDON=entry: giving up after the entry patch\n");
+            return 1;
+        }
 
         // ── decode_opcode hook: the `DC D8` fcomp alias ─────────────────────
         // One stage earlier than translate_insn.  Rosetta's decoder rejects
@@ -2278,36 +2312,31 @@ int main(int argc, char* argv[]) try {
                         "(free %llu B after the constants at 0x%llx)\n",
                         dblobs.handler.size(), padStartAddr + padBytes - decodeHandlerAddr,
                         decodeHandlerAddr);
-            } else if (!dbg.adjustMemoryProtection(decodeHandlerAddr,
-                                                   VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY,
-                                                   dblobs.handler.size()) ||
-                       !dbg.writeMemory(decodeHandlerAddr, dblobs.handler.data(),
-                                        dblobs.handler.size()) ||
-                       !dbg.adjustMemoryProtection(decodeHandlerAddr,
-                                                   VM_PROT_READ | VM_PROT_EXECUTE,
-                                                   dblobs.handler.size())) {
+            } else if (!writeText(decodeHandlerAddr, dblobs.handler.data(),
+                                  dblobs.handler.size())) {
                 fprintf(stdout, "M2: failed to write the decode handler blob\n");
-            } else if (!dbg.adjustMemoryProtection(decodeOpcodeAddr,
-                                                   VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY,
-                                                   dblobs.entry.size()) ||
-                       !dbg.writeMemory(decodeOpcodeAddr, dblobs.entry.data(),
-                                        dblobs.entry.size()) ||
-                       !dbg.adjustMemoryProtection(decodeOpcodeAddr,
-                                                   VM_PROT_READ | VM_PROT_EXECUTE,
-                                                   dblobs.entry.size())) {
-                fprintf(stdout, "M2: failed to patch the decode_opcode entry\n");
-                PatchedEntry decodeEntry{.addr = decodeOpcodeAddr, .orig = {}};
-                memcpy(decodeEntry.orig, origDecodePrologue, sizeof(decodeEntry.orig));
-                restoreEntry(decodeEntry);
             } else {
                 PatchedEntry decodeEntry{.addr = decodeOpcodeAddr, .orig = {}};
                 memcpy(decodeEntry.orig, origDecodePrologue, sizeof(decodeEntry.orig));
-                patchedEntries.push_back(decodeEntry);
-                decodeEntryAddr = decodeOpcodeAddr;
-                decodeBlobEnd = decodeHandlerAddr + dblobs.handler.size();
-                VERBOSE_LOG("M2: decode_opcode entry patched (abs-jump to 0x%llx, handler %zu B)\n",
-                            decodeHandlerAddr, dblobs.handler.size());
+                decodeTouchedAddr = decodeOpcodeAddr;
+                if (!writeText(decodeOpcodeAddr, dblobs.entry.data(), dblobs.entry.size())) {
+                    // Best effort, as above: put the prologue back and carry on.
+                    fprintf(stdout, "M2: failed to patch the decode_opcode entry\n");
+                    restoreEntry(decodeEntry);
+                } else {
+                    patchedEntries.push_back(decodeEntry);
+                    decodeEntryAddr = decodeOpcodeAddr;
+                    decodeBlobEnd = decodeHandlerAddr + dblobs.handler.size();
+                    VERBOSE_LOG(
+                        "M2: decode_opcode entry patched (abs-jump to 0x%llx, handler %zu B)\n",
+                        decodeHandlerAddr, dblobs.handler.size());
+                }
             }
+        }
+        if (g_cfg.loader_force_abandon == 2) {
+            fprintf(stdout,
+                    "M2: X87_FORCE_ABANDON=decode: giving up after the decode_opcode step\n");
+            return 1;
         }
 
         // Record the patched code ranges so the tracee can invalidate its own
@@ -2321,16 +2350,9 @@ int main(int argc, char* argv[]) try {
         // already carrying the current header (its receive buffer would be too
         // small).  So slot 0 spans both entry patches instead: they are both in
         // libRosettaRuntime's __TEXT, so the span is contiguous and mapped, and
-        // invalidating the lines in between is harmless.
-        coopIcacheAddr[0] = translateInsnAddr;
-        coopIcacheLen[0] = blobs.entry.size();
-        if (decodeEntryAddr != 0) {
-            const uint64_t lo = std::min(translateInsnAddr, decodeEntryAddr);
-            const uint64_t hi = std::max(translateInsnAddr + blobs.entry.size(),
-                                         decodeEntryAddr + 16);
-            coopIcacheAddr[0] = lo;
-            coopIcacheLen[0] = hi - lo;
-        }
+        // invalidating the lines in between is harmless. A decode_opcode
+        // entry that was written and then restored is included too.
+        setEntryIcacheSpan();
         coopIcacheAddr[1] = padStartAddr;
         coopIcacheLen[1] = decodeBlobEnd - padStartAddr;
 
@@ -2345,11 +2367,18 @@ int main(int argc, char* argv[]) try {
         // can still undo the patch, and before the kqueue wait below so
         // any in-flight tickle messages from the parent get drained while
         // we sit on kqueue. Detached thread; cleaned up on process exit.
+        if (g_cfg.loader_force_abandon == 3) {
+            // An exception, like a bad_alloc from the spawn, takes the same
+            // rollback path as a return.
+            throw std::runtime_error("X87_FORCE_ABANDON=thread: failing the receive thread spawn");
+        }
         if (!sidecar::spawnReceiveThread(servicePort, parentTaskPort)) {
-            return abandonHook("failed to spawn receive thread");
+            fprintf(stdout, "M2: failed to spawn receive thread\n");
+            return 1;
         }
         exitWatch = armExitWatch(parentPid);
         releaseTracee();
+        rollback.armed = false;
         unhookedNotice.prog = nullptr;
         // Env wins over the flags: an app bundle can set variables but not argv.
         sidecar::samplerConfigFromEnv(samplerCfg);
@@ -2387,9 +2416,9 @@ int main(int argc, char* argv[]) try {
 
     return 0;
 } catch (const std::exception& e) {
-    fprintf(stderr, "rosettax87: %s\n", e.what());
     if (g_unhookedArgv != nullptr) {
-        return runUnhooked(e.what());
+        return runUnhooked(std::string("exception: ") + e.what());
     }
+    fprintf(stderr, "rosettax87: %s\n", e.what());
     return 1;
 }

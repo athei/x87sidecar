@@ -319,6 +319,17 @@ RosettaConfig load_config_from_env() {
     cfg.loader_no_tco_cache = env_truthy("X87_NO_TCO_CACHE") ? 1 : 0;
     cfg.loader_no_ir_cache = env_truthy("X87_NO_IR_CACHE") ? 1 : 0;
     cfg.loader_force_unsupported = env_truthy("X87_FORCE_UNSUPPORTED") ? 1 : 0;
+    if (const char* v = std::getenv("X87_FORCE_ABANDON"); v != nullptr && v[0] != '\0') {
+        if (std::strcmp(v, "entry") == 0) {
+            cfg.loader_force_abandon = 1;
+        } else if (std::strcmp(v, "decode") == 0) {
+            cfg.loader_force_abandon = 2;
+        } else if (std::strcmp(v, "thread") == 0) {
+            cfg.loader_force_abandon = 3;
+        } else {
+            std::fprintf(stderr, "X87_FORCE_ABANDON: unknown value '%s' (ignored)\n", v);
+        }
+    }
 
     if (const char* p = std::getenv("X87_PROFILE"); p != nullptr && p[0] != '\0') {
         cfg.profile_path = p;
@@ -368,6 +379,13 @@ void print_env_help(std::FILE* out) {
         "                                runs without the x87 hook, as on a Rosetta\n"
         "                                the loader does not recognise; otherwise the\n"
         "                                loader refuses to launch it.\n"
+        "  X87_FORCE_ABANDON=<point>     fault injection: the sidecar gives up after\n"
+        "                                hooking, at <point> = entry (after the\n"
+        "                                translate_insn entry patch), decode (after the\n"
+        "                                decode_opcode step) or thread (an exception\n"
+        "                                where the receive thread is spawned).  With\n"
+        "                                --cooperative the patches are rolled back and\n"
+        "                                the target runs without the x87 hook.\n"
         "  X87_ALWAYS_NONE=1             diagnostic: sidecar always replies None,\n"
         "                                so the stub falls through to stock for every\n"
         "                                request.  Use to A/B whether a freeze is in\n"

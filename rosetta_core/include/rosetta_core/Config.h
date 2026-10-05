@@ -277,6 +277,13 @@ struct RosettaConfig {
                                        //                  as unsupported at launch, which
                                        //                  exercises the fallback that runs a
                                        //                  cooperative target without the hook.
+    uint8_t loader_force_abandon;      // X87_FORCE_ABANDON=entry|decode|thread  fault
+                                       //                  injection: give up after the
+                                       //                  translate_insn entry patch (1), after
+                                       //                  the decode_opcode step (2), or at the
+                                       //                  receive thread spawn by throwing (3),
+                                       //                  to exercise the rollback that leaves
+                                       //                  a cooperative target unhooked.
 
     // X87_PROFILE=<path>  When non-empty, sidecar appends a binary
     // record per first-seen IRBlock to <path>.<target-pid> (full IR stream).

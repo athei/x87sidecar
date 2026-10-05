@@ -22,6 +22,11 @@ jobs:
       - name: Build
         run: cmake --build build --parallel
 
+      - name: Check the unhooked fallback
+        # Cooperative mode with X87_FORCE_UNSUPPORTED=1 only execs the target,
+        # so this needs no privileges.
+        run: python3 scripts/test_unhooked_fallback.py
+
       - name: Probe the installed Rosetta
         # Locates every anchor this build hooks in the runner's Rosetta and
         # validates the assumptions behind them; exits non-zero if any is off.

@@ -336,11 +336,11 @@ fi
 
 # ── Phase 2c: x87sidecar --cooperative (handshake smoke) ──────────────────
 # Cooperative attach hands the sidecar the tracee's task port over a bootstrap
-# rendezvous — no task_for_pid / ptrace / get-task-allow / elevated privileges.
-# This phase verifies --cooperative does not break execution. NOTE: cooperative
-# mode does not yet reinstall the x87 JIT hook (the exec-pre-init stop it needs
-# is not reproducible cooperatively — see the cooperative-attach plan), so this
-# checks stock-Rosetta correctness under the handshake, not [ulp] acceleration.
+# rendezvous, with no task_for_pid, ptrace, get-task-allow or elevated
+# privileges. The test binaries link the handshake shim (tests/coop_handshake.c),
+# and the sidecar installs the same translate_insn and decode_opcode hooks
+# after Rosetta init that the default attach installs before it, so this phase
+# runs every test with the hook installed through the handshake.
 if [[ $NATIVE_ONLY -eq 0 ]]; then
     echo ""
     echo -e "${BOLD}=== Phase 2c: x87sidecar --cooperative (handshake smoke) ===${NC}"
