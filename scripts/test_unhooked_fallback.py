@@ -2,9 +2,9 @@
 """Check the cooperative unhooked fallback after a normal CMake build.
 
 With X87_FORCE_UNSUPPORTED=1, `x87sidecar --cooperative <program>` must exec
-the program in place without forking a sidecar: one line on stderr, the
-program's own output and exit status, the same pid, and none of the
-variables the loader adds for a hooked launch. This uses the flat binary and
+the program in place without forking a sidecar: one warning banner on
+stderr, the program's own output and exit status, the same pid, and none of
+the variables the loader adds for a hooked launch. This uses the flat binary and
 never attaches, so it needs no entitlements, root or authorization.
 """
 
@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parent.parent
 BIN = ROOT / "build" / "bin"
 LOADER = BIN / "x87sidecar"
 TESTS = ["test_arith", "test_fld", "test_fcom", "test_fxch"]
-FALLBACK = "without the x87 hook"
+FALLBACK = "RUNNING WITHOUT X87 ACCELERATION"
 LOADER_VARS = ("X87_SIDECAR_BOOTSTRAP", "ROSETTA_DISABLE_AOT")
 
 
@@ -83,7 +83,7 @@ def check_test_binary(name):
     assert "PASS" in stdout and "FAIL" not in stdout, stdout
     # sh -> loader -> target, all in one process.
     assert execs == 2 and forks == 0, (execs, forks)
-    print(f"ok  {name}: exit {code}, one process, fallback line on stderr")
+    print(f"ok  {name}: exit {code}, one process, warning banner on stderr")
 
 
 def check_pid_env_and_status():

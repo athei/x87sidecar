@@ -257,13 +257,30 @@ refuses to launch the target, so a test or benchmark run never reports
 results that were not hooked. Cooperative mode, which wine sends every
 32-bit process through, lets the program run when hook setup fails. A
 failure before launch, such as an unsupported Rosetta or a sidecar that
-could not start, prints `running <program> without the x87 hook` on stderr
-and execs the target in place, keeping its pid, with the arguments and
-environment wine passed: `X87_SIDECAR_BOOTSTRAP` is not set for it and
-`ROSETTA_DISABLE_AOT` keeps whatever value it inherited. A failure after
-the target has handed over its ports, by an error or an exception, puts
-back any entry patch already written and releases the target without the
-hook. The sidecar then prints `x87 hook not installed for <program>`.
+could not start, execs the target in place, keeping its pid, with the
+arguments and environment wine passed: `X87_SIDECAR_BOOTSTRAP` is not set
+for it and `ROSETTA_DISABLE_AOT` keeps whatever value it inherited. A
+failure after the target has handed over its ports, by an error or an
+exception, puts back any entry patch already written and releases the
+target without the hook.
+
+Either way a program running without the hook is easy to miss, since the
+only symptom is that an x87-heavy game is slow. So both paths print a
+banner on stderr:
+
+```
+################################################################
+WARNING: X87SIDECAR COULD NOT HOOK ROSETTA: UNSUPPORTED ROSETTA.
+PROCESS 12345 IS RUNNING WITHOUT X87 ACCELERATION: /path/to/wine
+32-BIT GAMES THAT USE X87 MATH WILL BE MUCH SLOWER.
+################################################################
+```
+
+The reason on the second line varies; the substring `RUNNING WITHOUT X87
+ACCELERATION` does not, so logs can be searched for it. A sidecar that
+gives up before the target's handshake request arrived, when the target
+may not be running at all, prints `x87 hook not installed for <program>`
+instead.
 
 Two switches exercise these paths. `X87_FORCE_UNSUPPORTED=1` makes the
 loader treat the installed Rosetta as unsupported. `X87_FORCE_ABANDON` makes

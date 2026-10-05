@@ -12,6 +12,7 @@
 
 #include <libkern/OSCacheControl.h>
 #include <mach/mach.h>
+#include <mach/notify.h>
 #include <servers/bootstrap.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -90,15 +91,28 @@ __attribute__((constructor)) static void x87_coop_handshake(void) {
     memset(&rep, 0, sizeof(rep));
     kr = mach_msg(&rep.reply.header, MACH_RCV_MSG, 0, sizeof(rep), reply, 30000 /*ms*/,
                   MACH_PORT_NULL);
-    if (verbose)
-        fprintf(stderr, "coop: handshake reply kr=0x%x; continuing\n", kr);
+    // Only the sidecar's reply carries code ranges. Anything else, such as the
+    // send-once notification the kernel delivers when the sidecar exits
+    // without replying (its reply right dies with it), means the sidecar is
+    // gone, and the program continues without the hook.
+    int is_reply = kr == KERN_SUCCESS && rep.reply.header.msgh_id == X87_COOP_MSGH_ID + 1 &&
+                   rep.reply.header.msgh_size == sizeof(x87_coop_reply_t);
+    if (verbose) {
+        if (is_reply)
+            fprintf(stderr, "coop: handshake reply received; continuing\n");
+        else if (kr == KERN_SUCCESS && rep.reply.header.msgh_id == MACH_NOTIFY_SEND_ONCE)
+            fprintf(stderr, "coop: sidecar gone without a reply; continuing unhooked\n");
+        else
+            fprintf(stderr, "coop: no handshake reply (kr=0x%x id=0x%x); continuing unhooked\n", kr,
+                    kr == KERN_SUCCESS ? rep.reply.header.msgh_id : 0);
+    }
 
     // Invalidate our own i-cache for the code the sidecar patched. This runs on
     // the same thread that will execute translate_insn, and sys_icache_invalidate
     // issues a broadcast (inner-shareable) IC IVAU, so the patched entry becomes
     // visible on every core — which a cross-process flush from the sidecar does
     // not reliably achieve once translate_insn is already hot in the i-cache.
-    if (kr == KERN_SUCCESS) {
+    if (is_reply) {
         for (int i = 0; i < 2; i++) {
             if (rep.reply.icache_len[i] != 0) {
                 sys_icache_invalidate((void*)(uintptr_t)rep.reply.icache_addr[i],

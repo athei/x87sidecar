@@ -1161,11 +1161,27 @@ static std::string coop_service_name(pid_t pid) {
 static char** g_unhookedArgv = nullptr;
 static std::optional<std::string> g_inheritedDisableAot;
 
-static int runUnhooked(const std::string& reason) {
+// The warning shown whenever a target runs without the hook. It has to be
+// impossible to miss in a wine log, since the only other symptom is a slow
+// game. "RUNNING WITHOUT X87 ACCELERATION" is the stable substring tests look
+// for. One write(2), so concurrent processes do not interleave its lines.
+static void printUnhookedBanner(const std::string& reason, pid_t pid, const char* prog) {
+    std::string upper = reason;
+    for (char& c : upper) {
+        c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    }
+    const std::string rule(64, '#');
+    const std::string text =
+        rule + "\nWARNING: X87SIDECAR COULD NOT HOOK ROSETTA: " + upper + ".\nPROCESS " +
+        std::to_string(pid) + " IS RUNNING WITHOUT X87 ACCELERATION: " + prog +
+        "\n32-BIT GAMES THAT USE X87 MATH WILL BE MUCH SLOWER.\n" + rule + "\n";
     fflush(stdout);
-    fprintf(stderr, "[rosettax87] %s; running %s without the x87 hook\n", reason.c_str(),
-            g_unhookedArgv[0]);
     fflush(stderr);
+    (void)write(STDERR_FILENO, text.data(), text.size());
+}
+
+static int runUnhooked(const std::string& reason) {
+    printUnhookedBanner(reason, getpid(), g_unhookedArgv[0]);
     unsetenv(X87_COOP_ENV);
     if (g_inheritedDisableAot) {
         setenv("ROSETTA_DISABLE_AOT", g_inheritedDisableAot->c_str(), 1);
@@ -1180,16 +1196,26 @@ static int runUnhooked(const std::string& reason) {
 // Once the cooperative target has been launched, a sidecar that gives up
 // before releasing it leaves it running without the hook: a tracee blocked in
 // the handshake resumes when this process exits and the reply right dies with
-// it. Say so on the way out, whichever return path is taken. The wording does
-// not claim the target is running: its exec may have failed, or it may never
-// have performed the handshake.
+// it, or earlier when the rollback replies. Say so on the way out, whichever
+// return path is taken. After the handshake request arrived, the target is
+// known to be running, and gets the warning banner. Before it, the wording
+// does not claim that: the target's exec may have failed, or it may never
+// perform the handshake.
 struct UnhookedNotice {
     const char* prog = nullptr;
+    pid_t pid = 0;
+    bool handshook = false;
     UnhookedNotice() = default;
     UnhookedNotice(const UnhookedNotice&) = delete;
     UnhookedNotice& operator=(const UnhookedNotice&) = delete;
     ~UnhookedNotice() {
-        if (prog != nullptr) {
+        if (prog == nullptr) {
+            return;
+        }
+        if (handshook) {
+            printUnhookedBanner("hook setup failed after the handshake", pid, prog);
+        } else {
+            fflush(stdout);
             fprintf(stderr, "[rosettax87] x87 hook not installed for %s\n", prog);
         }
     }
@@ -1454,6 +1480,7 @@ int main(int argc, char* argv[]) try {
         write(syncPipe[1], "x", 1);
         close(syncPipe[1]);
         unhookedNotice.prog = progArgv[0];  // the target is launched from here on
+        unhookedNotice.pid = parentPid;
 
         x87_coop_request_rcv_t rcv{};
         kr = mach_msg(&rcv.req.header, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof(rcv), servicePort,
@@ -1463,6 +1490,7 @@ int main(int argc, char* argv[]) try {
                     mach_error_string(kr));
             return 1;
         }
+        unhookedNotice.handshook = true;
         task_t traceeTask = rcv.req.task_port.name;
         thread_t traceeThread = rcv.req.thread_port.name;
         coopReplyPort = rcv.req.header.msgh_remote_port;
