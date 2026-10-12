@@ -264,11 +264,11 @@ and its FPCR.FZ flushes inputs as well as outputs, so there Rosetta leaves
 FPCR.FZ clear and puts FTZ and DAZ in bits 1 and 0 of the Apple register
 `S3_6_C15_C2_5` instead. The runtime chooses from the commpage CPU
 capabilities: bit 34 (FEAT_AFP) selects FPCR, bit 38 the Apple register. The
-emitted x87 code runs under either. Real x87 ignores all three. So by default a program that sets FTZ or DAZ for its SSE code also
-gets its x87 denormals flushed to zero, down to a plain `fld m32; fstp m32`
-copy of a denormal float, which MSVC `/arch:IA32` code uses for float
-copies, and, under DAZ, a denormal compares equal to zero. Stock Rosetta
-keeps them.
+emitted x87 code runs under either. Real x87 ignores all three. So by
+default a program that sets FTZ or DAZ for its SSE code also gets its x87
+denormals flushed to zero, down to a plain `fld m32; fstp m32` copy of a
+denormal float, which MSVC `/arch:IA32` code uses for float copies, and,
+under DAZ, a denormal compares equal to zero. Stock Rosetta keeps them.
 
 `X87_IGNORE_FTZ_DAZ=1` makes each translation reply clear the two bits on
 entry and restore them on exit (see `emit_native_state_boundary`), in FPCR
@@ -277,20 +277,20 @@ or in the Apple register, chosen the same way as the runtime chooses;
 FEAT_AFP hardware, so the choice cannot be made at run time by trying, and
 the Apple-register path cannot run on the M5 Max where the rest of this
 section was measured; phase 15 of `run_tests.sh` covers it on hardware
-without FEAT_AFP, such as the CI runners. It is off
-by default because it has a cost for every program, not only for the ones
-that set FTZ or DAZ. With neither bit set and an empty x87 stack at both
-ends of the reply, a reply gains six instructions and no taken branch. With
-values on the stack, entry gains nine instructions and one taken branch and
-exit four instructions and one taken branch. On the benchmarks that costs up
-to 36 percent on the one-instruction loops of `bench_load` and `bench_store`,
-3 to 28 percent on the short chains of `bench_fstp_fld`, and up to 13
-percent on the dot product, `f2xm1` and `fsin` benchmarks. With a bit set,
-the two FPCR writes cost about 20 ns per reply: a loop around
-`fld m32; fstp m32` goes from under 1 ns per iteration to 22 ns, where stock
-Rosetta takes 10 ns, and a loop around a six-instruction arithmetic run goes
-from 1.2 ns to 23 ns, where stock takes 72 ns. With the knob off the emitted
-code is the same as without the feature.
+without FEAT_AFP, such as the CI runners. It is off by default because it
+has a cost for every program, not only for the ones that set FTZ or DAZ.
+With neither bit set and an empty x87 stack at both ends of the reply, a
+reply gains six instructions and no taken branch. With values on the stack,
+entry gains nine instructions and one taken branch and exit four
+instructions and one taken branch. On the benchmarks that costs up to 36
+percent on the one-instruction loops of `bench_load` and `bench_store`, 3 to
+28 percent on the short chains of `bench_fstp_fld`, and up to 13 percent on
+the dot product, `f2xm1` and `fsin` benchmarks. With a bit set, the two FPCR
+writes cost about 20 ns per reply: a loop around `fld m32; fstp m32` goes
+from under 1 ns per iteration to 22 ns, where stock Rosetta takes 10 ns, and
+a loop around a six-instruction arithmetic run goes from 1.2 ns to 23 ns,
+where stock takes 72 ns. With the knob off the emitted code is the same as
+without the feature.
 
 With the knob on, a signal handler that interrupts an x87 run sees FTZ and
 DAZ clear: `stmxcsr` in the handler reads them as off, because the handler
