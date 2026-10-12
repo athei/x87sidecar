@@ -162,11 +162,13 @@ The write-back has a window: a write by another thread to the same bytes
 between the probe's load and its store is undone. The real store then
 overwrites those bytes, so the end state is one the x86 store could have
 produced, and only the other thread's value is lost for that moment. An
-atomic add of zero would leave no window, but LSE atomics take a bus error on write-combined and uncached mappings (a Metal
-buffer created with `MTLResourceCPUCacheModeWriteCombined`, an IOSurface
-with a write-combine or inhibit-cache mode, and so host-visible memory as
-MoltenVK maps it), where plain loads and stores work. A D3D game filling a
-mapped vertex buffer with `fstp` would have crashed.
+atomic add of zero would leave no window, but LSE atomics take a bus error
+on write-combined and uncached mappings, where plain loads and stores work.
+Metal buffers and IOSurfaces can be mapped write-combined (a Metal buffer
+created with `MTLResourceCPUCacheModeWriteCombined`, an IOSurface with a
+write-combine or inhibit-cache mode), and Vulkan translation layers may map
+host-visible memory that way. A D3D game filling such a mapped vertex buffer
+with `fstp` would have crashed.
 
 For an operand with a base and a displacement the probe adds two
 instructions to a load and three to a store (one and two for a bare
