@@ -577,10 +577,11 @@ static void orr_mask(AssemblerBuffer& buf, int is_64bit, int Rd, int Rn, uint64_
 
 // ── Flag-free f80 <-> binary64 ──────────────────────────────────────────────
 //
-// The same results as emit_f80_to_f64_convert and emit_f64_to_f80, written
-// for code that holds the x87 registers in the native layout and converts
-// one slot at a time inside a run: four GPRs, no NZCV write, and control
-// flow through CBZ/CBNZ/TBZ/TBNZ and B only, all forward.
+// The results of emit_f80_to_f64_convert (but see the unnormals below) and
+// emit_f64_to_f80, written for code that holds the x87 registers in the
+// native layout and converts one slot at a time inside a run: four GPRs, no
+// NZCV write, and control flow through CBZ/CBNZ/TBZ/TBNZ and B only, all
+// forward.
 
 // With e the biased exponent and m the significand, a normal result is
 // built as (hi << 52) + r, where hi = sign << 11 | (e - 15361) and r is m
@@ -590,11 +591,24 @@ static void orr_mask(AssemblerBuffer& buf, int is_64bit, int Rd, int Rn, uint64_
 // case of its own.  e - 15361 >= 0x7FE overflows before rounding and goes
 // to the path that also takes infinities and NaNs.
 //
-// An unnormal (integer bit clear) is read as if the bit were set, except
-// that its rounding never carries into the exponent: r | 2^52 keeps the
-// field of r = 2^52 at the exponent's own value, as the flag-based version
-// computes it.
+// One difference from emit_f80_to_f64_convert: an encoding with the integer
+// bit clear under a nonzero exponent (unnormal, pseudo-infinity, pseudo-NaN)
+// becomes the default NaN, as on the x87 and in stock Rosetta, where the
+// flag-based version reads an unnormal as if the bit were set.  Its callers
+// hold Rosetta's own 80-bit registers, so they meet these encodings as
+// stock does.
 void emit_f80_bits_to_f64(AssemblerBuffer& buf, int Xm, int Wx, int Xt1, int Xt2) {
+    // Integer bit clear under a nonzero exponent: an unnormal, pseudo-
+    // infinity or pseudo-NaN, which the x87 and stock Rosetta read as the
+    // default NaN.
+    const auto integer_bit = emit_tbz_fwd(buf, 1, Xm, 63);
+    and_mask(buf, 0, Xt1, Wx, 0x7fff);
+    const auto exponent_zero = emit_cbz_fwd(buf, 0, 0, Xt1);
+    emit_movn(buf, 1, /*MOVZ*/ 2, 3, 0xfff8, Xm);  // 0xFFF8000000000000
+    const auto done_invalid = emit_b_fwd(buf);
+    bind_imm14(buf, integer_bit);
+    bind_imm19(buf, exponent_zero);
+
     and_mask(buf, 0, Xt1, Wx, 0x7fff);
     emit_add_imm(buf, 0, /*sub*/ 1, 0, /*LSL 12*/ 1, 4, Xt1, Xt1);  // e - 16384
     emit_add_imm(buf, 0, 0, 0, 0, 1023, Xt1, Xt1);                 // e - 15361
@@ -610,18 +624,10 @@ void emit_f80_bits_to_f64(AssemblerBuffer& buf, int Xm, int Wx, int Xt1, int Xt2
     emit_add_imm(buf, 0, 0, 0, 0, 0x3ff, Xt2, Xt2);
     and_mask(buf, 0, Wx, Xm, 0x7ff);
     emit_add_sub_shifted_reg(buf, 0, 0, 0, 0, Wx, 0, Xt2, Xt2);
-    const auto unnormal = emit_tbz_fwd(buf, 0, Xm, 63);
     emit_bitfield(buf, 1, /*UBFM*/ 2, 1, 11, 63, Xm, Xm);                 // LSR #11
     emit_add_sub_shifted_reg(buf, 1, 0, 0, /*LSR*/ 1, Xt2, 11, Xm, Xm);   // r
     emit_add_sub_shifted_reg(buf, 1, 0, 0, /*LSL*/ 0, Xt1, 52, Xm, Xm);   // + hi << 52
     const auto done_normal = emit_b_fwd(buf);
-
-    bind_imm14(buf, unnormal);
-    emit_bitfield(buf, 1, 2, 1, 11, 63, Xm, Xm);
-    emit_add_sub_shifted_reg(buf, 1, 0, 0, 1, Xt2, 11, Xm, Xm);
-    orr_mask(buf, 1, Xm, Xm, uint64_t(1) << 52);
-    emit_add_sub_shifted_reg(buf, 1, 0, 0, 0, Xt1, 52, Xm, Xm);
-    const auto done_unnormal = emit_b_fwd(buf);
 
     // e <= 15360: a subnormal or zero result, m >> (15372 - e) rounded to
     // nearest even.  The bits shifted out, aligned at bit 63 in Wx, round
@@ -685,9 +691,9 @@ void emit_f80_bits_to_f64(AssemblerBuffer& buf, int Xm, int Wx, int Xt1, int Xt2
     emit_logical_shifted_reg(buf, 1, 1, 0, 0, Xt2, 63, Xm, Xm);
 
     bind_imm26(buf, done_normal);
-    bind_imm26(buf, done_unnormal);
     bind_imm26(buf, done_small);
     bind_imm26(buf, done_tiny);
+    bind_imm26(buf, done_invalid);
 }
 
 // Normal, zero, subnormal (normalised with CLZ, every bit kept) and

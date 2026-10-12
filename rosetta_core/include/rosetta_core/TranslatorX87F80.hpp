@@ -44,8 +44,9 @@ void emit_f64_to_f80(AssemblerBuffer& buf, int Xaddr_slot, int Dd_src, int Xbits
 //
 // emit_f80_bits_to_f64: Xm holds the 64-bit significand and Wx the sign and
 // exponent halfword (bits 31:16 zero, as LDRH leaves them).  Xm receives the
-// binary64 bits emit_f80_to_f64_convert would produce.  Wx, Xt1 and Xt2 are
-// clobbered.
+// binary64 bits emit_f80_to_f64_convert would produce, except that an
+// unnormal, pseudo-infinity or pseudo-NaN gives the default NaN, as in stock
+// Rosetta.  Wx, Xt1 and Xt2 are clobbered.
 void emit_f80_bits_to_f64(AssemblerBuffer& buf, int Xm, int Wx, int Xt1, int Xt2);
 
 // emit_f64_bits_to_f80: writes the f80 for the binary64 bits in Xb to

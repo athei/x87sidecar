@@ -271,6 +271,8 @@ static const f80_value kF80Values[] = {
     {"NaN with low payload bits", {0xC000000000000801ULL, 0x7FFF}},
     {"about 1e4000", {0xDE3A1BB4C0F8A971ULL, 0x73E6}},
     {"unnormal", {0x4000000000000C01ULL, 0x4005}},
+    {"unnormal above binary64's range", {0x4000000000000001ULL, 0x5000}},
+    {"pseudo-NaN", {0x4000000000000001ULL, 0x7FFF}},
     {"denormal", {0x0000000000123457ULL, 0x0000}},
     {"negative 1 + 2^-63", {0x8000000000000001ULL, 0xBFFF}},
 };
