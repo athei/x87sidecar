@@ -317,7 +317,9 @@ the guest state from there, so every instruction the sidecar emits is one
 the runtime's decoder knows, control flow only goes forward, and a run is
 answered with one reply so the map has entries only where the state is
 complete. The private binary64 register file is converted to Rosetta's native
-80-bit layout at those boundaries. The signal tests check both arithmetic
+80-bit layout at those boundaries, except in replies that only move
+integers, which work on the 80-bit registers directly so an int64 held on
+the stack across branches stays exact. The signal tests check both arithmetic
 under a SIGUSR1 storm and reading or replacing the saved x87 context in
 64-bit and 32-bit compatibility mode.
 
@@ -389,6 +391,7 @@ knowing. Bracketed values are defaults.
 | `X87_ENABLE_BRIDGE=0` | disable carrying one IR run across short `mov`/`lea` gaps between x87 segments [on] |
 | `X87_BRIDGE_V2=0` | disable bridging across flag-writing ALU whose flags Rosetta's liveness proves dead [on] |
 | `X87_ENABLE_IR_SPLIT=0`, `X87_ENABLE_IR_REMAT=0` | disable register-pressure relief: splitting over-pressure runs, sinking long-lived values [on] |
+| `X87_NATIVE_TRANSPORT=0` | put replies made only of integer loads and stores (`fild`, `fistp`, ...) back through the binary64 register file, which rounds int64 values of 2^53 or more held on the stack; for bisecting [on] |
 | `X87_DISABLE_X87_IR=1` | direct translator only, no IR pipeline |
 | `X87_DISABLE_ALL_FUSIONS=1`, `X87_DISABLE_FUSIONS=f1,f2` | disable every fusion, or the named ones (`--help` lists the names) |
 | `X87_DISABLE_SINGLE_FAST=1`, `X87_DISABLE_CACHE=1` | disable the single-op fast path, the cross-instruction register cache |

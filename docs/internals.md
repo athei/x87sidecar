@@ -87,6 +87,23 @@ copy those fields directly. The sidecar's compact binary64 slots at offset
 `0x08`, stride 8 are private to a reply. The wrapper converts on entry and
 exit, after flushing deferred TOP, tags and permutations.
 
+That conversion rounds every valid slot to binary64, which loses the low
+bits of an int64 of 2^53 or more held on the x87 stack from one reply to
+the next. Delphi's `System.Move` copies memory that way: it loads 8-byte
+chunks with `fild` and stores them with `fistp` on the other side of
+conditional branches and loops, and NosTale lost file paths to it. So a
+reply whose x87 instructions are all `fild`, `fist`, `fistp`, `fisttp`,
+`fldcw`, `fnstcw` or no-ops is a native transport reply: it skips the
+conversion, `fild` writes the exact 80-bit value straight into the native
+slot, and the integer stores convert the native slot under the control
+word's rounding mode. Slots such a reply does not touch are neither read
+nor written, and memory holds only the native layout at both of its map
+entries. Its emitters write no NZCV and branch only forward, like the
+boundary. `X87_NATIVE_TRANSPORT=0` turns this off for bisecting.
+`test_delphi_move` runs the routine itself, and `test_x87_native_state` and
+`test_x87_signal_context` check the payload in a save area and in a signal
+context.
+
 An opaque save/restore round trip can hide a layout mismatch: the same
 misinterpreted bytes can be copied out and back unchanged. It fails when a
 handler reads or edits the saved registers. `test_x87_signal_context` checks
@@ -96,10 +113,10 @@ the handler. `test_x87_native_state` checks all eight FXSAVE/FXRSTOR slots and
 binary64 bit preservation across separate replies, including subnormals.
 
 `tests/test_x87_signal_storm.c` runs the reported chain and one case per x87
-opcode under a SIGUSR1 storm and compares every iteration bit for bit. Stock
-Rosetta itself shifts the x87 stack when a signal lands in its `fcomp`,
-`fcompp` or `ficomp` translations; the harness records that as a stock
-divergence.
+opcode, plus two native transport runs, under a SIGUSR1 storm and compares
+every iteration bit for bit. Stock Rosetta itself shifts the x87 stack when
+a signal lands in its `fcomp`, `fcompp` or `ficomp` translations; the
+harness records that as a stock divergence.
 
 ## Encodings Rosetta's decoder rejects
 

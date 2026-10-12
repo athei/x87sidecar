@@ -87,6 +87,15 @@ auto translate_ftst(TranslationResult* a1, IRInstr* /*a2*/) -> void;
 
 auto translate_fist(TranslationResult* a1, IRInstr* a2) -> void;
 
+// Native transport variants (X87Cache::is_native_transport_run): fild writes
+// the exact f80 of the integer into Rosetta's native slot, and the integer
+// stores read the native slot.  Only valid inside a reply that has no
+// compact binary64 state, i.e. with x87_cache.native_transport set.
+auto translate_fild_native(TranslationResult* a1, IRInstr* a2) -> void;
+auto translate_fist_native(TranslationResult* a1, IRInstr* a2) -> void;
+auto translate_fistp_native(TranslationResult* a1, IRInstr* a2) -> void;
+auto translate_fisttp_native(TranslationResult* a1, IRInstr* a2) -> void;
+
 auto translate_fisubr(TranslationResult* a1, IRInstr* a2) -> void;
 
 auto translate_fcmov(TranslationResult* a1, IRInstr* a2) -> void;

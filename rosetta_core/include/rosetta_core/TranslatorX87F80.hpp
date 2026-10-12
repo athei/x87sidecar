@@ -44,4 +44,34 @@ void emit_f64_to_f80(AssemblerBuffer& buf, int Xaddr_slot, int Dd_src, int Xbits
 // allocator masks. Must run outside an active x87 register-cache run.
 void emit_native_state_boundary(TranslationResult& tr, bool entering);
 
+// -----------------------------------------------------------------------------
+// Native transport (X87Cache::is_native_transport_run).  These work on
+// Rosetta's packed f80 slots directly and leave NZCV untouched: control flow
+// uses CBZ/CBNZ/TBZ/TBNZ only, every branch goes forward, and constants are
+// built in GPRs.
+// -----------------------------------------------------------------------------
+
+// Xaddr = address of physical slot Wphys (0..7, upper bits zero), the
+// 10-byte f80 at Xbase + 6 + 10 * phys.
+void emit_native_slot_addr(AssemblerBuffer& buf, int Xaddr, int Xbase, int Wphys);
+
+// Writes the int64 in Xint to the f80 slot at Xslot, exactly.  Xint, Xs and
+// Xe are clobbered.
+void emit_i64_to_f80_slot(AssemblerBuffer& buf, int Xslot, int Xint, int Xs, int Xe);
+
+// How emit_f80_slot_to_int rounds a value that is not an integer.
+enum class NativeIntRound {
+    kControlWord,  // RC from the control word at [Xbase]
+    kNearest,      // round to nearest even (X87_FAST_ROUND)
+    kChop,         // toward zero (fisttp)
+};
+
+// Converts the f80 slot at Xslot to an integer of width `bits` (16, 32 or
+// 64) in Xint, as fist/fistp/fisttp store it: rounded per `round`, and the
+// width's integer indefinite (INT_MIN) for NaN, infinity, an unnormal, or a
+// rounded value out of range.  Xslot, Xm, Wx and We are clobbered; Xbase
+// is read only for kControlWord.
+void emit_f80_slot_to_int(AssemblerBuffer& buf, int Xbase, int Xslot, int Xint, int Xm, int Wx,
+                          int We, NativeIntRound round, int bits);
+
 }  // namespace TranslatorX87

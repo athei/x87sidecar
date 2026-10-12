@@ -35,7 +35,9 @@ inline auto x87_begin(TranslationResult& a1, AssemblerBuffer& buf) -> std::pair<
         // compile_run consumes a run prefix (pressure split or build
         // early-stop) and the run tail re-enters translation.  Kept
         // textually in sync with the mirror at the top of X87IRLower.cpp.
-        if (!a1.x87_cache.st_base_valid) {
+        // A native transport reply never touches the compact slots that
+        // Xst_base points at, so it does not pin one.
+        if (!a1.x87_cache.st_base_valid && !a1.x87_cache.native_transport) {
             const int Xst_base = alloc_gpr(a1, 6);
             emit_add_imm(buf, /*is_64bit=*/1, /*is_sub=*/0, /*is_set_flags=*/0,
                          /*shift=*/0, kX87RegFileOff, a1.x87_cache.base_gpr, Xst_base);
@@ -53,13 +55,15 @@ inline auto x87_begin(TranslationResult& a1, AssemblerBuffer& buf) -> std::pair<
     if (a1.x87_cache.run_remaining > 0) {
         a1.x87_cache.base_gpr = static_cast<int8_t>(Xbase);
         a1.x87_cache.top_gpr = static_cast<int8_t>(Wd_top);
-
-        const int Xst_base = alloc_gpr(a1, 6);
-        emit_add_imm(buf, /*is_64bit=*/1, /*is_sub=*/0, /*is_set_flags=*/0,
-                     /*shift=*/0, kX87RegFileOff, Xbase, Xst_base);
-        a1.x87_cache.st_base_gpr = static_cast<int8_t>(Xst_base);
         a1.x87_cache.gprs_valid = 1;
-        a1.x87_cache.st_base_valid = 1;
+
+        if (!a1.x87_cache.native_transport) {
+            const int Xst_base = alloc_gpr(a1, 6);
+            emit_add_imm(buf, /*is_64bit=*/1, /*is_sub=*/0, /*is_set_flags=*/0,
+                         /*shift=*/0, kX87RegFileOff, Xbase, Xst_base);
+            a1.x87_cache.st_base_gpr = static_cast<int8_t>(Xst_base);
+            a1.x87_cache.st_base_valid = 1;
+        }
     }
 
     return {Xbase, Wd_top};

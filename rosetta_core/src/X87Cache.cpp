@@ -29,11 +29,11 @@
 // general per-opcode fallback: transcendentals would clash on stock's
 // {x22, w23} helper-call ABI, which is why this list stays short.
 //
-// fsave / frstor stay INLINE — see translate_fsave / translate_frstor
-// for the full story.  TL;DR: stock's m108 path uses an incompatible
-// stride-10/0x06 raw-f80 ST layout that doesn't interoperate with
-// our (and stock's modern m512-path) stride-8/0x08 f64 layout.
-// Composing them was empirically validated to corrupt all 8 ST slots.
+// fsave / frstor stay inline (translate_fsave / translate_frstor).
+// Rosetta keeps the register file as packed f80 at +0x06, stride 10, in
+// every one of its own paths.  The sidecar's binary64 slots at +0x08,
+// stride 8, exist only inside one reply: Translator converts at the reply's
+// entry and exit (emit_native_state_boundary), so stock never sees them.
 // =============================================================================
 
 static bool is_handled_x87(uint16_t op) {
@@ -130,6 +130,31 @@ static bool is_handled_x87(uint16_t op) {
     }
 }
 
+// The ops a native transport reply may contain.  None of them does
+// arithmetic on a register value: fild writes an integer into a slot, which
+// a 64-bit significand holds exactly, the integer stores read one back, and
+// the rest touch only the control word or nothing.  So the reply can work on
+// the native 80-bit slots directly instead of converting the register file
+// to binary64 and back, which rounds every int64 of 2^53 or more held on the
+// stack across a reply (Delphi's System.Move keeps fild values on the stack
+// across its branches).
+static bool is_native_transport_x87(uint16_t op) {
+    switch (op) {
+        case kOpcodeName_fild:
+        case kOpcodeName_fist:
+        case kOpcodeName_fistp:
+        case kOpcodeName_fisttp:
+        case kOpcodeName_fldcw:
+        case kOpcodeName_fnstcw:
+        case kOpcodeName_fnop:
+        case kOpcodeName_fdisi:
+        case kOpcodeName_feni:
+            return true;
+        default:
+            return false;
+    }
+}
+
 // =============================================================================
 // X87Cache member functions
 // =============================================================================
@@ -204,6 +229,16 @@ int X87Cache::lookahead(IRInstr* instr_array, int64_t num_instrs, int64_t insn_i
         count++;
     }
     return count;
+}
+
+bool X87Cache::is_native_transport_run(IRInstr* instr_array, int64_t num_instrs, int64_t insn_idx) {
+    int64_t i = insn_idx;
+    for (; i < num_instrs && is_handled_x87(instr_array[i].opcode()); i++) {
+        if (!is_native_transport_x87(instr_array[i].opcode())) {
+            return false;
+        }
+    }
+    return i > insn_idx;
 }
 
 X87Cache::BridgedRun X87Cache::lookahead_bridged(IRInstr* instr_array, int64_t num_instrs,

@@ -73,12 +73,25 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                                  op != kOpcodeName_finit && op != kOpcodeName_fldenv &&
                                  op != kOpcodeName_fstenv && op != kOpcodeName_fxsave &&
                                  op != kOpcodeName_fxrstor;
+    // A reply made only of integer loads and stores, control word moves and
+    // no-ops does no arithmetic, so it can work on the native f80 slots
+    // directly and needs no conversion at either end.  That keeps an int64
+    // held on the x87 stack across replies exact, which the binary64 round
+    // trip of the boundary cannot (Delphi's System.Move holds fild values
+    // across its branches).  The run lookahead decides it, so the predicate
+    // covers every op the reply below can consume: bridging is off for such
+    // a run and an IR run never extends past it.
+    const bool transport =
+        native_boundary &&
+        (g_rosetta_config == nullptr || g_rosetta_config->native_transport != 0) &&
+        X87Cache::is_native_transport_run(instr_array, num_instrs, insn_idx);
+    cache.native_transport = transport ? 1 : 0;
     const bool traced =
         native_boundary && x87trace::matches(instr_array, static_cast<size_t>(num_instrs));
     const uint64_t trace_site = uint64_t(instr_array[insn_idx].pc) << 32;
     if (traced)
         x87trace::emit_boundary(*translation_result, trace_site | (uint64_t(insn_idx) << 1));
-    if (native_boundary)
+    if (native_boundary && !transport)
         TranslatorX87::emit_native_state_boundary(*translation_result, true);
     auto ret =
         translate_instruction_impl(translation_result, block, instr_array, num_instrs, insn_idx);
@@ -112,9 +125,11 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
         }
         ret = more;
     }
+    cache.native_transport = 0;
     if (native_boundary) {
         if (ret) {
-            TranslatorX87::emit_native_state_boundary(*translation_result, false);
+            if (!transport)
+                TranslatorX87::emit_native_state_boundary(*translation_result, false);
             if (traced)
                 x87trace::emit_boundary(*translation_result, trace_site | (uint64_t(*ret) << 1) | 1,
                                         *ret == num_instrs);
@@ -282,7 +297,9 @@ static auto translate_instruction_impl(TranslationResult* translation_result, IR
                         bridge_allowed = false;
                     }
                 }
-                if (bridge_allowed && run >= 1) {
+                // A native transport run is not bridged: the bridged region
+                // would be lowered by the IR into the compact layout.
+                if (bridge_allowed && run >= 1 && !cache.native_transport) {
                     const auto br = X87Cache::lookahead_bridged(
                         instr_array, num_instrs, insn_idx, g_rosetta_config->bridge_max_gap,
                         g_rosetta_config->bridge_max_total,
@@ -472,7 +489,10 @@ static auto translate_instruction_impl(TranslationResult* translation_result, IR
     }
 
     {
-        const bool ir_disabled = g_rosetta_config && g_rosetta_config->disable_x87_ir;
+        // The IR lowers into the compact layout, which a native transport
+        // reply does not have.
+        const bool ir_disabled =
+            (g_rosetta_config && g_rosetta_config->disable_x87_ir) || cache.native_transport != 0;
         if (!ir_disabled && cache.active()) {
             // Measurement-only override: profile_analyze can ask for compile_run
             // to fire regardless of the gate so we can score "what would IR emit
@@ -820,7 +840,12 @@ static auto translate_instruction_impl(TranslationResult* translation_result, IR
     }
 
     // ── Peephole: try 2-instruction fusion patterns ─────────────────────────
-    const uint64_t fusions_mask = g_rosetta_config ? g_rosetta_config->disabled_fusions_mask : 0;
+    // A native transport reply keeps only the fild m64 + fistp m64 copies,
+    // which touch no slot; every other fusion works on compact slots.
+    uint64_t fusions_mask = g_rosetta_config ? g_rosetta_config->disabled_fusions_mask : 0;
+    if (cache.native_transport) {
+        fusions_mask |= ~(1ULL << static_cast<int>(FusionId::fild_fistp));
+    }
     const auto fused = TranslatorX87::try_peephole(translation_result, instr_array, num_instrs,
                                                    insn_idx, fusions_mask);
 
@@ -830,12 +855,37 @@ static auto translate_instruction_impl(TranslationResult* translation_result, IR
     // everything at run end.  Counts into tally_single so profile_analyze
     // stays comparable across configs.
     bool single_fast = false;
-    if (!fused && !cache.active() &&
+    if (!fused && !cache.active() && !cache.native_transport &&
         !(g_rosetta_config && g_rosetta_config->disable_x87_single_fast)) {
         single_fast = TranslatorX87::try_translate_single_fast(translation_result, cur_instr);
     }
 
-    if (!fused && !single_fast) {
+    // Native transport: the integer loads and stores work on the native
+    // slots.  fldcw, fnstcw and the no-ops touch no slot and take their
+    // usual emitters below.
+    bool native = false;
+    if (!fused && cache.native_transport) {
+        native = true;
+        switch (opcode) {
+            case Opcode::kOpcodeName_fild:
+                TranslatorX87::translate_fild_native(translation_result, cur_instr);
+                break;
+            case Opcode::kOpcodeName_fist:
+                TranslatorX87::translate_fist_native(translation_result, cur_instr);
+                break;
+            case Opcode::kOpcodeName_fistp:
+                TranslatorX87::translate_fistp_native(translation_result, cur_instr);
+                break;
+            case Opcode::kOpcodeName_fisttp:
+                TranslatorX87::translate_fisttp_native(translation_result, cur_instr);
+                break;
+            default:
+                native = false;
+                break;
+        }
+    }
+
+    if (!fused && !single_fast && !native) {
         switch (opcode) {
             case Opcode::kOpcodeName_fldz:
                 TranslatorX87::translate_fldz(translation_result, cur_instr);

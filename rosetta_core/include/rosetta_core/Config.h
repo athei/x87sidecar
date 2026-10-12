@@ -114,6 +114,17 @@ struct RosettaConfig {
     uint8_t log_bridge;               // X87_LOG_BRIDGE            one stderr line per bridged
                                       //                           compile (hash, counts) and per
                                       //                           fallback.
+    uint8_t native_transport;         // X87_NATIVE_TRANSPORT      (default ON) a reply whose x87
+                                      //                           ops are all fild / fist / fistp /
+                                      //                           fisttp / fldcw / fnstcw / fnop
+                                      //                           works on Rosetta's native 80-bit
+                                      //                           slots directly, so int64 values
+                                      //                           held on the x87 stack across
+                                      //                           replies stay exact.  Set =0 to
+                                      //                           put such replies back through
+                                      //                           the binary64 register file (for
+                                      //                           rollback and bisecting only:
+                                      //                           that path rounds |v| >= 2^53).
 
     // X87_BRIDGE_HASH_LIST / X87_NO_BRIDGE_HASH_LIST — per-block bridging
     // bisect, same semantics and hash key as the rollback lists above:

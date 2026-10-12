@@ -38,6 +38,12 @@ struct X87Cache {
         0;  // OPT-D: 1 = push's tag-valid update deferred (cancel on next pop)
     int8_t deferred_pop_count =
         0;  // OPT-D2: number of pop tag-set-empty updates deferred to run end
+    // 1 while the current reply is a native transport reply (see
+    // is_native_transport_run): its ops work on Rosetta's packed 80-bit
+    // slots directly and the reply has no compact binary64 state at all.
+    // Set and cleared by Translator::translate_instruction around one
+    // reply; invalidate() and tick() leave it alone.
+    int8_t native_transport = 0;
 
     // OPT-G: Deferred FXCH — compile-time register renaming.
     // perm[i] maps logical stack depth i to physical depth offset.
@@ -147,6 +153,14 @@ struct X87Cache {
 
     // Scan forward from insn_idx counting consecutive handled x87 instructions.
     static int lookahead(IRInstr* instr_array, int64_t num_instrs, int64_t insn_idx);
+
+    // True when the run lookahead() would count from insn_idx is non-empty
+    // and every op in it moves integers or the control word without
+    // arithmetic: fild, fist, fistp, fisttp (any memory size), fldcw,
+    // fnstcw and the no-ops fnop, fdisi, feni.  Such a reply can be emitted
+    // against the native 80-bit slots exactly, with no binary64 conversion
+    // of the register file on entry or exit.
+    static bool is_native_transport_run(IRInstr* instr_array, int64_t num_instrs, int64_t insn_idx);
 
     // Run bridging: a region descriptor for one IR run that spans short gaps
     // of bridge instructions (X87Bridge.h) between x87 segments.
