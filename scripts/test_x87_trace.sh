@@ -5,6 +5,10 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 BUILD=${1:-"$ROOT/build"}
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/x87-trace-test.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
+# shellcheck source=scripts/run_bounded.sh
+source "$ROOT/scripts/run_bounded.sh"
+# Upper bound in seconds for each loader run, the run_tests.sh default.
+TEST_TIMEOUT="${TEST_TIMEOUT:-60}"
 
 for fixture in test_x87_signal_context test_x87_trace_threads test_x87_trace_freeze; do
     selected_hash=0x129250d0f7976b3f
@@ -15,11 +19,15 @@ for fixture in test_x87_signal_context test_x87_trace_threads test_x87_trace_fre
         for setting in "${!X87_@}"; do unset "$setting"; done
         export X87_NO_PREAUTH=1 X87_TRACE_BLOCK="$selected_hash"
         export X87_TRACE_OUTPUT="$WORK/$fixture" X87_TRACE_STOP_NEGATIVE=1
-        # SIGALRM after 60 s, the run_tests.sh bound, ends a target that
-        # never exits; the sidecar exits with it.
-        perl -e 'alarm shift; exec @ARGV' 60 \
+        run_bounded "$TEST_TIMEOUT" \
             "$BUILD/bin/x87sidecar_entitled" "$BUILD/bin/tests/$fixture" 2>&1
-    ) || { printf '%s\n' "$output"; exit 1; }
+    ) || {
+        rc=$?
+        printf '%s\n' "$output"
+        [[ $rc -eq 124 ]] && printf 'FAIL  trace fixture %s timed out after %s s\n' \
+            "$fixture" "$TEST_TIMEOUT"
+        exit "$rc"
+    }
     if grep -q 'FAIL' <<<"$output" || ! grep -q '^PASS' <<<"$output"; then
         printf 'FAIL  trace fixture %s\n%s\n' "$fixture" "$output"
         exit 1

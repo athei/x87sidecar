@@ -260,42 +260,17 @@ filter_runtime_lines() {
         [[ $? -eq 1 ]]
 }
 
-# run_bounded SECONDS COMMAND...: run COMMAND in a process group of its own
-# and kill the whole group if anything in it is still running after SECONDS,
-# exiting 124 like timeout(1), which macOS does not ship.  After COMMAND
-# exits, the rest of its group (the sidecar, which exits once it sees the
-# target exit) gets the remaining time to finish its output; a member still
-# there at the deadline is killed, so nothing left behind can hold the
-# output pipe open and keep the caller's $(...) waiting.  Otherwise exits as
-# COMMAND did, 128 + the signal number when a signal ended it.  Every run of
-# the loader goes through this, so a target or sidecar that never exits is
-# reported as a failure instead of stalling the harness.
-run_bounded() {
-    perl -e '
-        my $secs = shift;
-        my $pid = fork() // die "fork: $!";
-        if ($pid == 0) {
-            setpgrp(0, 0);
-            exec @ARGV or exit 127;
-        }
-        # Both sides set the group, so a kill below cannot race the child'"'"'s
-        # own setpgrp; the parent'"'"'s call fails harmlessly after the exec.
-        setpgrp($pid, $pid);
-        $SIG{ALRM} = sub { kill "KILL", -$pid; waitpid($pid, 0); exit 124; };
-        alarm $secs;
-        waitpid($pid, 0);
-        my $status = $?;
-        select(undef, undef, undef, 0.02) while kill(0, -$pid);
-        alarm 0;
-        exit($status & 127 ? 128 + ($status & 127) : $status >> 8);
-    ' "$@"
-}
+# Every run of the loader goes through run_bounded, so a target or sidecar
+# that never exits is reported as a failure instead of stalling the harness.
+# shellcheck source=scripts/run_bounded.sh
+source "$SCRIPT_DIR/run_bounded.sh"
 
 # Upper bound in seconds for one run of the loader.  The slowest test takes
 # about 6 s on an M-series Mac, so this only ever fires on a hang.  It has to
 # stay below the 90 s of silence after which scripts/diagnose_ci.py stops a
-# CI run, or a hang there is never reported against its test.
-TEST_TIMEOUT="${TEST_TIMEOUT:-60}"
+# CI run, or a hang there is never reported against its test.  Exported for
+# test_x87_trace.sh, which bounds its own loader runs.
+export TEST_TIMEOUT="${TEST_TIMEOUT:-60}"
 
 TOTAL=0
 PASSED=0
@@ -751,12 +726,19 @@ if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then
             local out exit_code=0
             out=$(run_bounded "$TEST_TIMEOUT" "$@" 2>/dev/null | filter_runtime_lines) ||
                 exit_code=$?
-            local got="trap"
+            # A trapping run reports the SIGILL it caught in a FAIL line and
+            # exits 1; any other failure, a loader that did not start
+            # included, is neither result.
+            local got
             if [[ $exit_code -eq 124 ]]; then
                 got="a timeout after $TEST_TIMEOUT s"
             elif [[ $exit_code -eq 0 ]] && ! grep -qE 'FAIL' <<<"$out"; then
                 got="pass"
-                grep -qE 'PASS' <<<"$out" || got="no output"
+                grep -qE 'PASS' <<<"$out" || got="exit 0 without a PASS line"
+            elif grep -qE 'FAIL.*SIGILL' <<<"$out"; then
+                got="trap"
+            else
+                got="exit $exit_code without a SIGILL line"
             fi
             local verb="traps"
             [[ "$want" == "pass" ]] && verb="passes"
@@ -1239,6 +1221,10 @@ echo ""
 # correctly on ARM hardware. The fixture includes the selected hash in both modes.
 if [[ $NATIVE_ONLY -eq 0 && " ${TESTS[*]} " == *" test_x87_signal_context "* ]]; then
     EXIT=0
+    # The script bounds each of its loader runs with run_bounded and
+    # TEST_TIMEOUT and exits 124 when one times out.  Wrapping the script
+    # itself would not help: a kill of its group does not reach the groups
+    # of the runs inside it.
     OUT=$(bash "$SCRIPT_DIR/test_x87_trace.sh" "$BUILD_DIR" 2>&1) || EXIT=$?
     check_output "x87_trace" "$OUT" "$EXIT"
 fi

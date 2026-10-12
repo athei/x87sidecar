@@ -17,6 +17,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 BUILD_DIR="$ROOT_DIR/build"
+# shellcheck source=scripts/run_bounded.sh
+source "$SCRIPT_DIR/run_bounded.sh"
 BIN="$BUILD_DIR/bin"
 # Default-attach (task_for_pid + ptrace) needs the entitled build; the flat
 # `x87sidecar` ships without entitlements and is cooperative-only.
@@ -126,10 +128,9 @@ run_bench() {
     if [[ "$mode" == "baseline" ]]; then
         extra_env+=("X87_DISABLE_HOOK=1")
     fi
-    # SIGALRM after 600 s ends a target that never exits; the sidecar exits
-    # with it.
-    perl -e 'alarm shift; exec @ARGV' 600 env "${extra_env[@]}" "$LOADER" "$binary" 2>/dev/null |
-        filter_runtime_lines
+    # Bounded at 600 s, so a run that never exits is killed together with
+    # its sidecar instead of stalling the table.
+    run_bounded 600 env "${extra_env[@]}" "$LOADER" "$binary" 2>/dev/null | filter_runtime_lines
 }
 
 # Collect results: associative arrays keyed by "bench.func_name"
