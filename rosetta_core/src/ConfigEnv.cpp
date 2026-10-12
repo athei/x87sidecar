@@ -148,7 +148,7 @@ RosettaConfig load_config_from_env() {
     // Native transport replies (Translator.cpp).  Default ON; =0 is the
     // rollback and bisect switch that restores the binary64 round trip.
     cfg.native_transport = env_default_on("X87_NATIVE_TRANSPORT");
-    cfg.precise_faults = env_default_on("X87_PRECISE_FAULTS");
+    cfg.precise_faults = env_truthy("X87_PRECISE_FAULTS") ? 1 : 0;
 
     // Test-only gate pool clamps: make register-pressure splits
     // deterministically reproducible regardless of stock's dynamic FPR
@@ -460,12 +460,18 @@ void print_env_help(std::FILE* out) {
         "                                stays exact.  For rollback and bisecting only;\n"
         "                                with it off every such value of 2^53 or more\n"
         "                                is rounded.\n"
-        "  X87_PRECISE_FAULTS=0          drop the fault probe at the start of a reply\n"
-        "                                and answer integer-only runs as one reply.\n"
-        "                                Default ON: a memory fault in a reply's first\n"
-        "                                x87 instruction reaches the program's signal\n"
-        "                                handler with a precise context instead of\n"
-        "                                aborting.  For bisecting and cost A/B only.\n"
+        "  X87_PRECISE_FAULTS=1          use when a program aborts with \"unexpectedly\n"
+        "                                need to EmulateForward on a synchronous\n"
+        "                                exception\": probe the memory operand of each\n"
+        "                                reply's first x87 instruction and answer\n"
+        "                                integer-only runs one instruction per reply,\n"
+        "                                so a fault there reaches the program's signal\n"
+        "                                handler.  Default OFF: any memory fault in\n"
+        "                                translated x87 code aborts.  Costs up to about\n"
+        "                                14%% on x87-heavy loops and makes an x87 store\n"
+        "                                into write-combined memory 20 to 40 times\n"
+        "                                slower; faults later in a floating-point run\n"
+        "                                still abort.\n"
         "  X87_ENABLE_FMA_CONTRACT=1     fold fmul+fadd/fsub into a single FMA (IR pass,\n"
         "                                fld_arith_arithp fusion, arith_faddp peephole).\n"
         "                                Off by default: real x87 rounds the product\n"

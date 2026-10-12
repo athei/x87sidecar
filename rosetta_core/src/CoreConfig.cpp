@@ -11,5 +11,5 @@ void rosetta_set_config(const RosettaConfig* config) {
 }
 
 bool precise_faults_enabled() {
-    return g_rosetta_config == nullptr || g_rosetta_config->precise_faults != 0;
+    return g_rosetta_config != nullptr && g_rosetta_config->precise_faults != 0;
 }

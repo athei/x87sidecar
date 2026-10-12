@@ -147,15 +147,18 @@ struct RosettaConfig {
                                       //                           the binary64 register file (for
                                       //                           rollback and bisecting only:
                                       //                           that path rounds |v| >= 2^53).
-    uint8_t precise_faults;           // X87_PRECISE_FAULTS        (default ON) probe the memory
-                                      //                           operand of a reply's first x87
-                                      //                           instruction before anything in
-                                      //                           the reply changes state, and
-                                      //                           answer native transport runs one
-                                      //                           instruction per reply, so a
-                                      //                           fault there reaches the guest
-                                      //                           handler with a precise context.
-                                      //                           =0 for bisecting and cost A/B.
+    uint8_t precise_faults;           // X87_PRECISE_FAULTS        (default OFF) =1 probes the
+                                      //                           memory operand of a reply's
+                                      //                           first x87 instruction before
+                                      //                           anything in the reply changes
+                                      //                           state, and answers native
+                                      //                           transport runs one instruction
+                                      //                           per reply, so a fault there
+                                      //                           reaches the guest handler with
+                                      //                           a precise context instead of
+                                      //                           aborting the process.  Off, the
+                                      //                           emitted code is the same as
+                                      //                           without the feature.
 
     // X87_BRIDGE_HASH_LIST / X87_NO_BRIDGE_HASH_LIST — per-block bridging
     // bisect, same semantics and hash key as the rollback lists above:
