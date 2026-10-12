@@ -31,7 +31,9 @@
 #      assert the pressure splits keep it on the IR path (fpr_fail=0), then
 #      replay tests/data/fist_pressure.ir the same way and assert it exits 0
 #      with one split per block, then tests/data/ir_dup_input.ir and assert
-#      it exits 0 with every x87 instruction on the IR path
+#      it exits 0 with every x87 instruction on the IR path, then
+#      tests/data/ir_fpatan_rc.ir and assert it exits 0 with the fpatan's
+#      GPR peak predicted
 #
 # Phase 1 doubles as the baseline the other phases are read against.  A
 # case that fails there fails with the sidecar nowhere in the picture, so
@@ -95,6 +97,7 @@ ALL_TESTS=(
     test_ir_remat
     test_ir_split_trans
     test_ir_dup_input
+    test_ir_fpatan_rc
     test_bridge_mov
     test_bridge_lea
     test_bridge_flags
@@ -693,6 +696,31 @@ if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then
             PASSED=$((PASSED + 1))
         else
             echo -e "${RED}FAIL${NC}  ir_dup_input_replay  (exit=$REXIT)"
+            echo "$ROUT" | sed 's/^/      /'
+            FAILED=$((FAILED + 1))
+        fi
+    fi
+
+    # tests/data/ir_fpatan_rc.ir is test_ir_fpatan_rc's two blocks: fpatan
+    # in a run that pins the cached rounding control, at a fresh run start
+    # with the full 8-GPR pool.  The model has to predict 5 pinned + 4 for
+    # fpatan = 9 and keep the run off the lowering, which otherwise runs out
+    # of GPRs and asserts.
+    echo ""
+    echo -e "${BOLD}=== Replay: ir_fpatan_rc.ir on the full GPR pool ===${NC}"
+    TOTAL=$((TOTAL + 1))
+    FPATAN_IR="$ROOT_DIR/tests/data/ir_fpatan_rc.ir"
+    if [[ ! -x "$REPLAY_BIN" || ! -f "$FPATAN_IR" ]]; then
+        echo -e "${YELLOW}SKIP${NC}  ir_fpatan_rc_replay  (tool or blob not found)"
+        ERRORS=$((ERRORS + 1))
+    else
+        REXIT=0
+        ROUT=$("$REPLAY_BIN" "$FPATAN_IR" --fpr-pool 8 2>&1) || REXIT=$?
+        if [[ $REXIT -eq 0 ]] && grep -q '^max_gpr_peak,9$' <<<"$ROUT"; then
+            echo -e "${GREEN}PASS${NC}  ir_fpatan_rc_replay (gpr peak 9 seen)"
+            PASSED=$((PASSED + 1))
+        else
+            echo -e "${RED}FAIL${NC}  ir_fpatan_rc_replay  (exit=$REXIT)"
             echo "$ROUT" | sed 's/^/      /'
             FAILED=$((FAILED + 1))
         fi

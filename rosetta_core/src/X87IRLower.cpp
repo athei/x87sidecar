@@ -1636,16 +1636,18 @@ int peak_live_gprs(const Context& ctx, int budget, int* first_over_node, bool fa
             // clobbering cores is included in each count):
             //   sin/cos: Xconst held + ~2 internal in trig_range_reduce/poly = 3
             //   fptan:   Xconst + Xqi held + brief Xnzcv at the TST = 3
-            //   fpatan:  Xconst + Xsign_xy held + Xnzcv over steps 3-5 = 3
+            //   fpatan:  Xconst + Xsign_xy + Xnzcv over steps 3-5, plus Xk
+            //            for the step-3 1.0 constant or Xbits for the
+            //            step-5 sign test = 4
             //   fyl2x:   Xconst + ~3 inside log2 (Xu, Xu_off, Xidx peak) = 4
             //   fscale:  Wd_k + Wd_e + Xnzcv + brief Xtemp at overflow CSEL = 4
             // Conservative bound across the family.
             case Op::FSin:
             case Op::FCos:
             case Op::FPtan:
-            case Op::FPatan:
                 transient = 3;
                 break;
+            case Op::FPatan:
             case Op::FYl2x:
             case Op::FScale:
                 transient = 4;
