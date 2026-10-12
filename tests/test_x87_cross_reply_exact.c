@@ -14,9 +14,10 @@
  *
  * The middle block takes the shapes the translator emits differently: an
  * IR run (direct emitters and fusions when the harness turns the IR off),
- * single-instruction replies, two- and three-instruction fusions, a
- * transcendental, fcmov, deferred FXCH, and pushes that leave the held value
- * at every depth from 1 to 7.  Every case also runs with TOP rotated by
+ * single-instruction replies, two- and three-instruction fusions, an IR run
+ * bridged across a mov, transcendentals including the pushing fxtract,
+ * fsincos and fptan, fcmov, deferred FXCH, ffree, fincstp and fdecstp inside
+ * a run, and pushes that leave the held value at every depth from 1 to 7.  Every case also runs with TOP rotated by
  * fdecstp before the load, so the held value sits in each of the eight
  * physical registers and the middle block's pushes wrap TOP past 0.
  * Blocks are separated by `jmp 1f; 1:`, which ends a translation block.
@@ -43,7 +44,8 @@ typedef struct {
 static const double kConst[] = {3.0, 2.0, 0.25, 1.0, 0.5};
 
 #define SEP "jmp 1f\n1:\n\t"
-#define CLOBBERS "memory", "cc", "st", "st(1)", "st(2)", "st(3)", "st(4)", "st(5)", "st(6)", "st(7)"
+#define CLOBBERS                                                                             \
+    "memory", "cc", "rax", "st", "st(1)", "st(2)", "st(3)", "st(4)", "st(5)", "st(6)", "st(7)"
 
 /* ── Middle blocks ───────────────────────────────────────────────────────── */
 /* Each pushes and pops only its own values, writing results to out[]. */
@@ -63,6 +65,15 @@ static const double kConst[] = {3.0, 2.0, 0.25, 1.0, 0.5};
 #define MID_FXCH2                                                                       \
     "fldl 0(%[c])\n\tfldl 8(%[c])\n\tfldl 16(%[c])\n\tfxch %%st(2)\n\tfstpl 0(%[out])\n\t" \
     "fstpl 8(%[out])\n\tfstpl 16(%[out])\n\t"
+/* The mov joins the x87 instructions on either side into one bridged IR run. */
+#define MID_BRIDGE "fldl 0(%[c])\n\tmovl $5, %%eax\n\tfmull 8(%[c])\n\tfstpl 0(%[out])\n\t"
+#define MID_FXTRACT "fldl 0(%[c])\n\tfxtract\n\tfaddp\n\tfstpl 0(%[out])\n\t"
+#define MID_FSINCOS "fldl 32(%[c])\n\tfsincos\n\tfaddp\n\tfstpl 0(%[out])\n\t"
+#define MID_FPTAN "fldl 32(%[c])\n\tfptan\n\tfaddp\n\tfstpl 0(%[out])\n\t"
+/* ffree, fincstp and fdecstp inside a run: the freed 2.0 is skipped. */
+#define MID_TOPMOVE                                                                      \
+    "fldl 0(%[c])\n\tfldl 8(%[c])\n\tffree %%st(0)\n\tfincstp\n\tfdecstp\n\tfincstp\n\t" \
+    "fstpl 0(%[out])\n\t"
 #define PUSH1 "fldl 24(%[c])\n\t"
 #define ADDP "faddp\n\t"
 #define MID_D1 PUSH1 "fstpl 0(%[out])\n\t"
@@ -108,6 +119,11 @@ DEFINE_FORMS(FYL2X)
 DEFINE_FORMS(FCMOV)
 DEFINE_FORMS(FXCH1)
 DEFINE_FORMS(FXCH2)
+DEFINE_FORMS(BRIDGE)
+DEFINE_FORMS(FXTRACT)
+DEFINE_FORMS(FSINCOS)
+DEFINE_FORMS(FPTAN)
+DEFINE_FORMS(TOPMOVE)
 DEFINE_FORMS(D1)
 DEFINE_FORMS(D2)
 DEFINE_FORMS(D3)
@@ -135,6 +151,11 @@ static const middle kMiddles[] = {
     {"fcmove", FORMS(FCMOV), 2, {3.0, 3.0}},
     {"fxch st1", FORMS(FXCH1), 2, {3.0, 2.0}},
     {"fxch st2", FORMS(FXCH2), 3, {3.0, 2.0, 0.25}},
+    {"bridged", FORMS(BRIDGE), 1, {6.0}},
+    {"fxtract", FORMS(FXTRACT), 1, {2.5}},
+    {"fsincos", FORMS(FSINCOS), 0, {0}},
+    {"fptan", FORMS(FPTAN), 0, {0}},
+    {"ffree fincstp fdecstp", FORMS(TOPMOVE), 1, {3.0}},
     {"depth1", FORMS(D1), 1, {1.0}},
     {"depth2", FORMS(D2), 1, {2.0}},
     {"depth3", FORMS(D3), 1, {3.0}},

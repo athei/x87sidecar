@@ -283,7 +283,9 @@ static uint8_t slots_to_convert(const X87Cache& c, const IRInstr* instrs, int64_
 // 80-bit value to binary64, in place, and marks it binary64 in the tracker.
 // Uses the run cache's base, TOP and Xst_base when it holds them, otherwise
 // loads base and TOP into registers of its own; either way it leaves the
-// allocator as it found it.  Five scratch GPRs on top of those; no NZCV.
+// allocator as it found it.  Four scratch GPRs on top of those, so a run
+// leaves one register of the eight-register pool to stock; the slot address
+// is computed again after the conversion, which needs all four.  No NZCV.
 static void emit_slot_conversions(TranslationResult& tr, uint8_t mask) {
     if (mask == 0) {
         return;
@@ -301,29 +303,31 @@ static void emit_slot_conversions(TranslationResult& tr, uint8_t mask) {
         emit_load_top(buf, tr, Xbase, Wtop);
         Xst = -1;
     }
-    const int Xaddr = alloc_free_gpr(tr);
     const int Xm = alloc_free_gpr(tr);
     const int Wx = alloc_free_gpr(tr);
     const int Xt1 = alloc_free_gpr(tr);
     const int Xt2 = alloc_free_gpr(tr);
+    const int Xfrom = Xst >= 0 ? Xst : Xbase;
     const int16_t off = Xst >= 0 ? 0 : kX87NativeSlotOff;
     for (int r = 0; r < 8; r++) {
         if (((mask >> r) & 1U) == 0) {
             continue;
         }
-        emit_native_slot_key(buf, Wtop, (r - c.top_rel) & 7, Xaddr);
-        emit_add_sub_shifted_reg(buf, 1, 0, 0, 0, Xaddr, 0, Xst >= 0 ? Xst : Xbase, Xaddr);
-        emit_ldur_stur(buf, 3, /*LDUR*/ 1, off, Xaddr, Xm);
-        emit_ldr_str_imm(buf, 1, 0, /*LDRH*/ 1, static_cast<int16_t>((off + 8) / 2), Xaddr, Wx);
+        const int depth = (r - c.top_rel) & 7;
+        emit_native_slot_key(buf, Wtop, depth, Xt1);
+        emit_add_sub_shifted_reg(buf, 1, 0, 0, 0, Xt1, 0, Xfrom, Xt1);
+        emit_ldur_stur(buf, 3, /*LDUR*/ 1, off, Xt1, Xm);
+        emit_ldr_str_imm(buf, 1, 0, /*LDRH*/ 1, static_cast<int16_t>((off + 8) / 2), Xt1, Wx);
         TranslatorX87::emit_f80_bits_to_f64(buf, Xm, Wx, Xt1, Xt2);
-        emit_ldur_stur(buf, 3, /*STUR*/ 0, off, Xaddr, Xm);
+        emit_native_slot_key(buf, Wtop, depth, Xt1);
+        emit_add_sub_shifted_reg(buf, 1, 0, 0, 0, Xt1, 0, Xfrom, Xt1);
+        emit_ldur_stur(buf, 3, /*STUR*/ 0, off, Xt1, Xm);
         c.slot_fmt[r] = kSlotF64;
     }
     free_gpr(tr, Xt2);
     free_gpr(tr, Xt1);
     free_gpr(tr, Wx);
     free_gpr(tr, Xm);
-    free_gpr(tr, Xaddr);
     if (own) {
         free_gpr(tr, Wtop);
         free_gpr(tr, Xbase);
@@ -1356,7 +1360,10 @@ static auto translate_instruction_impl(TranslationResult* translation_result, IR
     // ── X87_NATIVE_SLOTS: convert what the next emitter reads ───────────────
     // A fusion consumes up to six instructions, also when the run cache is
     // off, and finishes the run's deferred FXCH when it reaches the run's
-    // end, so the window covers that much.
+    // end, so the window covers that much.  With the cache off a reply holds
+    // one instruction unless a fusion takes more, so a slot only a later
+    // instruction reads is converted here, back at the end of this reply,
+    // and again in its own: code that a debugging knob can afford.
     if (cache.native_slots) {
         const int run = cache.active() ? cache.run_remaining
                                        : X87Cache::lookahead(instr_array, num_instrs, insn_idx);

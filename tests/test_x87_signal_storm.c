@@ -25,7 +25,9 @@
  *           pages in a loop (translation invalidation)
  * argv[2] is the time budget per case in seconds.  STORM_CASE=<name> runs one
  * case only.  Under the chain cases run in every variant; the per-opcode
- * cases run in "plain" only.
+ * cases run in "plain" only.  With X87_NATIVE_SLOTS=1 in the environment the
+ * held_f80 case runs in "plain" and "modctx" as well: an 80-bit value held
+ * across replies, which the modctx handler replaces in the saved context.
  */
 #include <math.h>
 #include <pthread.h>
@@ -55,10 +57,56 @@ static volatile sig_atomic_t g_signals = 0;
  * signal delivery. */
 static volatile unsigned long g_iters = 0;
 
+/* The held-f80 case (run_held_case): while g_held_active, the handler looks
+ * for the held 80-bit value among the stack registers of the saved context.
+ * The register file is complete at every point where a signal is
+ * delivered, so the value has to be there with all ten bytes whenever it is
+ * on the stack, never in a rounded form.  In the modctx variant the handler
+ * also replaces it with g_held_edit, which the store at the end of the
+ * iteration then has to write. */
+static unsigned char g_held[10];
+static unsigned char g_held_rounded[10];
+static unsigned char g_held_edit[10];
+static volatile sig_atomic_t g_held_active = 0;
+static volatile sig_atomic_t g_held_seen = 0;
+static volatile sig_atomic_t g_held_bad = 0;
+static volatile sig_atomic_t g_held_edited = 0;
+
+static void held_in_context(ucontext_t* uc) {
+    if (uc->uc_mcsize < sizeof(*uc->uc_mcontext)) {
+        return;
+    }
+    /* __fpu_stmm0..7 are 16-byte records whose first ten bytes are the
+     * physical registers 0..7 (test_x87_signal_context).  Popped registers
+     * keep their bytes, so only valid ones count: the abridged tag word has
+     * a bit per physical register. */
+    unsigned char* st = (unsigned char*)&uc->uc_mcontext->__fs.__fpu_stmm0;
+    const unsigned ftw = uc->uc_mcontext->__fs.__fpu_ftw;
+    for (int i = 0; i < 8; i++) {
+        if (((ftw >> i) & 1U) == 0) {
+            continue;
+        }
+        unsigned char* r = st + 16 * i;
+        if (memcmp(r, g_held, 10) == 0) {
+            g_held_seen++;
+            if (g_variant == V_MODCTX) {
+                memcpy(r, g_held_edit, 10);
+                g_held_edited = 1;
+            }
+        } else if (memcmp(r, g_held_rounded, 10) == 0) {
+            g_held_bad++;
+        }
+    }
+}
+
 static void handler(int sig, siginfo_t* si, void* ctx) {
     (void)sig;
     (void)si;
     g_signals++;
+    if (g_held_active && ctx != NULL) {
+        held_in_context((ucontext_t*)ctx);
+        return;
+    }
     if (g_variant == V_MODCTX && ctx != NULL) {
         ucontext_t* uc = (ucontext_t*)ctx;
         /* Same content written back.  Bit 1 of rflags reads as 1 on every
@@ -567,6 +615,90 @@ static void run_case(const char* name, seq_fn fn, double x, int variant, double 
     }
 }
 
+/* ── a held 80-bit value ──────────────────────────────────────────────── */
+
+/* An 80-bit value loaded in one block and stored in a later one, with two
+ * blocks of x87 arithmetic between them that do not touch it.  Its low
+ * significand bits do not fit binary64, so a round trip through binary64 at
+ * any point shows up in the stored bytes. */
+static void held_seq(const void* src, void* dst, double* out) {
+    static const double k[] = {0.75, 3.0};
+    __asm__ volatile(
+        "fldt (%[src])\n\tjmp 1f\n1:\n\t"
+        "fldl 0(%[k])\n\tfmull 8(%[k])\n\tfaddl 0(%[k])\n\tfstpl 0(%[out])\n\tjmp 1f\n1:\n\t"
+        "fldl 8(%[k])\n\tfsqrt\n\tfstpl 8(%[out])\n\tjmp 1f\n1:\n\t"
+        "fstpt (%[dst])\n"
+        :
+        : [src] "r"(src), [dst] "r"(dst), [out] "r"(out), [k] "r"(k)
+        : "memory", "st", "st(1)");
+}
+
+static void run_held_case(int variant, double budget_s) {
+    const char* only = getenv("STORM_CASE");
+    if (only != NULL && strcmp(only, "held_f80") != 0) {
+        return;
+    }
+    /* pi with the low significand bits set, and the same value rounded to
+     * binary64's 53 bits, which is how a binary64 round trip would leave it. */
+    const uint64_t mant = 0xC90FDAA22168C235ULL;
+    const uint16_t sexp = 0x4000;
+    const uint64_t rounded = mant & ~0x7FFULL;
+    const uint64_t edited = mant ^ 0x2ULL;
+    memcpy(g_held, &mant, 8);
+    memcpy(g_held + 8, &sexp, 2);
+    memcpy(g_held_rounded, &rounded, 8);
+    memcpy(g_held_rounded + 8, &sexp, 2);
+    memcpy(g_held_edit, &edited, 8);
+    memcpy(g_held_edit + 8, &sexp, 2);
+
+    g_variant = variant;
+    g_signals = 0;
+    g_held_seen = 0;
+    g_held_bad = 0;
+    g_storm_run = 1;
+    pthread_t th;
+    const int have_thread = pthread_create(&th, NULL, storm_thread, NULL) == 0;
+
+    unsigned char src[16] __attribute__((aligned(16)));
+    unsigned char dst[16] __attribute__((aligned(16)));
+    double out[2];
+    memset(src, 0, sizeof(src));
+    memcpy(src, g_held, 10);
+    unsigned long iters = 0;
+    unsigned long wrong = 0;
+    unsigned long edits = 0;
+    const double deadline = now_s() + budget_s;
+    while (now_s() < deadline) {
+        for (int k = 0; k < 64; k++) {
+            memset(dst, 0xA5, sizeof(dst));
+            g_held_edited = 0;
+            g_held_active = 1;
+            held_seq(src, dst, out);
+            g_held_active = 0;
+            const int edited_now = g_held_edited;
+            edits += (unsigned long)edited_now;
+            const unsigned char* want = edited_now ? g_held_edit : g_held;
+            if (memcmp(dst, want, 10) != 0 || out[0] != 3.0 || out[1] != sqrt(3.0)) {
+                wrong++;
+            }
+            iters++;
+            g_iters = iters;
+        }
+    }
+    g_storm_run = 0;
+    if (have_thread) {
+        pthread_join(th, NULL);
+    }
+    if (wrong == 0 && g_held_bad == 0) {
+        printf("PASS  held_f80 variant=%s  iters=%lu signals=%d seen=%d edited=%lu\n",
+               variant_name(variant), iters, (int)g_signals, (int)g_held_seen, edits);
+    } else {
+        printf("FAIL  held_f80 variant=%s  wrong=%lu of %lu, rounded in context=%d, signals=%d\n",
+               variant_name(variant), wrong, iters, (int)g_held_bad, (int)g_signals);
+        failures++;
+    }
+}
+
 int main(int argc, char** argv) {
     const char* which = argc > 1 ? argv[1] : "all";
     if (argc > 2) {
@@ -617,6 +749,12 @@ int main(int argc, char** argv) {
             for (size_t k = 0; k < sizeof(k_op_cases) / sizeof(k_op_cases[0]); k++) {
                 run_case(k_op_cases[k].name, k_op_cases[k].fn, 0.75, v, g_budget_op, NAN);
             }
+        }
+        /* Under the sidecar an 80-bit value only survives a reply with
+         * X87_NATIVE_SLOTS=1, so the case runs where that is set. */
+        const char* slots = getenv("X87_NATIVE_SLOTS");
+        if ((v == V_PLAIN || v == V_MODCTX) && slots != NULL && strcmp(slots, "1") == 0) {
+            run_held_case(v, g_budget_chain);
         }
     }
 

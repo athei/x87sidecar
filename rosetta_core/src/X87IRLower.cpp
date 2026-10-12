@@ -32,7 +32,8 @@ inline auto x87_begin(TranslationResult& a1, AssemblerBuffer& buf) -> std::pair<
         // early-stop) and the suffix re-enters lowering.
         if (!a1.x87_cache.st_base_valid) {
             const int Xst_base = alloc_gpr(a1, 6);
-            emit_add_imm(buf, 1, 0, 0, 0, x87_st_base_off(), a1.x87_cache.base_gpr, Xst_base);
+            emit_add_imm(buf, 1, 0, 0, 0, x87_st_base_off(a1.x87_cache), a1.x87_cache.base_gpr,
+                         Xst_base);
             a1.x87_cache.st_base_gpr = static_cast<int8_t>(Xst_base);
             a1.x87_cache.st_base_valid = 1;
         }
@@ -46,7 +47,7 @@ inline auto x87_begin(TranslationResult& a1, AssemblerBuffer& buf) -> std::pair<
         a1.x87_cache.base_gpr = static_cast<int8_t>(Xbase);
         a1.x87_cache.top_gpr = static_cast<int8_t>(Wd_top);
         const int Xst_base = alloc_gpr(a1, 6);
-        emit_add_imm(buf, 1, 0, 0, 0, x87_st_base_off(), Xbase, Xst_base);
+        emit_add_imm(buf, 1, 0, 0, 0, x87_st_base_off(a1.x87_cache), Xbase, Xst_base);
         a1.x87_cache.st_base_gpr = static_cast<int8_t>(Xst_base);
         a1.x87_cache.gprs_valid = 1;
         a1.x87_cache.st_base_valid = 1;

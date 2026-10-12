@@ -241,7 +241,7 @@ auto translate_fld(TranslationResult* a1, IRInstr* a2) -> void {
         const bool addr_is_64 = (a2->operands[0].mem.addr_size == IROperandSize::S64);
         const int Xaddr = compute_operand_address(*a1, addr_is_64, &a2->operands[0], GPR::XZR);
 
-        if (g_x87_slot_tracker != nullptr) {
+        if (a1->x87_cache.native_slots) {
             // X87_NATIVE_SLOTS: the new register takes the ten bytes as they
             // are and stays in the 80-bit format until something reads it.
             emit_native_st_addr(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Xst_base);
@@ -4217,11 +4217,11 @@ auto translate_frstor(TranslationResult* a1, IRInstr* a2) -> void {
     free_gpr(*a1, Xaddr);
 
     if (cached) {
-        // Re-derive Xst_base = Xbase + x87_st_base_off() and put it back in
+        // Re-derive Xst_base = Xbase + x87_st_base_off(a1->x87_cache) and put it back in
         // the cached slot (slot 6 = x28 by convention).
         const int Xst_base_new = alloc_gpr(*a1, 6);
         emit_add_imm(buf, /*is_64bit=*/1, /*is_sub=*/0, /*is_set_flags=*/0,
-                     /*shift=*/0, x87_st_base_off(), Xbase, Xst_base_new);
+                     /*shift=*/0, x87_st_base_off(a1->x87_cache), Xbase, Xst_base_new);
         a1->x87_cache.st_base_gpr = static_cast<int8_t>(Xst_base_new);
     }
 

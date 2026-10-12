@@ -62,18 +62,19 @@ static_assert(kX87RegStride == 0x08, "Invalid stride for st[] registers");
 
 // X87_NATIVE_SLOTS keeps the working binary64 value of each register in the
 // first 8 bytes of its native 80-bit slot, at +6 + 10 * phys, so converting
-// one slot leaves its neighbours alone.  While g_x87_native_layout is set,
-// the slot helpers below (emit_load_st, emit_store_st,
-// emit_store_st_at_offset, emit_x87_perm_flush) and the Xst_base the run
-// cache pins use that layout.  Translator::translate_instruction sets it for
-// one reply at a time.
+// one slot leaves its neighbours alone.  Code that has the TranslationResult
+// reads X87Cache::native_slots; the slot helpers below (emit_load_st,
+// emit_store_st, emit_store_st_at_offset, emit_x87_perm_flush), which do not
+// have it, read g_x87_native_layout.  Translator::translate_instruction sets
+// both for one reply at a time.
 static constexpr int16_t kX87NativeSlotOff = 6;
 static constexpr int kX87NativeSlotStride = 10;
 inline thread_local bool g_x87_native_layout = false;
 
-// What Xst_base points at: the compact st[] array, or native slot 0.
-inline int16_t x87_st_base_off() {
-    return g_x87_native_layout ? kX87NativeSlotOff : kX87RegFileOff;
+// What Xst_base points at in the reply `c` belongs to: the compact st[]
+// array, or native slot 0.
+inline int16_t x87_st_base_off(const X87Cache& c) {
+    return c.native_slots != 0 ? kX87NativeSlotOff : kX87RegFileOff;
 }
 
 // The slot tracker (X87Cache::slot_fmt, top_rel) of the reply being
