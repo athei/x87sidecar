@@ -181,6 +181,123 @@ static void flush_run_and_release(TranslationResult& tr) {
     tr.free_gpr_mask = cache.stock_free_gpr_mask;
 }
 
+// Bytes an x87 instruction reads or writes through its memory operand.
+static int x87_access_bytes(const IRInstr& insn, const IROperand& op) {
+    switch (insn.opcode()) {
+        case Opcode::kOpcodeName_fbld:
+        case Opcode::kOpcodeName_fbstp:
+            return 10;
+        case Opcode::kOpcodeName_fsave:
+        case Opcode::kOpcodeName_frstor:
+            return 108;  // the 32-bit layout, the only one the emitters write
+        default:
+            break;
+    }
+    switch (op.mem.size) {
+        case IROperandSize::S16:
+            return 2;
+        case IROperandSize::S32:
+            return 4;
+        case IROperandSize::S64:
+            return 8;
+        case IROperandSize::S80:
+            return 10;
+        default:
+            return 1;
+    }
+}
+
+static bool x87_writes_memory(uint16_t opcode) {
+    switch (opcode) {
+        case Opcode::kOpcodeName_fst:
+        case Opcode::kOpcodeName_fstp:
+        case Opcode::kOpcodeName_fist:
+        case Opcode::kOpcodeName_fistp:
+        case Opcode::kOpcodeName_fisttp:
+        case Opcode::kOpcodeName_fbstp:
+        case Opcode::kOpcodeName_fnstcw:
+        case Opcode::kOpcodeName_fstsw:
+        case Opcode::kOpcodeName_fsave:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// A memory fault in translated code is recovered by rolling back to the
+// start of the instruction-map entry the faulting pc belongs to, and there
+// is one entry per reply.  The runtime only rolls back when nothing before
+// the faulting instruction in that entry changed state: no store, no NZCV
+// or FPCR write, no write to a register that holds guest state, and no
+// floating-point arithmetic.  Otherwise it aborts the process with
+// "unexpectedly need to EmulateForward on a synchronous exception".  A reply
+// that converts the register file changes state before its first guest
+// access (the entry conversion alone does), so the access of the reply's
+// first instruction is probed here, before anything else.
+//
+// A load is probed with a load of the access width into the zero register,
+// or of its first and last byte for 10 and 108 bytes; one load also covers
+// an unaligned access that crosses a page.  A store is probed by loading
+// those bytes and writing them back unchanged: the full access width for 2,
+// 4 and 8 bytes, otherwise the first byte after a load of the last.  The
+// write-back is the reply's only state change before the probe completes,
+// so a fault in it still rolls back, and it faults where the store would,
+// including on a read-only page.  An atomic would leave no window, but LSE
+// atomics take a bus error on write-combined and uncached mappings (Metal
+// buffers, IOSurfaces), where plain loads and stores work.  The window: a
+// write by another thread to those bytes between the load and the
+// write-back is undone, and the real store then overwrites the same bytes,
+// so only that transient value is lost, which is an order the x86 store
+// could have produced.
+//
+// Once the probes pass, the real access later in the reply cannot fault,
+// and a fault in a probe reaches the guest handler with the reply's first
+// instruction as rip and the state from before it.  A store into a
+// PROT_NONE page faults in the probe's load, so the handler sees a read
+// fault where stock reports a write.  Accesses further into a reply are
+// not probed: rolling back to the reply start would report the wrong
+// instruction.
+static void emit_fault_probe(TranslationResult& tr, IRInstr& insn) {
+    IROperand* mem = nullptr;
+    for (int i = 0; i < insn.num_operands && i < 4; i++) {
+        const auto kind = insn.operands[i].kind;
+        if (kind == IROperandKind::MemRef || kind == IROperandKind::AbsMem) {
+            mem = &insn.operands[i];
+            break;
+        }
+    }
+    if (mem == nullptr) {
+        return;
+    }
+    const auto saved_mask = tr.free_gpr_mask;
+    tr.free_gpr_mask &= kGprScratchMask;
+    AssemblerBuffer& buf = tr.insn_buf;
+    const int bytes = x87_access_bytes(insn, *mem);
+    const int Xaddr = compute_operand_address(tr, /*is_64bit=*/1, mem, GPR::XZR);
+    const bool store = x87_writes_memory(insn.opcode());
+    const int Xval = store ? alloc_free_gpr(tr) : GPR::XZR;
+    if (bytes == 2 || bytes == 4 || bytes == 8) {
+        const int size = bytes == 2 ? 1 : bytes == 4 ? 2 : 3;
+        emit_ldr_str_imm(buf, size, /*is_fp=*/0, /*LDR*/ 1, /*imm12=*/0, Xaddr, Xval);
+        if (store) {
+            emit_ldr_str_imm(buf, size, 0, /*STR*/ 0, 0, Xaddr, Xval);
+        }
+    } else {
+        if (bytes > 1) {
+            emit_ldr_str_imm(buf, /*size=*/0, 0, /*LDR*/ 1, bytes - 1, Xaddr, GPR::XZR);
+        }
+        emit_ldr_str_imm(buf, 0, 0, /*LDR*/ 1, /*imm12=*/0, Xaddr, Xval);
+        if (store) {
+            emit_ldr_str_imm(buf, 0, 0, /*STR*/ 0, 0, Xaddr, Xval);
+        }
+    }
+    if (store) {
+        free_gpr(tr, Xval);
+    }
+    free_gpr(tr, Xaddr);
+    tr.free_gpr_mask = saved_mask;
+}
+
 auto Translator::translate_instruction(TranslationResult* translation_result, IRBlock* block,
                                        IRInstr* instr_array, int64_t num_instrs, int64_t insn_idx)
     -> std::optional<int64_t> {
@@ -223,6 +340,17 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
     // the flag clear, as every request that ends does.
     const RequestEntry entry = capture_request_entry(*translation_result);
     cache.native_transport = transport ? 1 : 0;
+    // The probe has to stay the first thing in the reply: before the entry
+    // conversion, before any NZCV save or FPCR write, before anything an op
+    // emitter does.  A native transport reply needs none: it is one
+    // instruction (or a fused fild m64 / fistp m64 pair), and its emitters
+    // touch guest memory before they change any state, so its own access
+    // rolls back and reports the fault kind stock does.  X87_PROFILE's block
+    // counter and X87_TRACE_BLOCK's records are stores emitted ahead of the
+    // op, so with either on a fault in a transport reply that carries them
+    // aborts.
+    if (native_boundary && !transport && precise_faults_enabled())
+        emit_fault_probe(*translation_result, instr_array[insn_idx]);
     const bool traced =
         native_boundary && x87trace::matches(instr_array, static_cast<size_t>(num_instrs));
     const uint64_t trace_site = uint64_t(instr_array[insn_idx].pc) << 32;
@@ -276,8 +404,15 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
             if (traced)
                 x87trace::emit_boundary(*translation_result, trace_site | (uint64_t(*ret) << 1) | 1,
                                         *ret == num_instrs);
-        } else
+        } else {
+            // Declined: drop the boundary and the fault probe, including
+            // any fixup the probe's address computation recorded.
             translation_result->insn_buf.end = start;
+            for (size_t i = 0; i < 6; i++) {
+                auto& list = translation_result->*kFixupLists[i];
+                list.end = list.begin + entry.fixup_count[i];
+            }
+        }
     }
     if (translation_result->alloc_failure != nullptr) {
         // ARPL is the one opcode stock cannot be handed: it never had an id
@@ -431,7 +566,17 @@ static auto translate_instruction_impl(TranslationResult* translation_result, IR
         if (!cache.active()) {
             const bool cache_disabled = g_rosetta_config && g_rosetta_config->disable_x87_cache;
             if (!cache_disabled) {
-                const int run = X87Cache::lookahead(instr_array, num_instrs, insn_idx);
+                // A native transport run is answered one instruction per
+                // reply, so every integer load and store is the first
+                // instruction of its reply, and its own access, which comes
+                // before any state change, faults precisely (see the probe
+                // call in translate_instruction).  Transport replies have no entry or
+                // exit conversion, so the extra replies cost little.  An
+                // adjacent fild m64 / fistp m64 pair stays one reply (see
+                // try_fuse_fld_group).
+                const int run = cache.native_transport && precise_faults_enabled()
+                                    ? 1
+                                    : X87Cache::lookahead(instr_array, num_instrs, insn_idx);
                 cache.set_run(run);
                 // Run bridging: at a fresh run start, check whether short v1
                 // gaps join this run to following x87 segments.  Stash the

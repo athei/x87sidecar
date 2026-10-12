@@ -8,6 +8,7 @@
 #include "rosetta_core/AssemblerBuffer.h"
 #include "rosetta_core/AssemblerHelpers.hpp"
 #include "rosetta_core/Config.h"
+#include "rosetta_core/CoreConfig.h"
 #include "rosetta_core/IRInstr.h"
 #include "rosetta_core/IROperand.h"
 #include "rosetta_core/Opcode.h"
@@ -2859,9 +2860,18 @@ static auto try_fuse_fld_group(TranslationResult* tr, IRInstr* instrs, int64_t n
     IRInstr* next = &instrs[idx + 1];  // caller guarantees idx+1 < num
 
     // Exact int64 copy first: no longer fusion starts with fild + fistp.
+    // A native transport run is answered one instruction per reply so that
+    // a fault in any of its accesses is precise.  The lone pair stays fused
+    // there: it is Delphi's copy loop, seven instructions against 89 as two
+    // replies, and a fault in its store rolls back to the fild, which a
+    // retry handles.  The nested pairs would put a second store after the
+    // first, where a fault aborts.
+    const bool lone_pair_only = tr->x87_cache.native_transport != 0 && precise_faults_enabled();
     if (!fusion_disabled(disabled_mask, FusionId::fild_fistp)) {
-        if (auto r = try_fuse_fild_fistp_nested(tr, instrs, num, idx)) {
-            return r;
+        if (!lone_pair_only) {
+            if (auto r = try_fuse_fild_fistp_nested(tr, instrs, num, idx)) {
+                return r;
+            }
         }
         if (auto r = try_fuse_fild_fistp(tr, cur, next)) {
             return r;

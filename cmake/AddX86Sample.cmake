@@ -19,6 +19,16 @@ function(add_x86_sample_lowzero name)
     _add_x86_sample_impl("${name}" "-Wl,-pagezero_size,0x4000")
 endfunction()
 
+# The low-zero variant, also linked against the frameworks named after the
+# test, e.g. add_x86_sample_lowzero_frameworks(test_x IOSurface CoreFoundation).
+function(add_x86_sample_lowzero_frameworks name)
+    set(flags "-Wl,-pagezero_size,0x4000")
+    foreach(fw IN LISTS ARGN)
+        list(APPEND flags "-framework" "${fw}")
+    endforeach()
+    _add_x86_sample_impl("${name}" "${flags}")
+endfunction()
+
 function(_add_x86_sample_impl name extra_flags)
     set(out_dir "${X86_SAMPLE_OUTPUT_DIR}")
     if(NOT out_dir)

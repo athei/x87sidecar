@@ -32,9 +32,10 @@
 #      must trap under native Rosetta, pass under x87sidecar (the
 #      decode_opcode hook substitutes a decodable encoding), and trap again
 #      under X87_NO_DECODE_HOOK=1
-#  13. x87sidecar with X87_STOCK_BCD=0 on test_fbld, test_fbstp and
-#      test_flags_handoff, the only phase that reaches the inline FBLD/FBSTP
-#      translators (blocks containing them go to stock by default)
+#  13. x87sidecar with X87_STOCK_BCD=0 on test_fbld, test_fbstp,
+#      test_flags_handoff and test_x87_sync_fault, the only phase that
+#      reaches the inline FBLD/FBSTP translators (blocks containing them go
+#      to stock by default)
 #  14. a representative set under X87_FAIL_ALLOC_EVERY=N for several N,
 #      without X87_STRICT_ALLOC: requests whose register allocation fails
 #      are declined to stock, and every result must still match
@@ -53,6 +54,10 @@
 #      tests/data/ir_dup_input.ir and assert it exits 0 with every x87
 #      instruction on the IR path, then tests/data/ir_fpatan_rc.ir and
 #      assert it exits 0 with the fpatan's GPR peak predicted
+#
+# test_x87_sync_fault runs only the faults the sidecar recovers precisely.
+# The ones it still cannot recover, inside longer floating-point runs, abort
+# the process; SYNC_FAULT_IN_RUN=1 adds them for a manual run.
 #
 # Every phase runs with X87_STRICT_ALLOC=1, so a register allocation that
 # fails asserts and crashes the test instead of being declined to stock.
@@ -188,6 +193,7 @@ ALL_TESTS=(
     test_x87_signal_storm
     test_x87_signal_context
     test_x87_native_state
+    test_x87_sync_fault
     test_m80_copy
     test_bcd_exact
     test_alloc_decline
@@ -702,11 +708,13 @@ fi
 # reaches the sidecar's own BCD translators.  This phase keeps them under
 # test on the cases they get right; test_bcd_exact needs all 18 digits and
 # only passes through stock.  test_flags_handoff checks that they leave the
-# guest flags alone.
+# guest flags alone, and test_x87_sync_fault covers a fault in an inline
+# fbld or fbstp.
 STOCK_BCD_OFF_TESTS=(
     test_fbld
     test_fbstp
     test_flags_handoff
+    test_x87_sync_fault
 )
 if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then
     echo ""
@@ -745,6 +753,7 @@ ALLOC_FAIL_TESTS=(
     test_x87_native_state
     test_delphi_move
     test_flags_handoff
+    test_x87_sync_fault
 )
 ALLOC_FAIL_EVERY=(1 3 17 43 97 251)
 if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then

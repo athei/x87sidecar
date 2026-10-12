@@ -341,6 +341,18 @@ the stack across branches stays exact. The signal tests check both arithmetic
 under a SIGUSR1 storm and reading or replacing the saved x87 context in
 64-bit and 32-bit compatibility mode.
 
+A memory fault in translated code can only be rolled back to the start of
+its reply. The sidecar probes the memory operand of each reply's first x87
+instruction before the reply changes any state, and answers runs of integer
+loads and stores one instruction per reply, so a fault there reaches the
+program's SIGSEGV or SIGBUS handler with the same context stock Rosetta
+gives it, except that a probed store into a `PROT_NONE` page is reported
+as a read fault. A fault in a later instruction of a floating-point run
+still aborts the process, and one in the store of an adjacent
+`fild m64; fistp m64` copy is reported at the `fild`;
+[docs/internals.md](docs/internals.md#memory-faults-inside-emitted-code)
+explains why.
+
 Two encodings real hardware runs are missing from Rosetta's decode tables,
 so a program containing them traps under stock Rosetta. A second small stub
 on `decode_opcode` substitutes an encoding the decoder accepts, entirely
@@ -422,6 +434,7 @@ knowing. Bracketed values are defaults.
 | `X87_BRIDGE_V2=0` | disable bridging across flag-writing ALU whose flags Rosetta's liveness proves dead [on] |
 | `X87_ENABLE_IR_SPLIT=0`, `X87_ENABLE_IR_REMAT=0` | disable register-pressure relief: splitting over-pressure runs, sinking long-lived values [on] |
 | `X87_NATIVE_TRANSPORT=0` | put replies made only of integer loads and stores (`fild`, `fistp`, ...) back through the binary64 register file, which rounds int64 values of 2^53 or more held on the stack; for bisecting [on] |
+| `X87_PRECISE_FAULTS=0` | drop the fault probe at the start of each reply and answer runs of integer loads and stores as one reply, so a memory fault in translated x87 code aborts the process again; for bisecting [on] |
 | `X87_DISABLE_X87_IR=1` | direct translator only, no IR pipeline |
 | `X87_DISABLE_ALL_FUSIONS=1`, `X87_DISABLE_FUSIONS=f1,f2` | disable every fusion, or the named ones (`--help` lists the names) |
 | `X87_DISABLE_FUSIONS=fild_fistp,fld_fstp_m80` | send adjacent `fld m80; fstp m80` pairs, and `fild m64; fistp m64` pairs in runs with other x87 work, through binary64 instead of copying the bytes exactly; replies of only integer loads and stores stay exact through native transport [both on] |
