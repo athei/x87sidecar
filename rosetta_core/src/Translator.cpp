@@ -181,6 +181,106 @@ static void flush_run_and_release(TranslationResult& tr) {
     tr.free_gpr_mask = cache.stock_free_gpr_mask;
 }
 
+static bool precise_faults() {
+    return g_rosetta_config == nullptr || g_rosetta_config->precise_faults != 0;
+}
+
+// Bytes an x87 instruction reads or writes through its memory operand.
+static int x87_access_bytes(const IRInstr& insn, const IROperand& op) {
+    switch (insn.opcode()) {
+        case Opcode::kOpcodeName_fbld:
+        case Opcode::kOpcodeName_fbstp:
+            return 10;
+        case Opcode::kOpcodeName_fsave:
+        case Opcode::kOpcodeName_frstor:
+            return 108;  // the 32-bit layout, the only one the emitters write
+        default:
+            break;
+    }
+    switch (op.mem.size) {
+        case IROperandSize::S16:
+            return 2;
+        case IROperandSize::S32:
+            return 4;
+        case IROperandSize::S64:
+            return 8;
+        case IROperandSize::S80:
+            return 10;
+        default:
+            return 1;
+    }
+}
+
+static bool x87_writes_memory(uint16_t opcode) {
+    switch (opcode) {
+        case Opcode::kOpcodeName_fst:
+        case Opcode::kOpcodeName_fstp:
+        case Opcode::kOpcodeName_fist:
+        case Opcode::kOpcodeName_fistp:
+        case Opcode::kOpcodeName_fisttp:
+        case Opcode::kOpcodeName_fbstp:
+        case Opcode::kOpcodeName_fnstcw:
+        case Opcode::kOpcodeName_fstsw:
+        case Opcode::kOpcodeName_fsave:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// A memory fault in translated code is recovered by rolling back to the
+// start of the instruction-map entry the faulting pc belongs to, and there
+// is one entry per reply.  The runtime only rolls back when nothing before
+// the faulting instruction in that entry changed state: no store, no NZCV
+// or FPCR write, no write to a register that holds guest state, and no
+// floating-point arithmetic.  Otherwise it aborts the process with
+// "unexpectedly need to EmulateForward on a synchronous exception".  Every
+// reply changes state before its first guest access (the entry conversion
+// alone does), so the access of the reply's first instruction is probed
+// here, before anything else: the first and last byte are read, and a store
+// target also gets an atomic add of zero to one byte, which leaves memory
+// unchanged and faults exactly where the store would.  The atomic changes
+// state as far as the runtime is concerned, so a reply has room for one,
+// and it comes last.  Once the probes pass, the real access later in the
+// reply cannot fault, and a fault in a probe reaches the guest handler with
+// the reply's first instruction as rip and the state from before it.
+// Accesses further into a reply are not probed: rolling back to the reply
+// start would report the wrong instruction.
+static void emit_fault_probe(TranslationResult& tr, IRInstr& insn) {
+    IROperand* mem = nullptr;
+    for (int i = 0; i < insn.num_operands && i < 4; i++) {
+        const auto kind = insn.operands[i].kind;
+        if (kind == IROperandKind::MemRef || kind == IROperandKind::AbsMem) {
+            mem = &insn.operands[i];
+            break;
+        }
+    }
+    if (mem == nullptr) {
+        return;
+    }
+    const auto saved_mask = tr.free_gpr_mask;
+    tr.free_gpr_mask &= kGprScratchMask;
+    AssemblerBuffer& buf = tr.insn_buf;
+    const int bytes = x87_access_bytes(insn, *mem);
+    const int Xaddr = compute_operand_address(tr, /*is_64bit=*/1, mem, GPR::XZR);
+    if (bytes == 2 || bytes == 4 || bytes == 8) {
+        // One load of the access width covers both pages of an unaligned
+        // access that crosses a page.
+        const int size = bytes == 2 ? 1 : bytes == 4 ? 2 : 3;
+        emit_ldr_str_imm(buf, size, /*is_fp=*/0, /*LDR*/ 1, /*imm12=*/0, Xaddr, GPR::XZR);
+    } else {
+        emit_ldr_str_imm(buf, /*size=*/0, 0, /*LDR*/ 1, /*imm12=*/0, Xaddr, GPR::XZR);
+        if (bytes > 1) {
+            emit_ldr_str_imm(buf, 0, 0, /*LDR*/ 1, bytes - 1, Xaddr, GPR::XZR);
+        }
+    }
+    if (x87_writes_memory(insn.opcode())) {
+        buf.emit(0x383f001fU | (static_cast<uint32_t>(Xaddr) << 5));  // STADDB WZR, [Xaddr]
+    }
+    free_gpr(tr, Xaddr);
+    tr.free_gpr_mask = saved_mask;
+}
+
 auto Translator::translate_instruction(TranslationResult* translation_result, IRBlock* block,
                                        IRInstr* instr_array, int64_t num_instrs, int64_t insn_idx)
     -> std::optional<int64_t> {
@@ -223,6 +323,8 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
     // the flag clear, as every request that ends does.
     const RequestEntry entry = capture_request_entry(*translation_result);
     cache.native_transport = transport ? 1 : 0;
+    if (native_boundary && precise_faults())
+        emit_fault_probe(*translation_result, instr_array[insn_idx]);
     const bool traced =
         native_boundary && x87trace::matches(instr_array, static_cast<size_t>(num_instrs));
     const uint64_t trace_site = uint64_t(instr_array[insn_idx].pc) << 32;
@@ -276,8 +378,15 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
             if (traced)
                 x87trace::emit_boundary(*translation_result, trace_site | (uint64_t(*ret) << 1) | 1,
                                         *ret == num_instrs);
-        } else
+        } else {
+            // Declined: drop the boundary and the fault probe, including
+            // any fixup the probe's address computation recorded.
             translation_result->insn_buf.end = start;
+            for (size_t i = 0; i < 6; i++) {
+                auto& list = translation_result->*kFixupLists[i];
+                list.end = list.begin + entry.fixup_count[i];
+            }
+        }
     }
     if (translation_result->alloc_failure != nullptr) {
         // ARPL is the one opcode stock cannot be handed: it never had an id

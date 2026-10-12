@@ -147,6 +147,13 @@ struct RosettaConfig {
                                       //                           the binary64 register file (for
                                       //                           rollback and bisecting only:
                                       //                           that path rounds |v| >= 2^53).
+    uint8_t precise_faults;           // X87_PRECISE_FAULTS        (default ON) probe the memory
+                                      //                           operand of a reply's first x87
+                                      //                           instruction before anything in
+                                      //                           the reply changes state, so a
+                                      //                           fault there reaches the guest
+                                      //                           handler with a precise context.
+                                      //                           =0 for bisecting and cost A/B.
 
     // X87_BRIDGE_HASH_LIST / X87_NO_BRIDGE_HASH_LIST — per-block bridging
     // bisect, same semantics and hash key as the rollback lists above:
