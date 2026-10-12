@@ -336,6 +336,14 @@ void emit_fcom_cc_write_sw(AssemblerBuffer& buf, TranslationResult& a1, int Xbas
 
 inline constexpr int kNzcvPfBit = 26;
 
+// No x87 instruction other than the fcomi family writes EFLAGS, so code
+// that sets NZCV for its own use has to put the guest's flags back.  Where
+// a GPR is free across the span, MRS into it before and MSR from it after.
+// Where none is, park the flags in an FPR: Xtmp only carries them across
+// and is free again after each call.
+void emit_nzcv_park(AssemblerBuffer& buf, int Dpark, int Xtmp);    // MRS; FMOV Dpark, Xtmp
+void emit_nzcv_unpark(AssemblerBuffer& buf, int Dpark, int Xtmp);  // FMOV Xtmp, Dpark; MSR
+
 // FCOMI/FUCOMI flags.  Pre: NZCV holds an FCMP of ST(0) against ST(i).  Post:
 // NZCV holds the guest EFLAGS FCOMI leaves: ZF, PF and CF from the compare,
 // SF, OF and AF clear.  Allocates and frees 3 GPRs.

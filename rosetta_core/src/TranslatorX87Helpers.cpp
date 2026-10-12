@@ -857,6 +857,16 @@ void emit_fcom_cc_write_sw(AssemblerBuffer& buf, TranslationResult& a1, int Xbas
     free_gpr(a1, Wd_sw);
 }
 
+void emit_nzcv_park(AssemblerBuffer& buf, int Dpark, int Xtmp) {
+    emit_mrs_nzcv(buf, Xtmp);
+    emit_fmov_x_to_d(buf, Dpark, Xtmp);
+}
+
+void emit_nzcv_unpark(AssemblerBuffer& buf, int Dpark, int Xtmp) {
+    emit_fmov_d_to_x(buf, Xtmp, Dpark);
+    emit_msr_nzcv(buf, Xtmp);
+}
+
 // =============================================================================
 // FCOMI flags from an FCMP.
 //

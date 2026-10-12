@@ -156,6 +156,19 @@ followed by the sidecar's `fcmovu` read OF in place of PF, and a stock
 block boundary, and the test harness runs it again with the compares and
 with the `fcmov`s handed to stock.
 
+No other x87 instruction writes EFLAGS, so code the sidecar emits for one
+that sets NZCV for its own branches and selects has to put the guest's flags
+back. Where a scratch register is free across that code it reads NZCV into
+it first and writes it back after; where all of them are taken, as in the
+80-bit conversions of `fld m80`, `fstp m80`, `fsave` and `frstor` and in
+`fbstp`, it parks the flags in a floating-point register. An earlier
+version did neither for those instructions or for `fxam` and `fxtract`, so
+a guest `pushf` after any of them read the flags the conversion or the
+classification had left, not its own. The reply boundary's own conversion
+saves and restores NZCV as well. `test_flags_handoff` sets seven flag
+patterns with `popf`, runs each x87 instruction the sidecar translates,
+alone and in its fused and IR shapes, and checks them with `pushf`.
+
 ## When the translator runs out of registers
 
 The IR pipeline checks a run's register pressure against the scratch pools

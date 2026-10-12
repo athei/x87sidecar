@@ -255,7 +255,11 @@ auto translate_fld(TranslationResult* a1, IRInstr* a2) -> void {
         const int Xsign = alloc_free_gpr(*a1);
         const int Wd_aux = alloc_free_gpr(*a1);
 
+        // The conversion sets NZCV and all eight scratch GPRs are taken, so
+        // the guest flags wait in Dd_val, which receives the value after.
+        emit_nzcv_park(buf, Dd_val, Wd_aux);
         emit_f80_to_f64_convert(buf, Xmant, Wexp, Xsign, Wd_aux, Wd_tmp);
+        emit_nzcv_unpark(buf, Dd_val, Wd_aux);
 
         free_gpr(*a1, Wd_aux);
         free_gpr(*a1, Xsign);
@@ -1369,7 +1373,12 @@ auto translate_fst(TranslationResult* a1, IRInstr* a2) -> void {
         const int Xbits = alloc_free_gpr(*a1);  // raw double bits → f80 mantissa
         const int Wexp = alloc_free_gpr(*a1);   // exponent → f80 exponent word
 
+        // The conversion sets NZCV; the guest flags wait in an FPR.
+        const int Dd_flags = alloc_free_fpr(*a1);
+        emit_nzcv_park(buf, Dd_flags, Wexp);
         emit_f64_to_f80(buf, Xaddr, Dd_src, Xbits, Wexp, Wd_tmp);
+        emit_nzcv_unpark(buf, Dd_flags, Wexp);
+        free_fpr(*a1, Dd_flags);
         free_fpr(*a1, Dd_src);
 
         free_gpr(*a1, Xaddr);
@@ -1654,6 +1663,10 @@ auto translate_fxam(TranslationResult* a1, IRInstr* /*a2*/) -> void {
         buf.emit(insn);
     };
 
+    // Phases A to C set NZCV.  Wd_tmp is idle until x87_end, so it keeps the
+    // guest flags across them.
+    emit_mrs_nzcv(buf, Wd_tmp);
+
     // Default w_class = 0x0400  (Normal).
     emit_movn(buf, 0, /*opc=*/2 /*MOVZ*/, /*hw=*/0, /*imm16=*/0x0400, Wd_class);
 
@@ -1692,6 +1705,7 @@ auto translate_fxam(TranslationResult* a1, IRInstr* /*a2*/) -> void {
     emit_add_imm(buf, 0, 1, 1, 0, 3, Wd_a, 31);  // CMP w_a, #3
     emit_movn(buf, 0, 2, 0, 0x4100, Wd_a);       // w_a = empty
     emit_csel(0, Wd_class, Wd_a, Wd_class, /*cond=*/0 /*EQ*/);
+    emit_msr_nzcv(buf, Wd_tmp);  // last flag reader done: guest flags back
 
     // ── Phase D: OR sign bit into w_class at position 9 (C1). ───────────────
     // Extract only bit 63 (avoids leaking exp bits into C0/C2/C3 through the
@@ -3518,6 +3532,10 @@ auto translate_fxtract(TranslationResult* a1, IRInstr* /*a2*/) -> void {
     emit_fmov_x_to_d(buf, Dd_minf, Xtemp);
     free_gpr(*a1, Xtemp);
 
+    // The selects below set NZCV.  Wd_tmp2 is idle until the push, so it
+    // keeps the guest flags until the last CSEL.
+    emit_mrs_nzcv(buf, Wd_tmp2);
+
     // ANDS XZR, Xv, #0x000FFFFFFFFFFFFF — Z=1 iff mantissa==0.
     LogicalImmEncoding enc_mant;
     is_bitmask_immediate(/*is_64bit=*/true, 0x000FFFFFFFFFFFFFULL, enc_mant);
@@ -3571,6 +3589,7 @@ auto translate_fxtract(TranslationResult* a1, IRInstr* /*a2*/) -> void {
     emit_add_imm(buf, /*is_64bit=*/0, /*is_sub=*/1, /*is_set_flags=*/1,
                  /*shift=*/0, /*imm12=*/0, Wd_e, /*Rd=*/31);
     emit_csel(/*is_64bit=*/1, /*Rd=*/Xs, /*Rn=*/Xv, /*Rm=*/Xs, kEQ);
+    emit_msr_nzcv(buf, Wd_tmp2);
     free_gpr(*a1, Wd_e);
     free_gpr(*a1, Xv);
 
@@ -3818,6 +3837,11 @@ auto translate_fbstp(TranslationResult* a1, IRInstr* a2) -> void {
     // Step 2: load ST(0).
     emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Dd_val, Xst_base);
 
+    // Steps 4 to 8 set NZCV with every scratch GPR in use at the peak, so
+    // the guest flags wait in an FPR.
+    const int Dd_flags = alloc_free_fpr(*a1);
+    emit_nzcv_park(buf, Dd_flags, Wd_tmp);
+
     // Wd_tmp / Wd_tmp2 are dead until x87_pop — free them so the body has
     // enough scratch GPRs.  Re-allocated at the bottom for x87_pop.
     free_gpr(*a1, Wd_tmp2);
@@ -3910,6 +3934,9 @@ auto translate_fbstp(TranslationResult* a1, IRInstr* a2) -> void {
                  Xint, GPR::XZR);
     // CSEL Xint, Xneg, Xint, LT  → Xint = (Xint < 0) ? Xneg : Xint = |Xint|
     emit_csel(/*is_64bit=*/1, /*Rd=*/Xint, /*Rn=*/Xneg, /*Rm=*/Xint, /*cond=*/11 /*LT*/);
+    // Last flag reader: guest flags back.  The rest branches with CBNZ only.
+    emit_nzcv_unpark(buf, Dd_flags, Xneg);
+    free_fpr(*a1, Dd_flags);
     free_gpr(*a1, Xneg);
 
     // Xten = 10
@@ -4112,6 +4139,11 @@ auto translate_frstor(TranslationResult* a1, IRInstr* a2) -> void {
     const int Wd_aux = alloc_free_gpr(*a1);
     const int Dd_val = alloc_free_fpr(*a1);
 
+    // The conversions set NZCV and every scratch GPR is taken, so the guest
+    // flags wait in an FPR for the whole loop.
+    const int Dd_flags = alloc_free_fpr(*a1);
+    emit_nzcv_park(buf, Dd_flags, Xmant);
+
     for (int i = 0; i < 8; ++i) {
         const int delta = (i == 0) ? 0x1C : 10;
         // Bump Xslot to the start of the current slot.
@@ -4128,6 +4160,8 @@ auto translate_frstor(TranslationResult* a1, IRInstr* a2) -> void {
         emit_store_st(buf, Xbase, Wd_top, /*stack_depth=*/i, Wd_tmp, Dd_val, Xst_base);
     }
 
+    emit_nzcv_unpark(buf, Dd_flags, Xmant);
+    free_fpr(*a1, Dd_flags);
     free_fpr(*a1, Dd_val);
     free_gpr(*a1, Wd_aux);
     free_gpr(*a1, Xsign);
@@ -4239,6 +4273,10 @@ auto translate_fsave(TranslationResult* a1, IRInstr* a2) -> void {
     const int Wexp = alloc_free_gpr(*a1);
     const int Dd_src = alloc_free_fpr(*a1);
 
+    // The conversions set NZCV; the guest flags wait in an FPR for the loop.
+    const int Dd_flags = alloc_free_fpr(*a1);
+    emit_nzcv_park(buf, Dd_flags, Xbits);
+
     for (int i = 0; i < 8; ++i) {
         // Load ST(i) (logical depth i from current TOP).
         emit_load_st(buf, Xbase, Wd_top, /*stack_depth=*/i, Wd_tmp, Dd_src, Xst_base);
@@ -4250,6 +4288,8 @@ auto translate_fsave(TranslationResult* a1, IRInstr* a2) -> void {
         emit_f64_to_f80(buf, Xslot, Dd_src, Xbits, Wexp, Wd_tmp);
     }
 
+    emit_nzcv_unpark(buf, Dd_flags, Xbits);
+    free_fpr(*a1, Dd_flags);
     free_fpr(*a1, Dd_src);
     free_gpr(*a1, Wexp);
     free_gpr(*a1, Xbits);
