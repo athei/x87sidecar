@@ -354,7 +354,7 @@ auto emit_msr_fpcr(AssemblerBuffer& buf, int Xd) -> void;
 // Encoding: sf | 011010 | b5=0 | op=is_nz | imm19 | Rt
 auto emit_cbz(AssemblerBuffer& buf, int is_64bit, int is_nz, int Rt, int imm19) -> void;
 
-// TBZ/TBNZ Rt, #bit, #imm14 — test bit and branch if (non-)zero
+// TBZ/TBNZ Rt, #bit, #imm14: test bit and branch if (non-)zero
 // is_nz: 0=TBZ, 1=TBNZ
 // bit:   0..63; 32 and above select the X form
 // imm14: signed instruction-count offset

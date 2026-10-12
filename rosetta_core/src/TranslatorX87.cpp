@@ -18,6 +18,7 @@
 #include "rosetta_core/TranslatorX87F80.hpp"
 #include "rosetta_core/TranslatorX87Helpers.hpp"
 #include "rosetta_core/TranslatorX87Transcendental.hpp"
+#include "rosetta_core/X87IR.h"
 
 namespace TranslatorX87 {
 
@@ -3093,7 +3094,7 @@ auto translate_fcmov(TranslationResult* a1, IRInstr* a2) -> void {
         emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Dd_st0, Xst_base);
 
     // if (cond) result = Dd_src, else result = Dd_st0.  NZCV holds the guest
-    // EFLAGS from whatever set them last — this is what FCMOV tests.
+    // EFLAGS from whatever set them last, which is what FCMOV tests.
     emit_fcmov_select(buf, *a1, Dd_st0, Dd_src, Dd_st0, aarch64_cond);
 
     // Store result back to ST(0).

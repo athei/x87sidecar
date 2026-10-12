@@ -334,10 +334,6 @@ void emit_fcom_cc_write_sw(AssemblerBuffer& buf, TranslationResult& a1, int Xbas
 // AArch64 condition code tests them, so a PF reader goes through MRS.
 // =============================================================================
 
-// FCMOV conditions beyond the AArch64 condition codes: FCMOVU and FCMOVNU
-// test PF, which only NZCV bit 26 holds.
-inline constexpr int kFcmovCondPF = 16;   // PF == 1
-inline constexpr int kFcmovCondNPF = 17;  // PF == 0
 inline constexpr int kNzcvPfBit = 26;
 
 // FCOMI/FUCOMI flags.  Pre: NZCV holds an FCMP of ST(0) against ST(i).  Post:

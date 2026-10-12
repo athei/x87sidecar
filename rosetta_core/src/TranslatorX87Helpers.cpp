@@ -7,6 +7,7 @@
 #include "rosetta_core/Register.h"
 #include "rosetta_core/TranslationResult.h"
 #include "rosetta_core/TranslatorHelpers.hpp"
+#include "rosetta_core/X87IR.h"
 
 // emit_ldr_str_imm with size=1 (LDRH/STRH) uses a halfword-scaled imm12:
 // byte_offset = imm12 * 2.  Pass byte_offset/2 for all LDRH/STRH calls.

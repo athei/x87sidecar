@@ -3,7 +3,6 @@
 #include "rosetta_core/IRInstr.h"
 #include "rosetta_core/IROperand.h"
 #include "rosetta_core/Opcode.h"
-#include "rosetta_core/TranslatorX87Helpers.hpp"
 #include "rosetta_core/X87Bridge.h"
 #include "rosetta_core/X87IR.h"
 

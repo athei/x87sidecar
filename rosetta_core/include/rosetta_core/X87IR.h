@@ -7,6 +7,12 @@ struct TranslationResult;
 struct IRInstr;
 union IROperand;
 
+// FCMOV conditions beyond the AArch64 condition codes: FCMOVU and FCMOVNU
+// test PF, which only NZCV bit 26 holds (see emit_fcmov_select).  Used by
+// the direct translator and as FCSel's imm_bits.
+inline constexpr int kFcmovCondPF = 16;   // PF == 1
+inline constexpr int kFcmovCondNPF = 17;  // PF == 0
+
 namespace X87IR {
 
 // Per-Context cap on IR nodes.  Bumped 64 → 128 on 2026-05-03 after the
@@ -63,7 +69,7 @@ enum class Op : uint8_t {
     FScale,  // 2 in, 1 out: in0 * 2^trunc(in1); ST(1) (=in1) unchanged in slot
 
     // Conditional select (FCMOV): inputs[0]=ST(0) false arm, inputs[1]=ST(i) true arm
-    // imm_bits[3:0] = AArch64 condition code
+    // imm_bits = AArch64 condition code, or kFcmovCondPF/kFcmovCondNPF
     FCSel,
 
     // Memory stores (side effects — emitted in program order)
