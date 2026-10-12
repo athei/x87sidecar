@@ -32,15 +32,16 @@
 #      must trap under native Rosetta, pass under x87sidecar (the
 #      decode_opcode hook substitutes a decodable encoding), and trap again
 #      under X87_NO_DECODE_HOOK=1
-#  13. x87sidecar with X87_STOCK_BCD=0 on test_fbld and test_fbstp, the only
-#      phase that reaches the inline FBLD/FBSTP translators (blocks
-#      containing them go to stock by default)
+#  13. x87sidecar with X87_STOCK_BCD=0 on test_fbld, test_fbstp and
+#      test_flags_handoff, the only phase that reaches the inline FBLD/FBSTP
+#      translators (blocks containing them go to stock by default)
 #  14. a representative set under X87_FAIL_ALLOC_EVERY=N for several N,
 #      without X87_STRICT_ALLOC: requests whose register allocation fails
 #      are declined to stock, and every result must still match
 #  15. test_x87_ftz_daz: passes under native Rosetta and under x87sidecar
 #      with X87_IGNORE_FTZ_DAZ=1 (default, IR off, fusions off), and must
-#      still fail under x87sidecar without the knob
+#      still fail under x87sidecar without the knob; test_flags_handoff must
+#      pass with the knob
 #  16. test_flags_handoff with X87_STOCK_OPS handing the fcomi family, then
 #      the fcmov family, to stock, with the IR on and off: guest flags set
 #      by one translator and read by the other.  Each run must resolve every
@@ -700,10 +701,12 @@ fi
 # Blocks containing FBLD or FBSTP go to stock by default, so no other phase
 # reaches the sidecar's own BCD translators.  This phase keeps them under
 # test on the cases they get right; test_bcd_exact needs all 18 digits and
-# only passes through stock.
+# only passes through stock.  test_flags_handoff checks that they leave the
+# guest flags alone.
 STOCK_BCD_OFF_TESTS=(
     test_fbld
     test_fbstp
+    test_flags_handoff
 )
 if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then
     echo ""
@@ -828,6 +831,10 @@ if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then
         expect_ftz "ftz_daz  knob on, IR + fusions off"  pass env X87_IGNORE_FTZ_DAZ=1 \
             X87_DISABLE_X87_IR=1 X87_DISABLE_ALL_FUSIONS=1 "$LOADER" "$FTZ_BIN"
         expect_ftz "ftz_daz  knob off (flushes)"         fail "$LOADER" "$FTZ_BIN"
+        # The knob adds code to every reply boundary; the guest flags must
+        # still come through it.
+        expect_ftz "flags_handoff  knob on"              pass env X87_IGNORE_FTZ_DAZ=1 \
+            "$LOADER" "$TESTS_BIN/test_flags_handoff"
     fi
 fi
 
