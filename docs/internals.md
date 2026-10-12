@@ -118,6 +118,57 @@ every iteration bit for bit. Stock Rosetta itself shifts the x87 stack when
 a signal lands in its `fcomp`, `fcompp` or `ficomp` translations; the
 harness records that as a stock divergence.
 
+## Guest flags in NZCV
+
+Stock Rosetta keeps the guest's EFLAGS in NZCV, and a flag one translator
+sets is read by the other whenever an x87 instruction and its neighbours go
+to different ones: every SSE and integer instruction is stock's, and
+declined requests, `X87_STOCK_OPS` and `X87_STOCK_HASH_LIST` hand x87
+instructions to stock too. So the sidecar has to use stock's layout exactly:
+
+| x86 flag | where stock keeps it |
+|---|---|
+| SF | N |
+| ZF | Z |
+| CF | C, inverted |
+| OF | V |
+| AF | NZCV bit 27 |
+| PF | NZCV bit 26 |
+
+Bits 26 and 27 are below the four architectural flags. Apple cores write
+them on flag-setting instructions, and `MRS`/`MSR NZCV` read and write
+them. Stock's translations show the layout directly: `pushf` and `lahf`
+read PF with `MRS` and `UBFX #26` and AF with `UBFX #27`, `popf` and `sahf`
+pack all six into one `MSR NZCV`, `jp` and `setp` test bit 26, `ucomisd`
+is `FCMP; AXFLAG` with PF taken from bit 26 afterwards, and `add` is
+`ADDS; CFINV` so that C holds the inverted carry when the next instruction
+starts.
+
+No AArch64 condition code tests bit 26, so the sidecar's `fcmovu` and
+`fcmovnu` read NZCV into a register and branch over the move with `TBZ` or
+`TBNZ` on bit 26. Its `fcomi` family writes ZF, PF and CF and leaves SF, OF
+and AF clear, as the hardware does. An earlier version had `fcmovu` test V,
+and `fcomi` copy the unordered result into V as well as bit 26 so that the
+two agreed: a stock `ucomisd`, `sahf`, `popf` or integer instruction
+followed by the sidecar's `fcmovu` read OF in place of PF, and a stock
+`seto`, `jo` or `pushf` after the sidecar's `fucomi` of a NaN saw OF set.
+`test_flags_handoff` runs each direction, in the same block and across a
+block boundary, and the test harness runs it again with the compares and
+with the `fcmov`s handed to stock.
+
+No other x87 instruction writes EFLAGS, so code the sidecar emits for one
+that sets NZCV for its own branches and selects has to put the guest's flags
+back. Where a scratch register is free across that code it reads NZCV into
+it first and writes it back after; where all of them are taken, as in the
+80-bit conversions of `fld m80`, `fstp m80`, `fsave` and `frstor` and in
+`fbstp`, it parks the flags in a floating-point register. An earlier
+version did neither for those instructions or for `fxam` and `fxtract`, so
+a guest `pushf` after any of them read the flags the conversion or the
+classification had left, not its own. The reply boundary's own conversion
+saves and restores NZCV as well. `test_flags_handoff` sets seven flag
+patterns with `popf`, runs each x87 instruction the sidecar translates,
+alone and in its fused and IR shapes, and checks them with `pushf`.
+
 ## When the translator runs out of registers
 
 The IR pipeline checks a run's register pressure against the scratch pools
@@ -149,16 +200,12 @@ the next request in it enters the block afresh.
 
 The rest of the block goes to stock as well: later requests in it are
 declined without translating, until stock moves to another block or starts
-this one over. Stock and the sidecar do not keep every flag in the same
-place. The sidecar's `fcmovu` reads PF from V, which stock's `fucomi` leaves
-clear, so a sidecar instruction must not read flags that a stock translation
-of the same block set. Instructions translated before the failure stay, since
-stock's readers find what the sidecar writes. The rule stops at the block
-boundary: a stock `fucomi` at the end of a declined block followed by a
-sidecar `fcmovu` in the next block still reads PF wrong, as it already did
-for blocks handed to stock by `X87_STOCK_HASH_LIST` or `X87_STOCK_OPS`. A
-block declined from its first request gets no block profiler counter, and
-the profiler's per-block diagnostics for a declined block can include the
+this one over. The flags do not need this, since both translators keep them
+in the same place (see [Guest flags in NZCV](#guest-flags-in-nzcv)); the
+rule is kept because a failed request is rare and it only costs speed in
+that block. Instructions translated before the failure stay. A block
+declined from its first request gets no block profiler counter, and the
+profiler's per-block diagnostics for a declined block can include the
 declined attempt.
 
 ARPL is the exception. Stock has no opcode for it, so a failure while

@@ -1013,10 +1013,10 @@ bool build(Context& ctx, IRInstr* instr_array, int64_t num_instrs, int64_t start
                 ok = build_fcmov(ctx, instr, 1);  // NE
                 break;
             case kOpcodeName_fcmovu:
-                ok = build_fcmov(ctx, instr, 6);  // VS
+                ok = build_fcmov(ctx, instr, kFcmovCondPF);
                 break;
             case kOpcodeName_fcmovnu:
-                ok = build_fcmov(ctx, instr, 7);  // VC
+                ok = build_fcmov(ctx, instr, kFcmovCondNPF);
                 break;
 
             case kOpcodeName_ftst: {

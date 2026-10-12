@@ -992,9 +992,11 @@ void lower(Context& ctx, TranslationResult* result) {
                     Dd = alloc_free_fpr(*result);
                 }
                 fprs.node_fpr[i] = static_cast<int8_t>(Dd);
-                int cond = static_cast<int>(n.imm_bits & 0xF);
-                // FCSEL Dd, Dn_true, Dm_false, cond → Dd = cond ? Dn : Dm
-                emit_fcsel_f64(buf, Dd, Dm, Dn, cond);
+                // An AArch64 condition code, or kFcmovCondPF/NPF for
+                // FCMOVU/FCMOVNU, which read PF from NZCV bit 26.
+                int cond = static_cast<int>(n.imm_bits);
+                // Dd = cond ? Dm (true arm) : Dn (false arm)
+                emit_fcmov_select(buf, *result, Dd, Dm, Dn, cond);
                 break;
             }
 
@@ -1177,34 +1179,8 @@ void lower(Context& ctx, TranslationResult* result) {
                 int Dd_src = fprs.get(n.inputs[1]);
 
                 emit_fcmp_f64(buf, Dd_st0, Dd_src);
-
-                // Extract condition bits before any MSR clobbers NZCV.
-                int Wd_z = alloc_free_gpr(*result);
-                int Wd_v = alloc_free_gpr(*result);
-                int Wd_c = alloc_free_gpr(*result);
-
-                emit_cset(buf, /*is_64bit=*/0, /*cond=*/0 /*EQ*/, Wd_z);  // 1 if equal
-                emit_cset(buf, /*is_64bit=*/0, /*cond=*/6 /*VS*/, Wd_v);  // 1 if unordered
-                emit_cset(buf, /*is_64bit=*/0, /*cond=*/2 /*CS*/, Wd_c);  // 1 if carry set
-
-                // Z_new = Z | V  (equal or unordered → ZF)
-                emit_logical_shifted_reg(buf, 0, /*ORR*/ 1, 0, /*LSL*/ 0, Wd_v, 0, Wd_z, Wd_z);
-                // C_new = C & !V  (carry clear for unordered → CF)
-                emit_logical_shifted_reg(buf, 0, /*AND*/ 0, /*N=invert rhs*/ 1, /*LSL*/ 0, Wd_v, 0,
-                                         Wd_c, Wd_c);
-
-                // Pack NZCV: bit30=ZF, bit29=CF, bit28=V(PF for FCMOV), bit26=PF
-                emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/2 /*UBFM*/, /*N=*/0,
-                              /*immr=*/2, /*imms=*/1, Wd_z, Wd_z);
-                emit_logical_shifted_reg(buf, 0, /*ORR*/ 1, 0, /*LSL*/ 0, Wd_c, 29, Wd_z, Wd_z);
-                emit_logical_shifted_reg(buf, 0, /*ORR*/ 1, 0, /*LSL*/ 0, Wd_v, 28, Wd_z, Wd_z);
-                emit_logical_shifted_reg(buf, 0, /*ORR*/ 1, 0, /*LSL*/ 0, Wd_v, 26, Wd_z, Wd_z);
-
-                emit_msr_nzcv(buf, Wd_z);
-
-                free_gpr(*result, Wd_c);
-                free_gpr(*result, Wd_v);
-                free_gpr(*result, Wd_z);
+                // ZF, PF (NZCV bit 26) and CF from the compare; SF, OF, AF clear.
+                emit_fcomi_nzcv(buf, *result);
                 // Pop (for FCOMIP/FUCOMIP) is handled by the IR epilogue via top_delta.
                 break;
             }
@@ -1547,7 +1523,8 @@ void lower(Context& ctx, TranslationResult* result) {
 // (Wd_tmp2 + Wd_tagw).  preamble_gprs carries that from the cache state.
 //
 // Per-node transient GPR demand (mirrors the lowering code exactly):
-//   - ReadSt, Const*, FAdd/FSub/FMul/FDiv, FMA*, FNeg/FAbs/FSqrt, FCSel: 0
+//   - ReadSt, Const*, FAdd/FSub/FMul/FDiv, FMA*, FNeg/FAbs/FSqrt: 0
+//   - FCSel: 0, or 1 for FCMOVU/FCMOVNU (the MRS that reads PF)
 //   - FMAdd FMA-reduce head: 1 (load address inside lower_fma_reduce)
 //   - LoadF64, LoadF32, StoreF64, StoreF32: 1 (addr from compute_operand_address)
 //   - LoadI16/I32/I64: 2 (addr + Wd_val)
@@ -1650,7 +1627,14 @@ int peak_live_gprs(const Context& ctx, int budget, int* first_over_node, bool fa
             case Op::FNeg:
             case Op::FAbs:
             case Op::FSqrt:
+                break;
+
+            // FCSel: 0, except FCMOVU/FCMOVNU, which read NZCV into one
+            // GPR to test PF (emit_fcmov_select).
             case Op::FCSel:
+                if (n.imm_bits == kFcmovCondPF || n.imm_bits == kFcmovCondNPF) {
+                    transient = 1;
+                }
                 break;
 
             // FMAdd: 0, except an FMA-reduce head, whose lower_fma_reduce

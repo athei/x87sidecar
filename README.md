@@ -377,18 +377,19 @@ python3 scripts/test_unhooked_fallback.py  # unhooked fallback, no privileges
 bash scripts/run_benchmarks.sh           # build + benchmark table
 ```
 
-The harness runs 104 self-checking x86-64 test binaries under stock Rosetta
+The harness runs 105 self-checking x86-64 test binaries under stock Rosetta
 and then under the sidecar in ten configurations (default, IR off, fusions
 off, hook bypassed, FMA contraction on, clamped register pool, pressure
 relief off, fast rounding, bridging off, bridging v2 off), plus a
 cooperative-attach smoke test, the two decoder tests three ways, the inline
 BCD translators with `X87_STOCK_BCD=0`, an allocation fault-injection phase,
 the FTZ/DAZ test with and without `X87_IGNORE_FTZ_DAZ` (`test_x87_ftz_daz`
-runs only in that phase) and an IR replay phase. The stock run is the
-baseline: a case that fails there is reported XFAIL in later phases rather
-than gating, and the stock run itself may only fail for tests listed in
-`KNOWN_STOCK_DIVERGENCE`. The harness uses the default attach path, so it
-needs `x87sidecar_entitled` or root.
+runs only in that phase), the guest-flags test with the `fcomi` and the
+`fcmov` families handed to stock, and an IR replay phase. The stock run is
+the baseline: a case that fails there is reported XFAIL in later phases
+rather than gating, and the stock run itself may only fail for tests listed
+in `KNOWN_STOCK_DIVERGENCE`. The harness uses the default attach path, so
+it needs `x87sidecar_entitled` or root.
 
 When the translator runs out of scratch registers it declines the request
 and stock Rosetta translates that instruction, which keeps a program running

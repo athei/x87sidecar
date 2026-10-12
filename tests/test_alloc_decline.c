@@ -188,9 +188,9 @@ static void compares(const double* a, uint8_t* below, uint16_t* sw) {
         : "eax", "st", "st(1)", "cc", "memory");
 }
 
-/* FUCOMI sets PF and FCMOVU reads it.  Stock and the sidecar keep PF in
- * different places, so the two must not be split between them when the
- * FUCOMI request is declined. */
+/* FUCOMI sets PF and FCMOVU reads it, from NZCV bit 26 in both stock's and
+ * the sidecar's translation, so the result holds whichever of them a
+ * declined request leaves each instruction to. */
 static double fcmovu_after_fucomi(double a, double b, double src) {
     double out;
     __asm__ volatile(

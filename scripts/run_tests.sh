@@ -32,15 +32,20 @@
 #      must trap under native Rosetta, pass under x87sidecar (the
 #      decode_opcode hook substitutes a decodable encoding), and trap again
 #      under X87_NO_DECODE_HOOK=1
-#  13. x87sidecar with X87_STOCK_BCD=0 on test_fbld and test_fbstp, the only
-#      phase that reaches the inline FBLD/FBSTP translators (blocks
-#      containing them go to stock by default)
+#  13. x87sidecar with X87_STOCK_BCD=0 on test_fbld, test_fbstp and
+#      test_flags_handoff, the only phase that reaches the inline FBLD/FBSTP
+#      translators (blocks containing them go to stock by default)
 #  14. a representative set under X87_FAIL_ALLOC_EVERY=N for several N,
 #      without X87_STRICT_ALLOC: requests whose register allocation fails
 #      are declined to stock, and every result must still match
 #  15. test_x87_ftz_daz: passes under native Rosetta and under x87sidecar
 #      with X87_IGNORE_FTZ_DAZ=1 (default, IR off, fusions off), and must
-#      still fail under x87sidecar without the knob
+#      still fail under x87sidecar without the knob; test_flags_handoff must
+#      pass with the knob
+#  16. test_flags_handoff with X87_STOCK_OPS handing the fcomi family, then
+#      the fcmov family, to stock, with the IR on and off: guest flags set
+#      by one translator and read by the other.  Each run must resolve every
+#      name and hand at least one block to stock
 #   R. replay tests/data/geom_block_874c40.ir under --fpr-pool 8 and
 #      assert the pressure splits keep it on the IR path (fpr_fail=0), then
 #      replay tests/data/fist_pressure.ir the same way and assert it exits 0
@@ -136,6 +141,7 @@ ALL_TESTS=(
     test_fild_fistp_copy
     test_delphi_move
     test_fcmov
+    test_flags_handoff
     test_ficom
     test_rc_recache
     test_fstpt_gs
@@ -695,10 +701,12 @@ fi
 # Blocks containing FBLD or FBSTP go to stock by default, so no other phase
 # reaches the sidecar's own BCD translators.  This phase keeps them under
 # test on the cases they get right; test_bcd_exact needs all 18 digits and
-# only passes through stock.
+# only passes through stock.  test_flags_handoff checks that they leave the
+# guest flags alone.
 STOCK_BCD_OFF_TESTS=(
     test_fbld
     test_fbstp
+    test_flags_handoff
 )
 if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then
     echo ""
@@ -736,6 +744,7 @@ ALLOC_FAIL_TESTS=(
     test_fxch
     test_x87_native_state
     test_delphi_move
+    test_flags_handoff
 )
 ALLOC_FAIL_EVERY=(1 3 17 43 97 251)
 if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then
@@ -822,6 +831,61 @@ if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then
         expect_ftz "ftz_daz  knob on, IR + fusions off"  pass env X87_IGNORE_FTZ_DAZ=1 \
             X87_DISABLE_X87_IR=1 X87_DISABLE_ALL_FUSIONS=1 "$LOADER" "$FTZ_BIN"
         expect_ftz "ftz_daz  knob off (flushes)"         fail "$LOADER" "$FTZ_BIN"
+        # The knob adds code to every reply boundary; the guest flags must
+        # still come through it.
+        expect_ftz "flags_handoff  knob on"              pass env X87_IGNORE_FTZ_DAZ=1 \
+            "$LOADER" "$TESTS_BIN/test_flags_handoff"
+    fi
+fi
+
+# ── Phase 16: guest flags across the stock/sidecar boundary ──────────────
+# test_flags_handoff puts its fcomi-family compares and the fcmovs that read
+# them in separate blocks.  Handing every block that holds a compare to
+# stock leaves the fcmovs to the sidecar, and handing the fcmovs to stock
+# leaves the compares to the sidecar, so each translator reads PF, ZF and CF
+# where the other wrote them.  The other phases cover stock's SSE, integer,
+# sahf and popf setters and its setcc, jcc, cmovcc, lahf and pushf readers.
+# A misspelt name, or a list that handed no block to stock, would pass
+# without testing anything, so each run must resolve every name to its
+# opcode id and report at least one block handed over.
+# Each entry is "<X87_STOCK_OPS value>|<opcode ids it resolves to>".
+FLAGS_HANDOFF_STOCK_OPS=(
+    "fcomi,fucomi,fcomip,fucomip|4"
+    "fcmovu,fcmovnu,fcmovb,fcmove,fcmovbe,fcmovnb,fcmovne,fcmovnbe|8"
+)
+if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then
+    echo ""
+    echo -e "${BOLD}=== Phase 16: guest flags across stock and the sidecar (X87_STOCK_OPS) ===${NC}"
+
+    BINARY="$TESTS_BIN/test_flags_handoff"
+    if [[ ! -x "$BINARY" ]]; then
+        echo -e "${YELLOW}SKIP${NC}  test_flags_handoff  (binary not found)"
+        ERRORS=$((ERRORS + 1))
+    else
+        for entry in "${FLAGS_HANDOFF_STOCK_OPS[@]}"; do
+            ops="${entry%%|*}"
+            want_ids="${entry##*|}"
+            for ir_off in 0 1; do
+                echo "      X87_STOCK_OPS=$ops X87_DISABLE_X87_IR=$ir_off"
+                EXIT=0
+                OUT=$(X87_STOCK_OPS=$ops X87_DISABLE_X87_IR=$ir_off "$LOADER" "$BINARY" \
+                    2>/dev/null | filter_runtime_lines) || EXIT=$?
+                if grep -q 'X87_STOCK_OPS: unknown opcode' <<<"$OUT" ||
+                    ! grep -q "X87_STOCK_OPS: $want_ids opcode ids resolved" <<<"$OUT"; then
+                    TOTAL=$((TOTAL + 1))
+                    echo -e "${RED}FAIL${NC}  test_flags_handoff  (X87_STOCK_OPS did not resolve to $want_ids opcode ids)"
+                    FAILED=$((FAILED + 1))
+                    continue
+                fi
+                if ! grep -q '\[x87stock\] hit #1 ' <<<"$OUT"; then
+                    TOTAL=$((TOTAL + 1))
+                    echo -e "${RED}FAIL${NC}  test_flags_handoff  (no block handed to stock)"
+                    FAILED=$((FAILED + 1))
+                    continue
+                fi
+                check_output "test_flags_handoff" "$OUT" "$EXIT"
+            done
+        done
     fi
 fi
 
