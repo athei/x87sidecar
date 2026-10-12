@@ -41,6 +41,9 @@
 #  15. test_x87_ftz_daz: passes under native Rosetta and under x87sidecar
 #      with X87_IGNORE_FTZ_DAZ=1 (default, IR off, fusions off), and must
 #      still fail under x87sidecar without the knob
+#  16. test_flags_handoff with X87_STOCK_OPS handing the fcomi family, then
+#      the fcmov family, to stock, with the IR on and off: guest flags set
+#      by one translator and read by the other
 #   R. replay tests/data/geom_block_874c40.ir under --fpr-pool 8 and
 #      assert the pressure splits keep it on the IR path (fpr_fail=0), then
 #      replay tests/data/fist_pressure.ir the same way and assert it exits 0
@@ -136,6 +139,7 @@ ALL_TESTS=(
     test_fild_fistp_copy
     test_delphi_move
     test_fcmov
+    test_flags_handoff
     test_ficom
     test_rc_recache
     test_fstpt_gs
@@ -736,6 +740,7 @@ ALLOC_FAIL_TESTS=(
     test_fxch
     test_x87_native_state
     test_delphi_move
+    test_flags_handoff
 )
 ALLOC_FAIL_EVERY=(1 3 17 43 97 251)
 if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then
@@ -822,6 +827,37 @@ if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then
         expect_ftz "ftz_daz  knob on, IR + fusions off"  pass env X87_IGNORE_FTZ_DAZ=1 \
             X87_DISABLE_X87_IR=1 X87_DISABLE_ALL_FUSIONS=1 "$LOADER" "$FTZ_BIN"
         expect_ftz "ftz_daz  knob off (flushes)"         fail "$LOADER" "$FTZ_BIN"
+    fi
+fi
+
+# ── Phase 16: guest flags across the stock/sidecar boundary ──────────────
+# test_flags_handoff puts its fcomi-family compares and the fcmovs that read
+# them in separate blocks.  Handing every block that holds a compare to
+# stock leaves the fcmovs to the sidecar, and handing the fcmovs to stock
+# leaves the compares to the sidecar, so each translator reads PF, ZF and CF
+# where the other wrote them.  The other phases cover stock's SSE, integer,
+# sahf and popf setters and its setcc, jcc, cmovcc, lahf and pushf readers.
+FLAGS_HANDOFF_STOCK_OPS=(
+    fcomi,fucomi,fcomip,fucomip
+    fcmovu,fcmovnu,fcmovb,fcmove,fcmovbe,fcmovnb,fcmovne,fcmovnbe
+)
+if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then
+    echo ""
+    echo -e "${BOLD}=== Phase 16: guest flags across stock and the sidecar (X87_STOCK_OPS) ===${NC}"
+
+    BINARY="$TESTS_BIN/test_flags_handoff"
+    if [[ ! -x "$BINARY" ]]; then
+        echo -e "${YELLOW}SKIP${NC}  test_flags_handoff  (binary not found)"
+        ERRORS=$((ERRORS + 1))
+    else
+        for ops in "${FLAGS_HANDOFF_STOCK_OPS[@]}"; do
+            for ir_off in 0 1; do
+                EXIT=0
+                OUT=$(X87_STOCK_OPS=$ops X87_DISABLE_X87_IR=$ir_off "$LOADER" "$BINARY" \
+                    2>/dev/null | filter_runtime_lines) || EXIT=$?
+                check_output "test_flags_handoff" "$OUT" "$EXIT"
+            done
+        done
     fi
 fi
 
