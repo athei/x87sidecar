@@ -95,6 +95,10 @@ struct RosettaConfig {
                                       //                           declined to stock with one log
                                       //                           line.  The test harness sets it
                                       //                           so pressure-model bugs crash.
+    uint32_t fail_alloc_every;        // X87_FAIL_ALLOC_EVERY      test-only fault injection: every
+                                      //                           Nth scratch register allocation
+                                      //                           in the process fails as if the
+                                      //                           pool were empty (0 = off).
     uint8_t enable_bridge;            // X87_ENABLE_BRIDGE         (default ON since 2026-07-04)
                                       //                           run bridging v1: carry one IR
                                       //                           run across short gaps of

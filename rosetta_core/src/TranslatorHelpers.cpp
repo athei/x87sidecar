@@ -1,5 +1,6 @@
 #include "rosetta_core/TranslatorHelpers.hpp"
 
+#include <atomic>
 #include <cassert>
 #include <cstdint>
 
@@ -27,6 +28,14 @@
 
 namespace {
 
+// ANDed into the free mask before the emptiness test, so one branch covers
+// both an empty pool and the X87_FAIL_ALLOC_EVERY injection: while the
+// injection is armed the mask is 0 and every allocation takes the slow path,
+// which counts it.
+uint32_t g_alloc_fast_mask = ~0U;
+uint32_t g_alloc_fail_every = 0;
+std::atomic<uint64_t> g_alloc_count{0};
+
 // Placeholders handed out after a failure.  Any in-range number will do:
 // the request's code is never installed.
 constexpr int kPlaceholderGpr = kGprScratchPool[0];
@@ -36,21 +45,39 @@ bool alloc_strict() {
     return g_rosetta_config != nullptr && g_rosetta_config->strict_alloc != 0;
 }
 
-// Slow path of every allocator: record the first failure of the request.
-[[gnu::cold]] [[gnu::noinline]] void alloc_failed(TranslationResult& tr, const char* allocator) {
+// Slow path of every allocator.  Returns true when this allocation fails:
+// the pool is `exhausted`, or the fault injection picked it.
+[[gnu::cold]] [[gnu::noinline]] bool alloc_fails(TranslationResult& tr, bool exhausted,
+                                                 const char* allocator) {
+    if (!exhausted) {
+        if (g_alloc_fail_every == 0) {
+            return false;
+        }
+        const uint64_t n = g_alloc_count.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (n % g_alloc_fail_every != 0) {
+            return false;
+        }
+    }
     if (tr.alloc_failure == nullptr) {
         tr.alloc_failure = allocator;
     }
+    return true;
 }
 
 }  // namespace
 
+void configure_alloc_fault_injection(uint32_t every) {
+    g_alloc_fail_every = every;
+    g_alloc_fast_mask = every != 0 ? 0U : ~0U;
+    g_alloc_count.store(0, std::memory_order_relaxed);
+}
+
 int alloc_gpr(TranslationResult& translation, int pool_index) {
     const int reg = kGprScratchPool[pool_index];
     const uint32_t mask = 1U << reg;
-    if (__builtin_expect((translation.free_gpr_mask & mask) == 0, 0)) {
+    if (__builtin_expect((translation.free_gpr_mask & mask & g_alloc_fast_mask) == 0, 0) &&
+        alloc_fails(translation, (translation.free_gpr_mask & mask) == 0, "alloc_gpr")) {
         assert(!alloc_strict() && "alloc_gpr: pool slot already occupied");
-        alloc_failed(translation, "alloc_gpr");
         return reg;
     }
     translation.free_gpr_mask &= ~mask;
@@ -59,9 +86,9 @@ int alloc_gpr(TranslationResult& translation, int pool_index) {
 
 int alloc_free_gpr(TranslationResult& translation) {
     uint32_t mask = translation.free_gpr_mask;
-    if (__builtin_expect(mask == 0, 0)) {
+    if (__builtin_expect((mask & g_alloc_fast_mask) == 0, 0) &&
+        alloc_fails(translation, mask == 0, "alloc_free_gpr")) {
         assert(!alloc_strict() && "no temporary GPR available to allocate");
-        alloc_failed(translation, "alloc_free_gpr");
         return kPlaceholderGpr;
     }
     int reg = __builtin_ctz(mask);  // lowest set bit = binary reverse of __clz(__rbit32)
@@ -85,9 +112,9 @@ void free_gpr(TranslationResult& translation, int reg) {
 
 auto alloc_free_fpr(TranslationResult& translation) -> int {
     uint32_t mask = translation.free_fpr_mask;
-    if (__builtin_expect(mask == 0, 0)) {
+    if (__builtin_expect((mask & g_alloc_fast_mask) == 0, 0) &&
+        alloc_fails(translation, mask == 0, "alloc_free_fpr")) {
         assert(!alloc_strict() && "no temporary FPR available to allocate");
-        alloc_failed(translation, "alloc_free_fpr");
         return kPlaceholderFpr;
     }
     int reg = __builtin_ctz(mask);  // lowest set bit = binary reverse of __clz(__rbit32)
@@ -213,9 +240,9 @@ auto emit_load_immediate_no_xzr(TranslationResult& result, int is_64bit, uint64_
 // that is a declined request like in the allocators above.
 static int alloc_scratch_gpr(TranslationResult& result) {
     uint32_t mask = result.free_gpr_mask;
-    if (__builtin_expect(mask == 0, 0)) {
+    if (__builtin_expect((mask & g_alloc_fast_mask) == 0, 0) &&
+        alloc_fails(result, mask == 0, "alloc_scratch_gpr")) {
         assert(!alloc_strict() && "no temporary GPR available to allocate");
-        alloc_failed(result, "alloc_scratch_gpr");
         return kPlaceholderGpr;
     }
     int r = __builtin_ctz(mask);

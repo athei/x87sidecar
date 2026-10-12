@@ -39,6 +39,10 @@
 
 auto alloc_gpr(TranslationResult& translation, int pool_index) -> int;
 
+// X87_FAIL_ALLOC_EVERY: make every Nth allocation in the process fail as if
+// its pool were empty (0 = off).  Called by rosetta_set_config.
+void configure_alloc_fault_injection(uint32_t every);
+
 // ---------------------------------------------------------------------------
 // alloc_free_gpr — allocate lowest free scratch GPR directly from mask
 // (used in paths that can't go through the pool-indexed allocator)
