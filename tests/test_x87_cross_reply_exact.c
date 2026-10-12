@@ -20,11 +20,14 @@
  * a run, and pushes that leave the held value at every depth from 1 to 7.
  * Further middles read the held value without changing it, which the
  * translator does from the 80-bit image (fld st(i), fst and fstp to a
- * register, m64 and m32, fist and fistp, fnsave and frstor), and move it
- * between physical registers through a deferred FXCH.  What they read must
+ * register, m64 and m32, fist and fistp, fnsave and frstor; fst m32, fist
+ * and fistp also inside a run the IR lowers), and move it between physical
+ * registers through a deferred FXCH.  What they read must
  * equal the same read done in the loading block, and fnsave must save the
  * held value's ten bytes; --dump prints those reads so a run under stock
- * Rosetta can be compared with one under x87sidecar.  Every case also runs
+ * Rosetta can be compared with one under x87sidecar.  --int-stores-may-round
+ * accepts a 64-bit integer store rounded to 53 bits, for a harness run that
+ * leaves the translator too few registers for its exact integer store.  Every case also runs
  * with TOP rotated by fdecstp before the load, so the held value sits in
  * each of the eight physical registers and the middle block's pushes wrap
  * TOP past 0.
@@ -90,6 +93,10 @@ static const double kConst[] = {3.0, 2.0, 0.25, 1.0, 0.5};
 #define MID_RD_FIST "fistl 0(%[out])\n\t"
 #define MID_RD_FISTP "fld %%st(0)\n\tfistpll 0(%[out])\n\t"
 #define MID_RD_FSAVE "fnsave 0(%[out])\n\tfrstor 0(%[out])\n\t"
+/* The same reads inside a run long enough for the IR. */
+#define MID_RD_IRFST32 "fldz\n\tfstpl 8(%[out])\n\tfsts 0(%[out])\n\t"
+#define MID_RD_IRFIST "fldz\n\tfstpl 8(%[out])\n\tfistl 0(%[out])\n\t"
+#define MID_RD_IRFISTP "fldz\n\tfstpl 8(%[out])\n\tfld %%st(0)\n\tfistpll 0(%[out])\n\t"
 /* The held value changes physical register twice through a deferred FXCH
  * flushed at a push and at a pop. */
 #define MID_RD_FXCH                                                              \
@@ -140,6 +147,9 @@ typedef void (*ref_fn)(const void* src, double* out);
 #define REF_RD_FSTST "fstpl 0(%[out])\n\t"
 #define REF_RD_FIST "fistl 0(%[out])\n\tfstp %%st(0)\n\t"
 #define REF_RD_FISTP "fistpll 0(%[out])\n\t"
+#define REF_RD_IRFST32 REF_RD_FST32
+#define REF_RD_IRFIST REF_RD_FIST
+#define REF_RD_IRFISTP REF_RD_FISTP
 
 #define DEFINE_REF(name, LOAD, BODY)                                                       \
     static void name(const void* src, double* out) {                                       \
@@ -159,6 +169,9 @@ DEFINE_REFS(RD_FST32)
 DEFINE_REFS(RD_FSTST)
 DEFINE_REFS(RD_FIST)
 DEFINE_REFS(RD_FISTP)
+DEFINE_REFS(RD_IRFST32)
+DEFINE_REFS(RD_IRFIST)
+DEFINE_REFS(RD_IRFISTP)
 
 DEFINE_FORMS(IR)
 DEFINE_FORMS(SINGLE)
@@ -176,6 +189,9 @@ DEFINE_FORMS(RD_FSTST)
 DEFINE_FORMS(RD_FIST)
 DEFINE_FORMS(RD_FISTP)
 DEFINE_FORMS(RD_FSAVE)
+DEFINE_FORMS(RD_IRFST32)
+DEFINE_FORMS(RD_IRFIST)
+DEFINE_FORMS(RD_IRFISTP)
 DEFINE_FORMS(RD_FXCH)
 DEFINE_FORMS(BRIDGE)
 DEFINE_FORMS(FXTRACT)
@@ -201,6 +217,7 @@ typedef struct {
     ref_fn ref[2];
     int read_off;
     int read_len;
+    int int_read; /* the read is an integer store */
 } middle;
 
 #define FORMS(mid) {m80_##mid, i64_##mid, i64m80_##mid}
@@ -221,8 +238,11 @@ static const middle kMiddles[] = {
     {"reads: fst m32", FORMS(RD_FST32), 0, {0}, REFS(RD_FST32), 0, 4},
     {"reads: fld st(1), fstp st(1)", FORMS(RD_FSTST), 0, {0}, REFS(RD_FSTST), 0, 8},
     {"reads: fist m32", FORMS(RD_FIST), 0, {0}, REFS(RD_FIST), 0, 4},
-    {"reads: fld st(0), fistp m64", FORMS(RD_FISTP), 0, {0}, REFS(RD_FISTP), 0, 8},
+    {"reads: fld st(0), fistp m64", FORMS(RD_FISTP), 0, {0}, REFS(RD_FISTP), 0, 8, 1},
     {"reads: fnsave, frstor", FORMS(RD_FSAVE), 0, {0}, {0, 0}, 28, 10},
+    {"reads in a run: fst m32", FORMS(RD_IRFST32), 0, {0}, REFS(RD_IRFST32), 0, 4},
+    {"reads in a run: fist m32", FORMS(RD_IRFIST), 0, {0}, REFS(RD_IRFIST), 0, 4},
+    {"reads in a run: fld st(0), fistp m64", FORMS(RD_IRFISTP), 0, {0}, REFS(RD_IRFISTP), 0, 8, 1},
     {"moves: fxch across a push and a pop", FORMS(RD_FXCH), 1, {1.0}},
     {"bridged", FORMS(BRIDGE), 1, {6.0}},
     {"fxtract", FORMS(FXTRACT), 1, {2.5}},
@@ -275,6 +295,9 @@ static const f80_value kF80Values[] = {
     {"pseudo-NaN", {0x4000000000000001ULL, 0x7FFF}},
     {"denormal", {0x0000000000123457ULL, 0x0000}},
     {"negative 1 + 2^-63", {0x8000000000000001ULL, 0xBFFF}},
+    /* fst m32 rounds this up to 1 + 2^-23; through binary64 it would become
+     * the tie 1 + 2^-24 and round to 1. */
+    {"1 + 2^-24 + 2^-60", {0x8000008000000008ULL, 0x3FFF}},
 };
 
 typedef struct {
@@ -323,6 +346,39 @@ static void check_middle(const middle* m, int rot, const double* out) {
 
 static int dump = 0;
 
+/* --int-stores-may-round: the harness has left the translator too few
+ * registers for its exact integer store, which then reads binary64.  A
+ * 64-bit integer store may give the value rounded to 53 bits. */
+static int int_stores_may_round = 0;
+
+static int64_t round_to_53_bits(int64_t v) {
+    if (v == INT64_MIN) {
+        return v;
+    }
+    uint64_t mag = v < 0 ? (uint64_t)-v : (uint64_t)v;
+    const int width = 64 - __builtin_clzll(mag | 1);
+    if (width <= 53) {
+        return v;
+    }
+    const int shift = width - 53;
+    const uint64_t rem = mag & ((1ULL << shift) - 1);
+    const uint64_t half = 1ULL << (shift - 1);
+    mag -= rem;
+    if (rem > half || (rem == half && ((mag >> shift) & 1) != 0)) {
+        mag += 1ULL << shift;
+    }
+    return v < 0 ? -(int64_t)mag : (int64_t)mag;
+}
+
+static int int64_matches(const void* got, const void* want) {
+    int64_t g;
+    int64_t w;
+    memcpy(&g, got, sizeof(g));
+    memcpy(&w, want, sizeof(w));
+    /* Either side may have rounded (a reference read too). */
+    return g == w || (int_stores_may_round && round_to_53_bits(g) == round_to_53_bits(w));
+}
+
 static void check_read(const middle* m, int form, int rot, const char* val, const void* src,
                        const f80* held, const double* out) {
     if (m->read_len == 0) {
@@ -335,7 +391,9 @@ static void check_read(const middle* m, int form, int rot, const char* val, cons
         want = (const uint8_t*)ref + m->read_off;
     }
     const uint8_t* got = (const uint8_t*)out + m->read_off;
-    if (memcmp(got, want, (size_t)m->read_len) != 0) {
+    const int same = m->int_read && m->read_len == 8 ? int64_matches(got, want)
+                                                     : memcmp(got, want, (size_t)m->read_len) == 0;
+    if (!same) {
         report("read of the held value", m->name, rot, val, got, want, (size_t)m->read_len);
     }
     if (dump && rot == 0) {
@@ -358,7 +416,10 @@ static void check_balanced(const middle* m, int rot) {
 
 int main(int argc, char** argv) {
     /* --dump prints what the read-only middles read, to compare runs. */
-    dump = argc > 1 && strcmp(argv[1], "--dump") == 0;
+    for (int i = 1; i < argc; i++) {
+        dump |= strcmp(argv[i], "--dump") == 0;
+        int_stores_may_round |= strcmp(argv[i], "--int-stores-may-round") == 0;
+    }
     int cases = 0;
     for (size_t mi = 0; mi < sizeof(kMiddles) / sizeof(kMiddles[0]); mi++) {
         const middle* m = &kMiddles[mi];
@@ -390,7 +451,7 @@ int main(int argc, char** argv) {
                 m->fn[kI64](&src, &dst, out);
                 rotate_up(rot);
                 cases++;
-                if (dst != src) {
+                if (!int64_matches(&dst, &src)) {
                     report("fild m64 to fistp m64", m->name, rot, kI64Values[vi].name, &dst, &src,
                            sizeof(dst));
                 }

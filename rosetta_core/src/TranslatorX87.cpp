@@ -1498,14 +1498,15 @@ auto translate_fst(TranslationResult* a1, IRInstr* a2) -> void {
         if (x87_slot_holds_f80_at(resolve_depth(*a1, 0))) {
             // X87_NATIVE_SLOTS: convert ST(0)'s 80-bit image into Dd_src and
             // leave the slot as it is.  Wd_tmp holds the address until both
-            // halves are loaded, then serves the conversion.
+            // halves are loaded, then serves the conversion.  For m32 the
+            // conversion rounds to odd, so the FCVT below rounds once.
             emit_native_st_addr(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Xst_base);
             const int Xm = alloc_free_gpr(*a1);
             const int Wx = alloc_free_gpr(*a1);
             const int Xt2 = alloc_free_gpr(*a1);
             emit_ldr_str_imm(buf, 3, 0, /*LDR*/ 1, 0, Wd_tmp, Xm);
             emit_ldr_str_imm(buf, 1, 0, /*LDRH*/ 1, 4, Wd_tmp, Wx);
-            emit_f80_bits_to_f64(buf, Xm, Wx, Wd_tmp, Xt2);
+            emit_f80_bits_to_f64(buf, Xm, Wx, Wd_tmp, Xt2, /*round_to_odd=*/is_f32);
             emit_fmov_x_to_d(buf, Dd_src, Xm);
             free_gpr(*a1, Xt2);
             free_gpr(*a1, Wx);
@@ -2190,6 +2191,30 @@ auto translate_fsqrt(TranslationResult* a1, IRInstr* /*a2*/) -> void {
     free_gpr(*a1, Wd_tmp);
 }
 
+// Loads ST(0) as binary64 into Dd for fist, fistp and fisttp.  Under
+// X87_NATIVE_SLOTS, an ST(0) still in its 80-bit form, which the dispatcher
+// did not send to the exact translate_*_native emitter for lack of
+// registers, is converted into Dd and left as it is in its slot: the stored
+// integer comes from the binary64 value, and the register keeps all its
+// bits.  Wd_tmp and Xm are scratch; Xm is the caller's integer register,
+// still unused at this point.
+static void load_st0_for_int_store(AssemblerBuffer& buf, TranslationResult& a1, int Xbase,
+                                   int Wd_top, int Wd_tmp, int Xm, int Dd, int Xst_base) {
+    if (!x87_slot_holds_f80_at(resolve_depth(a1, 0))) {
+        emit_load_st(buf, Xbase, Wd_top, resolve_depth(a1, 0), Wd_tmp, Dd, Xst_base);
+        return;
+    }
+    emit_native_st_addr(buf, Xbase, Wd_top, resolve_depth(a1, 0), Wd_tmp, Xst_base);
+    const int Wx = alloc_free_gpr(a1);
+    const int Xt2 = alloc_free_gpr(a1);
+    emit_ldr_str_imm(buf, 3, 0, /*LDR*/ 1, 0, Wd_tmp, Xm);
+    emit_ldr_str_imm(buf, 1, 0, /*LDRH*/ 1, 4, Wd_tmp, Wx);
+    emit_f80_bits_to_f64(buf, Xm, Wx, Wd_tmp, Xt2);
+    emit_fmov_x_to_d(buf, Dd, Xm);
+    free_gpr(a1, Xt2);
+    free_gpr(a1, Wx);
+}
+
 // =============================================================================
 // FISTP — store ST(0) as signed integer to memory, then pop
 //
@@ -2238,7 +2263,7 @@ auto translate_fistp(TranslationResult* a1, IRInstr* a2) -> void {
     const int Dd_val = alloc_free_fpr(*a1);
 
     // Step 1: load ST(0) mantissa → Dd_val
-    emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Dd_val, Xst_base);
+    load_st0_for_int_store(buf, *a1, Xbase, Wd_top, Wd_tmp, Wd_int, Dd_val, Xst_base);
 
     // Step 2: convert f64 to signed integer, respecting the rounding mode in
     // control_word bits [11:10] (RC field).
@@ -2410,7 +2435,7 @@ auto translate_fisttp(TranslationResult* a1, IRInstr* a2) -> void {
     const int Dd_val = alloc_free_fpr(*a1);
 
     // Step 1: load ST(0) mantissa → Dd_val
-    emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Dd_val, Xst_base);
+    load_st0_for_int_store(buf, *a1, Xbase, Wd_top, Wd_tmp, Wd_int, Dd_val, Xst_base);
 
     // Step 2: FISTT always truncates — single FCVTZS, no RC dispatch needed.
     // X-width conversion for every size (see translate_fistp).
@@ -2897,7 +2922,7 @@ auto translate_fist(TranslationResult* a1, IRInstr* a2) -> void {
     const int Dd_val = alloc_free_fpr(*a1);
 
     // Load ST(0)
-    emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Dd_val, Xst_base);
+    load_st0_for_int_store(buf, *a1, Xbase, Wd_top, Wd_tmp, Wd_int, Dd_val, Xst_base);
 
     // Rounding mode dispatch — same CBZ/SUB chain as translate_fistp.
     // X-width conversion for every size (see translate_fistp).

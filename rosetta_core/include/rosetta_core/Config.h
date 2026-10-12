@@ -97,7 +97,10 @@ struct RosettaConfig {
                                       //                           is available (0 = off).  Makes
                                       //                           split behavior deterministic in
                                       //                           tests; allocation is unaffected.
-    uint8_t gpr_pool_limit;           // X87_GPR_POOL_LIMIT        test-only GPR-side equivalent.
+    uint8_t gpr_pool_limit;           // X87_GPR_POOL_LIMIT        test-only GPR-side equivalent;
+                                      //                           also clamps the count that lets
+                                      //                           an X87_NATIVE_SLOTS integer
+                                      //                           store convert 80 bits exactly.
     uint8_t strict_alloc;             // X87_STRICT_ALLOC          assert when a scratch register
                                       //                           allocation fails, as every
                                       //                           build did before the decline

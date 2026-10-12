@@ -57,8 +57,9 @@
 #      must end with its own exit status natively and under both attaches
 #  19. test_x87_cross_reply_exact with X87_NATIVE_SLOTS=1 (default, IR off,
 #      fusions off, run cache off, single-op fast path off, clamped
-#      register pool, bridging off, X87_PRECISE_FAULTS=1, and
-#      X87_FAIL_ALLOC_EVERY=N), then the tests that read or replace the
+#      register pool, bridging off, X87_PRECISE_FAULTS=1,
+#      X87_FAIL_ALLOC_EVERY=N, and X87_GPR_POOL_LIMIT=4, where integer
+#      stores fall back to binary64), then the tests that read or replace the
 #      native x87 state with it.  Without the knob, which is off by
 #      default, test_x87_cross_reply_exact has to fail in every phase that
 #      translates it; exporting X87_NATIVE_SLOTS=1 for the whole run makes
@@ -1224,6 +1225,19 @@ if [[ $NATIVE_ONLY -eq 0 && ${#PHASE19_TESTS[@]} -gt 0 ]]; then
                 filter_runtime_lines) || EXIT=$?
             check_output "$t" "$OUT" "$EXIT"
         done
+    done
+    # X87_GPR_POOL_LIMIT=4 leaves too few registers for the exact integer
+    # store, so integer stores of 80-bit registers read binary64 and the
+    # test accepts 64-bit stores rounded to 53 bits.
+    for t in "${NATIVE_SLOTS_TESTS[@]}"; do
+        native_slots_phase_runs "$t" || continue
+        echo "      X87_NATIVE_SLOTS=1 X87_GPR_POOL_LIMIT=4 ($t --int-stores-may-round)"
+        BINARY="$TESTS_BIN/$t"
+        [[ -x "$BINARY" ]] || continue
+        EXIT=0
+        OUT=$(run_bounded "$TEST_TIMEOUT" env X87_GPR_POOL_LIMIT=4 "$LOADER" "$BINARY" \
+            --int-stores-may-round 2>/dev/null | filter_runtime_lines) || EXIT=$?
+        check_output "$t" "$OUT" "$EXIT"
     done
     echo "      X87_NATIVE_SLOTS=1"
     for t in "${NATIVE_SLOTS_STATE_TESTS[@]}"; do

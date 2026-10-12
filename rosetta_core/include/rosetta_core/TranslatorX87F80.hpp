@@ -47,7 +47,14 @@ void emit_f64_to_f80(AssemblerBuffer& buf, int Xaddr_slot, int Dd_src, int Xbits
 // binary64 bits emit_f80_to_f64_convert would produce, except that an
 // unnormal, pseudo-infinity or pseudo-NaN gives the default NaN, as in stock
 // Rosetta.  Wx, Xt1 and Xt2 are clobbered.
-void emit_f80_bits_to_f64(AssemblerBuffer& buf, int Xm, int Wx, int Xt1, int Xt2);
+//
+// round_to_odd truncates instead and sets the lowest result bit when any
+// discarded bit was set.  Narrowing that result to binary32 (FCVT) then
+// rounds the 80-bit value once, as fst m32 does, where rounding to nearest
+// first could round twice.  Finite values beyond binary64's range still
+// become infinity.
+void emit_f80_bits_to_f64(AssemblerBuffer& buf, int Xm, int Wx, int Xt1, int Xt2,
+                          bool round_to_odd = false);
 
 // emit_f64_bits_to_f80: writes the f80 for the binary64 bits in Xb to
 // [Xaddr, #0..#9], the bytes emit_f64_to_f80 writes.  Xb, We and Wt are

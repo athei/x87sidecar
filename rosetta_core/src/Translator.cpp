@@ -196,9 +196,11 @@ struct NativeLayoutScope {
 //                   them in place first.
 //   soft_f80        a soft read finds an 80-bit slot: fld st(i), fst and fstp
 //                   to a register or to m32/m64, fist, fistp, fisttp, fxch and
-//                   fsave read such a slot exactly in their direct emitters,
-//                   so the fusions and the single-op fast path, which read
-//                   binary64, are skipped for this request.
+//                   fsave read such a slot in their direct emitters without
+//                   changing it (the integer stores exactly, or from a
+//                   binary64 copy when short of registers), so the fusions
+//                   and the single-op fast path, which read binary64, are
+//                   skipped for this request.
 //   push_read_hard  with first_push_native, the value the first instruction
 //                   pushes would be read as binary64 later in the window.
 //
@@ -207,8 +209,7 @@ struct NativeLayoutScope {
 // slots as they are (emit_x87_perm_flush), so the formats move with them.
 // The emitters convert nothing themselves.  Converting a slot the
 // instruction ends up not reading, or an empty one, costs code but changes
-// no result.  int_store_soft says whether an integer store may take its
-// slot in 80-bit form: emit_f80_slot_to_int needs five scratch GPRs.
+// no result.
 struct SlotPlan {
     uint8_t convert = 0;
     bool soft_f80 = false;
@@ -216,8 +217,7 @@ struct SlotPlan {
 };
 
 static SlotPlan plan_slots(const X87Cache& c, const IRInstr* instrs, int64_t num, int64_t idx,
-                           int count, bool to_run_end, bool int_store_soft,
-                           bool first_push_native = false) {
+                           int count, bool to_run_end, bool first_push_native = false) {
     SlotPlan plan;
     int top = c.top_rel;
     int8_t perm[8];
@@ -263,12 +263,7 @@ static SlotPlan plan_slots(const X87Cache& c, const IRInstr* instrs, int64_t num
     for (int k = 0; k < count && idx + k < num; k++) {
         const IRInstr& insn = instrs[idx + k];
         const auto e = X87Cache::slot_effect(insn);
-        uint8_t soft = e.soft;
-        const uint16_t op = insn.opcode();
-        if (!int_store_soft &&
-            (op == kOpcodeName_fist || op == kOpcodeName_fistp || op == kOpcodeName_fisttp)) {
-            soft = 0;
-        }
+        const uint8_t soft = e.soft;
         for (int d = 0; d < 8; d++) {
             if ((e.reads >> d) & 1U) {
                 read(perm[d], ((soft >> d) & 1U) != 0);
@@ -1372,11 +1367,17 @@ static auto translate_instruction_impl(TranslationResult* translation_result, IR
         const int window = std::clamp(run, 1, 6);
         const bool to_run_end = run <= 6;
         // emit_f80_slot_to_int takes five scratch GPRs besides what
-        // x87_begin needs; with fewer the integer store reads binary64.
-        int_store_soft = __builtin_popcount(translation_result->free_gpr_mask) >=
-                         TranslatorX87::x87_begin_gpr_need(*translation_result) + 5;
+        // x87_begin needs; with fewer the integer store takes its usual
+        // emitter, which converts ST(0) into a register and stores from that
+        // binary64 value, leaving the slot as it is.  X87_GPR_POOL_LIMIT
+        // clamps the count here too, so tests reach that fallback.
+        int free_gprs = __builtin_popcount(translation_result->free_gpr_mask);
+        if (g_rosetta_config && g_rosetta_config->gpr_pool_limit > 0) {
+            free_gprs = std::min<int>(free_gprs, g_rosetta_config->gpr_pool_limit);
+        }
+        int_store_soft = free_gprs >= TranslatorX87::x87_begin_gpr_need(*translation_result) + 5;
         const SlotPlan plan = plan_slots(cache, instr_array, num_instrs, insn_idx, window,
-                                         to_run_end, int_store_soft);
+                                         to_run_end);
         emit_slot_conversions(*translation_result, plan.convert);
         soft_f80 = plan.soft_f80;
         // fild m64 writes the exact 80-bit value when nothing later in the
@@ -1388,7 +1389,7 @@ static auto translate_instruction_impl(TranslationResult* translation_result, IR
             cur_instr->operands[0].kind != IROperandKind::Register &&
             cur_instr->operands[0].mem.size == IROperandSize::S64) {
             exact_fild = !plan_slots(cache, instr_array, num_instrs, insn_idx, std::max(run, 1),
-                                     /*to_run_end=*/true, int_store_soft,
+                                     /*to_run_end=*/true,
                                      /*first_push_native=*/true)
                               .push_read_hard;
         }
