@@ -3,6 +3,8 @@
  * A round trip through an opaque save buffer can hide a layout mismatch, so
  * check the actual 80-bit payload at a known instruction-map boundary.
  * Both long mode and an LDT compatibility segment run the issue #23 chain.
+ * Long mode also holds an int64 of 2^53 or more on the stack between a fild
+ * and a fistp in separate blocks, whose f80 must be exact in the context.
  */
 #include <architecture/i386/desc.h>
 #include <architecture/i386/table.h>
@@ -32,7 +34,28 @@ static struct {
 static pthread_t victim;
 static atomic_bool running;
 static volatile sig_atomic_t signals, observations, invalid_context, rewrite_context;
-extern char context32_finish[], context64_finish[], gate_stub[];
+extern char context32_finish[], context64_finish[], gate_stub[], transport_finish[];
+
+/* An int64 of 2^53 or more, held on the x87 stack between a fild and a fistp
+ * in separate blocks.  The handler must find its exact f80 in the saved
+ * context, and an edit there must reach the fistp. */
+static struct {
+    int64_t value;
+    int64_t replacement;
+} tinput = {0x5357452E46535745LL, 0x7EDCBA9876543211LL};
+static struct {
+    int64_t out;
+    uint32_t bad;
+    uint32_t replaced;
+    uint16_t cw;
+} toutput;
+
+static void i64_to_f80(int64_t v, uint64_t* mant, uint16_t* se) {
+    const uint64_t a = v < 0 ? 0 - (uint64_t)v : (uint64_t)v;
+    const int lz = __builtin_clzll(a);
+    *mant = a << lz;
+    *se = (uint16_t)((v < 0 ? 0x8000 : 0) | (16383 + 63 - lz));
+}
 
 /* Rosetta uses the full mcontext after an LDT is installed. Its extra
  * segment registers move the FPU area, including in the 64-bit handler. */
@@ -50,7 +73,29 @@ static void handler(int sig, siginfo_t* info, void* context) {
     ucontext_t* uc = context;
     signals++;
     uintptr_t pc = uc->uc_mcontext->__ss.__rip;
-    if (pc == (uintptr_t)context32_finish || pc == (uintptr_t)context64_finish) {
+    if (pc == (uintptr_t)transport_finish) {
+        _STRUCT_X86_FLOAT_STATE64* fs = float_state(uc);
+        uint16_t sw;
+        memcpy(&sw, &fs->__fpu_fsw, sizeof(sw));
+        unsigned char* slot = (unsigned char*)&fs->__fpu_stmm0 + 16 * ((sw >> 11) & 7);
+        uint64_t mant, want_mant;
+        uint16_t exp, want_exp;
+        memcpy(&mant, slot, 8);
+        memcpy(&exp, slot + 8, 2);
+        observations++;
+        i64_to_f80(tinput.value, &want_mant, &want_exp);
+        if (mant != want_mant || exp != want_exp) {
+            i64_to_f80(tinput.replacement, &want_mant, &want_exp);
+            /* A rewrite from an earlier signal can still be live. */
+            if (!rewrite_context || mant != want_mant || exp != want_exp)
+                invalid_context++;
+        }
+        if (rewrite_context) {
+            i64_to_f80(tinput.replacement, &mant, &exp);
+            memcpy(slot, &mant, 8);
+            memcpy(slot + 8, &exp, 2);
+        }
+    } else if (pc == (uintptr_t)context32_finish || pc == (uintptr_t)context64_finish) {
         _STRUCT_X86_FLOAT_STATE64* fs = float_state(uc);
         uint16_t sw;
         memcpy(&sw, &fs->__fpu_fsw, sizeof(sw));
@@ -125,6 +170,42 @@ __attribute__((noinline)) static void run_chain64(void) {
         : "a"(&input), "d"(&output)
         : "rbx", "rcx", "memory", "cc", "st", "st(1)", "st(2)");
 }
+/* fild, then a fistp in the next block.  transport_finish is the
+ * instruction-map entry that ends the fild's run; the fnstcw stores in the
+ * same run make it long enough for signals to land in. */
+__attribute__((noinline)) static void run_transport64(void) {
+    __asm__ volatile(
+        ".intel_syntax noprefix\n"
+        "mov ecx, 1000\n"
+        "0: fnstcw WORD PTR [rdx+16]\n"
+        "fnstcw WORD PTR [rdx+16]\n"
+        "fnstcw WORD PTR [rdx+16]\n"
+        "fnstcw WORD PTR [rdx+16]\n"
+        "fnstcw WORD PTR [rdx+16]\n"
+        "fnstcw WORD PTR [rdx+16]\n"
+        "fnstcw WORD PTR [rdx+16]\n"
+        "fnstcw WORD PTR [rdx+16]\n"
+        "fild QWORD PTR [rax]\n"
+        ".globl _transport_finish\n"
+        "_transport_finish:\n"
+        "jmp 2f\n"
+        "2: fistp QWORD PTR [rdx]\n"
+        "mov rbx, QWORD PTR [rdx]\n"
+        "cmp rbx, QWORD PTR [rax]\n"
+        "je 5f\n"
+        "cmp rbx, QWORD PTR [rax+8]\n"
+        "jne 4f\n"
+        "inc DWORD PTR [rdx+12]\n"
+        "jmp 5f\n"
+        "4: inc DWORD PTR [rdx+8]\n"
+        "5: dec ecx\n"
+        "jnz 0b\n"
+        ".att_syntax prefix\n"
+        :
+        : "a"(&tinput), "d"(&toutput)
+        : "rbx", "rcx", "memory", "cc", "st");
+}
+
 static uint16_t sel_cs32 = 0;
 static uint16_t sel_ds32 = 0;
 static uint16_t sel_cs64 = 0;
@@ -258,6 +339,45 @@ static void run_case(int compat, int rewrite, double x) {
         failures++;
 }
 
+static void run_transport_case(int rewrite) {
+    rewrite_context = 0;
+    memset(&toutput, 0, sizeof(toutput));
+    __asm__ volatile("fninit");
+    run_transport64();
+    if (toutput.out != tinput.value || toutput.bad != 0 || toutput.replaced != 0) {
+        printf("FAIL  signal context transport: reference got=%016llx bad=%u\n",
+               (unsigned long long)toutput.out, toutput.bad);
+        failures++;
+        return;
+    }
+    memset(&toutput, 0, sizeof(toutput));
+    signals = observations = invalid_context = 0;
+    rewrite_context = rewrite;
+    atomic_store(&running, 1);
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, sender, NULL) != 0) {
+        fprintf(stderr, "FAIL  signal context transport: pthread_create\n");
+        failures++;
+        return;
+    }
+    double deadline = now() + 0.2;
+    do {
+        run_transport64();
+    } while (now() < deadline);
+    atomic_store(&running, 0);
+    void* sender_error;
+    pthread_join(thread, &sender_error);
+    int ok = observations > 0 && invalid_context == 0 && toutput.bad == 0 &&
+             sender_error == NULL && (!rewrite || toutput.replaced > 0) &&
+             (rewrite || toutput.replaced == 0);
+    printf("%s  signal context transport fild rewrite=%d signals=%d checked=%d invalid=%d bad=%u "
+           "replaced=%u\n",
+           ok ? "PASS" : "FAIL", rewrite, (int)signals, (int)observations, (int)invalid_context,
+           toutput.bad, toutput.replaced);
+    if (!ok)
+        failures++;
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IOLBF, 0);
     setup_ldt();
@@ -277,5 +397,7 @@ int main(void) {
         for (int rewrite = 0; rewrite < 2; ++rewrite)
             for (unsigned i = 0; i < sizeof(values) / sizeof(values[0]); ++i)
                 run_case(compat, rewrite, values[i]);
+    for (int rewrite = 0; rewrite < 2; ++rewrite)
+        run_transport_case(rewrite);
     return failures ? 1 : 0;
 }

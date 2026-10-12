@@ -327,6 +327,16 @@ X87_SEQ(seq_fxsave, "fld " D "\n\tfxsave " SMEM "\n\tfxrstor " SMEM "\n\t")
 X87_SEQ(seq_fnop, "fld " D "\n\tfnop\n\t")
 X87_SEQ(seq_fdisi_feni, "fld " D "\n\t.byte 0xdb, 0xe1\n\t.byte 0xdb, 0xe0\n\t") /* fndisi; fneni */
 
+/* Native transport replies: runs of integer loads and stores only, which the
+ * sidecar emits against the native 80-bit slots.  The jmp ends the run
+ * before the macro's fnstsw and fstp. */
+X87_SEQ(seq_transport_int,
+        "fild " I64 "\n\tfild " I32 "\n\tfistp " S32 "\n\tfistp " S64 "\n\tfild " S64
+        "\n\tjmp 1f\n1:\n\t")
+X87_SEQ(seq_transport_round,
+        "fld " D "\n\tfld " D "\n\tjmp 1f\n1:\n\tfist " S32 "\n\tfisttp " S16 "\n\tfldcw " CW
+        "\n\tfistp " S64 "\n\tfild " S64 "\n\tjmp 2f\n2:\n\t")
+
 /* A long run: many consecutive x87 ops, which the IR path translates as one
  * unit.  A signal inside it makes the runtime step the whole rest of the run. */
 X87_SEQ(seq_longrun,
@@ -381,6 +391,7 @@ static const struct op_case k_op_cases[] = {
     {"fnstsw", seq_fnstsw},       {"fnclex", seq_fnclex},       {"fninit", seq_fninit},
     {"fnstenv", seq_fnstenv},     {"fnsave", seq_fnsave},       {"fxsave", seq_fxsave},
     {"fnop", seq_fnop},           {"fdisi_feni", seq_fdisi_feni}, {"longrun", seq_longrun},
+    {"transport_int", seq_transport_int}, {"transport_round", seq_transport_round},
 };
 
 /* ── driver ───────────────────────────────────────────────────────────── */
