@@ -53,6 +53,11 @@
 
 const char* logsEnabled = nullptr;
 
+// Whether SIGCONT is blocked in the signal mask this process started with,
+// which the target inherits too. Read at the top of main; nothing in the
+// loader changes the mask.
+static bool g_sigcontBlockedAtStart = false;
+
 #define VERBOSE_LOG(fmt, ...)           \
     do {                                \
         if (logsEnabled) {              \
@@ -693,40 +698,55 @@ public:
 
         // 4. Stop once more, on SIGCONT, so that PT_DETACH can succeed.
         //    PT_THUPDATE in step 3 set p_stat to SRUN, and PT_DETACH returns
-        //    EBUSY unless p_stat is SSTOP, which only a soft-signal stop of a
-        //    traced process sets. A detach that fails leaves P_LTRACED set
-        //    for the rest of the target's life, and XNU then routes every
-        //    signal through its traced path: a fatal signal that the sending
-        //    thread blocks is handed to another thread with
-        //    thread_abort_safely() instead of thread_abort(), which does not
-        //    interrupt a thread waiting for a Mach exception reply. Rosetta's
-        //    own abort is exactly that case (its exception server thread calls
-        //    abort_with_payload while the faulting thread waits for that
-        //    server's reply), and the target then sleeps forever instead of
-        //    exiting with SIGABRT. The stop uses SIGCONT rather than another
-        //    SIGSTOP: replying to a SIGSTOP stop after a successful detach
-        //    leaves the target stopped (state T) on the kernels that take this
-        //    path, while SIGCONT's default action is to ignore it. Releasing
-        //    the Mach suspend from 2b here lets the task run into the signal.
-        //    It also keeps the suspend from overlapping PT_DETACH, which
-        //    calls task_resume on the target itself after clearing
-        //    P_LSIGEXC.
-        kill(childPid_, SIGCONT);
-        task_resume(taskPort_);
-        const bool gotSigcont = catchSoftSignal(SIGCONT);
-        if (!gotSigcont) {
-            fprintf(stdout, "detach: SIGCONT not received\n");
+        //    EBUSY unless p_stat is SSTOP; for this traced target that takes
+        //    a signal stop held by the debugger, like the SIGSTOP one above.
+        //    A detach that fails leaves P_LTRACED set for the rest of the
+        //    target's life, and XNU then routes every signal through its
+        //    traced path: a fatal signal that the sending thread blocks is
+        //    handed to another thread with thread_abort_safely() instead of
+        //    thread_abort(), which does not interrupt a thread waiting for a
+        //    Mach exception reply. Rosetta's own abort is exactly that case
+        //    (its exception server thread calls abort_with_payload while the
+        //    faulting thread waits for that server's reply), and the target
+        //    then sleeps forever instead of exiting with SIGABRT.
+        //
+        //    On macOS 27.0.1 the signal held at the stop is delivered to the
+        //    target after a successful detach, although PT_DETACH passes 0.
+        //    That is why another SIGSTOP would leave the target stopped
+        //    (state T), as the classic sequence does there and on 26.6.2.
+        //    A SIGCONT delivered to a running process has no effect unless it
+        //    has a SIGCONT handler, and the release happens during Rosetta's
+        //    init, before guest code can install one.
+        //
+        //    The target inherits its signal mask from the loader, as this
+        //    process does. If SIGCONT is blocked, the stop would not come
+        //    until the guest unblocks it, so skip this step and release the
+        //    target traced, as before the step was added.
+        //
+        //    Releasing the Mach suspend from 2b here lets the task run into
+        //    the signal. It also keeps the suspend from overlapping
+        //    PT_DETACH, which calls task_resume on the target itself after
+        //    clearing P_LSIGEXC.
+        bool gotSigcont = false;
+        if (g_sigcontBlockedAtStart) {
+            VERBOSE_LOG("detach: SIGCONT is blocked; releasing the target traced\n");
+        } else {
+            kill(childPid_, SIGCONT);
+            task_resume(taskPort_);
+            gotSigcont = catchSoftSignal(SIGCONT);
+            if (!gotSigcont) {
+                fprintf(stdout, "detach: SIGCONT not received\n");
+            }
         }
 
         // 5. ShutDownExceptionThread: restore original exception ports, drop ours.
         exc_.restoreAndTearDown();
 
         // 6. PT_DETACH from the held SIGCONT stop, which clears P_LTRACED and
-        //    P_LSIGEXC and discards the signal (data 0). Then release the held
-        //    exception with a plain reply, since ptrace no longer applies. If
-        //    the detach fails anyway, suppress SIGCONT while still traced as
-        //    in step 3; the target then runs traced, as before this stop was
-        //    added.
+        //    P_LSIGEXC. Then release the held exception with a plain reply,
+        //    since ptrace no longer applies. If the detach fails anyway,
+        //    suppress SIGCONT while still traced as in step 3; the target then
+        //    runs traced, as before this stop was added.
         errno = 0;
         const int detached = ptrace(PT_DETACH, childPid_, reinterpret_cast<caddr_t>(1), 0);
         const int detachErr = detached < 0 ? errno : 0;
@@ -739,6 +759,11 @@ public:
             exc_.release();
         } else {
             exc_.reply(0);
+        }
+
+        // Balance the suspend from 2b when step 4 was skipped.
+        if (g_sigcontBlockedAtStart) {
+            task_resume(taskPort_);
         }
 
         VERBOSE_LOG("Debugger detached (reply-first path).\n");
@@ -1281,6 +1306,13 @@ struct ScopeExit {
 };
 
 int main(int argc, char* argv[]) try {
+    {
+        sigset_t startMask;
+        sigemptyset(&startMask);
+        if (sigprocmask(SIG_BLOCK, nullptr, &startMask) == 0) {
+            g_sigcontBlockedAtStart = sigismember(&startMask, SIGCONT) == 1;
+        }
+    }
     int argi = 1;
     if (argi < argc && std::string_view(argv[argi]) == "--help") {
         print_loader_usage(argv[0]);
