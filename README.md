@@ -342,14 +342,25 @@ under a SIGUSR1 storm and reading or replacing the saved x87 context in
 64-bit and 32-bit compatibility mode.
 
 A memory fault in translated code can only be rolled back to the start of
-its reply. The sidecar probes the memory operand of each reply's first x87
-instruction before the reply changes any state, and answers runs of integer
-loads and stores one instruction per reply, so a fault there reaches the
-program's SIGSEGV or SIGBUS handler with the same context stock Rosetta
-gives it, except that a probed store into a `PROT_NONE` page is reported
-as a read fault. A fault in a later instruction of a floating-point run
-still aborts the process, and one in the store of an adjacent
-`fild m64; fistp m64` copy is reported at the `fild`;
+its reply, and the sidecar's replies change state before their first guest
+access. So by default any guest memory fault inside sidecar-translated x87
+code, such as a Windows program touching a guard page or a write-watched
+buffer through an x87 load or store, aborts the process with `rosetta
+error: unexpectedly need to EmulateForward on a synchronous exception`,
+where stock Rosetta would call the program's handler. A program that dies
+with that message can set `X87_PRECISE_FAULTS=1`. The sidecar then probes
+the memory operand of each reply's first x87 instruction before the reply
+changes any state, and answers runs of integer loads and stores one
+instruction per reply, so a fault there reaches the program's SIGSEGV or
+SIGBUS handler with the same context stock Rosetta gives it, except that a
+probed store into a `PROT_NONE` page is reported as a read fault. It is off
+by default because of what it costs: an x87 store at the start of a reply
+into write-combined memory, as when a game fills a mapped vertex buffer,
+becomes 23 to 40 times slower, loops of x87 arithmetic on memory operands
+lose up to 7 percent, and back-to-back `fild m64; fistp m64` copies take 4.5
+times as long. Even with it on, a fault in a later instruction of a
+floating-point run still aborts the process, and one in the store of an
+adjacent `fild m64; fistp m64` copy is reported at the `fild`;
 [docs/internals.md](docs/internals.md#memory-faults-inside-emitted-code)
 explains why.
 
@@ -397,7 +408,10 @@ cooperative-attach smoke test, the two decoder tests three ways, the inline
 BCD translators with `X87_STOCK_BCD=0`, an allocation fault-injection phase,
 the FTZ/DAZ test with and without `X87_IGNORE_FTZ_DAZ` (`test_x87_ftz_daz`
 runs only in that phase), the guest-flags test with the `fcomi` and the
-`fcmov` families handed to stock, and an IR replay phase. The stock run is
+`fcmov` families handed to stock, the memory-fault test with
+`X87_PRECISE_FAULTS=1` in seven configurations and under allocation
+failures, and once without it, where it must abort (`test_x87_sync_fault`
+runs only in that phase), and an IR replay phase. The stock run is
 the baseline: a case that fails there is reported XFAIL in later phases
 rather than gating, and the stock run itself may only fail for tests listed
 in `KNOWN_STOCK_DIVERGENCE`. The harness uses the default attach path, so
@@ -434,7 +448,7 @@ knowing. Bracketed values are defaults.
 | `X87_BRIDGE_V2=0` | disable bridging across flag-writing ALU whose flags Rosetta's liveness proves dead [on] |
 | `X87_ENABLE_IR_SPLIT=0`, `X87_ENABLE_IR_REMAT=0` | disable register-pressure relief: splitting over-pressure runs, sinking long-lived values [on] |
 | `X87_NATIVE_TRANSPORT=0` | put replies made only of integer loads and stores (`fild`, `fistp`, ...) back through the binary64 register file, which rounds int64 values of 2^53 or more held on the stack; for bisecting [on] |
-| `X87_PRECISE_FAULTS=0` | drop the fault probe at the start of each reply and answer runs of integer loads and stores as one reply, so a memory fault in translated x87 code aborts the process again; for bisecting [on] |
+| `X87_PRECISE_FAULTS=1` | for a program that aborts with "unexpectedly need to EmulateForward on a synchronous exception": probe the memory operand of each reply's first x87 instruction and answer runs of integer loads and stores one instruction per reply, so a memory fault there reaches the program's handler; costs up to 7 percent on x87 loops, makes an x87 store into write-combined memory 23 to 40 times slower, and faults later in a floating-point run still abort [off: any memory fault in translated x87 code aborts] |
 | `X87_DISABLE_X87_IR=1` | direct translator only, no IR pipeline |
 | `X87_DISABLE_ALL_FUSIONS=1`, `X87_DISABLE_FUSIONS=f1,f2` | disable every fusion, or the named ones (`--help` lists the names) |
 | `X87_DISABLE_FUSIONS=fild_fistp,fld_fstp_m80` | send adjacent `fld m80; fstp m80` pairs, and `fild m64; fistp m64` pairs in runs with other x87 work, through binary64 instead of copying the bytes exactly; replies of only integer loads and stores stay exact through native transport [both on] |

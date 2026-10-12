@@ -232,8 +232,10 @@ static bool x87_writes_memory(uint16_t opcode) {
 // floating-point arithmetic.  Otherwise it aborts the process with
 // "unexpectedly need to EmulateForward on a synchronous exception".  A reply
 // that converts the register file changes state before its first guest
-// access (the entry conversion alone does), so the access of the reply's
-// first instruction is probed here, before anything else.
+// access (the entry conversion alone does), so with X87_PRECISE_FAULTS=1
+// the access of the reply's first instruction is probed here, before
+// anything else.  The knob is off by default, since a store probe into
+// write-combined memory is uncached and slow (docs/internals.md).
 //
 // A load is probed with a load of the access width into the zero register,
 // or of its first and last byte for 10 and 108 bytes; one load also covers

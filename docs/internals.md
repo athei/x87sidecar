@@ -143,13 +143,20 @@ the pop. The routines' own floating-point work is out of the check's sight.
 
 The sidecar's replies start with the conversion from the native register
 layout to the compact one, which compares and stores, so a fault in any
-guest access after it aborts, even in a lone `fstps`. So the memory
-operand of each such reply's first x87 instruction is probed before
-anything else in the reply (`emit_fault_probe`). A load is probed with a
-load of the access width into the zero register, or with loads of its
-first and last byte for the 10- and 108-byte forms; one load of the access
-width also covers an unaligned access that crosses a page. A store is
-probed by loading the bytes it will write and writing them back
+guest access after it aborts, even in a lone `fstps`. By default nothing is
+done about it: with `X87_PRECISE_FAULTS` off, any guest memory fault inside
+sidecar-translated x87 code aborts the process with that message, where
+stock Rosetta calls the program's SIGSEGV or SIGBUS handler. Windows
+programs under wine see such faults through structured exception handling:
+guard pages, write watches, `IsBadReadPtr`, deliberate access violations.
+A program that aborts this way can be run with `X87_PRECISE_FAULTS=1`.
+
+With the knob on, the memory operand of each reply's first x87 instruction
+is probed before anything else in the reply (`emit_fault_probe`). A load is
+probed with a load of the access width into the zero register, or with
+loads of its first and last byte for the 10- and 108-byte forms; one load
+of the access width also covers an unaligned access that crosses a page. A
+store is probed by loading the bytes it will write and writing them back
 unchanged: the full access width for 2, 4 and 8 bytes, otherwise the first
 byte after a load of the last. The write-back is the probe's only state
 change and comes last, so a fault in it still rolls back, and it faults
@@ -182,11 +189,11 @@ The fault kind differs in one case. Stock reports a load as a read fault
 load when its page is `PROT_NONE`, so the handler sees a read fault there.
 On a read-only page the write-back faults, and the kind matches stock.
 
-Native transport replies need no probe: a run of only integer loads and
-stores is answered one instruction per reply, and each of those emitters
-touches guest memory before it changes any state, so its own access rolls
-back, with the same fault kind as stock. Those replies have no conversion
-at either end, so splitting them costs little: in Delphi's `System.Move`
+Native transport replies need no probe: with the knob on, a run of only
+integer loads and stores is answered one instruction per reply, and each
+of those emitters touches guest memory before it changes any state, so its
+own access rolls back, with the same fault kind as stock. Those replies
+have no conversion at either end: in Delphi's `System.Move`
 (`test_delphi_move`), a run of two `fild` goes from 64 instructions as one
 reply to 67 as two, and a run of two `fistp` from 109 to 113. One
 exception is kept: an adjacent `fild m64; fistp m64` pair stays one fused
@@ -197,25 +204,34 @@ accessible and returns gets the right result, one that skips the reported
 instruction does not, but the process does not abort. The nested pairs of
 that fusion (`fild; fild; fistp; fistp`) are not used in such runs,
 because a second store behind the first would abort; split, two nested
-pairs take about a hundred instructions instead of nine. `System.Move` has
-no such sequence. With `X87_PROFILE` or `X87_TRACE_BLOCK` on, their
-counter and trace stores come ahead of a transport reply's access, and a
-fault there aborts.
+pairs take about a hundred instructions instead of nine. With
+`X87_PROFILE` or `X87_TRACE_BLOCK` on, their counter and trace stores come
+ahead of a transport reply's access, and a fault there aborts.
 
-A fault in a later instruction of a floating-point run still aborts. That
-instruction has no map entry of its own, and giving it one would mean
-writing the x87 state back to memory in the native layout before every
-memory access of the run, which is the cost the run reply exists to avoid.
-Probing the later accesses at the start of the reply as well would not help:
-the rollback would report the run's first instruction as rip, so a handler
-that skips the faulting instruction would skip the wrong one, and a second
-store probe would itself change state before the faulting one. This needs
-the x87 state to stay in the native layout throughout. A 10- or 108-byte
-store that crosses from a writable page into a read-only one also still
-aborts, since only its first byte is written back. `X87_PRECISE_FAULTS=0`
-turns the probes and the transport split off, for bisecting, and with
-`X87_NATIVE_TRANSPORT=0` an integer-only run is an ordinary floating-point
-run again.
+The knob is off by default because of what it costs, measured on an M5 Max
+against the same build without it. The store probe has to read the bytes
+it writes back, and a read from write-combined memory is uncached, so an
+x87 store at the start of a reply into a write-combined buffer becomes 23
+to 40 times slower: a loop filling such a buffer with `fstps` takes 39
+times as long. Loops of x87 arithmetic on memory operands lose up to 7
+percent (dot products, `fyl2x`), and a loop of two nested
+`fild m64; fistp m64` copies takes 4.5 times as long, since those runs are
+split. With the knob off the emitted code is the same as without the
+feature.
+
+Even with the knob on, a fault in a later instruction of a floating-point
+run still aborts. That instruction has no map entry of its own, and giving
+it one would mean writing the x87 state back to memory in the native layout
+before every memory access of the run, which is the cost the run reply
+exists to avoid. Probing the later accesses at the start of the reply as
+well would not help: the rollback would report the run's first instruction
+as rip, so a handler that skips the faulting instruction would skip the
+wrong one, and a second store probe would itself change state before the
+faulting one. This needs the x87 state to stay in the native layout
+throughout. A 10- or 108-byte store that crosses from a writable page into
+a read-only one also still aborts, since only its first byte is written
+back, and with `X87_NATIVE_TRANSPORT=0` an integer-only run is an ordinary
+floating-point run again.
 
 `tests/test_x87_sync_fault.c` checks rip, fault address and kind, control
 word, status word, tags and stack contents in the handler against a
@@ -225,9 +241,11 @@ final state and memory with an unfaulted run and with a run that leaves the
 instruction out. Its cases cover `PROT_NONE` and read-only pages, bare,
 displacement, index, RIP-relative and `%gs` operands, and 32-bit
 compatibility mode through an LDT code segment, and it stores through x87
-instructions into write-combined and uncached IOSurfaces. The harness runs
-the cases above; `SYNC_FAULT_IN_RUN=1` adds the ones that are not precise
-yet, which pass under stock Rosetta.
+instructions into write-combined and uncached IOSurfaces. `run_tests.sh`
+runs it in a phase of its own with `X87_PRECISE_FAULTS=1`, and once
+without, where a store at the start of a reply must abort with the
+runtime's message. `SYNC_FAULT_IN_RUN=1` adds the cases that are not
+precise yet, which pass under stock Rosetta.
 
 ## Guest flags in NZCV
 
