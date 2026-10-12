@@ -150,7 +150,9 @@ struct RosettaConfig {
     uint8_t precise_faults;           // X87_PRECISE_FAULTS        (default ON) probe the memory
                                       //                           operand of a reply's first x87
                                       //                           instruction before anything in
-                                      //                           the reply changes state, so a
+                                      //                           the reply changes state, and
+                                      //                           answer native transport runs one
+                                      //                           instruction per reply, so a
                                       //                           fault there reaches the guest
                                       //                           handler with a precise context.
                                       //                           =0 for bisecting and cost A/B.

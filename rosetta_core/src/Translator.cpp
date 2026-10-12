@@ -540,7 +540,16 @@ static auto translate_instruction_impl(TranslationResult* translation_result, IR
         if (!cache.active()) {
             const bool cache_disabled = g_rosetta_config && g_rosetta_config->disable_x87_cache;
             if (!cache_disabled) {
-                const int run = X87Cache::lookahead(instr_array, num_instrs, insn_idx);
+                // A native transport run is answered one instruction per
+                // reply, so every integer load and store is the first
+                // instruction of its reply and gets the fault probe (see
+                // emit_fault_probe).  Transport replies have no entry or
+                // exit conversion, so the extra replies cost little.  An
+                // adjacent fild m64 / fistp m64 pair stays one reply (see
+                // try_fuse_fld_group).
+                const int run = cache.native_transport && precise_faults()
+                                    ? 1
+                                    : X87Cache::lookahead(instr_array, num_instrs, insn_idx);
                 cache.set_run(run);
                 // Run bridging: at a fresh run start, check whether short v1
                 // gaps join this run to following x87 segments.  Stash the
