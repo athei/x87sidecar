@@ -126,7 +126,10 @@ run_bench() {
     if [[ "$mode" == "baseline" ]]; then
         extra_env+=("X87_DISABLE_HOOK=1")
     fi
-    env "${extra_env[@]}" "$LOADER" "$binary" 2>/dev/null | filter_runtime_lines
+    # SIGALRM after 600 s ends a target that never exits; the sidecar exits
+    # with it.
+    perl -e 'alarm shift; exec @ARGV' 600 env "${extra_env[@]}" "$LOADER" "$binary" 2>/dev/null |
+        filter_runtime_lines
 }
 
 # Collect results: associative arrays keyed by "bench.func_name"
