@@ -323,8 +323,15 @@ static void run_storm(void) {
     const double deadline = now_s() + 0.2;
     while (now_s() < deadline) {
         for (int k = 0; k < 64; k++) {
-            float o32[2] = {0, 0};
-            double o64 = 0;
+            /* Sentinel fill: a store that never happens must not look like a
+             * flushed +0. */
+            float o32[2];
+            double o64;
+            const uint32_t s32 = 0xFFFFFFFFu;
+            const uint64_t s64 = 0xFFFFFFFFFFFFFFFFull;
+            memcpy(&o32[0], &s32, 4);
+            memcpy(&o32[1], &s32, 4);
+            memcpy(&o64, &s64, 8);
             storm_seq(in32, in64, o32, &o64);
             const uint32_t g0 = u32(o32[0]), g1 = u32(o32[1]);
             const uint64_t g64 = u64(o64);
