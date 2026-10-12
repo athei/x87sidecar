@@ -1411,9 +1411,10 @@ void lower(Context& ctx, TranslationResult* result) {
                         free_gpr(*result, Wd_adj);
                     }
 
-                    // BFI W_ax, Wd_sw, #0, #16 — write status_word into x86 AX
-                    int W_ax = n.inputs[1];  // destination register index (usually 0 = W0)
-                    emit_bitfield(buf, 0, /*BFM*/ 1, 0, /*immr=*/0, /*imms=*/15, Wd_sw, W_ax);
+                    // BFI X_ax, Xd_sw, #0, #16: write status_word into x86 AX.
+                    // 64-bit form, so RAX bits 63:16 are left as they were.
+                    int W_ax = n.inputs[1];  // destination register index (usually 0 = X0)
+                    emit_bitfield(buf, 1, /*BFM*/ 1, 1, /*immr=*/0, /*imms=*/15, Wd_sw, W_ax);
                     free_gpr(*result, Wd_sw);
                 }
                 break;

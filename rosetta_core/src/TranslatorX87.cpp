@@ -1431,11 +1431,12 @@ auto translate_fst(TranslationResult* a1, IRInstr* a2) -> void {
 //   fstsw   DF E0   operands[0] = Register AX  (register destination)
 //
 // The AX path reads the status_word as a 16-bit halfword and inserts it into
-// bits[15:0] of W0 (the 32-bit view of RAX) via BFI, leaving bits[31:16]
-// untouched so the upper 16 bits of EAX are preserved per x86 semantics.
+// bits[15:0] of X0 (RAX) via BFI, leaving bits[63:16] untouched as x86
+// semantics require.  The insert has to be the 64-bit form: any write to a
+// W register clears bits[63:32] of the X register.
 //
-// BFI W_ax, Wd_sw, #0, #16  encodes as BFM with immr=0, imms=15:
-//   When immr <= imms: inserts Wn[imms-immr : 0] = Wn[15:0] into Wd[15:0].
+// BFI X_ax, Xd_sw, #0, #16  encodes as BFM (sf=1, N=1) with immr=0, imms=15:
+//   When immr <= imms: inserts Xn[imms-immr : 0] = Xn[15:0] into Xd[15:0].
 //
 // The memory path just stores the 16-bit halfword directly via STRH.
 //
@@ -1504,17 +1505,17 @@ auto translate_fstsw(TranslationResult* a1, IRInstr* a2) -> void {
         // operands[0].reg.reg.value == 0x30 (size_class=3 → 16-bit, index=0 → AX)
         //
         // In Rosetta's GPR mapping, x86 register index 0 (RAX) maps directly
-        // to AArch64 register X0.  Write the status_word into bits[15:0] of W0,
-        // leaving the upper 16 bits of EAX untouched.
+        // to AArch64 register X0.  Write the status_word into bits[15:0] of X0,
+        // leaving bits[63:16] of RAX untouched.
         //
-        // BFI W0, Wd_sw, #lsb=0, #width=16
-        //   → BFM immr=(32-0)&31=0, imms=width-1=15
-        //   → copies Wd_sw[15:0] into W0[15:0]
+        // BFI X0, Xd_sw, #lsb=0, #width=16
+        //   → BFM sf=1 N=1 immr=(64-0)&63=0, imms=width-1=15
+        //   → copies Xd_sw[15:0] into X0[15:0]
         // -----------------------------------------------------------------
         const int W_ax = a2->operands[0].reg.reg.index();  // = 0 (RAX/EAX/AX)
 
-        emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/1 /*BFM*/,
-                      /*N=*/0, /*immr=*/0, /*imms=*/15,
+        emit_bitfield(buf, /*is_64bit=*/1, /*opc=*/1 /*BFM*/,
+                      /*N=*/1, /*immr=*/0, /*imms=*/15,
                       /*Rn=*/Wd_sw, /*Rd=*/W_ax);
     } else {
         // -----------------------------------------------------------------

@@ -20,6 +20,10 @@
  * against stock Rosetta by the native phase.
  *
  * Checked bits: C3 (14), TOP (13:11), C2 (10), C0 (8).
+ *
+ * FNSTSW AX writes only AX, so RAX bits 63:16 must come through unchanged.
+ * Every AX case starts with a sentinel in RAX and checks those bits too: a
+ * 32-bit register write on the ARM side would clear bits 63:32.
  */
 
 #include <math.h>
@@ -43,7 +47,10 @@ static float in_f[1] = {1.875f};
 /* Offset 0 = spill slot for FSTP, offset 8 = FNSTSW m16 destination */
 static double scratch[2];
 
-static void check_sw(const char* name, uint16_t got, uint16_t mask, uint16_t expected) {
+/* Loaded into RAX before each AX case; bits 63:16 must survive FNSTSW AX. */
+#define RAX_SENTINEL 0x0123456789abcdefULL
+
+static void check_bits(const char* name, uint16_t got, uint16_t mask, uint16_t expected) {
     if ((got & mask) != expected) {
         printf("FAIL  %-62s  got=0x%04x  expected=0x%04x (mask 0x%04x)\n", name, got & mask,
                expected, mask);
@@ -53,22 +60,32 @@ static void check_sw(const char* name, uint16_t got, uint16_t mask, uint16_t exp
     }
 }
 
+static void check_sw(const char* name, uint64_t rax, uint16_t mask, uint16_t expected) {
+    check_bits(name, (uint16_t)rax, mask, expected);
+    if ((rax >> 16) != (RAX_SENTINEL >> 16)) {
+        printf("FAIL  %-62s  RAX[63:16]=0x%012llx  expected=0x%012llx\n", name,
+               (unsigned long long)(rax >> 16), (unsigned long long)(RAX_SENTINEL >> 16));
+        failures++;
+    }
+}
+
 /*
  * One x87 run, bracketed by FNINIT and a CMP on each side.  %1 = in,
- * %2 = in_f, %3 = scratch.  The run's last FNSTSW AX is the result.
+ * %2 = in_f, %3 = scratch.  RAX enters holding RAX_SENTINEL; the run's last
+ * FNSTSW AX leaves the status word in AX.
  */
 #define SW_CASE(fn, body)                      \
-    static uint16_t fn(void) {                 \
-        uint16_t ax;                           \
+    static uint64_t fn(void) {                 \
+        uint64_t rax = RAX_SENTINEL;           \
         __asm__ volatile(                      \
             "fninit\n\t"                       \
             "cmpq %%r11, %%r11\n\t" body       \
             "cmpq %%r11, %%r11\n\t"            \
             "fninit\n\t"                       \
-            : "=&a"(ax)                        \
+            : "+a"(rax)                        \
             : "r"(in), "r"(in_f), "r"(scratch) \
             : "r11", "cc", "memory");          \
-        return ax;                             \
+        return rax;                            \
     }
 
 /* ── fld + fcomp/fucomp + fnstsw AX with an earlier push pending ─────────── */
@@ -303,8 +320,8 @@ int main(void) {
              SW_MASK, TOP(7) | CC_LT);
 
     printf("\n=== fnstsw m16 ===\n");
-    check_sw("fld x2; fcomp m64; fnstsw m16  (GT, TOP=7)", fld_fcomp_fstsw_m16(), SW_MASK,
-             TOP(7) | CC_GT);
+    check_bits("fld x2; fcomp m64; fnstsw m16  (GT, TOP=7)", fld_fcomp_fstsw_m16(), SW_MASK,
+               TOP(7) | CC_GT);
 
     printf("\n%s: %d failure(s)\n", failures ? "FAILED" : "ALL PASSED", failures);
     return failures ? 1 : 0;
