@@ -159,15 +159,14 @@ auto translate_fldpi(TranslationResult* a1, IRInstr* /*a2*/) -> void {
 //   FLD ST(i)   D9 C0+i  operands = [ST(0) dst Register, ST(i) src Register]
 //   FLD m32fp   D9 /0    operands = [m32fp MemRef src]  — operands[0].size == S32
 //   FLD m64fp   DD /0    operands = [m64fp MemRef src]  — operands[0].size == S64
+//   FLD m80fp   DB /5    operands = [m80fp MemRef src]  (operands[0].size == S80)
 //
-// FLD m80fp (DB /5) is intentionally NOT handled here. The dispatcher in
-// `Translator::translate_instruction` short-circuits to nullopt before
-// calling us so stock libRosettaRuntime translates the entire instruction
-// (its emit + its `x87_fld_fp80` routine, ABI matched). A previous
-// version emitted a BL+Fixup for this case targeting our deleted dylib's
-// custom routine; without the dylib, that fixup resolves to Apple's
-// stock routine whose ABI doesn't match our prologue's register
-// convention.
+// FLD m80fp converts inline to binary64 (emit_f80_to_f64_convert in
+// TranslatorX87F80.cpp): the significand is rounded to 53 bits, values
+// outside binary64's range become infinity or zero, NaN payloads keep only
+// their top bits, and the unsupported encodings are read as if the integer
+// bit were set.  An FLD m80 immediately followed by FSTP m80 normally does
+// not get here: the fld_fstp_m80 fusion copies the ten bytes unchanged.
 //
 // ST(i) ordering requirement:
 //   Intel spec: temp = ST(i); TOP--; ST(0) = temp.
@@ -299,11 +298,14 @@ auto translate_fld(TranslationResult* a1, IRInstr* a2) -> void {
 //                 Within each byte: bits[7:4] = high digit, bits[3:0] = low digit.
 //   byte[9]     : bit 7 = sign (1 = negative), bits[6:0] reserved (zero).
 //
-// Stock x87 spec is f80, but we natively store ST as f64 throughout. Conversion
-// path is BCD → i64 → f64 (one SCVTF), which avoids the f80 unpack stock would
-// pay. Max representable: |10^18 - 1| ≈ 60 bits, fits in i64; SCVTF rounds to
-// nearest-even on the f64 → 18-digit values lose ~7 LSBs of precision, matching
-// stock's f80→f64 round on the way out.
+// The x87 loads the value exactly into its 64-bit significand, and so does
+// stock Rosetta.  We store ST as f64, so the path is BCD → i64 → f64 (one
+// SCVTF).  The i64 holds every 18-digit value (|10^18 - 1| needs 60 bits),
+// but SCVTF rounds it to 53: values above 2^53 lose up to 7 low bits, and
+// 999999999999999999 becomes 10^18, which a following FBSTP stores as the
+// BCD indefinite.  That is why the sidecar hands blocks containing FBLD or
+// FBSTP to stock by default (X87_STOCK_BCD); in the live sidecar this
+// translator only runs with X87_STOCK_BCD=0.
 //
 // We do not validate digit nibbles (>9 is implementation-defined per Intel);
 // the binary value of the nibble flows through MADD as-is, matching stock.
@@ -1271,7 +1273,7 @@ auto translate_fmul(TranslationResult* a1, IRInstr* a2) -> void {
 //
 // operands[0] is the memory destination (IROperandMemRef).
 // operands[0].size encodes the store width: S32 → float32, S64 → float64,
-//                                           S80 → float80 (runtime routine).
+//                                           S80 → float80 (inline conversion).
 // Source is always ST(0).
 //
 // Register allocation (S32 / S64 direct-emit paths):
@@ -1281,8 +1283,9 @@ auto translate_fmul(TranslationResult* a1, IRInstr* a2) -> void {
 //                           RMW scratch inside emit_x87_pop
 //   Dd_src  (fpr free pool) -- ST(0) value; narrowed in-place to Sd_src for S32
 //
-// Register allocation (S80 runtime path):
-//   Xaddr   (gpr pool 0) -- destination address passed to runtime routine
+// Register allocation (S80 path):
+//   Xaddr   (gpr free pool) -- destination address
+//   Xbits, Wexp (gpr free pool) -- converted significand and sign/exponent
 //
 // FST / FSTP / FST_STACK / FSTP_STACK
 //
@@ -1297,11 +1300,12 @@ auto translate_fmul(TranslationResult* a1, IRInstr* a2) -> void {
 // the same slot, so the load/store is skipped. The pop still fires for fstp_stack.
 //
 // The Memory path (fst / fstp) stores ST(0) to a memory address.
-// S80 is handed off to a runtime routine (kRuntimeRoutine_fstp_fp80 / fst_fp80)
-// because the 80-bit extended format has a different exponent bias (16383 vs
-// 1023) and an explicit integer bit — it cannot be produced from a 64-bit double
-// via a plain FCVT, and writing only 8 bytes to an m80fp destination corrupts
-// the 2-byte exponent field at addr+8.
+// S80 is converted inline by emit_f64_to_f80 (TranslatorX87F80.cpp), because
+// the 80-bit extended format has a different exponent bias (16383 vs 1023)
+// and an explicit integer bit: it cannot be produced from a double with a
+// plain FCVT, and all ten bytes have to be written.  The result is exact for
+// the binary64 value in ST(0), which is all the sidecar keeps; an FSTP m80
+// right after FLD m80 is fused into a ten-byte copy (fld_fstp_m80) instead.
 // is_f32 is only valid for the S32/S64 direct-emit memory path.
 auto translate_fst(TranslationResult* a1, IRInstr* a2) -> void {
     AssemblerBuffer& buf = a1->insn_buf;
@@ -1319,20 +1323,13 @@ auto translate_fst(TranslationResult* a1, IRInstr* a2) -> void {
     // x87 f80:          bytes 0-7 mantissa (64-bit, explicit integer bit at 63)
     //                   bytes 8-9 [15] sign | [14:0] exp (15-bit, bias 16383)
     //
-    // Instruction layout (22 instructions, 3 paths):
-    //   [0-4]   extract sign/exp/mantissa from double bits
-    //   [5-7]   dispatch: CBZ→zero/denorm, B.EQ→inf/nan
-    //   [8-14]  normal: set integer bit, bias-adjust exp, store, B .done
-    //   [15-17] zero/denorm: store zero mantissa + sign, B .done
-    //   [18-21] inf/nan: set integer bit, store, sign|0x7FFF, store
-    //   [22]    .done: pop + end
+    // emit_f64_to_f80 has four paths (normal, subnormal, zero, Inf/NaN) and
+    // writes all ten bytes on each; the pop follows.
     // -------------------------------------------------------------------------
     if (a2->operands[0].kind != IROperandKind::Register &&
         a2->operands[0].mem.size == IROperandSize::S80) {
         // Inline f64 → f80 conversion via the shared emit_f64_to_f80 helper
-        // in TranslatorX87F80.cpp.  The helper emits the same 22-instruction
-        // sequence that previously lived inline here and is also used by
-        // translate_fsave.
+        // in TranslatorX87F80.cpp, which translate_fsave uses as well.
         auto [Xbase, Wd_top] = x87_begin(*a1, buf);
         const int Xst_base = x87_get_st_base(*a1);
         const int Wd_tmp = alloc_gpr(*a1, 2);  // sign scratch, then pop scratch
@@ -3764,6 +3761,11 @@ auto translate_ffree(TranslationResult* a1, IRInstr* a2) -> void {
 //
 // Indefinite (NaN, ±inf, |rounded| >= 10^18):
 //   { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC0, 0xFF, 0xFF }
+//
+// The conversion is exact for the f64 in ST(0), but that f64 carries only
+// about 16 of the 18 digits the x87 would have.  As with FBLD, blocks
+// containing FBSTP go to stock by default (X87_STOCK_BCD), so in the live
+// sidecar this translator only runs with X87_STOCK_BCD=0.
 //
 // Codegen:
 //   1.  Compute dest address.
