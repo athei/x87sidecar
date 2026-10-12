@@ -251,7 +251,8 @@ filter_runtime_lines() {
 
 # run_bounded SECONDS COMMAND...: run COMMAND in a process group of its own
 # and kill the whole group if it is still running after SECONDS, exiting 124
-# like timeout(1), which macOS does not ship.  For runs expected to end in
+# like timeout(1), which macOS does not ship.  The group is also killed when
+# COMMAND exits, so nothing it left running can hold its output open.  For runs expected to end in
 # an abort, where a process left behind would otherwise stall the harness
 # until CI's idle timeout.  Otherwise exits as COMMAND did, 128 + the signal
 # number when a signal ended it.
@@ -263,11 +264,17 @@ run_bounded() {
             setpgrp(0, 0);
             exec @ARGV or exit 127;
         }
+        # Both sides set the group, so a kill below cannot race the child'"'"'s
+        # own setpgrp; the parent'"'"'s call fails harmlessly after the exec.
+        setpgrp($pid, $pid);
         $SIG{ALRM} = sub { kill "KILL", -$pid; waitpid($pid, 0); exit 124; };
         alarm $secs;
         waitpid($pid, 0);
         my $status = $?;
         alarm 0;
+        # A group member left behind could still hold the output pipe and
+        # keep the caller'"'"'s $(...) waiting.
+        kill "KILL", -$pid;
         exit($status & 127 ? 128 + ($status & 127) : $status >> 8);
     ' "$@"
 }
@@ -980,11 +987,12 @@ if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then
         # Without the knob a store at the start of a reply has to abort the
         # process with the runtime's message; anything else, a pass
         # included, means the knob or its default changed.  Through the
-        # cooperative attach, which the bundles use: on kernels where the
-        # default attach's release leaves the target traced (the reply-first
-        # detach in main.cpp), the runtime's abort is delivered as a Mach
-        # exception that nothing answers, so the target never exits and the
-        # sidecar waits for it forever.  That hung CI here.  Bounded, so
+        # cooperative attach, which the bundles use.  Under the default
+        # attach on macOS 26.6.2, CI hung here: the aborting target stayed
+        # stopped under trace with the sidecar as its tracer, and the sidecar
+        # kept waiting for it to exit.  The reply-first detach in main.cpp
+        # leaves the target traced on that kernel, which presumably holds
+        # the fatal signal, but the mechanism is not confirmed.  Bounded, so
         # that a hang reports a failure instead.
         TOTAL=$((TOTAL + 1))
         EXIT=0
