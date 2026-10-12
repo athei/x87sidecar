@@ -46,6 +46,7 @@
 #include "rosetta_core/RosettaCore.h"
 #include "rosetta_core/TranscendentalHelper.h"
 #include "rosetta_core/TranslationResult.h"
+#include "rosetta_core/TranslatorX87F80.hpp"
 #include "sidecar.hpp"
 #include "stub_asm.hpp"
 #include "types.h"
@@ -280,6 +281,8 @@ static int probeRuntime() {
            f.translationResultSize_ ? f.translationResultSize_
                                     : static_cast<uint32_t>(sidecar::kStockTRSize));
     printf("  opcode table       %zu entries\n", f.opcodeNames_.size());
+    printf("  MXCSR FTZ/DAZ in   %s (X87_IGNORE_FTZ_DAZ)\n",
+           TranslatorX87::flush_control_name(TranslatorX87::flush_control()));
     const bool ok =
         runtimeAssumptionsHold(f) && f.offsetDecodeOpcode_ != 0 && f.armTreeRootOffset_ != 0;
     printf("%s\n", ok ? "supported" : "NOT fully supported");

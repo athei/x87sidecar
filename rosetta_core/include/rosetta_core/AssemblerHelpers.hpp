@@ -342,12 +342,24 @@ auto emit_mrs_nzcv(AssemblerBuffer& buf, int Xd) -> void;
 // Encoding: 0xD51B4200 | Rt  (same sysreg, L=0)
 auto emit_msr_nzcv(AssemblerBuffer& buf, int Xd) -> void;
 
+// MRS Xd, FPCR / MSR FPCR, Xd: read or write the floating-point control register
+// Encoding: 0xD53B4400 | Rt (read), 0xD51B4400 | Rt (write)
+auto emit_mrs_fpcr(AssemblerBuffer& buf, int Xd) -> void;
+auto emit_msr_fpcr(AssemblerBuffer& buf, int Xd) -> void;
+
 // CBZ/CBNZ Rt, #imm19 — compare and branch if (non-)zero
 // is_64bit: 0=W-register, 1=X-register
 // is_nz:    0=CBZ, 1=CBNZ
 // imm19:    signed instruction-count offset (each insn = 4 bytes)
 // Encoding: sf | 011010 | b5=0 | op=is_nz | imm19 | Rt
 auto emit_cbz(AssemblerBuffer& buf, int is_64bit, int is_nz, int Rt, int imm19) -> void;
+
+// TBZ/TBNZ Rt, #bit, #imm14: test bit and branch if (non-)zero
+// is_nz: 0=TBZ, 1=TBNZ
+// bit:   0..63; 32 and above select the X form
+// imm14: signed instruction-count offset
+// Encoding: b5 | 011011 | op=is_nz | b40 | imm14 | Rt
+auto emit_tbz(AssemblerBuffer& buf, int is_nz, int Rt, int bit, int imm14) -> void;
 
 // B #imm26 — unconditional branch
 // imm26: signed instruction-count offset

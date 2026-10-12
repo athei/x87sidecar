@@ -1,26 +1,96 @@
 #include "rosetta_core/TranslatorHelpers.hpp"
 
+#include <atomic>
 #include <cassert>
 #include <cstdint>
 
 #include "rosetta_core/AssemblerHelpers.hpp"
+#include "rosetta_core/Config.h"
+#include "rosetta_core/CoreConfig.h"
 #include "rosetta_core/Fixup.h"
 #include "rosetta_core/IROperand.h"
 #include "rosetta_core/Register.h"
 #include "rosetta_core/RuntimeRoutine.h"
 #include "rosetta_core/TranslationResult.h"
 
+// ---------------------------------------------------------------------------
+// Allocation failure
+//
+// The register-pressure models are meant to keep every allocation below the
+// pool, but a miscount used to end in an assert that killed the sidecar and,
+// with it, the program being translated.  Now an allocator that cannot hand
+// out a register records the failure in the TranslationResult and returns a
+// placeholder register, so emission runs to the end of the request without
+// touching the free masks.  Translator::translate_instruction then discards
+// everything the request emitted and declines it, and stock translates the
+// instruction.  X87_STRICT_ALLOC keeps the assert for the test harness.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// ANDed into the free mask before the emptiness test, so one branch covers
+// both an empty pool and the X87_FAIL_ALLOC_EVERY injection: while the
+// injection is armed the mask is 0 and every allocation takes the slow path,
+// which counts it.
+uint32_t g_alloc_fast_mask = ~0U;
+uint32_t g_alloc_fail_every = 0;
+std::atomic<uint64_t> g_alloc_count{0};
+
+// Placeholders handed out after a failure.  Any in-range number will do:
+// the request's code is never installed.
+constexpr int kPlaceholderGpr = kGprScratchPool[0];
+constexpr int kPlaceholderFpr = kFprScratchPool[0];
+
+bool alloc_strict() {
+    return g_rosetta_config != nullptr && g_rosetta_config->strict_alloc != 0;
+}
+
+// Slow path of every allocator.  Returns true when this allocation fails:
+// the pool is `exhausted`, or the fault injection picked it.
+[[gnu::cold]] [[gnu::noinline]] bool alloc_fails(TranslationResult& tr, bool exhausted,
+                                                 const char* allocator) {
+    if (!exhausted) {
+        if (g_alloc_fail_every == 0) {
+            return false;
+        }
+        const uint64_t n = g_alloc_count.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (n % g_alloc_fail_every != 0) {
+            return false;
+        }
+    }
+    if (tr.alloc_failure == nullptr) {
+        tr.alloc_failure = allocator;
+    }
+    return true;
+}
+
+}  // namespace
+
+void configure_alloc_fault_injection(uint32_t every) {
+    g_alloc_fail_every = every;
+    g_alloc_fast_mask = every != 0 ? 0U : ~0U;
+    g_alloc_count.store(0, std::memory_order_relaxed);
+}
+
 int alloc_gpr(TranslationResult& translation, int pool_index) {
     const int reg = kGprScratchPool[pool_index];
     const uint32_t mask = 1U << reg;
-    assert((translation.free_gpr_mask & mask) != 0 && "alloc_gpr: pool slot already occupied");
+    if (__builtin_expect((translation.free_gpr_mask & mask & g_alloc_fast_mask) == 0, 0) &&
+        alloc_fails(translation, (translation.free_gpr_mask & mask) == 0, "alloc_gpr")) {
+        assert(!alloc_strict() && "alloc_gpr: pool slot already occupied");
+        return reg;
+    }
     translation.free_gpr_mask &= ~mask;
     return reg;
 }
 
 int alloc_free_gpr(TranslationResult& translation) {
     uint32_t mask = translation.free_gpr_mask;
-    assert(mask != 0 && "no temporary GPR available to allocate");
+    if (__builtin_expect((mask & g_alloc_fast_mask) == 0, 0) &&
+        alloc_fails(translation, mask == 0, "alloc_free_gpr")) {
+        assert(!alloc_strict() && "no temporary GPR available to allocate");
+        return kPlaceholderGpr;
+    }
     int reg = __builtin_ctz(mask);  // lowest set bit = binary reverse of __clz(__rbit32)
     translation.free_gpr_mask = mask & ~(1U << reg);
     return reg;
@@ -42,7 +112,11 @@ void free_gpr(TranslationResult& translation, int reg) {
 
 auto alloc_free_fpr(TranslationResult& translation) -> int {
     uint32_t mask = translation.free_fpr_mask;
-    assert(mask != 0 && "no temporary FPR available to allocate");
+    if (__builtin_expect((mask & g_alloc_fast_mask) == 0, 0) &&
+        alloc_fails(translation, mask == 0, "alloc_free_fpr")) {
+        assert(!alloc_strict() && "no temporary FPR available to allocate");
+        return kPlaceholderFpr;
+    }
     int reg = __builtin_ctz(mask);  // lowest set bit = binary reverse of __clz(__rbit32)
     translation.free_fpr_mask = mask & ~(1U << reg);
     return reg;
@@ -161,13 +235,15 @@ auto emit_load_immediate_no_xzr(TranslationResult& result, int is_64bit, uint64_
 // ---------------------------------------------------------------------------
 
 // Mirrors the binary's __clz(__rbit32(mask)) pattern: finds the lowest set bit
-// index, clears it in free_gpr_mask, and returns the register number.
-// Aborts if no free register is available (matches LABEL_104 / ASSERT3).
+// index, clears it in free_gpr_mask, and returns the register number.  The
+// binary aborts if no free register is available (LABEL_104 / ASSERT3); here
+// that is a declined request like in the allocators above.
 static int alloc_scratch_gpr(TranslationResult& result) {
     uint32_t mask = result.free_gpr_mask;
-    if (!mask) {
-        assert(false && "no temporary GPR available to allocate");
-        __builtin_unreachable();
+    if (__builtin_expect((mask & g_alloc_fast_mask) == 0, 0) &&
+        alloc_fails(result, mask == 0, "alloc_scratch_gpr")) {
+        assert(!alloc_strict() && "no temporary GPR available to allocate");
+        return kPlaceholderGpr;
     }
     int r = __builtin_ctz(mask);
     result.free_gpr_mask = mask & ~(1U << r);
@@ -881,7 +957,9 @@ auto read_operand_to_gpr(TranslationResult& result, bool is_64bit, IROperand* op
 //   [8] MOVZ Xd_int, #indef                  ; NaN → indefinite
 //   [9] done
 //
-// Allocates one scratch GPR and one scratch FPR (both transient).
+// Allocates one scratch GPR and one scratch FPR (both transient).  The IR
+// pressure model counts both: peak_live_gprs and peak_live_fprs in
+// X87IRLower.cpp.
 // =============================================================================
 auto emit_fist_indefinite_guard(TranslationResult& result, AssemblerBuffer& buf, int Xd_int,
                                 int Dd_val, IROperandSize size) -> void {

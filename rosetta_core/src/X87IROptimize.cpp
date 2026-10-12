@@ -376,6 +376,7 @@ static bool extract_simple_mem(const Node& n, uint8_t* base_reg, int64_t* disp) 
     if ((op.mem.mem_flags & 2U) != 0) {  // index register present
         return false;
     }
+    // Defensive: build() already ends a run at any segment-override operand.
     if (op.mem.seg_override != 0) {
         return false;
     }
@@ -692,6 +693,79 @@ static void pass_fma_reduce(Context& ctx) {
     }
 }
 
+// ── Pass 5: Exact int64 copy ────────────────────────────────────────────────
+//
+// Real x87 registers have a 64-bit mantissa, so FILD m64 followed by FISTP or
+// FISTTP m64 copies any int64 unchanged.  Here the value goes through a
+// binary64, which rounds every |v| >= 2^53: 0x5357452E46535745 ("EWSF.EWS")
+// comes back as ...5800 and INT64_MAX as the integer indefinite.  Delphi's
+// System.Move copies memory with exactly these pairs.
+//
+// A LoadI64 whose only consumers are StoreI64 nodes, and which is not left
+// on the stack at the end of the run, is never observed as a number.  Retag
+// it to LoadF64 and its stores to StoreF64: LDR D / STR D move the 64 bits
+// with no conversion, rounding-mode dispatch or indefinite guard.  The nodes
+// keep their positions, so memory order is unchanged, and
+// remat_relieve_fpr_pressure never sinks a load past a store, fnstcw or
+// bridge node.  Operands with a segment override are left alone so the GPR
+// model's per-op cost for them does not drop.
+//
+// Runs last, after every pass that matches LoadF64 or StoreI64.  Gated with
+// the fild_fistp peephole on FusionId::fild_fistp.
+
+static bool has_seg_override(const Node& n) {
+    return n.mem_operand != nullptr && n.mem_operand->mem.seg_override != 0;
+}
+
+static void pass_exact_i64_copy(Context& ctx) {
+    if (g_rosetta_config != nullptr &&
+        fusion_is_disabled(*g_rosetta_config, FusionId::fild_fistp)) {
+        return;
+    }
+
+    int16_t store_uses[kMaxNodes] = {};
+    bool other_use[kMaxNodes] = {};
+    for (short d : ctx.slot_val) {
+        if (d >= 0 && d < ctx.num_nodes) {
+            other_use[d] = true;
+        }
+    }
+    for (int i = 0; i < ctx.num_nodes; i++) {
+        const auto& n = ctx.nodes[i];
+        if (n.flags & kDead) {
+            continue;
+        }
+        const int nrefs = node_ref_input_count(n);
+        for (int k = 0; k < nrefs; k++) {
+            const short in = n.inputs[k];
+            if (in < 0 || in >= ctx.num_nodes) {
+                continue;
+            }
+            if (n.op == Op::StoreI64 && k == 0 && !has_seg_override(n)) {
+                store_uses[in]++;
+            } else {
+                other_use[in] = true;
+            }
+        }
+    }
+
+    for (int i = 0; i < ctx.num_nodes; i++) {
+        auto& n = ctx.nodes[i];
+        if (n.op != Op::LoadI64 || (n.flags & kDead) || other_use[i] || store_uses[i] == 0 ||
+            has_seg_override(n)) {
+            continue;
+        }
+        n.op = Op::LoadF64;
+        for (int j = i + 1; j < ctx.num_nodes; j++) {
+            auto& s = ctx.nodes[j];
+            if (s.op == Op::StoreI64 && !(s.flags & kDead) && s.inputs[0] == i) {
+                s.op = Op::StoreF64;
+                s.flags &= static_cast<uint8_t>(~kTruncate);
+            }
+        }
+    }
+}
+
 // ── Public API ──────────────────────────────────────────────────────────────
 
 void optimize(Context& ctx) {
@@ -704,6 +778,7 @@ void optimize(Context& ctx) {
     }
     pass_fma_reduce(ctx);
     pass_fcom_fstsw_fusion(ctx);
+    pass_exact_i64_copy(ctx);
 }
 
 }  // namespace X87IR

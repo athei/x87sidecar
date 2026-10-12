@@ -1,6 +1,7 @@
 #include "rosetta_core/TranslatorX87.h"
 
 #include <bit>
+#include <cassert>
 #include <cstdint>
 #include <utility>
 
@@ -17,6 +18,7 @@
 #include "rosetta_core/TranslatorX87F80.hpp"
 #include "rosetta_core/TranslatorX87Helpers.hpp"
 #include "rosetta_core/TranslatorX87Transcendental.hpp"
+#include "rosetta_core/X87IR.h"
 
 namespace TranslatorX87 {
 
@@ -159,15 +161,14 @@ auto translate_fldpi(TranslationResult* a1, IRInstr* /*a2*/) -> void {
 //   FLD ST(i)   D9 C0+i  operands = [ST(0) dst Register, ST(i) src Register]
 //   FLD m32fp   D9 /0    operands = [m32fp MemRef src]  — operands[0].size == S32
 //   FLD m64fp   DD /0    operands = [m64fp MemRef src]  — operands[0].size == S64
+//   FLD m80fp   DB /5    operands = [m80fp MemRef src]  (operands[0].size == S80)
 //
-// FLD m80fp (DB /5) is intentionally NOT handled here. The dispatcher in
-// `Translator::translate_instruction` short-circuits to nullopt before
-// calling us so stock libRosettaRuntime translates the entire instruction
-// (its emit + its `x87_fld_fp80` routine, ABI matched). A previous
-// version emitted a BL+Fixup for this case targeting our deleted dylib's
-// custom routine; without the dylib, that fixup resolves to Apple's
-// stock routine whose ABI doesn't match our prologue's register
-// convention.
+// FLD m80fp converts inline to binary64 (emit_f80_to_f64_convert in
+// TranslatorX87F80.cpp): the significand is rounded to 53 bits, values
+// outside binary64's range become infinity or zero, NaN payloads keep only
+// their top bits, and the unsupported encodings are read as if the integer
+// bit were set.  An FLD m80 immediately followed by FSTP m80 normally does
+// not get here: the fld_fstp_m80 fusion copies the ten bytes unchanged.
 //
 // ST(i) ordering requirement:
 //   Intel spec: temp = ST(i); TOP--; ST(0) = temp.
@@ -254,7 +255,11 @@ auto translate_fld(TranslationResult* a1, IRInstr* a2) -> void {
         const int Xsign = alloc_free_gpr(*a1);
         const int Wd_aux = alloc_free_gpr(*a1);
 
+        // The conversion sets NZCV and all eight scratch GPRs are taken, so
+        // the guest flags wait in Dd_val, which receives the value after.
+        emit_nzcv_park(buf, Dd_val, Wd_aux);
         emit_f80_to_f64_convert(buf, Xmant, Wexp, Xsign, Wd_aux, Wd_tmp);
+        emit_nzcv_unpark(buf, Dd_val, Wd_aux);
 
         free_gpr(*a1, Wd_aux);
         free_gpr(*a1, Xsign);
@@ -299,11 +304,14 @@ auto translate_fld(TranslationResult* a1, IRInstr* a2) -> void {
 //                 Within each byte: bits[7:4] = high digit, bits[3:0] = low digit.
 //   byte[9]     : bit 7 = sign (1 = negative), bits[6:0] reserved (zero).
 //
-// Stock x87 spec is f80, but we natively store ST as f64 throughout. Conversion
-// path is BCD → i64 → f64 (one SCVTF), which avoids the f80 unpack stock would
-// pay. Max representable: |10^18 - 1| ≈ 60 bits, fits in i64; SCVTF rounds to
-// nearest-even on the f64 → 18-digit values lose ~7 LSBs of precision, matching
-// stock's f80→f64 round on the way out.
+// The x87 loads the value exactly into its 64-bit significand, and so does
+// stock Rosetta.  We store ST as f64, so the path is BCD → i64 → f64 (one
+// SCVTF).  The i64 holds every 18-digit value (|10^18 - 1| needs 60 bits),
+// but SCVTF rounds it to 53: values above 2^53 lose up to 7 low bits, and
+// 999999999999999999 becomes 10^18, which a following FBSTP stores as the
+// BCD indefinite.  That is why the sidecar hands blocks containing FBLD or
+// FBSTP to stock by default (X87_STOCK_BCD); in the live sidecar this
+// translator only runs with X87_STOCK_BCD=0.
 //
 // We do not validate digit nibbles (>9 is implementation-defined per Intel);
 // the binary value of the nibble flows through MADD as-is, matching stock.
@@ -486,12 +494,15 @@ auto translate_fild(TranslationResult* a1, IRInstr* a2) -> void {
 
     const int Wd_tmp = alloc_gpr(*a1, 2);
     const int Wd_tmp2 = alloc_gpr(*a1, 3);
-    const int Wd_int = alloc_free_gpr(*a1);  // survives emit_x87_push
     const int Dd_val = alloc_free_fpr(*a1);
 
-    // Step 1: compute source memory address
+    // Step 1: compute source memory address.  Wd_int is allocated after it:
+    // a GS operand takes two scratch registers plus the fixed X29 while the
+    // address is formed, and with Xst_base held in a run there is no room
+    // for Wd_int as well.
     const int addr_reg =
         compute_operand_address(*a1, /*is_64bit=*/true, &a2->operands[0], GPR::XZR);
+    const int Wd_int = alloc_free_gpr(*a1);  // survives emit_x87_push
 
     // Step 2: load integer from memory into Wd_int, sign-extending as needed.
     // Wd_int is a free-pool register distinct from Wd_tmp, so emit_x87_push
@@ -1031,6 +1042,44 @@ auto translate_fdivp(TranslationResult* a1, IRInstr* a2) -> void {
 }
 
 // =============================================================================
+// Integer memory source shared by FIADD, FISUB, FISUBR, FIMUL, FIDIV, FIDIVR,
+// FICOM and FICOMP: load the m16int/m32int at `op` and convert it to f64 in
+// Dd_int.
+//
+// The integer lands in the address register when that is a scratch, which
+// keeps it off Wd_tmp (emit_store_st_at_offset reuses the ST(0) offset held
+// there).  For a bare 64-bit [reg] or [index] operand the address register
+// is the guest register itself, so the integer goes to a separate scratch
+// instead (writable_addr_reg).
+// =============================================================================
+static void emit_load_int_operand(TranslationResult& a1, AssemblerBuffer& buf, IROperand* op,
+                                  bool is_m16, int Dd_int) {
+    const int addr_reg = compute_operand_address(a1, /*is_64bit=*/true, op, GPR::XZR);
+    const int Wd_int = writable_addr_reg(a1, addr_reg);
+
+    if (is_m16) {
+        // LDRH Wd_int, [addr_reg]: 16-bit zero-extending load
+        emit_ldr_str_imm(buf, /*size=*/1 /*16-bit*/, /*is_fp=*/0, /*opc=*/1 /*LDR*/,
+                         /*imm12=*/0, addr_reg, Wd_int);
+        // SXTH Wd_int, Wd_int: sign-extend bits[15:0] → W (SBFM W, W, #0, #15)
+        emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/0 /*SBFM*/, /*N=*/0,
+                      /*immr=*/0, /*imms=*/15, Wd_int, Wd_int);
+    } else {
+        // LDR Wd_int, [addr_reg]: 32-bit load (signed by virtue of SCVTF below)
+        emit_ldr_str_imm(buf, /*size=*/2 /*32-bit*/, /*is_fp=*/0, /*opc=*/1 /*LDR*/,
+                         /*imm12=*/0, addr_reg, Wd_int);
+    }
+
+    // SCVTF Dd_int, Wd_int: signed W → f64
+    emit_scvtf(buf, /*is_64bit_int=*/0, /*ftype=*/1, Dd_int, Wd_int);
+
+    if (Wd_int != addr_reg) {
+        free_gpr(a1, Wd_int);
+    }
+    free_gpr(a1, addr_reg);
+}
+
+// =============================================================================
 // FIADD — DA /0, DE /0
 //
 // x87 semantics:
@@ -1045,10 +1094,10 @@ auto translate_fdivp(TranslationResult* a1, IRInstr* a2) -> void {
 // Sequence:
 //   1. Load ST(0) as f64 into Dd_st0.
 //   2. Compute source address → addr_reg.
-//   3. Load 32-bit or 16-bit integer from memory into Wd_tmp.
+//   3. Load 32-bit or 16-bit integer from memory (emit_load_int_operand).
 //      For 16-bit: LDRH (zero-extend into W) then SXTH (sign-extend to W).
 //      For 32-bit: LDR W (loads a signed 32-bit directly).
-//   4. SCVTF Dd_int, Wd_tmp  — signed integer → f64.
+//   4. SCVTF Dd_int, W: signed integer → f64.
 //   5. FADD Dd_st0, Dd_st0, Dd_int.
 //   6. Store result back into ST(0).
 //
@@ -1060,8 +1109,8 @@ auto translate_fdivp(TranslationResult* a1, IRInstr* a2) -> void {
 // Register allocation:
 //   Xbase   (gpr pool 0) -- X87State base
 //   Wd_top  (gpr pool 1) -- current TOP (read-only; no push/pop here)
-//   Wd_tmp  (gpr pool 2) -- offset scratch for emit_load_st, then reused as
-//                           the integer load target and SCVTF source
+//   Wd_tmp  (gpr pool 2) -- offset scratch for emit_load_st, kept for
+//                           emit_store_st_at_offset
 //   Dd_st0  (fpr free pool) -- ST(0) value; receives the sum
 //   Dd_int  (fpr free pool) -- converted integer value
 //
@@ -1084,32 +1133,10 @@ auto translate_fiadd(TranslationResult* a1, IRInstr* a2) -> void {
     const int Wk10 =
         emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Dd_st0, Xst_base);
 
-    // Step 2: compute source memory address — allocates a separate free-pool GPR.
-    const int addr_reg =
-        compute_operand_address(*a1, /*is_64bit=*/true, &a2->operands[0], GPR::XZR);
-
-    // Step 3: load integer from memory into addr_reg (reusing it for the value).
-    // Opt 3: loading into addr_reg (not Wd_tmp) preserves the ST(0) byte offset
-    // in Wd_tmp so emit_store_st_at_offset can skip recomputing it below.
-    if (is_m16) {
-        // LDRH addr_reg, [addr_reg]  — 16-bit zero-extending load
-        emit_ldr_str_imm(buf, /*size=*/1 /*16-bit*/, /*is_fp=*/0, /*opc=*/1 /*LDR*/,
-                         /*imm12=*/0, addr_reg, addr_reg);
-        // SXTH addr_reg, addr_reg  — sign-extend bits[15:0] → W
-        // Encoded as SBFM W, W, #0, #15
-        emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/0 /*SBFM*/, /*N=*/0,
-                      /*immr=*/0, /*imms=*/15, addr_reg, addr_reg);
-    } else {
-        // LDR addr_reg, [addr_reg]  — 32-bit load (signed by virtue of SCVTF below)
-        emit_ldr_str_imm(buf, /*size=*/2 /*32-bit*/, /*is_fp=*/0, /*opc=*/1 /*LDR*/,
-                         /*imm12=*/0, addr_reg, addr_reg);
-    }
-
-    // Step 4: convert signed integer W → f64
-    // emit_scvtf: is_64bit_int=0 (32-bit source W), ftype=1 (f64 destination)
-    emit_scvtf(buf, /*is_64bit_int=*/0, /*ftype=*/1, Dd_int, addr_reg);
-
-    free_gpr(*a1, addr_reg);
+    // Steps 2-4: load the integer and convert it to f64.
+    // Opt 3: the integer never goes through Wd_tmp, which keeps the ST(0)
+    // byte offset there so emit_store_st_at_offset can skip recomputing it.
+    emit_load_int_operand(*a1, buf, &a2->operands[0], is_m16, Dd_int);
 
     // Step 5: add
     emit_fadd_f64(buf, Dd_st0, Dd_st0, Dd_int);
@@ -1271,7 +1298,7 @@ auto translate_fmul(TranslationResult* a1, IRInstr* a2) -> void {
 //
 // operands[0] is the memory destination (IROperandMemRef).
 // operands[0].size encodes the store width: S32 → float32, S64 → float64,
-//                                           S80 → float80 (runtime routine).
+//                                           S80 → float80 (inline conversion).
 // Source is always ST(0).
 //
 // Register allocation (S32 / S64 direct-emit paths):
@@ -1281,8 +1308,9 @@ auto translate_fmul(TranslationResult* a1, IRInstr* a2) -> void {
 //                           RMW scratch inside emit_x87_pop
 //   Dd_src  (fpr free pool) -- ST(0) value; narrowed in-place to Sd_src for S32
 //
-// Register allocation (S80 runtime path):
-//   Xaddr   (gpr pool 0) -- destination address passed to runtime routine
+// Register allocation (S80 path):
+//   Xaddr   (gpr free pool) -- destination address
+//   Xbits, Wexp (gpr free pool) -- converted significand and sign/exponent
 //
 // FST / FSTP / FST_STACK / FSTP_STACK
 //
@@ -1297,11 +1325,12 @@ auto translate_fmul(TranslationResult* a1, IRInstr* a2) -> void {
 // the same slot, so the load/store is skipped. The pop still fires for fstp_stack.
 //
 // The Memory path (fst / fstp) stores ST(0) to a memory address.
-// S80 is handed off to a runtime routine (kRuntimeRoutine_fstp_fp80 / fst_fp80)
-// because the 80-bit extended format has a different exponent bias (16383 vs
-// 1023) and an explicit integer bit — it cannot be produced from a 64-bit double
-// via a plain FCVT, and writing only 8 bytes to an m80fp destination corrupts
-// the 2-byte exponent field at addr+8.
+// S80 is converted inline by emit_f64_to_f80 (TranslatorX87F80.cpp), because
+// the 80-bit extended format has a different exponent bias (16383 vs 1023)
+// and an explicit integer bit: it cannot be produced from a double with a
+// plain FCVT, and all ten bytes have to be written.  The result is exact for
+// the binary64 value in ST(0), which is all the sidecar keeps; an FSTP m80
+// right after FLD m80 is fused into a ten-byte copy (fld_fstp_m80) instead.
 // is_f32 is only valid for the S32/S64 direct-emit memory path.
 auto translate_fst(TranslationResult* a1, IRInstr* a2) -> void {
     AssemblerBuffer& buf = a1->insn_buf;
@@ -1319,20 +1348,13 @@ auto translate_fst(TranslationResult* a1, IRInstr* a2) -> void {
     // x87 f80:          bytes 0-7 mantissa (64-bit, explicit integer bit at 63)
     //                   bytes 8-9 [15] sign | [14:0] exp (15-bit, bias 16383)
     //
-    // Instruction layout (22 instructions, 3 paths):
-    //   [0-4]   extract sign/exp/mantissa from double bits
-    //   [5-7]   dispatch: CBZ→zero/denorm, B.EQ→inf/nan
-    //   [8-14]  normal: set integer bit, bias-adjust exp, store, B .done
-    //   [15-17] zero/denorm: store zero mantissa + sign, B .done
-    //   [18-21] inf/nan: set integer bit, store, sign|0x7FFF, store
-    //   [22]    .done: pop + end
+    // emit_f64_to_f80 has four paths (normal, subnormal, zero, Inf/NaN) and
+    // writes all ten bytes on each; the pop follows.
     // -------------------------------------------------------------------------
     if (a2->operands[0].kind != IROperandKind::Register &&
         a2->operands[0].mem.size == IROperandSize::S80) {
         // Inline f64 → f80 conversion via the shared emit_f64_to_f80 helper
-        // in TranslatorX87F80.cpp.  The helper emits the same 22-instruction
-        // sequence that previously lived inline here and is also used by
-        // translate_fsave.
+        // in TranslatorX87F80.cpp, which translate_fsave uses as well.
         auto [Xbase, Wd_top] = x87_begin(*a1, buf);
         const int Xst_base = x87_get_st_base(*a1);
         const int Wd_tmp = alloc_gpr(*a1, 2);  // sign scratch, then pop scratch
@@ -1351,7 +1373,12 @@ auto translate_fst(TranslationResult* a1, IRInstr* a2) -> void {
         const int Xbits = alloc_free_gpr(*a1);  // raw double bits → f80 mantissa
         const int Wexp = alloc_free_gpr(*a1);   // exponent → f80 exponent word
 
+        // The conversion sets NZCV; the guest flags wait in an FPR.
+        const int Dd_flags = alloc_free_fpr(*a1);
+        emit_nzcv_park(buf, Dd_flags, Wexp);
         emit_f64_to_f80(buf, Xaddr, Dd_src, Xbits, Wexp, Wd_tmp);
+        emit_nzcv_unpark(buf, Dd_flags, Wexp);
+        free_fpr(*a1, Dd_flags);
         free_fpr(*a1, Dd_src);
 
         free_gpr(*a1, Xaddr);
@@ -1431,11 +1458,12 @@ auto translate_fst(TranslationResult* a1, IRInstr* a2) -> void {
 //   fstsw   DF E0   operands[0] = Register AX  (register destination)
 //
 // The AX path reads the status_word as a 16-bit halfword and inserts it into
-// bits[15:0] of W0 (the 32-bit view of RAX) via BFI, leaving bits[31:16]
-// untouched so the upper 16 bits of EAX are preserved per x86 semantics.
+// bits[15:0] of X0 (RAX) via BFI, leaving bits[63:16] untouched as x86
+// semantics require.  The insert has to be the 64-bit form: any write to a
+// W register clears bits[63:32] of the X register.
 //
-// BFI W_ax, Wd_sw, #0, #16  encodes as BFM with immr=0, imms=15:
-//   When immr <= imms: inserts Wn[imms-immr : 0] = Wn[15:0] into Wd[15:0].
+// BFI X_ax, Xd_sw, #0, #16  encodes as BFM (sf=1, N=1) with immr=0, imms=15:
+//   When immr <= imms: inserts Xn[imms-immr : 0] = Xn[15:0] into Xd[15:0].
 //
 // The memory path just stores the 16-bit halfword directly via STRH.
 //
@@ -1504,17 +1532,17 @@ auto translate_fstsw(TranslationResult* a1, IRInstr* a2) -> void {
         // operands[0].reg.reg.value == 0x30 (size_class=3 → 16-bit, index=0 → AX)
         //
         // In Rosetta's GPR mapping, x86 register index 0 (RAX) maps directly
-        // to AArch64 register X0.  Write the status_word into bits[15:0] of W0,
-        // leaving the upper 16 bits of EAX untouched.
+        // to AArch64 register X0.  Write the status_word into bits[15:0] of X0,
+        // leaving bits[63:16] of RAX untouched.
         //
-        // BFI W0, Wd_sw, #lsb=0, #width=16
-        //   → BFM immr=(32-0)&31=0, imms=width-1=15
-        //   → copies Wd_sw[15:0] into W0[15:0]
+        // BFI X0, Xd_sw, #lsb=0, #width=16
+        //   → BFM sf=1 N=1 immr=(64-0)&63=0, imms=width-1=15
+        //   → copies Xd_sw[15:0] into X0[15:0]
         // -----------------------------------------------------------------
         const int W_ax = a2->operands[0].reg.reg.index();  // = 0 (RAX/EAX/AX)
 
-        emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/1 /*BFM*/,
-                      /*N=*/0, /*immr=*/0, /*imms=*/15,
+        emit_bitfield(buf, /*is_64bit=*/1, /*opc=*/1 /*BFM*/,
+                      /*N=*/1, /*immr=*/0, /*imms=*/15,
                       /*Rn=*/Wd_sw, /*Rd=*/W_ax);
     } else {
         // -----------------------------------------------------------------
@@ -1635,6 +1663,10 @@ auto translate_fxam(TranslationResult* a1, IRInstr* /*a2*/) -> void {
         buf.emit(insn);
     };
 
+    // Phases A to C set NZCV.  Wd_tmp is idle until x87_end, so it keeps the
+    // guest flags across them.
+    emit_mrs_nzcv(buf, Wd_tmp);
+
     // Default w_class = 0x0400  (Normal).
     emit_movn(buf, 0, /*opc=*/2 /*MOVZ*/, /*hw=*/0, /*imm16=*/0x0400, Wd_class);
 
@@ -1673,6 +1705,7 @@ auto translate_fxam(TranslationResult* a1, IRInstr* /*a2*/) -> void {
     emit_add_imm(buf, 0, 1, 1, 0, 3, Wd_a, 31);  // CMP w_a, #3
     emit_movn(buf, 0, 2, 0, 0x4100, Wd_a);       // w_a = empty
     emit_csel(0, Wd_class, Wd_a, Wd_class, /*cond=*/0 /*EQ*/);
+    emit_msr_nzcv(buf, Wd_tmp);  // last flag reader done: guest flags back
 
     // ── Phase D: OR sign bit into w_class at position 9 (C1). ───────────────
     // Extract only bit 63 (avoids leaking exp bits into C0/C2/C3 through the
@@ -2331,28 +2364,10 @@ auto translate_fidiv(TranslationResult* a1, IRInstr* a2) -> void {
     const int Wk19 =
         emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Dd_st0, Xst_base);
 
-    // Step 2: compute source address
-    const int addr_reg =
-        compute_operand_address(*a1, /*is_64bit=*/true, &a2->operands[0], GPR::XZR);
-
-    // Step 3: load integer from memory into addr_reg (reusing it for the value).
-    // Opt 3: loading into addr_reg (not Wd_tmp) preserves the ST(0) byte offset
-    // in Wd_tmp so emit_store_st_at_offset can skip recomputing it below.
-    if (is_m16) {
-        emit_ldr_str_imm(buf, /*size=*/1 /*16-bit*/, /*is_fp=*/0, /*opc=*/1 /*LDR*/,
-                         /*imm12=*/0, addr_reg, addr_reg);
-        // SXTH addr_reg, addr_reg — sign-extend bits[15:0] → W
-        emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/0 /*SBFM*/, /*N=*/0,
-                      /*immr=*/0, /*imms=*/15, addr_reg, addr_reg);
-    } else {
-        emit_ldr_str_imm(buf, /*size=*/2 /*32-bit*/, /*is_fp=*/0, /*opc=*/1 /*LDR*/,
-                         /*imm12=*/0, addr_reg, addr_reg);
-    }
-
-    // Step 4: SCVTF Dd_int, addr_reg — signed W → f64
-    emit_scvtf(buf, /*is_64bit_int=*/0, /*ftype=*/1, Dd_int, addr_reg);
-
-    free_gpr(*a1, addr_reg);
+    // Steps 2-4: load the integer and convert it to f64.
+    // Opt 3: the integer never goes through Wd_tmp, which keeps the ST(0)
+    // byte offset there so emit_store_st_at_offset can skip recomputing it.
+    emit_load_int_operand(*a1, buf, &a2->operands[0], is_m16, Dd_int);
 
     // Step 5: FDIV ST(0), integer
     emit_fdiv_f64(buf, Dd_st0, Dd_st0, Dd_int);
@@ -2395,28 +2410,10 @@ auto translate_fimul(TranslationResult* a1, IRInstr* a2) -> void {
     const int Wk20 =
         emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Dd_st0, Xst_base);
 
-    // Step 2: compute source address
-    const int addr_reg =
-        compute_operand_address(*a1, /*is_64bit=*/true, &a2->operands[0], GPR::XZR);
-
-    // Step 3: load integer from memory into addr_reg (reusing it for the value).
-    // Opt 3: loading into addr_reg (not Wd_tmp) preserves the ST(0) byte offset
-    // in Wd_tmp so emit_store_st_at_offset can skip recomputing it below.
-    if (is_m16) {
-        emit_ldr_str_imm(buf, /*size=*/1 /*16-bit*/, /*is_fp=*/0, /*opc=*/1 /*LDR*/,
-                         /*imm12=*/0, addr_reg, addr_reg);
-        // SXTH addr_reg, addr_reg — sign-extend bits[15:0] → W
-        emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/0 /*SBFM*/, /*N=*/0,
-                      /*immr=*/0, /*imms=*/15, addr_reg, addr_reg);
-    } else {
-        emit_ldr_str_imm(buf, /*size=*/2 /*32-bit*/, /*is_fp=*/0, /*opc=*/1 /*LDR*/,
-                         /*imm12=*/0, addr_reg, addr_reg);
-    }
-
-    // Step 4: SCVTF Dd_int, addr_reg — signed W → f64
-    emit_scvtf(buf, /*is_64bit_int=*/0, /*ftype=*/1, Dd_int, addr_reg);
-
-    free_gpr(*a1, addr_reg);
+    // Steps 2-4: load the integer and convert it to f64.
+    // Opt 3: the integer never goes through Wd_tmp, which keeps the ST(0)
+    // byte offset there so emit_store_st_at_offset can skip recomputing it.
+    emit_load_int_operand(*a1, buf, &a2->operands[0], is_m16, Dd_int);
 
     // Step 5: FMUL ST(0), integer
     emit_fmul_f64(buf, Dd_st0, Dd_st0, Dd_int);
@@ -2458,27 +2455,10 @@ auto translate_fisub(TranslationResult* a1, IRInstr* a2) -> void {
     const int Wk21 =
         emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Dd_st0, Xst_base);
 
-    // Step 2: compute source address
-    const int addr_reg =
-        compute_operand_address(*a1, /*is_64bit=*/true, &a2->operands[0], GPR::XZR);
-
-    // Step 3: load integer from memory into addr_reg (reusing it for the value).
-    // Opt 3: loading into addr_reg (not Wd_tmp) preserves the ST(0) byte offset
-    // in Wd_tmp so emit_store_st_at_offset can skip recomputing it below.
-    if (is_m16) {
-        emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/1 /*LDR*/,
-                         /*imm12=*/0, addr_reg, addr_reg);
-        emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/0 /*SBFM*/, /*N=*/0,
-                      /*immr=*/0, /*imms=*/15, addr_reg, addr_reg);
-    } else {
-        emit_ldr_str_imm(buf, /*size=*/2, /*is_fp=*/0, /*opc=*/1 /*LDR*/,
-                         /*imm12=*/0, addr_reg, addr_reg);
-    }
-
-    // Step 4: SCVTF Dd_int, addr_reg — signed W → f64
-    emit_scvtf(buf, /*is_64bit_int=*/0, /*ftype=*/1, Dd_int, addr_reg);
-
-    free_gpr(*a1, addr_reg);
+    // Steps 2-4: load the integer and convert it to f64.
+    // Opt 3: the integer never goes through Wd_tmp, which keeps the ST(0)
+    // byte offset there so emit_store_st_at_offset can skip recomputing it.
+    emit_load_int_operand(*a1, buf, &a2->operands[0], is_m16, Dd_int);
 
     // Step 5: FSUB ST(0) = ST(0) - integer
     emit_fsub_f64(buf, Dd_st0, Dd_st0, Dd_int);
@@ -2522,27 +2502,10 @@ auto translate_fidivr(TranslationResult* a1, IRInstr* a2) -> void {
     const int Wk22 =
         emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Dd_st0, Xst_base);
 
-    // Step 2: compute source address
-    const int addr_reg =
-        compute_operand_address(*a1, /*is_64bit=*/true, &a2->operands[0], GPR::XZR);
-
-    // Step 3: load integer from memory into addr_reg (reusing it for the value).
-    // Opt 3: loading into addr_reg (not Wd_tmp) preserves the ST(0) byte offset
-    // in Wd_tmp so emit_store_st_at_offset can skip recomputing it below.
-    if (is_m16) {
-        emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/1 /*LDR*/,
-                         /*imm12=*/0, addr_reg, addr_reg);
-        emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/0 /*SBFM*/, /*N=*/0,
-                      /*immr=*/0, /*imms=*/15, addr_reg, addr_reg);
-    } else {
-        emit_ldr_str_imm(buf, /*size=*/2, /*is_fp=*/0, /*opc=*/1 /*LDR*/,
-                         /*imm12=*/0, addr_reg, addr_reg);
-    }
-
-    // Step 4: SCVTF Dd_int, addr_reg — signed W → f64
-    emit_scvtf(buf, /*is_64bit_int=*/0, /*ftype=*/1, Dd_int, addr_reg);
-
-    free_gpr(*a1, addr_reg);
+    // Steps 2-4: load the integer and convert it to f64.
+    // Opt 3: the integer never goes through Wd_tmp, which keeps the ST(0)
+    // byte offset there so emit_store_st_at_offset can skip recomputing it.
+    emit_load_int_operand(*a1, buf, &a2->operands[0], is_m16, Dd_int);
 
     // Step 5: FDIV Dd_st0, Dd_int, Dd_st0  — integer / ST(0)  (reversed)
     emit_fdiv_f64(buf, Dd_st0, Dd_int, Dd_st0);
@@ -2691,31 +2654,20 @@ auto translate_frndint(TranslationResult* a1, IRInstr* /*a2*/) -> void {
 // EFLAGS, which Rosetta maps to AArch64 NZCV.  This is far simpler — no
 // status_word RMW needed, no NZCV save/restore.
 //
-// Rosetta EFLAGS → NZCV mapping:  N=SF, Z=ZF, C=!CF, V=OF
-// For FCOMI, SF=0 and OF is used for PF (parity = unordered):
-//   N=0 always, Z=ZF, C=!CF, V=PF
+// Rosetta EFLAGS → NZCV mapping:  N=SF, Z=ZF, C=!CF, V=OF, bit 27=AF,
+// bit 26=PF (see emit_fcomi_nzcv).  FCOMI clears SF, OF and AF:
+//   GT: CF=0,ZF=0,PF=0 → N=0,Z=0,C=1,V=0, bit 26=0
+//   LT: CF=1,ZF=0,PF=0 → N=0,Z=0,C=0,V=0, bit 26=0
+//   EQ: CF=0,ZF=1,PF=0 → N=0,Z=1,C=1,V=0, bit 26=0
+//   UN: CF=1,ZF=1,PF=1 → N=0,Z=1,C=0,V=0, bit 26=1
 //
-// Desired NZCV for each FCOMI outcome:
-//   GT: CF=0,ZF=0,PF=0 → N=0,Z=0,C=1,V=0
-//   LT: CF=1,ZF=0,PF=0 → N=0,Z=0,C=0,V=0
-//   EQ: CF=0,ZF=1,PF=0 → N=0,Z=1,C=1,V=0
-//   UN: CF=1,ZF=1,PF=1 → N=0,Z=1,C=0,V=1
-//
-// AArch64 FCMP output NZCV:
-//   GT: N=0,Z=0,C=1,V=0 → matches ✓
-//   LT: N=1,Z=0,C=0,V=0 → N wrong (need 0)
-//   EQ: N=0,Z=1,C=1,V=0 → matches ✓
-//   UN: N=0,Z=0,C=1,V=1 → Z wrong (need 1), C wrong (need 0)
-//
-// Fix: N_new=0, Z_new=Z|V, C_new=C&!V, V_new=V
-//
-// 9 emitted instructions (branchless) vs ~30+ for runtime BL round-trip.
+// FCMP plus 9 instructions (branchless) vs ~30+ for runtime BL round-trip.
 //
 // Register allocation:
 //   Xbase   (gpr pool 0) — X87State base
 //   Wd_top  (gpr pool 1) — current TOP; updated by pop if FCOMIP/FUCOMIP
 //   Wd_tmp  (gpr pool 2) — scratch for emit_load_st, pop RMW
-//   Wd_z, Wd_v, Wd_c (free pool) — CSET results; freed after packing
+//   3 free-pool GPRs inside emit_fcomi_nzcv, freed after packing
 //   Dd_st0  (fpr free)   — ST(0) value
 //   Dd_src  (fpr free)   — ST(i) value
 // =============================================================================
@@ -2742,43 +2694,8 @@ auto translate_fcomi(TranslationResult* a1, IRInstr* a2) -> void {
     free_fpr(*a1, Dd_src);
     free_fpr(*a1, Dd_st0);
 
-    // Branchless NZCV fixup: extract conditions while NZCV is live.
-    const int Wd_z = alloc_free_gpr(*a1);
-    const int Wd_v = alloc_free_gpr(*a1);
-    const int Wd_c = alloc_free_gpr(*a1);
-
-    // All three CSETs must execute before any MSR clobbers NZCV.
-    emit_cset(buf, /*is_64bit=*/0, /*cond=*/0 /*EQ*/, Wd_z);  // 1 if equal
-    emit_cset(buf, /*is_64bit=*/0, /*cond=*/6 /*VS*/, Wd_v);  // 1 if overflow (unordered)
-    emit_cset(buf, /*is_64bit=*/0, /*cond=*/2 /*CS*/, Wd_c);  // 1 if carry set
-
-    // Z_new = Z | V  (EQ or unordered)
-    emit_logical_shifted_reg(buf, 0, /*ORR*/ 1, 0, /*LSL*/ 0, Wd_v, 0, Wd_z, Wd_z);
-    // C_new = C & !V  (carry clear for unordered)
-    emit_logical_shifted_reg(buf, 0, /*AND*/ 0, /*N=invert*/ 1, /*LSL*/ 0, Wd_v, 0, Wd_c, Wd_c);
-
-    // Pack into NZCV format: [31]=N=0, [30]=Z, [29]=C, [28]=V=PF, [26]=PF
-    // Two consumers of this NZCV value use different bit positions for the
-    // unordered/PF flag:
-    //   bit 26: Rosetta's jp/jnp translation reads PF via ubfx w, w, #26, #1
-    //   bit 28: AArch64 FCSEL VS/VC conditions (used by translate_fcmov)
-    // Set Wd_v at both positions to satisfy both consumers.
-    // LSL Wd_z, Wd_z, #30
-    emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/2 /*UBFM*/, /*N=*/0,
-                  /*immr=*/2, /*imms=*/1, Wd_z, Wd_z);
-    // ORR Wd_z, Wd_z, Wd_c, LSL #29
-    emit_logical_shifted_reg(buf, 0, /*ORR*/ 1, 0, /*LSL*/ 0, Wd_c, 29, Wd_z, Wd_z);
-    // ORR Wd_z, Wd_z, Wd_v, LSL #28  (V = PF, for FCMOV FCSEL VS/VC)
-    emit_logical_shifted_reg(buf, 0, /*ORR*/ 1, 0, /*LSL*/ 0, Wd_v, 28, Wd_z, Wd_z);
-    // ORR Wd_z, Wd_z, Wd_v, LSL #26  (PF slot, for Rosetta jp/jnp ubfx #26)
-    emit_logical_shifted_reg(buf, 0, /*ORR*/ 1, 0, /*LSL*/ 0, Wd_v, 26, Wd_z, Wd_z);
-
-    // MSR NZCV, Wd_z — set the corrected flags
-    emit_msr_nzcv(buf, Wd_z);
-
-    free_gpr(*a1, Wd_c);
-    free_gpr(*a1, Wd_v);
-    free_gpr(*a1, Wd_z);
+    // Branchless NZCV fixup into stock's EFLAGS layout (PF in bit 26).
+    emit_fcomi_nzcv(buf, *a1);
 
     // Pop if FCOMIP / FUCOMIP.
     if (is_popping) {
@@ -2939,6 +2856,121 @@ auto translate_fist(TranslationResult* a1, IRInstr* a2) -> void {
 }
 
 // =============================================================================
+// Native transport: FILD / FIST / FISTP / FISTTP on the native f80 slots
+//
+// Used for replies whose x87 ops are all integer loads and stores, control
+// word moves and no-ops (X87Cache::is_native_transport_run).  Such a reply
+// skips emit_native_state_boundary, so the register file stays in Rosetta's
+// packed f80 layout throughout and every slot the reply does not touch is
+// neither read nor written.  FILD writes the exact f80 of the integer; the
+// stores convert the slot's f80 to an integer exactly, under the control
+// word's rounding mode.  Nothing goes through binary64, so an int64 held on
+// the stack across replies keeps all 64 bits, as Delphi's System.Move
+// needs.
+//
+// Xst_base is not pinned in this mode (x87_begin), which leaves the five
+// scratch GPRs the integer store needs besides Xbase, TOP and Wd_tmp.
+// =============================================================================
+auto translate_fild_native(TranslationResult* a1, IRInstr* a2) -> void {
+    AssemblerBuffer& buf = a1->insn_buf;
+    auto [Xbase, Wd_top] = x87_begin(*a1, buf);
+    const IROperandSize int_size = a2->operands[0].mem.size;
+
+    const int Wd_tmp = alloc_gpr(*a1, 2);
+    const int Wd_tmp2 = alloc_gpr(*a1, 3);
+
+    // Sign-extended int64 in Xint.  Xint is allocated after the address, as
+    // in translate_fild: a GS operand takes two scratch registers plus the
+    // fixed X29 while the address is formed.
+    const int addr_reg =
+        compute_operand_address(*a1, /*is_64bit=*/true, &a2->operands[0], GPR::XZR);
+    const int Xint = alloc_free_gpr(*a1);  // survives the push
+    if (int_size == IROperandSize::S16) {
+        emit_ldr_str_imm(buf, 1, 0, 1, 0, addr_reg, Xint);        // LDRH
+        emit_bitfield(buf, 1, 0 /*SBFM*/, 1, 0, 15, Xint, Xint);  // SXTH Xint
+    } else if (int_size == IROperandSize::S32) {
+        emit_ldr_str_imm(buf, 2, 0, 1, 0, addr_reg, Xint);        // LDR W
+        emit_bitfield(buf, 1, 0 /*SBFM*/, 1, 0, 31, Xint, Xint);  // SXTW Xint
+    } else {
+        emit_ldr_str_imm(buf, 3, 0, 1, 0, addr_reg, Xint);  // LDR X
+    }
+    free_gpr(*a1, addr_reg);
+
+    x87_push(buf, *a1, Xbase, Wd_top, Wd_tmp, Wd_tmp2);
+    free_gpr(*a1, Wd_tmp2);
+
+    const int Xs = alloc_free_gpr(*a1);
+    const int Xe = alloc_free_gpr(*a1);
+    emit_native_slot_addr(buf, Wd_tmp, Xbase, Wd_top);
+    emit_i64_to_f80_slot(buf, Wd_tmp, Xint, Xs, Xe);
+    free_gpr(*a1, Xe);
+    free_gpr(*a1, Xs);
+    free_gpr(*a1, Xint);
+
+    x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp);
+    free_gpr(*a1, Wd_tmp);
+}
+
+static void translate_int_store_native(TranslationResult* a1, IRInstr* a2, NativeIntRound round,
+                                       bool pop) {
+    AssemblerBuffer& buf = a1->insn_buf;
+    auto [Xbase, Wd_top] = x87_begin(*a1, buf);
+    const IROperandSize int_size = a2->operands[0].mem.size;
+    int bits = 64;
+    int store_size = 3;
+    if (int_size == IROperandSize::S16) {
+        bits = 16;
+        store_size = 1;
+    } else if (int_size == IROperandSize::S32) {
+        bits = 32;
+        store_size = 2;
+    }
+
+    const int Wd_tmp = alloc_gpr(*a1, 2);
+    const int Xslot = alloc_free_gpr(*a1);
+    const int Xint = alloc_free_gpr(*a1);
+    const int Xm = alloc_free_gpr(*a1);
+    const int Wx = alloc_free_gpr(*a1);
+
+    // ST(0) is physical slot TOP: a transport reply has no FXCH, so the
+    // permutation is always the identity here.
+    assert(!a1->x87_cache.perm_dirty && "native transport reply with a pending FXCH permutation");
+    emit_native_slot_addr(buf, Xslot, Xbase, Wd_top);
+    emit_f80_slot_to_int(buf, Xbase, Xslot, Xint, Xm, Wx, Wd_tmp, round, bits);
+    free_gpr(*a1, Wx);
+    free_gpr(*a1, Xm);
+    free_gpr(*a1, Xslot);
+
+    const int addr_reg =
+        compute_operand_address(*a1, /*is_64bit=*/true, &a2->operands[0], GPR::XZR);
+    emit_str_imm(buf, store_size, Xint, addr_reg, /*imm12=*/0);
+    free_gpr(*a1, addr_reg);
+    free_gpr(*a1, Xint);
+
+    if (pop) {
+        x87_pop(buf, *a1, Xbase, Wd_top, Wd_tmp);
+    }
+    x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp);
+    free_gpr(*a1, Wd_tmp);
+}
+
+static NativeIntRound native_store_round(const TranslationResult& a1) {
+    return x87_fast_round_active(a1) ? NativeIntRound::kNearest : NativeIntRound::kControlWord;
+}
+
+auto translate_fist_native(TranslationResult* a1, IRInstr* a2) -> void {
+    translate_int_store_native(a1, a2, native_store_round(*a1), /*pop=*/false);
+}
+
+auto translate_fistp_native(TranslationResult* a1, IRInstr* a2) -> void {
+    translate_int_store_native(a1, a2, native_store_round(*a1), /*pop=*/true);
+}
+
+auto translate_fisttp_native(TranslationResult* a1, IRInstr* a2) -> void {
+    translate_int_store_native(a1, a2, NativeIntRound::kChop, /*pop=*/true);
+}
+
+// =============================================================================
 // FISUBR — reverse-subtract: integer - ST(0)
 //
 // x87 semantics:
@@ -2967,24 +2999,8 @@ auto translate_fisubr(TranslationResult* a1, IRInstr* a2) -> void {
     const int Wk =
         emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Dd_st0, Xst_base);
 
-    // Step 2: compute source address
-    const int addr_reg =
-        compute_operand_address(*a1, /*is_64bit=*/true, &a2->operands[0], GPR::XZR);
-
-    // Step 3: load integer from memory
-    if (is_m16) {
-        emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/1 /*LDR*/,
-                         /*imm12=*/0, addr_reg, addr_reg);
-        emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/0 /*SBFM*/, /*N=*/0,
-                      /*immr=*/0, /*imms=*/15, addr_reg, addr_reg);
-    } else {
-        emit_ldr_str_imm(buf, /*size=*/2, /*is_fp=*/0, /*opc=*/1 /*LDR*/,
-                         /*imm12=*/0, addr_reg, addr_reg);
-    }
-
-    // Step 4: SCVTF
-    emit_scvtf(buf, /*is_64bit_int=*/0, /*ftype=*/1, Dd_int, addr_reg);
-    free_gpr(*a1, addr_reg);
+    // Steps 2-4: load the integer and convert it to f64
+    emit_load_int_operand(*a1, buf, &a2->operands[0], is_m16, Dd_int);
 
     // Step 5: FSUB Dd_st0, Dd_int, Dd_st0 — integer - ST(0) (REVERSED)
     emit_fsub_f64(buf, Dd_st0, Dd_int, Dd_st0);
@@ -3018,12 +3034,13 @@ auto translate_fisubr(TranslationResult* a1, IRInstr* a2) -> void {
 //   FCMOVNB  (CF=0)          → CS (C=1)                      = condition 2
 //   FCMOVNBE (CF=0 & ZF=0)  → HI (C=1 & Z=0)                = condition 8
 //   FCMOVNE  (ZF=0)          → NE (Z=0)                      = condition 1
-//   FCMOVU   (PF=1)          → VS (V=1)                      = condition 6
-//   FCMOVNU  (PF=0)          → VC (V=0)                      = condition 7
+//   FCMOVU   (PF=1)          → NZCV bit 26 set               = kFcmovCondPF
+//   FCMOVNU  (PF=0)          → NZCV bit 26 clear             = kFcmovCondNPF
 //
-// AArch64 FCSEL Dd, Dn, Dm, cond selects Dn if cond, else Dm.
-//   FCSEL Dd_st0, Dd_src, Dd_st0, cond
-//   = if (cond) Dd_st0 = Dd_src; else Dd_st0 = Dd_st0 (no change)
+// PF is not V: stock keeps OF in V and PF in NZCV bit 26, whoever set the
+// flags (FCOMI, UCOMISD, SAHF, POPF, an integer op).
+//
+// emit_fcmov_select: if (cond) Dd_st0 = Dd_src; else Dd_st0 unchanged.
 //
 // Register allocation:
 //   Xbase  (gpr pool 0) — X87State base
@@ -3031,13 +3048,14 @@ auto translate_fisubr(TranslationResult* a1, IRInstr* a2) -> void {
 //   Wd_tmp (gpr pool 2) — offset scratch for emit_{load,store}_st
 //   Dd_st0 (fpr free)   — current ST(0) value
 //   Dd_src (fpr free)   — ST(i) value (the candidate replacement)
+//   1 free-pool GPR inside emit_fcmov_select for FCMOVU and FCMOVNU
 // =============================================================================
 auto translate_fcmov(TranslationResult* a1, IRInstr* a2) -> void {
     AssemblerBuffer& buf = a1->insn_buf;
     auto [Xbase, Wd_top] = x87_begin(*a1, buf);
     const int Xst_base = x87_get_st_base(*a1);
 
-    // Map opcode to AArch64 condition code.
+    // Map opcode to an AArch64 condition code, or kFcmovCondPF/NPF for PF.
     int aarch64_cond;
     switch (a2->opcode()) {
         case kOpcodeName_fcmovb:
@@ -3059,11 +3077,11 @@ auto translate_fcmov(TranslationResult* a1, IRInstr* a2) -> void {
             aarch64_cond = 1;
             break;  // NE
         case kOpcodeName_fcmovu:
-            aarch64_cond = 6;
-            break;  // VS
+            aarch64_cond = kFcmovCondPF;
+            break;
         case kOpcodeName_fcmovnu:
-            aarch64_cond = 7;
-            break;  // VC
+            aarch64_cond = kFcmovCondNPF;
+            break;
         default:
             aarch64_cond = 14;
             break;  // AL (should never happen)
@@ -3089,9 +3107,9 @@ auto translate_fcmov(TranslationResult* a1, IRInstr* a2) -> void {
     const int Wk =
         emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Dd_st0, Xst_base);
 
-    // FCSEL: if (cond) result = Dd_src, else result = Dd_st0
-    // NZCV is live from prior x86 ALU/FCOMI — this is what FCMOV tests.
-    emit_fcsel_f64(buf, Dd_st0, Dd_src, Dd_st0, aarch64_cond);
+    // if (cond) result = Dd_src, else result = Dd_st0.  NZCV holds the guest
+    // EFLAGS from whatever set them last, which is what FCMOV tests.
+    emit_fcmov_select(buf, *a1, Dd_st0, Dd_src, Dd_st0, aarch64_cond);
 
     // Store result back to ST(0).
     emit_store_st_at_offset(buf, Xbase, Wk, Dd_st0, Xst_base);
@@ -3134,25 +3152,8 @@ auto translate_ficom(TranslationResult* a1, IRInstr* a2) -> void {
     // Step 1: load ST(0).
     emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Dd_st0, Xst_base);
 
-    // Step 2: compute source memory address.
-    const int addr_reg =
-        compute_operand_address(*a1, /*is_64bit=*/true, &a2->operands[0], GPR::XZR);
-
-    // Step 3: load integer from memory.
-    if (is_m16) {
-        emit_ldr_str_imm(buf, /*size=*/1 /*16-bit*/, /*is_fp=*/0, /*opc=*/1 /*LDR*/,
-                         /*imm12=*/0, addr_reg, addr_reg);
-        // SXTH: sign-extend bits[15:0] → W
-        emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/0 /*SBFM*/, /*N=*/0,
-                      /*immr=*/0, /*imms=*/15, addr_reg, addr_reg);
-    } else {
-        emit_ldr_str_imm(buf, /*size=*/2 /*32-bit*/, /*is_fp=*/0, /*opc=*/1 /*LDR*/,
-                         /*imm12=*/0, addr_reg, addr_reg);
-    }
-
-    // Step 4: convert signed integer W → f64.
-    emit_scvtf(buf, /*is_64bit_int=*/0, /*ftype=*/1, Dd_int, addr_reg);
-    free_gpr(*a1, addr_reg);
+    // Steps 2-4: load the integer and convert it to f64.
+    emit_load_int_operand(*a1, buf, &a2->operands[0], is_m16, Dd_int);
 
     // Step 5: save NZCV, compare, map flags.
     emit_mrs_nzcv(buf, Wd_tmp2);
@@ -3531,6 +3532,10 @@ auto translate_fxtract(TranslationResult* a1, IRInstr* /*a2*/) -> void {
     emit_fmov_x_to_d(buf, Dd_minf, Xtemp);
     free_gpr(*a1, Xtemp);
 
+    // The selects below set NZCV.  Wd_tmp2 is idle until the push, so it
+    // keeps the guest flags until the last CSEL.
+    emit_mrs_nzcv(buf, Wd_tmp2);
+
     // ANDS XZR, Xv, #0x000FFFFFFFFFFFFF — Z=1 iff mantissa==0.
     LogicalImmEncoding enc_mant;
     is_bitmask_immediate(/*is_64bit=*/true, 0x000FFFFFFFFFFFFFULL, enc_mant);
@@ -3584,6 +3589,7 @@ auto translate_fxtract(TranslationResult* a1, IRInstr* /*a2*/) -> void {
     emit_add_imm(buf, /*is_64bit=*/0, /*is_sub=*/1, /*is_set_flags=*/1,
                  /*shift=*/0, /*imm12=*/0, Wd_e, /*Rd=*/31);
     emit_csel(/*is_64bit=*/1, /*Rd=*/Xs, /*Rn=*/Xv, /*Rm=*/Xs, kEQ);
+    emit_msr_nzcv(buf, Wd_tmp2);
     free_gpr(*a1, Wd_e);
     free_gpr(*a1, Xv);
 
@@ -3765,6 +3771,11 @@ auto translate_ffree(TranslationResult* a1, IRInstr* a2) -> void {
 // Indefinite (NaN, ±inf, |rounded| >= 10^18):
 //   { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC0, 0xFF, 0xFF }
 //
+// The conversion is exact for the f64 in ST(0), but that f64 carries only
+// about 16 of the 18 digits the x87 would have.  As with FBLD, blocks
+// containing FBSTP go to stock by default (X87_STOCK_BCD), so in the live
+// sidecar this translator only runs with X87_STOCK_BCD=0.
+//
 // Codegen:
 //   1.  Compute dest address.
 //   2.  Load ST(0) into Dd_val.
@@ -3825,6 +3836,11 @@ auto translate_fbstp(TranslationResult* a1, IRInstr* a2) -> void {
 
     // Step 2: load ST(0).
     emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Dd_val, Xst_base);
+
+    // Steps 4 to 8 set NZCV with every scratch GPR in use at the peak, so
+    // the guest flags wait in an FPR.
+    const int Dd_flags = alloc_free_fpr(*a1);
+    emit_nzcv_park(buf, Dd_flags, Wd_tmp);
 
     // Wd_tmp / Wd_tmp2 are dead until x87_pop — free them so the body has
     // enough scratch GPRs.  Re-allocated at the bottom for x87_pop.
@@ -3918,6 +3934,9 @@ auto translate_fbstp(TranslationResult* a1, IRInstr* a2) -> void {
                  Xint, GPR::XZR);
     // CSEL Xint, Xneg, Xint, LT  → Xint = (Xint < 0) ? Xneg : Xint = |Xint|
     emit_csel(/*is_64bit=*/1, /*Rd=*/Xint, /*Rn=*/Xneg, /*Rm=*/Xint, /*cond=*/11 /*LT*/);
+    // Last flag reader: guest flags back.  The rest branches with CBNZ only.
+    emit_nzcv_unpark(buf, Dd_flags, Xneg);
+    free_fpr(*a1, Dd_flags);
     free_gpr(*a1, Xneg);
 
     // Xten = 10
@@ -4095,12 +4114,13 @@ auto translate_frstor(TranslationResult* a1, IRInstr* a2) -> void {
 
     // ── 8 ST slots — unrolled f80 -> f64 conversion ──
     //
-    // Xaddr is mutated in place: bumped by +0x1C before iter 0, then +10
-    // between iterations.  After iter 7 it points past the last slot;
-    // we don't restore it.
+    // Xslot walks the image: Xaddr + 0x1C before iter 0, then +10 between
+    // iterations.  After iter 7 it points past the last slot.  Xslot is
+    // Xaddr itself unless that is a guest register (bare 64-bit [reg]),
+    // which must keep its value.
     //
     // GPR pressure: Xbase + Wd_top + Wd_tmp + Xst_base(cached only) +
-    // Xaddr + Xmant + Wexp + Xsign + Wd_aux = 8 (standalone) or 9 (cached).
+    // Xslot + Xmant + Wexp + Xsign + Wd_aux = 8 (standalone) or 9 (cached).
     // The 8-slot scratch pool just fits standalone.  In cached mode we
     // free Xst_base for the duration of the loop and re-derive it at the
     // end — emit_store_st falls back to its uncached path (3 extra insns
@@ -4112,33 +4132,44 @@ auto translate_frstor(TranslationResult* a1, IRInstr* a2) -> void {
         Xst_base = -1;  // force uncached emit_store_st in the loop
     }
 
+    const int Xslot = writable_addr_reg(*a1, Xaddr);
     const int Xmant = alloc_free_gpr(*a1);
     const int Wexp = alloc_free_gpr(*a1);
     const int Xsign = alloc_free_gpr(*a1);
     const int Wd_aux = alloc_free_gpr(*a1);
     const int Dd_val = alloc_free_fpr(*a1);
 
+    // The conversions set NZCV and every scratch GPR is taken, so the guest
+    // flags wait in an FPR for the whole loop.
+    const int Dd_flags = alloc_free_fpr(*a1);
+    emit_nzcv_park(buf, Dd_flags, Xmant);
+
     for (int i = 0; i < 8; ++i) {
         const int delta = (i == 0) ? 0x1C : 10;
-        // Bump Xaddr to the start of the current slot.
+        // Bump Xslot to the start of the current slot.
         emit_add_imm(buf, /*is_64bit=*/1, /*is_sub=*/0, /*is_set_flags=*/0,
-                     /*shift=*/0, delta, Xaddr, Xaddr);
-        // LDR Xmant, [Xaddr, #0] — 8-byte mantissa.
-        emit_ldr_imm(buf, /*size=*/3, Xmant, Xaddr, /*imm12=*/0);
-        // LDRH Wexp, [Xaddr, #8] — 2-byte sign+exp word.
+                     /*shift=*/0, delta, (i == 0) ? Xaddr : Xslot, Xslot);
+        // LDR Xmant, [Xslot, #0]: 8-byte mantissa.
+        emit_ldr_imm(buf, /*size=*/3, Xmant, Xslot, /*imm12=*/0);
+        // LDRH Wexp, [Xslot, #8]: 2-byte sign+exp word.
         emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/1 /*LDR*/,
-                         /*imm12=*/4, Xaddr, Wexp);
+                         /*imm12=*/4, Xslot, Wexp);
         emit_f80_to_f64_convert(buf, Xmant, Wexp, Xsign, Wd_aux, Wd_tmp);
         emit_fmov_x_to_d(buf, Dd_val, Xmant);
         // Store into ST(i) (logical depth i from new TOP).
         emit_store_st(buf, Xbase, Wd_top, /*stack_depth=*/i, Wd_tmp, Dd_val, Xst_base);
     }
 
+    emit_nzcv_unpark(buf, Dd_flags, Xmant);
+    free_fpr(*a1, Dd_flags);
     free_fpr(*a1, Dd_val);
     free_gpr(*a1, Wd_aux);
     free_gpr(*a1, Xsign);
     free_gpr(*a1, Wexp);
     free_gpr(*a1, Xmant);
+    if (Xslot != Xaddr) {
+        free_gpr(*a1, Xslot);
+    }
     free_gpr(*a1, Xaddr);
 
     if (cached) {
@@ -4226,34 +4257,45 @@ auto translate_fsave(TranslationResult* a1, IRInstr* a2) -> void {
 
     // ── 8 ST slots — unrolled f64 -> f80 conversion ──
     //
-    // Per-iter: load ST(i) into Dd_src, bump Xaddr to slot i, call
-    // emit_f64_to_f80 (writes 10 bytes at [Xaddr]).  After the loop,
-    // Xaddr points past slot 7 — we don't restore it.
+    // Per-iter: load ST(i) into Dd_src, bump Xslot to slot i, call
+    // emit_f64_to_f80 (writes 10 bytes at [Xslot]).  After the loop,
+    // Xslot points past slot 7.  Xslot is Xaddr itself unless that is a
+    // guest register (bare 64-bit [reg]), which must keep its value.
     //
     // GPR pressure:
     //   persistent: Xbase, Wd_top, Wd_tmp, Xst_base(cached only),
-    //               Xaddr, Xbits, Wexp = 6 or 7
+    //               Xslot, Xbits, Wexp = 6 or 7
     //   per-iter:   no extra (Dd_src is FPR, no GPR cost)
     // = 7 worst case (cached).  Pool of 8 fits comfortably.
     const int Xst_base = x87_get_st_base(*a1);
+    const int Xslot = writable_addr_reg(*a1, Xaddr);
     const int Xbits = alloc_free_gpr(*a1);
     const int Wexp = alloc_free_gpr(*a1);
     const int Dd_src = alloc_free_fpr(*a1);
 
+    // The conversions set NZCV; the guest flags wait in an FPR for the loop.
+    const int Dd_flags = alloc_free_fpr(*a1);
+    emit_nzcv_park(buf, Dd_flags, Xbits);
+
     for (int i = 0; i < 8; ++i) {
         // Load ST(i) (logical depth i from current TOP).
         emit_load_st(buf, Xbase, Wd_top, /*stack_depth=*/i, Wd_tmp, Dd_src, Xst_base);
-        // Bump Xaddr to the start of the current slot.
+        // Bump Xslot to the start of the current slot.
         const int delta = (i == 0) ? 0x1C : 10;
         emit_add_imm(buf, /*is_64bit=*/1, /*is_sub=*/0, /*is_set_flags=*/0,
-                     /*shift=*/0, delta, Xaddr, Xaddr);
-        // Convert and store 10 bytes at [Xaddr, #0..#9].
-        emit_f64_to_f80(buf, Xaddr, Dd_src, Xbits, Wexp, Wd_tmp);
+                     /*shift=*/0, delta, (i == 0) ? Xaddr : Xslot, Xslot);
+        // Convert and store 10 bytes at [Xslot, #0..#9].
+        emit_f64_to_f80(buf, Xslot, Dd_src, Xbits, Wexp, Wd_tmp);
     }
 
+    emit_nzcv_unpark(buf, Dd_flags, Xbits);
+    free_fpr(*a1, Dd_flags);
     free_fpr(*a1, Dd_src);
     free_gpr(*a1, Wexp);
     free_gpr(*a1, Xbits);
+    if (Xslot != Xaddr) {
+        free_gpr(*a1, Xslot);
+    }
     free_gpr(*a1, Xaddr);
 
     // ── Re-initialize FPU state per Intel SDM (FSAVE = FSTENV + FINIT) ──

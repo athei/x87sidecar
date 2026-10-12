@@ -930,6 +930,16 @@ auto emit_msr_nzcv(AssemblerBuffer& buf, int Xd) -> void {
     buf.emit(0xD51B4200U | static_cast<uint32_t>(Xd & 0x1F));
 }
 
+auto emit_mrs_fpcr(AssemblerBuffer& buf, int Xd) -> void {
+    // MRS Xd, FPCR: op0=3, op1=3, CRn=4, CRm=4, op2=0
+    buf.emit(0xD53B4400U | static_cast<uint32_t>(Xd & 0x1F));
+}
+
+auto emit_msr_fpcr(AssemblerBuffer& buf, int Xd) -> void {
+    // MSR FPCR, Xd: same sysreg with L=0
+    buf.emit(0xD51B4400U | static_cast<uint32_t>(Xd & 0x1F));
+}
+
 auto emit_cbz(AssemblerBuffer& buf, int is_64bit, int is_nz, int Rt, int imm19) -> void {
     // CBZ/CBNZ Rt, #imm19
     // Encoding: sf | 011010 | b5=0 | op | imm19 | Rt
@@ -939,6 +949,18 @@ auto emit_cbz(AssemblerBuffer& buf, int is_64bit, int is_nz, int Rt, int imm19) 
     insn |= static_cast<uint32_t>(is_64bit != 0) << 31;
     insn |= static_cast<uint32_t>(is_nz != 0) << 24;
     insn |= (static_cast<uint32_t>(imm19) & 0x7FFFFU) << 5;
+    insn |= static_cast<uint32_t>(Rt & 0x1F);
+    buf.emit(insn);
+}
+
+auto emit_tbz(AssemblerBuffer& buf, int is_nz, int Rt, int bit, int imm14) -> void {
+    // TBZ/TBNZ Rt, #bit, #imm14
+    // Encoding: b5 | 011011 | op | b40 | imm14 | Rt   (0x36 / 0x37)
+    uint32_t insn = 0x36000000U;
+    insn |= static_cast<uint32_t>((bit >> 5) & 1) << 31;
+    insn |= static_cast<uint32_t>(is_nz != 0) << 24;
+    insn |= static_cast<uint32_t>(bit & 0x1F) << 19;
+    insn |= (static_cast<uint32_t>(imm14) & 0x3FFFU) << 5;
     insn |= static_cast<uint32_t>(Rt & 0x1F);
     buf.emit(insn);
 }

@@ -37,6 +37,8 @@ constexpr FusionEntry kFusionTable[] = {
     {.name = "arith_fstp", .id = FusionId::arith_fstp},
     {.name = "arith_faddp", .id = FusionId::arith_faddp},
     {.name = "fstp_arith_fstp", .id = FusionId::fstp_arith_fstp},
+    {.name = "fild_fistp", .id = FusionId::fild_fistp},
+    {.name = "fld_fstp_m80", .id = FusionId::fld_fstp_m80},
 };
 
 }  // namespace
@@ -138,10 +140,15 @@ RosettaConfig load_config_from_env() {
     cfg.disable_x87_ir = env_truthy("X87_DISABLE_X87_IR") ? 1 : 0;
     cfg.disable_x87_single_fast = env_truthy("X87_DISABLE_SINGLE_FAST") ? 1 : 0;
     cfg.enable_fma_contract = env_truthy("X87_ENABLE_FMA_CONTRACT") ? 1 : 0;
+    cfg.ignore_ftz_daz = env_truthy("X87_IGNORE_FTZ_DAZ") ? 1 : 0;
     cfg.enable_fma_reduce = env_default_on("X87_ENABLE_FMA_REDUCE");
     cfg.enable_ir_split = env_default_on("X87_ENABLE_IR_SPLIT");
     cfg.enable_ir_remat = env_default_on("X87_ENABLE_IR_REMAT");
     cfg.log_ir_split = env_truthy("X87_LOG_IR_SPLIT") ? 1 : 0;
+    // Native transport replies (Translator.cpp).  Default ON; =0 is the
+    // rollback and bisect switch that restores the binary64 round trip.
+    cfg.native_transport = env_default_on("X87_NATIVE_TRANSPORT");
+    cfg.precise_faults = env_truthy("X87_PRECISE_FAULTS") ? 1 : 0;
 
     // Test-only gate pool clamps: make register-pressure splits
     // deterministically reproducible regardless of stock's dynamic FPR
@@ -164,6 +171,23 @@ RosettaConfig load_config_from_env() {
     };
     parse_pool_limit("X87_FPR_POOL_LIMIT", cfg.fpr_pool_limit);
     parse_pool_limit("X87_GPR_POOL_LIMIT", cfg.gpr_pool_limit);
+
+    // A failed scratch register allocation declines the request to stock
+    // unless X87_STRICT_ALLOC asks for the assert.  X87_FAIL_ALLOC_EVERY
+    // makes failures happen on demand so the decline path stays tested.
+    cfg.strict_alloc = env_truthy("X87_STRICT_ALLOC") ? 1 : 0;
+    if (const char* t = std::getenv("X87_FAIL_ALLOC_EVERY"); t != nullptr && t[0] != '\0') {
+        char* end = nullptr;
+        const unsigned long v = std::strtoul(t, &end, 10);
+        if (end != t && *end == '\0' && v >= 1 && v <= 0xFFFFFFFFUL) {
+            cfg.fail_alloc_every = static_cast<uint32_t>(v);
+            std::printf("[rosettax87] X87_FAIL_ALLOC_EVERY=%lu (allocation fault injection)\n", v);
+        } else {
+            std::printf("[rosettax87] X87_FAIL_ALLOC_EVERY: '%s' is not a positive integer "
+                        "(ignored)\n",
+                        t);
+        }
+    }
 
     // Run bridging v1.  Default ON since 2026-07-04 (clean TurtleWoW soak;
     // measured -6.18% exec-weighted ARM on the capture).  Set =0 to disable;
@@ -249,6 +273,8 @@ RosettaConfig load_config_from_env() {
         }
         std::printf("\n");
     }
+
+    cfg.x87_stock_bcd = env_default_on("X87_STOCK_BCD");
 
     if (env_truthy("X87_DISABLE_ALL_FUSIONS")) {
         cfg.disabled_fusions_mask = ~0ULL;
@@ -425,12 +451,45 @@ void print_env_help(std::FILE* out) {
         "  X87_DISABLE_SINGLE_FAST=1     disable the fused single-op fast path for\n"
         "                                isolated (run==1) fld/fst/fstp — fall back\n"
         "                                to the generic per-op emitters\n"
+        "  X87_NATIVE_TRANSPORT=0        put replies made only of fild, fist, fistp,\n"
+        "                                fisttp, fldcw, fnstcw, fnop, fdisi and feni\n"
+        "                                back through the binary64 register file.\n"
+        "                                Default ON: such replies work on the native\n"
+        "                                80-bit registers, so an int64 held on the x87\n"
+        "                                stack across branches (Delphi's System.Move)\n"
+        "                                stays exact.  For rollback and bisecting only;\n"
+        "                                with it off every such value of 2^53 or more\n"
+        "                                is rounded.\n"
+        "  X87_PRECISE_FAULTS=1          use when a program aborts with \"unexpectedly\n"
+        "                                need to EmulateForward on a synchronous\n"
+        "                                exception\": probe the memory operand of each\n"
+        "                                reply's first x87 instruction and answer\n"
+        "                                integer-only runs one instruction per reply,\n"
+        "                                so a fault there reaches the program's signal\n"
+        "                                handler.  Default OFF: any memory fault in\n"
+        "                                translated x87 code aborts.  Costs up to 7%%\n"
+        "                                on x87 loops and makes an x87 store into\n"
+        "                                write-combined memory 23 to 40 times slower;\n"
+        "                                faults later in a floating-point run still\n"
+        "                                abort.\n"
         "  X87_ENABLE_FMA_CONTRACT=1     fold fmul+fadd/fsub into a single FMA (IR pass,\n"
         "                                fld_arith_arithp fusion, arith_faddp peephole).\n"
         "                                Off by default: real x87 rounds the product\n"
         "                                before the add, and at the 53-bit precision\n"
         "                                Windows processes run at the unfused form is\n"
         "                                bit-exact while the fused one is not\n"
+        "  X87_IGNORE_FTZ_DAZ=1          keep x87 denormals when the program sets\n"
+        "                                MXCSR.FTZ or DAZ, as real x87 does: each x87\n"
+        "                                run clears the flush bits (FPCR.FZ/FIZ, or\n"
+        "                                S3_6_C15_C2_5 without FEAT_AFP; --probe says\n"
+        "                                which) and restores them after.  Off by\n"
+        "                                default; when on, every run gains 6 to 13\n"
+        "                                instructions (and two taken branches when the\n"
+        "                                x87 stack is not empty), and with FTZ or DAZ\n"
+        "                                set two register writes (about 20 ns per run).\n"
+        "                                Without FEAT_AFP a signal that lands inside a\n"
+        "                                run can make the rest of it give wrong results,\n"
+        "                                most likely flushed denormals\n"
         "  X87_ENABLE_FMA_REDUCE=0       disable NEON FMA-reduction lowering for serial\n"
         "                                FMADD chains.  Default ON, but it only acts on\n"
         "                                the FMAdd nodes contraction creates, so it\n"
@@ -458,6 +517,15 @@ void print_env_help(std::FILE* out) {
         "                                pressure gate believes is available, making\n"
         "                                splits deterministic (allocation unaffected)\n"
         "  X87_GPR_POOL_LIMIT=N          test-only GPR-side equivalent\n"
+        "  X87_STRICT_ALLOC=1            assert when the translator runs out of\n"
+        "                                scratch registers.  Without it the request\n"
+        "                                is declined to stock Rosetta and one line\n"
+        "                                names the block hash and the allocator.\n"
+        "                                The test harness sets it so a register\n"
+        "                                pressure bug still crashes there\n"
+        "  X87_FAIL_ALLOC_EVERY=N        test-only fault injection: every Nth scratch\n"
+        "                                register allocation fails as if the pool\n"
+        "                                were empty, to exercise the decline path\n"
         "  X87_ENABLE_BRIDGE=0           disable run bridging (default ON): bridging\n"
         "                                carries one IR run across short gaps of\n"
         "                                flag-transparent 32/64-bit mov/lea\n"
@@ -497,6 +565,9 @@ void print_env_help(std::FILE* out) {
         "  X87_STOCK_OPS=name,...        hand to stock every block containing any of\n"
         "                                the listed opcodes (mnemonics, e.g. f2xm1);\n"
         "                                coarse one-run localizer, narrow by hash next\n"
+        "  X87_STOCK_BCD=0               translate blocks containing fbld or fbstp in\n"
+        "                                the sidecar (default ON hands them to stock,\n"
+        "                                whose 80-bit registers keep all 18 digits)\n"
         "  X87_LOG_HASH_LIST=H,...       write an uptime-stamped line per translate\n"
         "                                request of the listed blocks to the\n"
         "                                X87_DIAG_DIR file (same clock as WINEDEBUG\n"

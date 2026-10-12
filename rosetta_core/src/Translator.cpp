@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <optional>
 
 #include "TranslatorX87Internal.hpp"
@@ -43,6 +44,126 @@ static auto translate_instruction_impl(TranslationResult* translation_result, IR
                                        IRInstr* instr_array, int64_t num_instrs, int64_t insn_idx)
     -> std::optional<int64_t>;
 
+static profile::BlockTally block_tally(const X87Cache& cache) {
+    return profile::BlockTally{
+        .ir_ops = cache.tally_ir,
+        .peephole_ops = cache.tally_peep,
+        .single_ops = cache.tally_single,
+        .fallthrough_ops = cache.tally_ft,
+        .ir_build_fail_ops = cache.tally_ir_build_fail,
+        .ir_fpr_fail_ops = cache.tally_ir_fpr_fail,
+        .ir_gpr_fail_ops = cache.tally_ir_gpr_fail,
+        .max_gpr_peak = cache.tally_max_gpr_peak,
+        .ir_split_runs = cache.tally_ir_split,
+        .ir_remat_runs = cache.tally_ir_remat,
+        .bridge_ops = cache.tally_bridge,
+        .bridge_fail_runs = cache.tally_bridge_fail,
+    };
+}
+
+// The IRG1 per-reason gate refusal counters and the RRR0 max-run-at-refusal
+// side table, both mirrored from the cache.
+static void mirror_block_gate_counters(uint32_t bid, const X87Cache& cache) {
+    profile::BlockIRGateCounters c{};
+    c.counts[profile::kIRGateReasonShortRun] = cache.tally_ir_gate_short_run;
+    c.counts[profile::kIRGateReasonTopDirty] = cache.tally_ir_gate_top_dirty;
+    c.counts[profile::kIRGateReasonTagPush] = cache.tally_ir_gate_tag_push;
+    c.counts[profile::kIRGateReasonDeferredPop] = cache.tally_ir_gate_deferred_pop;
+    c.counts[profile::kIRGateReasonPermDirty] = cache.tally_ir_gate_perm_dirty;
+    profile::set_block_ir_gate_counters(bid, c);
+
+    profile::BlockMaxRunAtRefuse mr{};
+    for (uint32_t r = 0; r < profile::kIRGateReasonCount; ++r) {
+        mr.max_run[r] = cache.max_run_at_gate[r];
+    }
+    profile::set_block_max_run_at_refuse(bid, mr);
+}
+
+// What a request can change in the result before it is known to succeed:
+// the emitted words, the fixup lists, the register masks and the x87 cache.
+// A request whose allocator ran dry is put back to this and declined.
+struct RequestEntry {
+    uint64_t buf_end;
+    uint64_t fixup_count[6];
+    uint32_t free_gpr_mask;
+    uint32_t free_fpr_mask;
+    uint32_t pinned_temporary_scalars;
+    X87Cache cache;
+};
+
+static constexpr TransactionalList<Fixup> TranslationResult::* kFixupLists[6] = {
+    &TranslationResult::external_fixups, &TranslationResult::internal_fixups,
+    &TranslationResult::_fixups,         &TranslationResult::field_B0,
+    &TranslationResult::dyld_stub_fixups, &TranslationResult::field_1A8,
+};
+
+static RequestEntry capture_request_entry(const TranslationResult& tr) {
+    RequestEntry e{.buf_end = tr.insn_buf.end,
+                   .fixup_count = {},
+                   .free_gpr_mask = tr.free_gpr_mask,
+                   .free_fpr_mask = tr.free_fpr_mask,
+                   .pinned_temporary_scalars = tr._pinned_temporary_scalars,
+                   .cache = tr.x87_cache};
+    for (size_t i = 0; i < 6; i++) {
+        e.fixup_count[i] = (tr.*kFixupLists[i]).element_count();
+    }
+    return e;
+}
+
+// Undo a request that ran out of scratch registers, so that stock, which
+// translates the instruction instead, finds the result as the request found
+// it.  This is sound at any point inside the request because a request is
+// a whole run (see translate_instruction): it starts with the cache released
+// and the x87 state complete in memory, and nothing it emitted is kept.  The
+// cache goes back to its entry state with the run released, as after any
+// declined request.  When the request had moved the cache onto a new block,
+// the entry state is the previous block's, so the block is entered afresh
+// the next time it is translated.  A request that found stock translating
+// the block again is treated the same way, by forgetting the block.  The
+// rest of the block goes to stock as well (X87Cache::declined_block).
+static void decline_after_alloc_failure(TranslationResult& tr, const RequestEntry& entry,
+                                        const IRBlock* block, const IRInstr* instr_array,
+                                        int64_t num_instrs, int64_t insn_idx) {
+    tr.insn_buf.end = entry.buf_end;
+    for (size_t i = 0; i < 6; i++) {
+        auto& list = tr.*kFixupLists[i];
+        list.end = list.begin + entry.fixup_count[i];
+    }
+    tr.free_gpr_mask = entry.free_gpr_mask;
+    tr.free_fpr_mask = entry.free_fpr_mask;
+    tr._pinned_temporary_scalars = entry.pinned_temporary_scalars;
+
+    const uint32_t attempted_bid = tr.x87_cache.profile_bid;
+    auto& cache = tr.x87_cache;
+    cache = entry.cache;
+    cache.invalidate();
+    cache.bridge_pending_total = 0;
+    cache.bridge_pending_idx = -1;
+    if (cache.prev_block == block && insn_idx <= cache.last_insn_idx) {
+        cache.prev_block = nullptr;
+    }
+    const bool same_block = cache.prev_block == block;
+    if (same_block) {
+        cache.last_insn_idx = static_cast<int32_t>(insn_idx);
+    }
+    cache.last_next_idx = -1;
+    cache.declined_block = block;
+    cache.declined_idx = static_cast<int32_t>(insn_idx);
+    cache.declined_num_instrs = static_cast<int32_t>(num_instrs);
+    cache.declined_start_pc = instr_array[0].pc;
+    // The attempt mirrored profile side tables for ops whose code was just
+    // dropped.  Within one translation of the block the cache holds what they
+    // said before, so mirror that back.  An attempt that had entered the
+    // block anew is left alone rather than zeroed, since the block id may
+    // carry an earlier translation's counts: its entries, and the
+    // latest-write build-fail opcode and top_dirty predecessor in any case,
+    // can then reflect the declined attempt.
+    if (attempted_bid != profile::kOverflowId && same_block) {
+        profile::set_block_tally(attempted_bid, block_tally(cache));
+        mirror_block_gate_counters(attempted_bid, cache);
+    }
+}
+
 // Flush every deferred piece of x87 state to memory and release the run.
 // Only for the path that must not happen: an instruction inside a run the
 // lookahead counted as handled came back declined.  The ops already emitted
@@ -60,12 +181,144 @@ static void flush_run_and_release(TranslationResult& tr) {
     tr.free_gpr_mask = cache.stock_free_gpr_mask;
 }
 
+// Bytes an x87 instruction reads or writes through its memory operand.
+static int x87_access_bytes(const IRInstr& insn, const IROperand& op) {
+    switch (insn.opcode()) {
+        case Opcode::kOpcodeName_fbld:
+        case Opcode::kOpcodeName_fbstp:
+            return 10;
+        case Opcode::kOpcodeName_fsave:
+        case Opcode::kOpcodeName_frstor:
+            return 108;  // the 32-bit layout, the only one the emitters write
+        default:
+            break;
+    }
+    switch (op.mem.size) {
+        case IROperandSize::S16:
+            return 2;
+        case IROperandSize::S32:
+            return 4;
+        case IROperandSize::S64:
+            return 8;
+        case IROperandSize::S80:
+            return 10;
+        default:
+            return 1;
+    }
+}
+
+static bool x87_writes_memory(uint16_t opcode) {
+    switch (opcode) {
+        case Opcode::kOpcodeName_fst:
+        case Opcode::kOpcodeName_fstp:
+        case Opcode::kOpcodeName_fist:
+        case Opcode::kOpcodeName_fistp:
+        case Opcode::kOpcodeName_fisttp:
+        case Opcode::kOpcodeName_fbstp:
+        case Opcode::kOpcodeName_fnstcw:
+        case Opcode::kOpcodeName_fstsw:
+        case Opcode::kOpcodeName_fsave:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// A memory fault in translated code is recovered by rolling back to the
+// start of the instruction-map entry the faulting pc belongs to, and there
+// is one entry per reply.  The runtime only rolls back when nothing before
+// the faulting instruction in that entry changed state: no store, no NZCV
+// or FPCR write, no write to a register that holds guest state, and no
+// floating-point arithmetic.  Otherwise it aborts the process with
+// "unexpectedly need to EmulateForward on a synchronous exception".  A reply
+// that converts the register file changes state before its first guest
+// access (the entry conversion alone does), so with X87_PRECISE_FAULTS=1
+// the access of the reply's first instruction is probed here, before
+// anything else.  The knob is off by default, since a store probe into
+// write-combined memory is uncached and slow (docs/internals.md).
+//
+// A load is probed with a load of the access width into the zero register,
+// or of its first and last byte for 10 and 108 bytes; one load also covers
+// an unaligned access that crosses a page.  A store is probed by loading
+// those bytes and writing them back unchanged: the full access width for 2,
+// 4 and 8 bytes, otherwise the first byte after a load of the last.  The
+// write-back is the reply's only state change before the probe completes,
+// so a fault in it still rolls back, and it faults where the store would,
+// including on a read-only page.  An atomic would leave no window, but LSE
+// atomics take a bus error on write-combined and uncached mappings (Metal
+// buffers, IOSurfaces), where plain loads and stores work.  The window: a
+// write by another thread to those bytes between the load and the
+// write-back is undone, and the real store then overwrites the same bytes,
+// so only that transient value is lost, which is an order the x86 store
+// could have produced.
+//
+// Once the probes pass, the real access later in the reply cannot fault,
+// and a fault in a probe reaches the guest handler with the reply's first
+// instruction as rip and the state from before it.  A store into a
+// PROT_NONE page faults in the probe's load, so the handler sees a read
+// fault where stock reports a write.  Accesses further into a reply are
+// not probed: rolling back to the reply start would report the wrong
+// instruction.
+static void emit_fault_probe(TranslationResult& tr, IRInstr& insn) {
+    IROperand* mem = nullptr;
+    for (int i = 0; i < insn.num_operands && i < 4; i++) {
+        const auto kind = insn.operands[i].kind;
+        if (kind == IROperandKind::MemRef || kind == IROperandKind::AbsMem) {
+            mem = &insn.operands[i];
+            break;
+        }
+    }
+    if (mem == nullptr) {
+        return;
+    }
+    const auto saved_mask = tr.free_gpr_mask;
+    tr.free_gpr_mask &= kGprScratchMask;
+    AssemblerBuffer& buf = tr.insn_buf;
+    const int bytes = x87_access_bytes(insn, *mem);
+    const int Xaddr = compute_operand_address(tr, /*is_64bit=*/1, mem, GPR::XZR);
+    const bool store = x87_writes_memory(insn.opcode());
+    const int Xval = store ? alloc_free_gpr(tr) : GPR::XZR;
+    if (bytes == 2 || bytes == 4 || bytes == 8) {
+        const int size = bytes == 2 ? 1 : bytes == 4 ? 2 : 3;
+        emit_ldr_str_imm(buf, size, /*is_fp=*/0, /*LDR*/ 1, /*imm12=*/0, Xaddr, Xval);
+        if (store) {
+            emit_ldr_str_imm(buf, size, 0, /*STR*/ 0, 0, Xaddr, Xval);
+        }
+    } else {
+        if (bytes > 1) {
+            emit_ldr_str_imm(buf, /*size=*/0, 0, /*LDR*/ 1, bytes - 1, Xaddr, GPR::XZR);
+        }
+        emit_ldr_str_imm(buf, 0, 0, /*LDR*/ 1, /*imm12=*/0, Xaddr, Xval);
+        if (store) {
+            emit_ldr_str_imm(buf, 0, 0, /*STR*/ 0, 0, Xaddr, Xval);
+        }
+    }
+    if (store) {
+        free_gpr(tr, Xval);
+    }
+    free_gpr(tr, Xaddr);
+    tr.free_gpr_mask = saved_mask;
+}
+
 auto Translator::translate_instruction(TranslationResult* translation_result, IRBlock* block,
                                        IRInstr* instr_array, int64_t num_instrs, int64_t insn_idx)
     -> std::optional<int64_t> {
     auto& cache = translation_result->x87_cache;
     const auto start = translation_result->insn_buf.end;
     const auto op = instr_array[insn_idx].opcode();
+    translation_result->alloc_failure = nullptr;
+    // The rest of a block in which a request ran out of registers goes to
+    // stock (X87Cache::declined_block).  ARPL cannot, and reads no x87 flags.
+    if (cache.declined_block != nullptr) {
+        if (cache.declined_block != block || insn_idx <= cache.declined_idx ||
+            num_instrs != cache.declined_num_instrs ||
+            instr_array[0].pc != cache.declined_start_pc) {
+            cache.declined_block = nullptr;
+        } else if (op != kOpcodeName_arpl) {
+            cache.last_next_idx = -1;
+            return std::nullopt;
+        }
+    }
     // Metadata-only ops and FXSAVE/FXRSTOR go to stock, which consumes
     // native state directly. Every handled x87 reply uses compact state
     // internally and must export native f80 after its cache is flushed.
@@ -73,15 +326,44 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                                  op != kOpcodeName_finit && op != kOpcodeName_fldenv &&
                                  op != kOpcodeName_fstenv && op != kOpcodeName_fxsave &&
                                  op != kOpcodeName_fxrstor;
+    // A reply made only of integer loads and stores, control word moves and
+    // no-ops does no arithmetic, so it can work on the native f80 slots
+    // directly and needs no conversion at either end.  That keeps an int64
+    // held on the x87 stack across replies exact, which the binary64 round
+    // trip of the boundary cannot (Delphi's System.Move holds fild values
+    // across its branches).  The run lookahead decides it, so the predicate
+    // covers every op the reply below can consume: bridging is off for such
+    // a run and an IR run never extends past it.
+    const bool transport =
+        native_boundary &&
+        (g_rosetta_config == nullptr || g_rosetta_config->native_transport != 0) &&
+        X87Cache::is_native_transport_run(instr_array, num_instrs, insn_idx);
+    // Captured before native_transport is set, so a declined request leaves
+    // the flag clear, as every request that ends does.
+    const RequestEntry entry = capture_request_entry(*translation_result);
+    cache.native_transport = transport ? 1 : 0;
+    // The probe has to stay the first thing in the reply: before the entry
+    // conversion, before any NZCV save or FPCR write, before anything an op
+    // emitter does.  A native transport reply needs none: it is one
+    // instruction (or a fused fild m64 / fistp m64 pair), and its emitters
+    // touch guest memory before they change any state, so its own access
+    // rolls back and reports the fault kind stock does.  X87_PROFILE's block
+    // counter and X87_TRACE_BLOCK's records are stores emitted ahead of the
+    // op, so with either on a fault in a transport reply that carries them
+    // aborts.
+    if (native_boundary && !transport && precise_faults_enabled())
+        emit_fault_probe(*translation_result, instr_array[insn_idx]);
     const bool traced =
         native_boundary && x87trace::matches(instr_array, static_cast<size_t>(num_instrs));
     const uint64_t trace_site = uint64_t(instr_array[insn_idx].pc) << 32;
     if (traced)
         x87trace::emit_boundary(*translation_result, trace_site | (uint64_t(insn_idx) << 1));
-    if (native_boundary)
+    if (native_boundary && !transport)
         TranslatorX87::emit_native_state_boundary(*translation_result, true);
-    auto ret =
-        translate_instruction_impl(translation_result, block, instr_array, num_instrs, insn_idx);
+    auto ret = translation_result->alloc_failure != nullptr
+                   ? std::nullopt
+                   : translate_instruction_impl(translation_result, block, instr_array,
+                                                num_instrs, insn_idx);
 
     // A run is one reply.  Stock records one instruction-map entry per
     // translate_insn reply, and when an asynchronous signal lands in a
@@ -93,10 +375,14 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
     // each such entry was a point where a signal silently shifted the x87
     // stack (issue #23).  With the whole run in one reply the only entries
     // are the run's start and its end, where x87_end has flushed everything.
-    while (ret.has_value() && cache.active() && *ret < num_instrs) {
+    while (ret.has_value() && cache.active() && *ret < num_instrs &&
+           translation_result->alloc_failure == nullptr) {
         cache.last_next_idx = static_cast<int32_t>(*ret);
         const auto more =
             translate_instruction_impl(translation_result, block, instr_array, num_instrs, *ret);
+        if (!more.has_value() && translation_result->alloc_failure != nullptr) {
+            break;
+        }
         if (!more.has_value()) {
             static int declined_count = 0;
             if (++declined_count <= 10) {
@@ -112,14 +398,40 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
         }
         ret = more;
     }
-    if (native_boundary) {
+    cache.native_transport = 0;
+    if (native_boundary && translation_result->alloc_failure == nullptr) {
         if (ret) {
-            TranslatorX87::emit_native_state_boundary(*translation_result, false);
+            if (!transport)
+                TranslatorX87::emit_native_state_boundary(*translation_result, false);
             if (traced)
                 x87trace::emit_boundary(*translation_result, trace_site | (uint64_t(*ret) << 1) | 1,
                                         *ret == num_instrs);
-        } else
+        } else {
+            // Declined: drop the boundary and the fault probe, including
+            // any fixup the probe's address computation recorded.
             translation_result->insn_buf.end = start;
+            for (size_t i = 0; i < 6; i++) {
+                auto& list = translation_result->*kFixupLists[i];
+                list.end = list.begin + entry.fixup_count[i];
+            }
+        }
+    }
+    if (translation_result->alloc_failure != nullptr) {
+        // ARPL is the one opcode stock cannot be handed: it never had an id
+        // for it (see translate_instruction_impl).  The register form, the
+        // only one seen in practice, needs four scratch GPRs, so this is not
+        // expected to happen.
+        if (op == kOpcodeName_arpl) {
+            std::fprintf(stdout,
+                         "[rosettax87] %s failed while translating ARPL, which stock cannot "
+                         "translate; aborting\n",
+                         translation_result->alloc_failure);
+            std::fflush(stdout);
+            std::abort();
+        }
+        decline_after_alloc_failure(*translation_result, entry, block, instr_array, num_instrs,
+                                    insn_idx);
+        return std::nullopt;
     }
     cache.last_next_idx = ret.has_value() ? static_cast<int32_t>(*ret) : -1;
     return ret;
@@ -256,7 +568,17 @@ static auto translate_instruction_impl(TranslationResult* translation_result, IR
         if (!cache.active()) {
             const bool cache_disabled = g_rosetta_config && g_rosetta_config->disable_x87_cache;
             if (!cache_disabled) {
-                const int run = X87Cache::lookahead(instr_array, num_instrs, insn_idx);
+                // A native transport run is answered one instruction per
+                // reply, so every integer load and store is the first
+                // instruction of its reply, and its own access, which comes
+                // before any state change, faults precisely (see the probe
+                // call in translate_instruction).  Transport replies have no entry or
+                // exit conversion, so the extra replies cost little.  An
+                // adjacent fild m64 / fistp m64 pair stays one reply (see
+                // try_fuse_fld_group).
+                const int run = cache.native_transport && precise_faults_enabled()
+                                    ? 1
+                                    : X87Cache::lookahead(instr_array, num_instrs, insn_idx);
                 cache.set_run(run);
                 // Run bridging: at a fresh run start, check whether short v1
                 // gaps join this run to following x87 segments.  Stash the
@@ -282,7 +604,9 @@ static auto translate_instruction_impl(TranslationResult* translation_result, IR
                         bridge_allowed = false;
                     }
                 }
-                if (bridge_allowed && run >= 1) {
+                // A native transport run is not bridged: the bridged region
+                // would be lowered by the IR into the compact layout.
+                if (bridge_allowed && run >= 1 && !cache.native_transport) {
                     const auto br = X87Cache::lookahead_bridged(
                         instr_array, num_instrs, insn_idx, g_rosetta_config->bridge_max_gap,
                         g_rosetta_config->bridge_max_total,
@@ -320,21 +644,7 @@ static auto translate_instruction_impl(TranslationResult* translation_result, IR
     // disabled or this block hit kMaxBlocks.
     const auto mirror_tally = [&] {
         if (cache.profile_bid != profile::kOverflowId) {
-            profile::set_block_tally(cache.profile_bid,
-                                     profile::BlockTally{
-                                         .ir_ops = cache.tally_ir,
-                                         .peephole_ops = cache.tally_peep,
-                                         .single_ops = cache.tally_single,
-                                         .fallthrough_ops = cache.tally_ft,
-                                         .ir_build_fail_ops = cache.tally_ir_build_fail,
-                                         .ir_fpr_fail_ops = cache.tally_ir_fpr_fail,
-                                         .ir_gpr_fail_ops = cache.tally_ir_gpr_fail,
-                                         .max_gpr_peak = cache.tally_max_gpr_peak,
-                                         .ir_split_runs = cache.tally_ir_split,
-                                         .ir_remat_runs = cache.tally_ir_remat,
-                                         .bridge_ops = cache.tally_bridge,
-                                         .bridge_fail_runs = cache.tally_bridge_fail,
-                                     });
+            profile::set_block_tally(cache.profile_bid, block_tally(cache));
         }
     };
 
@@ -344,19 +654,7 @@ static auto translate_instruction_impl(TranslationResult* translation_result, IR
     // side-table (RRR0) — same trigger.
     const auto mirror_gate_counters = [&] {
         if (cache.profile_bid != profile::kOverflowId) {
-            profile::BlockIRGateCounters c{};
-            c.counts[profile::kIRGateReasonShortRun] = cache.tally_ir_gate_short_run;
-            c.counts[profile::kIRGateReasonTopDirty] = cache.tally_ir_gate_top_dirty;
-            c.counts[profile::kIRGateReasonTagPush] = cache.tally_ir_gate_tag_push;
-            c.counts[profile::kIRGateReasonDeferredPop] = cache.tally_ir_gate_deferred_pop;
-            c.counts[profile::kIRGateReasonPermDirty] = cache.tally_ir_gate_perm_dirty;
-            profile::set_block_ir_gate_counters(cache.profile_bid, c);
-
-            profile::BlockMaxRunAtRefuse mr{};
-            for (uint32_t r = 0; r < profile::kIRGateReasonCount; ++r) {
-                mr.max_run[r] = cache.max_run_at_gate[r];
-            }
-            profile::set_block_max_run_at_refuse(cache.profile_bid, mr);
+            mirror_block_gate_counters(cache.profile_bid, cache);
         }
     };
 
@@ -472,7 +770,10 @@ static auto translate_instruction_impl(TranslationResult* translation_result, IR
     }
 
     {
-        const bool ir_disabled = g_rosetta_config && g_rosetta_config->disable_x87_ir;
+        // The IR lowers into the compact layout, which a native transport
+        // reply does not have.
+        const bool ir_disabled =
+            (g_rosetta_config && g_rosetta_config->disable_x87_ir) || cache.native_transport != 0;
         if (!ir_disabled && cache.active()) {
             // Measurement-only override: profile_analyze can ask for compile_run
             // to fire regardless of the gate so we can score "what would IR emit
@@ -820,7 +1121,12 @@ static auto translate_instruction_impl(TranslationResult* translation_result, IR
     }
 
     // ── Peephole: try 2-instruction fusion patterns ─────────────────────────
-    const uint64_t fusions_mask = g_rosetta_config ? g_rosetta_config->disabled_fusions_mask : 0;
+    // A native transport reply keeps only the fild m64 + fistp m64 copies,
+    // which touch no slot; every other fusion works on compact slots.
+    uint64_t fusions_mask = g_rosetta_config ? g_rosetta_config->disabled_fusions_mask : 0;
+    if (cache.native_transport) {
+        fusions_mask |= ~(1ULL << static_cast<int>(FusionId::fild_fistp));
+    }
     const auto fused = TranslatorX87::try_peephole(translation_result, instr_array, num_instrs,
                                                    insn_idx, fusions_mask);
 
@@ -830,12 +1136,37 @@ static auto translate_instruction_impl(TranslationResult* translation_result, IR
     // everything at run end.  Counts into tally_single so profile_analyze
     // stays comparable across configs.
     bool single_fast = false;
-    if (!fused && !cache.active() &&
+    if (!fused && !cache.active() && !cache.native_transport &&
         !(g_rosetta_config && g_rosetta_config->disable_x87_single_fast)) {
         single_fast = TranslatorX87::try_translate_single_fast(translation_result, cur_instr);
     }
 
-    if (!fused && !single_fast) {
+    // Native transport: the integer loads and stores work on the native
+    // slots.  fldcw, fnstcw and the no-ops touch no slot and take their
+    // usual emitters below.
+    bool native = false;
+    if (!fused && cache.native_transport) {
+        native = true;
+        switch (opcode) {
+            case Opcode::kOpcodeName_fild:
+                TranslatorX87::translate_fild_native(translation_result, cur_instr);
+                break;
+            case Opcode::kOpcodeName_fist:
+                TranslatorX87::translate_fist_native(translation_result, cur_instr);
+                break;
+            case Opcode::kOpcodeName_fistp:
+                TranslatorX87::translate_fistp_native(translation_result, cur_instr);
+                break;
+            case Opcode::kOpcodeName_fisttp:
+                TranslatorX87::translate_fisttp_native(translation_result, cur_instr);
+                break;
+            default:
+                native = false;
+                break;
+        }
+    }
+
+    if (!fused && !single_fast && !native) {
         switch (opcode) {
             case Opcode::kOpcodeName_fldz:
                 TranslatorX87::translate_fldz(translation_result, cur_instr);

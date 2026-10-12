@@ -8,6 +8,7 @@
 #include "rosetta_core/AssemblerBuffer.h"
 #include "rosetta_core/AssemblerHelpers.hpp"
 #include "rosetta_core/Config.h"
+#include "rosetta_core/CoreConfig.h"
 #include "rosetta_core/IRInstr.h"
 #include "rosetta_core/IROperand.h"
 #include "rosetta_core/Opcode.h"
@@ -146,9 +147,12 @@ static void emit_fld_value(AssemblerBuffer& buf, TranslationResult& a1,
         case kFildM16:
         case kFildM32:
         case kFildM64: {
-            const int Wd_int = alloc_free_gpr(a1);
+            // Address first: a GS operand needs two scratch registers plus
+            // the fixed X29 while it is formed, more than the callers leave
+            // free if Wd_int is already held.
             const int addr =
                 compute_operand_address(a1, /*is_64bit=*/true, &fld_instr->operands[0], GPR::XZR);
+            const int Wd_int = alloc_free_gpr(a1);
             if (cls.source == kFildM16) {
                 emit_ldr_str_imm(buf, 1, 0, 1, 0, addr, Wd_int);     // LDRH
                 emit_bitfield(buf, 0, 0, 0, 0, 15, Wd_int, Wd_int);  // SXTH
@@ -585,6 +589,245 @@ static auto try_fuse_fld_fstp(TranslationResult* a1, IRInstr* fld_instr, IRInstr
 }
 
 // =============================================================================
+// Peephole: FILD m64 + FISTP/FISTTP m64 → exact 64-bit copy
+//
+// Real x87 holds any int64 exactly, so the pair copies 8 bytes unchanged
+// whatever the rounding mode.  The binary64 round trip through SCVTF and
+// FCVT* rounds every |v| >= 2^53 instead.  Delphi's System.Move copies memory
+// with this pair (fild; fistp; add; jl), and two-instruction runs never reach
+// the IR, whose pass_exact_i64_copy handles longer runs.  The push and pop
+// cancel, so the pair is a plain LDR D / STR D, load first.
+//
+// Segment-override operands are declined: a GS address takes a fixed pool
+// slot inside compute_operand_address.
+//
+// Returns 2 (instructions consumed) if fused, std::nullopt otherwise.
+// =============================================================================
+
+static auto try_fuse_fild_fistp(TranslationResult* a1, IRInstr* fild_instr, IRInstr* fistp_instr)
+    -> std::optional<int> {
+    if (fild_instr->opcode() != kOpcodeName_fild) {
+        return std::nullopt;
+    }
+    if (fistp_instr->opcode() != kOpcodeName_fistp && fistp_instr->opcode() != kOpcodeName_fisttp) {
+        return std::nullopt;
+    }
+    IROperand* src = &fild_instr->operands[0];
+    IROperand* dst = &fistp_instr->operands[0];
+    if (src->kind == IROperandKind::Register || dst->kind == IROperandKind::Register) {
+        return std::nullopt;
+    }
+    if (src->mem.size != IROperandSize::S64 || dst->mem.size != IROperandSize::S64) {
+        return std::nullopt;
+    }
+    if (src->mem.seg_override != 0 || dst->mem.seg_override != 0) {
+        return std::nullopt;
+    }
+
+    AssemblerBuffer& buf = a1->insn_buf;
+    auto [Xbase, Wd_top] = x87_begin(*a1, buf);
+    const int Wd_tmp = alloc_gpr(*a1, 2);
+
+    // Net-zero-stack fusion, as in try_fuse_fld_fstp.
+    if (!(a1->x87_cache.tag_push_pending && a1->x87_cache.top_dirty)) {
+        x87_flush_top(buf, *a1, Xbase, Wd_top, Wd_tmp);
+    }
+
+    const int Dd_val = alloc_free_fpr(*a1);
+
+    const int src_addr = compute_operand_address(*a1, /*is_64bit=*/true, src, GPR::XZR);
+    emit_fldr_imm(buf, 3, Dd_val, src_addr, 0);
+    free_gpr(*a1, src_addr);
+
+    const int dst_addr = compute_operand_address(*a1, /*is_64bit=*/true, dst, GPR::XZR);
+    emit_fstr_imm(buf, 3, Dd_val, dst_addr, 0);
+    free_gpr(*a1, dst_addr);
+
+    free_fpr(*a1, Dd_val);
+    x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp, /*consumed=*/2);
+    free_gpr(*a1, Wd_tmp);
+
+    return 2;
+}
+
+// =============================================================================
+// Peephole: FLD m80fp + FSTP m80fp → ten-byte copy
+//
+// `fld tbyte [src]; fstp tbyte [dst]` is what a long double assignment or a
+// Delphi Extended assignment compiles to.  The x87 moves the ten bytes
+// without converting them: FLD m80 does not quiet an SNaN and FSTP m80 does
+// not round, so every encoding arrives intact, including values outside
+// binary64's range, all 64 significand bits, NaN payloads, unnormals and
+// pseudo-denormals.  Stock Rosetta does the same.  Going through the
+// binary64 register file would lose all of that, so the pair becomes a copy
+// of eight plus two bytes.  The push and pop cancel exactly as in
+// try_fuse_fld_fstp: TOP and the tag word end where they started.
+//
+// Only the adjacent pair is exact.  A value loaded with FLD m80 that meets
+// any other instruction first, or reaches its FSTP m80 in a later reply, is
+// rounded to binary64 on the way.
+//
+// Returns 2 (instructions consumed) if fused, std::nullopt otherwise.
+// =============================================================================
+
+static auto try_fuse_fld_fstp_m80(TranslationResult* a1, IRInstr* fld_instr, IRInstr* fstp_instr)
+    -> std::optional<int> {
+    if (fld_instr->opcode() != kOpcodeName_fld || fstp_instr->opcode() != kOpcodeName_fstp) {
+        return std::nullopt;
+    }
+    if (fld_instr->operands[0].kind == IROperandKind::Register ||
+        fld_instr->operands[0].mem.size != IROperandSize::S80) {
+        return std::nullopt;
+    }
+    if (fstp_instr->operands[0].kind == IROperandKind::Register ||
+        fstp_instr->operands[0].mem.size != IROperandSize::S80) {
+        return std::nullopt;
+    }
+
+    AssemblerBuffer& buf = a1->insn_buf;
+    auto [Xbase, Wd_top] = x87_begin(*a1, buf);
+    const int Wd_tmp = alloc_gpr(*a1, 2);
+
+    // Same deferred-TOP handling as try_fuse_fld_fstp.
+    if (!(a1->x87_cache.tag_push_pending && a1->x87_cache.top_dirty)) {
+        x87_flush_top(buf, *a1, Xbase, Wd_top, Wd_tmp);
+    }
+
+    // Load both parts before computing the destination address, so the copy
+    // is right when source and destination overlap and only one address is
+    // live at a time.  The significand goes into an FPR and the sign and
+    // exponent word into Wd_tmp.  Neither may go into Xsrc: for a plain
+    // 64-bit base or index register with no displacement,
+    // compute_operand_address returns the guest register itself.
+    //   LDR  Dd_mant, [Xsrc]
+    //   LDRH Wd_tmp,  [Xsrc, #8]
+    //   STR  Dd_mant, [Xdst]
+    //   STRH Wd_tmp,  [Xdst, #8]
+    const int Dd_mant = alloc_free_fpr(*a1);
+    const int Xsrc =
+        compute_operand_address(*a1, /*is_64bit=*/true, &fld_instr->operands[0], GPR::XZR);
+    emit_fldr_imm(buf, /*size=*/3 /*D*/, Dd_mant, Xsrc, /*imm12=*/0);
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/1 /*LDR*/, /*imm12=*/4, Xsrc, Wd_tmp);
+    // Freed before the destination address is formed, so a segment-override
+    // destination still finds its scratch registers, including the fixed
+    // X29 slot the GS path takes.
+    free_gpr(*a1, Xsrc);
+
+    // If the STR succeeds and the STRH faults on the next page, the pair is
+    // re-executed from the FLD and re-reads a source that the STR may
+    // already have overwritten when source and destination overlap.  The
+    // x87 itself loads into a register first, so its restart behaviour
+    // differs; this case is left as it is.
+    const int Xdst =
+        compute_operand_address(*a1, /*is_64bit=*/true, &fstp_instr->operands[0], GPR::XZR);
+    emit_fstr_imm(buf, /*size=*/3 /*D*/, Dd_mant, Xdst, /*imm12=*/0);
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/0 /*STR*/, /*imm12=*/4, Xdst, Wd_tmp);
+    free_gpr(*a1, Xdst);
+    free_fpr(*a1, Dd_mant);
+
+    x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp, /*consumed=*/2);
+    free_gpr(*a1, Wd_tmp);
+
+    return 2;
+}
+
+// =============================================================================
+// Peephole: k x FILD m64, then k x FISTP/FISTTP m64 → k exact 64-bit copies
+//
+// The nested form of the pair above, for k = 3 and 2: the stores take the
+// loaded values in reverse, so the n-th store writes the value of the
+// (k+1-n)-th load.  Every load happens before every store, as on x87, so
+// overlapping source and destination behave the same.  The values are held
+// in GPRs: base, TOP, Xst_base, Wd_tmp, three values and one address
+// scratch fill the eight-register pool exactly, and an Immediate operand
+// with a runtime addend needs a second address scratch.  The pool can be
+// smaller (stock may hold scratch registers, and this shape is reached when
+// the IR refused the run, possibly for GPR pressure), so the fusion counts
+// what it needs against the free mask before it emits anything and
+// declines when the mask is short.
+//
+// Returns 2k (instructions consumed) if fused, std::nullopt otherwise.
+// =============================================================================
+
+static bool is_exact_i64_operand(IRInstr* instr) {
+    const IROperand* op = &instr->operands[0];
+    return op->kind != IROperandKind::Register && op->mem.size == IROperandSize::S64 &&
+           op->mem.seg_override == 0;
+}
+
+static auto try_fuse_fild_fistp_nested(TranslationResult* a1, IRInstr* instrs, int64_t num,
+                                       int64_t idx) -> std::optional<int> {
+    int k = 3;
+    for (; k >= 2; --k) {
+        if (idx + 2 * k > num) {
+            continue;
+        }
+        bool match = true;
+        for (int j = 0; j < k && match; ++j) {
+            IRInstr* load = &instrs[idx + j];
+            IRInstr* store = &instrs[idx + k + j];
+            match =
+                load->opcode() == kOpcodeName_fild && is_exact_i64_operand(load) &&
+                (store->opcode() == kOpcodeName_fistp || store->opcode() == kOpcodeName_fisttp) &&
+                is_exact_i64_operand(store);
+        }
+        if (match) {
+            break;
+        }
+    }
+    if (k < 2) {
+        return std::nullopt;
+    }
+    // x87_begin's registers, Wd_tmp, the k values, and the address scratch.
+    // compute_operand_address holds one register for a non-segment operand,
+    // except an Immediate whose runtime addend is loaded into a second one
+    // (mem_flags bit 0 clear); each address is freed before the next.
+    int addr_need = 1;
+    for (int j = 0; j < 2 * k; ++j) {
+        const IROperand* op = &instrs[idx + j].operands[0];
+        if (op->kind == IROperandKind::Immediate && (op->imm.mem_flags & 1) == 0) {
+            addr_need = 2;
+        }
+    }
+    const int need = x87_begin_gpr_need(*a1) + 1 + k + addr_need;
+    if (__builtin_popcount(a1->free_gpr_mask) < need) {
+        return std::nullopt;
+    }
+
+    AssemblerBuffer& buf = a1->insn_buf;
+    auto [Xbase, Wd_top] = x87_begin(*a1, buf);
+    const int Wd_tmp = alloc_gpr(*a1, 2);
+
+    // Net-zero-stack fusion, as in try_fuse_fild_fistp.
+    if (!(a1->x87_cache.tag_push_pending && a1->x87_cache.top_dirty)) {
+        x87_flush_top(buf, *a1, Xbase, Wd_top, Wd_tmp);
+    }
+
+    int values[3];
+    for (int j = 0; j < k; ++j) {
+        values[j] = alloc_free_gpr(*a1);
+        const int addr =
+            compute_operand_address(*a1, /*is_64bit=*/true, &instrs[idx + j].operands[0], GPR::XZR);
+        emit_ldr_str_imm(buf, 3, 0, 1, 0, addr, values[j]);  // LDR X
+        free_gpr(*a1, addr);
+    }
+    for (int j = 0; j < k; ++j) {
+        const int addr = compute_operand_address(*a1, /*is_64bit=*/true,
+                                                 &instrs[idx + k + j].operands[0], GPR::XZR);
+        emit_str_imm(buf, 3, values[k - 1 - j], addr, 0);
+        free_gpr(*a1, addr);
+    }
+    for (int j = k - 1; j >= 0; --j) {
+        free_gpr(*a1, values[j]);
+    }
+
+    x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp, /*consumed=*/2 * k);
+    free_gpr(*a1, Wd_tmp);
+
+    return 2 * k;
+}
+
+// =============================================================================
 // Peephole: FXCH ST(1) + FSTP ST(1) → just pop
 //
 // The swap's effect is destroyed by the pop — both instructions collapse
@@ -726,9 +969,10 @@ static auto try_fuse_fcom_fstsw(TranslationResult* a1, IRInstr* fcom_instr, IRIn
         // ORR in new CC bits
         emit_logical_shifted_reg(buf, 0, 1, 0, 0, Wd_tmp, 0, Wd_sw, Wd_sw);
 
-        // OPT-F6: BFI directly into W_AX — saves the LDRH that
-        // translate_fstsw would have needed.
-        emit_bitfield(buf, 0, 1, 0, /*immr=*/0, /*imms=*/15, Wd_sw, W_ax);
+        // OPT-F6: BFI directly into AX; saves the LDRH that
+        // translate_fstsw would have needed.  64-bit form (sf=1, N=1): a W
+        // write would clear RAX bits 63:32, and FNSTSW AX leaves 63:16 alone.
+        emit_bitfield(buf, 1, 1, 1, /*immr=*/0, /*imms=*/15, Wd_sw, W_ax);
 
         // STRH Wd_sw → status_word (still needed for other readers)
         emit_ldr_str_imm(buf, 1, 0, 0, kX87StatusWordImm12, Xbase, Wd_sw);
@@ -745,8 +989,8 @@ static auto try_fuse_fcom_fstsw(TranslationResult* a1, IRInstr* fcom_instr, IRIn
         }
         // AX was BFI'd before the pop — TOP bits [13:11] are stale (pre-pop).
         // Patch in the post-pop TOP value (correct for both single and double pop).
-        // BFI W_ax, Wd_top, #11, #3  →  BFM immr=21, imms=2
-        emit_bitfield(buf, 0, 1, 0, /*immr=*/21, /*imms=*/2, Wd_top, W_ax);
+        // BFI X_ax, Xd_top, #11, #3  →  BFM sf=1 N=1 immr=53, imms=2
+        emit_bitfield(buf, 1, 1, 1, /*immr=*/53, /*imms=*/2, Wd_top, W_ax);
     }
 
     x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp, /*consumed=*/2);
@@ -1420,7 +1664,8 @@ static auto try_fuse_fld_fcomp_fstsw(TranslationResult* a1, IRInstr* fld_instr,
         const int Wd_sw = alloc_free_gpr(*a1);
 
         // OPT-D: net-zero-stack fusion — skip flush to preserve full cancellation.
-        if (!(a1->x87_cache.tag_push_pending && a1->x87_cache.top_dirty)) {
+        const bool keep_pending = a1->x87_cache.tag_push_pending && a1->x87_cache.top_dirty;
+        if (!keep_pending) {
             x87_flush_top(buf, *a1, Xbase, Wd_top, Wd_sw);
         }
 
@@ -1434,8 +1679,16 @@ static auto try_fuse_fld_fcomp_fstsw(TranslationResult* a1, IRInstr* fld_instr,
         // ORR in new CC bits
         emit_logical_shifted_reg(buf, 0, 1, 0, 0, Wd_tmp, 0, Wd_sw, Wd_sw);
 
-        // OPT-F6: BFI directly into W_AX
-        emit_bitfield(buf, 0, 1, 0, /*immr=*/0, /*imms=*/15, Wd_sw, W_ax);
+        // OPT-F6: BFI directly into AX (64-bit form keeps RAX bits 63:16)
+        emit_bitfield(buf, 1, 1, 1, /*immr=*/0, /*imms=*/15, Wd_sw, W_ax);
+
+        // A push earlier in the run is still pending and the flush above was
+        // skipped, so status_word holds the TOP from before that push.  AX
+        // must report the live TOP: patch it in from Wd_top.
+        // BFI X_ax, Xd_top, #11, #3  →  BFM sf=1 N=1 immr=53, imms=2
+        if (keep_pending) {
+            emit_bitfield(buf, 1, 1, 1, /*immr=*/53, /*imms=*/2, Wd_top, W_ax);
+        }
 
         // STRH Wd_sw → status_word
         emit_ldr_str_imm(buf, 1, 0, 0, kX87StatusWordImm12, Xbase, Wd_sw);
@@ -1444,10 +1697,9 @@ static auto try_fuse_fld_fcomp_fstsw(TranslationResult* a1, IRInstr* fld_instr,
     }
 
     // ── 4e: No push/pop — they cancel ───────────────────────────────────────
-    // But we still need the TOP bits in AX to reflect the post-pop state,
-    // even though net TOP is unchanged.  Since FCOMP pops after FLD push,
-    // the net TOP is the same as before.  The status_word already has the
-    // correct TOP (we flushed above), so AX is correct.
+    // Net TOP is unchanged, so the TOP bits in AX are the TOP at entry to
+    // the fusion: either flushed to status_word above, or patched in from
+    // Wd_top when the flush was skipped.
 
     x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp, /*consumed=*/3);
     free_gpr(*a1, Wd_tmp);
@@ -1662,8 +1914,8 @@ static auto try_fuse_fld_fcompp_fstsw(TranslationResult* a1, IRInstr* fld_instr,
         // ORR in new CC bits
         emit_logical_shifted_reg(buf, 0, 1, 0, 0, Wd_tmp, 0, Wd_sw, Wd_sw);
 
-        // OPT-F6: BFI directly into W_AX
-        emit_bitfield(buf, 0, 1, 0, /*immr=*/0, /*imms=*/15, Wd_sw, W_ax);
+        // OPT-F6: BFI directly into AX (64-bit form keeps RAX bits 63:16)
+        emit_bitfield(buf, 1, 1, 1, /*immr=*/0, /*imms=*/15, Wd_sw, W_ax);
 
         // STRH Wd_sw → status_word
         emit_ldr_str_imm(buf, 1, 0, 0, kX87StatusWordImm12, Xbase, Wd_sw);
@@ -1674,8 +1926,8 @@ static auto try_fuse_fld_fcompp_fstsw(TranslationResult* a1, IRInstr* fld_instr,
     // ── 4e: Net one pop (FLD push + FCOMPP double-pop = +1 net pop) ─────────
     x87_pop(buf, *a1, Xbase, Wd_top, Wd_tmp);
     // AX was BFI'd before the pop — patch in post-pop TOP value.
-    // BFI W_ax, Wd_top, #11, #3  →  BFM immr=21, imms=2
-    emit_bitfield(buf, 0, 1, 0, /*immr=*/21, /*imms=*/2, Wd_top, W_ax);
+    // BFI X_ax, Xd_top, #11, #3  →  BFM sf=1 N=1 immr=53, imms=2
+    emit_bitfield(buf, 1, 1, 1, /*immr=*/53, /*imms=*/2, Wd_top, W_ax);
 
     x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp, /*consumed=*/3);
     free_gpr(*a1, Wd_tmp);
@@ -1777,7 +2029,8 @@ static auto try_fuse_fld_fld_fucompp(TranslationResult* a1, IRInstr* fld1_instr,
         const int Wd_sw = alloc_free_gpr(*a1);
 
         // OPT-D: net-zero-stack fusion — skip flush to preserve full cancellation.
-        if (!(a1->x87_cache.tag_push_pending && a1->x87_cache.top_dirty)) {
+        const bool keep_pending = a1->x87_cache.tag_push_pending && a1->x87_cache.top_dirty;
+        if (!keep_pending) {
             x87_flush_top(buf, *a1, Xbase, Wd_top, Wd_sw);
         }
 
@@ -1792,9 +2045,16 @@ static auto try_fuse_fld_fld_fucompp(TranslationResult* a1, IRInstr* fld1_instr,
         emit_logical_shifted_reg(buf, 0, 1, 0, 0, Wd_tmp, 0, Wd_sw, Wd_sw);
 
         if (has_fstsw) {
-            // OPT-F6: BFI directly into W_AX
+            // OPT-F6: BFI directly into AX (64-bit form keeps RAX bits 63:16)
             const int W_ax = fstsw_instr->operands[0].reg.reg.index();
-            emit_bitfield(buf, 0, 1, 0, /*immr=*/0, /*imms=*/15, Wd_sw, W_ax);
+            emit_bitfield(buf, 1, 1, 1, /*immr=*/0, /*imms=*/15, Wd_sw, W_ax);
+
+            // Flush skipped for a pending push: status_word holds the TOP
+            // from before that push, so patch the live TOP into AX.
+            // BFI X_ax, Xd_top, #11, #3  →  BFM sf=1 N=1 immr=53, imms=2
+            if (keep_pending) {
+                emit_bitfield(buf, 1, 1, 1, /*immr=*/53, /*imms=*/2, Wd_top, W_ax);
+            }
         }
 
         // STRH Wd_sw → status_word
@@ -1804,7 +2064,8 @@ static auto try_fuse_fld_fld_fucompp(TranslationResult* a1, IRInstr* fld1_instr,
     }
 
     // ── 4d: No push or pop (2 pushes + 2 pops = net zero) ───────────────────
-    // TOP is unchanged; memory already has correct TOP (OPT-D or flushed above).
+    // TOP is unchanged.  Either it was flushed above, or a pending push keeps
+    // top_dirty set and the run's end (or the cancelling pop) settles it.
 
     const int consumed = has_fstsw ? 4 : 3;
     x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp, consumed);
@@ -2598,6 +2859,25 @@ static auto try_fuse_fld_group(TranslationResult* tr, IRInstr* instrs, int64_t n
     IRInstr* cur = &instrs[idx];
     IRInstr* next = &instrs[idx + 1];  // caller guarantees idx+1 < num
 
+    // Exact int64 copy first: no longer fusion starts with fild + fistp.
+    // A native transport run is answered one instruction per reply so that
+    // a fault in any of its accesses is precise.  The lone pair stays fused
+    // there: it is Delphi's copy loop, seven instructions against 89 as two
+    // replies, and a fault in its store rolls back to the fild, which a
+    // retry handles.  The nested pairs would put a second store after the
+    // first, where a fault aborts.
+    const bool lone_pair_only = tr->x87_cache.native_transport != 0 && precise_faults_enabled();
+    if (!fusion_disabled(disabled_mask, FusionId::fild_fistp)) {
+        if (!lone_pair_only) {
+            if (auto r = try_fuse_fild_fistp_nested(tr, instrs, num, idx)) {
+                return r;
+            }
+        }
+        if (auto r = try_fuse_fild_fistp(tr, cur, next)) {
+            return r;
+        }
+    }
+
     // 4-instruction fusions (longest first)
     if (idx + 3 < num) {
         if (!fusion_disabled(disabled_mask, FusionId::fld_fld_fucompp)) {
@@ -2640,6 +2920,11 @@ static auto try_fuse_fld_group(TranslationResult* tr, IRInstr* instrs, int64_t n
     // 2-instruction fusions
     if (!fusion_disabled(disabled_mask, FusionId::fld_arithp)) {
         if (auto r = try_fuse_fld_arithp(tr, cur, next)) {
+            return r;
+        }
+    }
+    if (!fusion_disabled(disabled_mask, FusionId::fld_fstp_m80)) {
+        if (auto r = try_fuse_fld_fstp_m80(tr, cur, next)) {
             return r;
         }
     }

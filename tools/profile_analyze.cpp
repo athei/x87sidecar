@@ -428,6 +428,10 @@ struct EmitMeasurement {
     uint32_t arm_ir_forced = 0;  // gate bypassed via RosettaConfig::force_x87_ir_gate
 };
 
+// Requests declined because an allocator ran out of registers, over every
+// offline translation; printed as the alloc_declines row.
+uint64_t g_alloc_declines = 0;
+
 uint32_t runOneMode(const IRInstr* instrs, size_t len, const RosettaConfig* cfg) {
     // emit_x87_base reads thread_context_offsets->x87_state_offset.  We
     // never execute the emitted code, so any small value picks the
@@ -462,6 +466,9 @@ uint32_t runOneMode(const IRInstr* instrs, size_t len, const RosettaConfig* cfg)
     const auto n = static_cast<int64_t>(len);
     while (idx < n) {
         auto next = Translator::translate_instruction(&result, &dummy, mut.data(), n, idx);
+        if (!next.has_value() && result.alloc_failure != nullptr) {
+            ++g_alloc_declines;
+        }
         idx = next.value_or(idx + 1);
     }
     rosetta_set_config(nullptr);
@@ -486,6 +493,7 @@ RosettaConfig make_production_cfg() {
     cfg.enable_bridge_v2 = 1;
     cfg.bridge_max_gap = 2;
     cfg.bridge_max_total = 8;
+    cfg.native_transport = 1;
     // Rollback knobs default ON too but only matter to Translator's gate
     // cascade, which measurePattern doesn't exercise (it builds a fresh
     // x87 cache per call); leave them 0 here.
@@ -2057,6 +2065,12 @@ int main(int argc, char** argv) try {
                         r.td_count, static_cast<unsigned long long>(r.exec), r.block_len);
         }
     }
+    // A translation that runs out of scratch registers declines the rest of
+    // its block to stock, so every emit count above that includes it is
+    // short by what stock would have emitted.  Nonzero means a
+    // register-pressure model bug worth chasing.
+    std::printf("\n# Offline translations declined after an allocation failure\n");
+    std::printf("alloc_declines,%llu\n", static_cast<unsigned long long>(g_alloc_declines));
     return 0;
 } catch (const std::exception& e) {
     std::fprintf(stderr, "profile_analyze: %s\n", e.what());
