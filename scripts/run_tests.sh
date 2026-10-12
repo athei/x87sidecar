@@ -735,6 +735,7 @@ ALLOC_FAIL_TESTS=(
     test_fsincos
     test_fxch
     test_x87_native_state
+    test_delphi_move
 )
 ALLOC_FAIL_EVERY=(1 3 17 43 97 251)
 if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then
