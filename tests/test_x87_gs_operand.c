@@ -1,4 +1,4 @@
-// test_x87_gs_operand.c -- x87 memory operands with a %gs: segment override
+// test_x87_gs_operand.c -- x87 memory operands with a %gs: or %fs: override
 //
 // A GS-relative address takes more temporaries than a plain one: the
 // address without the segment, a register for the segment base, and X29,
@@ -6,18 +6,25 @@
 // temporaries before computing the address can run out of registers or
 // find X29 taken, and an assert then kills the process.
 //
-// Every case below runs the same instruction sequence twice, once with
-// its operand at %gs:disp(%rcx) and once with a plain disp(%rcx) operand
-// pointing at an ordinary buffer holding the same bytes, and compares the
-// two results bit for bit: the stored values, the memory operand's bytes
-// afterwards, and the status word.  Cases cover each x87 memory form
-// isolated between integer instructions (translated on its own), inside a
-// run of x87 instructions (register cache live), and in the shapes the
-// peephole fusions match.
+// Every case below runs the same instruction sequence three times: with
+// its operand at %gs:disp(%rcx), at %fs:disp(%rcx), and as a plain
+// disp(%rcx) operand pointing at an ordinary buffer holding the same bytes.
+// The segment runs are compared with the plain run bit for bit: the stored
+// values, the memory operand's bytes afterwards, and the status word.  A
+// representative subset is also checked against fixed expected values, so
+// a fault shared by all three runs still fails.  Every run checks that the
+// address and data registers (%rcx, %rdx, %rsi, %rdi) survive.  Cases
+// cover each x87 memory form isolated between integer instructions
+// (translated on its own), inside a run of x87 instructions (register
+// cache live), and in the shapes the peephole fusions match.
 //
 // The GS operands address thread-specific-data slots: on macOS x86_64 the
 // GS base is the thread's TSD array, so slot k is at %gs:(k * 8).  The test
 // allocates consecutive pthread keys and uses their slots as the area.
+// The FS base of a macOS x86_64 thread under Rosetta is zero, so the FS
+// operands address an ordinary buffer.  FS takes one register fewer than
+// GS and no fixed one; the FS runs are skipped, not failed, if the FS base
+// turns out not to be zero.
 //
 // Compile:
 //   clang -arch x86_64 -O2 -o test_x87_gs_operand test_x87_gs_operand.c
@@ -40,6 +47,10 @@ enum { kAreaQwords = 18, kAreaBytes = kAreaQwords * 8, kOutBytes = 64 };
 #define GS_M4 "%%gs:12(%%rcx)"
 #define GS_M8 "%%gs:16(%%rcx)"
 #define GS_B "%%gs:(%%rdx)"
+#define FS_M "%%fs:8(%%rcx)"
+#define FS_M4 "%%fs:12(%%rcx)"
+#define FS_M8 "%%fs:16(%%rcx)"
+#define FS_B "%%fs:(%%rdx)"
 #define PL_M "8(%%rcx)"
 #define PL_M4 "12(%%rcx)"
 #define PL_M8 "16(%%rcx)"
@@ -323,23 +334,31 @@ enum InitKind { K_NONE, K_F32, K_F64, K_F80, K_I16, K_I32, K_I64, K_BCD, K_CW };
     X(fxch_fstp, K_NONE, F_FXCH_FSTP, "fstpl")                                           \
     X(fld_group, K_F64, F_FLD_GROUP, "")
 
-typedef void (*CaseFn)(uintptr_t base, const double* in, unsigned char* out, uint16_t* sw);
+// Returns 1 when %rcx, %rdx, %rsi and %rdi still hold their inputs.  All
+// four are read-write operands, so a translator that writes one of them is
+// seen here rather than corrupting the compiler's view of the registers.
+typedef int (*CaseFn)(uintptr_t base, const double* in, unsigned char* out, uint16_t* sw);
 
 #define DEFINE_VARIANT(name, suffix, shape, op, M, M4, M8, B)                            \
-    static void name##_##suffix(uintptr_t base, const double* in, unsigned char* out,     \
-                                uint16_t* sw) {                                          \
-        uintptr_t bare = base + 8;                                                       \
+    static int name##_##suffix(uintptr_t base, const double* in, unsigned char* out,      \
+                               uint16_t* sw) {                                           \
+        uintptr_t rcx = base;                                                            \
+        uintptr_t rdx = base + 8;                                                        \
+        const double* rsi = in;                                                          \
+        unsigned char* rdi = out;                                                        \
         uint16_t ax;                                                                     \
         __asm__ volatile("fninit\n\t" SEP shape(op, M, M4, M8, B) SEP "fnstsw %%ax\n\t"  \
                          "fninit\n\t"                                                    \
-                         : "=a"(ax), "+c"(base), "+d"(bare)                              \
-                         : "S"(in), "D"(out)                                             \
+                         : "=a"(ax), "+c"(rcx), "+d"(rdx), "+S"(rsi), "+D"(rdi)          \
+                         :                                                               \
                          : "r11", "cc", "memory");                                       \
         *sw = ax;                                                                        \
+        return rcx == base && rdx == base + 8 && rsi == in && rdi == out;                \
     }
 
 #define DEFINE_CASE(name, kind, shape, op)                                               \
     DEFINE_VARIANT(name, gs, shape, op, GS_M, GS_M4, GS_M8, GS_B)                        \
+    DEFINE_VARIANT(name, fs, shape, op, FS_M, FS_M4, FS_M8, FS_B)                        \
     DEFINE_VARIANT(name, pl, shape, op, PL_M, PL_M4, PL_M8, PL_B)
 
 CASES(DEFINE_CASE)
@@ -348,17 +367,97 @@ typedef struct {
     const char* name;
     enum InitKind kind;
     CaseFn gs;
+    CaseFn fs;
     CaseFn pl;
 } Case;
 
-#define CASE_ENTRY(name, kind, shape, op) {#name, kind, name##_gs, name##_pl},
+#define CASE_ENTRY(name, kind, shape, op) {#name, kind, name##_gs, name##_fs, name##_pl},
 
 static const Case kCases[] = {CASES(CASE_ENTRY)};
+
+// ── Fixed expected values ──────────────────────────────────────────────────
+//
+// Inputs are 1.75 and -3.5 at (%rsi).  fill() puts 3, -4, 5, ... (scaled by
+// 0.625 for doubles) at the area.  Every value here is exact.
+
+enum ExpectType { E_F64, E_I32, E_U16 };
+
+typedef struct {
+    const char* name;
+    int in_area;  // 0: offset into out, 1: offset into the memory operand's area
+    int off;
+    enum ExpectType type;
+    double d;
+    int32_t i;
+} Expect;
+
+static const Expect kExpect[] = {
+    {"fldl_S", 0, 0, E_F64, 1.875, 0},
+    {"fildl_R", 0, 0, E_F64, 3.0, 0},
+    {"fildl_R", 0, 16, E_F64, 1.75, 0},
+    {"faddl_S", 0, 0, E_F64, 3.625, 0},
+    {"fiaddl_R", 0, 0, E_F64, -0.5, 0},
+    {"fiaddl_R", 0, 8, E_F64, 1.75, 0},
+    {"fstpl_S", 1, 0, E_F64, 1.75, 0},
+    {"fistpl_R", 1, 0, E_I32, 0.0, -4},
+    {"fistpl_R", 0, 0, E_F64, 1.75, 0},
+    {"fisttpl_S", 1, 0, E_I32, 0.0, 1},
+    {"fbstp_S", 1, 0, E_I32, 0.0, 2},
+    // -3.5 < 1.875: C0 set, TOP = 6 with two values loaded.
+    {"fcoml_S", 0, 48, E_U16, 0.0, 0x3100},
+    {"fistpl_pair_rc", 1, 0, E_I32, 0.0, -4},
+    {"fistpl_pair_rc", 1, 4, E_I32, 0.0, 2},
+    {"fild_arith", 0, 0, E_F64, -10.5, 0},
+    {"fnsave_frstor_R", 0, 0, E_F64, -3.5, 0},
+    {"fnsave_frstor_R", 0, 8, E_F64, 1.75, 0},
+    // FLDCW to round toward zero, then FISTP -3.5.
+    {"fldcw_R", 0, 32, E_I32, 0.0, -3},
+};
+
+// Returns the number of expected values for `name` that `out` and `area`
+// miss, printing each.
+static int check_expected(const char* name, const unsigned char* out, const unsigned char* area) {
+    int bad = 0;
+    for (size_t e = 0; e < sizeof(kExpect) / sizeof(kExpect[0]); e++) {
+        const Expect* x = &kExpect[e];
+        if (strcmp(x->name, name) != 0) {
+            continue;
+        }
+        const unsigned char* p = (x->in_area ? area : out) + x->off;
+        int ok;
+        if (x->type == E_F64) {
+            double got;
+            memcpy(&got, p, 8);
+            ok = memcmp(&got, &x->d, 8) == 0;
+            if (!ok) {
+                printf(" %s+%d=%g want %g", x->in_area ? "mem" : "out", x->off, got, x->d);
+            }
+        } else if (x->type == E_I32) {
+            int32_t got;
+            memcpy(&got, p, 4);
+            ok = got == x->i;
+            if (!ok) {
+                printf(" %s+%d=%d want %d", x->in_area ? "mem" : "out", x->off, got, x->i);
+            }
+        } else {
+            uint16_t got;
+            memcpy(&got, p, 2);
+            ok = got == (uint16_t)x->i;
+            if (!ok) {
+                printf(" %s+%d=%04x want %04x", x->in_area ? "mem" : "out", x->off, got,
+                       (uint16_t)x->i);
+            }
+        }
+        bad += !ok;
+    }
+    return bad;
+}
 
 // ── Area setup ─────────────────────────────────────────────────────────────
 
 static pthread_key_t g_keys[kAreaQwords];
 static unsigned char g_plain[kAreaBytes] __attribute__((aligned(16)));
+static unsigned char g_fsarea[kAreaBytes] __attribute__((aligned(16)));
 
 static void fill(unsigned char* area, enum InitKind kind) {
     memset(area, 0, kAreaBytes);
@@ -449,6 +548,42 @@ static int setup_keys(void) {
     return got == 0x1122334455667788ULL;
 }
 
+// The FS runs need a zero FS base.
+static int fs_base_is_zero(void) {
+    static volatile uint64_t probe = 0x8877665544332211ULL;
+    uint64_t got;
+    __asm__ volatile("movq %%fs:(%1), %0" : "=r"(got) : "r"(&probe) : "memory");
+    return got == probe;
+}
+
+// Compares one segment run with the plain run; prints what differs.
+static int same_as_plain(const char* seg, const unsigned char* out, const unsigned char* area,
+                         uint16_t sw, const unsigned char* pl_out, uint16_t pl_sw) {
+    const int ok_out = memcmp(out, pl_out, kOutBytes) == 0;
+    const int ok_area = memcmp(area, g_plain, kAreaBytes) == 0;
+    const int ok_sw = sw == pl_sw;
+    if (ok_out && ok_area && ok_sw) {
+        return 1;
+    }
+    printf(" [%s differs:%s%s%s", seg, ok_out ? "" : " out", ok_area ? "" : " mem",
+           ok_sw ? "" : " sw");
+    for (int b = 0; b < kOutBytes; b += 8) {
+        if (memcmp(out + b, pl_out + b, 8) != 0) {
+            uint64_t g;
+            uint64_t p;
+            memcpy(&g, out + b, 8);
+            memcpy(&p, pl_out + b, 8);
+            printf(" out+%d %s=%016llx plain=%016llx", b, seg, (unsigned long long)g,
+                   (unsigned long long)p);
+        }
+    }
+    if (!ok_sw) {
+        printf(" sw %s=%04x plain=%04x", seg, sw, pl_sw);
+    }
+    printf("]");
+    return 0;
+}
+
 // ---------------------------------------------------------------------------
 
 // An optional argument runs only the case of that name.  Output is
@@ -461,7 +596,23 @@ int main(int argc, char** argv) {
         printf("setup: consecutive TSD slots not reachable through %%gs  FAIL\n");
         return 1;
     }
+    // A misspelt name in kExpect would silently check nothing.
+    for (size_t e = 0; e < sizeof(kExpect) / sizeof(kExpect[0]); e++) {
+        int found = 0;
+        for (size_t c = 0; c < sizeof(kCases) / sizeof(kCases[0]); c++) {
+            found |= strcmp(kExpect[e].name, kCases[c].name) == 0;
+        }
+        if (!found) {
+            printf("setup: expected value for unknown case %s  FAIL\n", kExpect[e].name);
+            return 1;
+        }
+    }
+    const int fs_ok = fs_base_is_zero();
+    if (!fs_ok) {
+        printf("note: FS base is not zero, %%fs: runs skipped\n");
+    }
     const uintptr_t gs_base = (uintptr_t)g_keys[0] * 8 - 8;
+    const uintptr_t fs_base = (uintptr_t)g_fsarea - 8;
     const uintptr_t pl_base = (uintptr_t)g_plain - 8;
     const double in[4] = {1.75, -3.5, 0.0, 0.0};
 
@@ -477,43 +628,47 @@ int main(int argc, char** argv) {
         unsigned char init[kAreaBytes];
         unsigned char gs_area[kAreaBytes];
         unsigned char gs_out[kOutBytes];
+        unsigned char fs_out[kOutBytes];
         unsigned char pl_out[kOutBytes];
         uint16_t gs_sw = 0;
+        uint16_t fs_sw = 0;
         uint16_t pl_sw = 0;
         fill(init, k->kind);
 
         memcpy(g_plain, init, kAreaBytes);
         memset(pl_out, 0xEE, kOutBytes);
-        k->pl(pl_base, in, pl_out, &pl_sw);
+        const int pl_kept = k->pl(pl_base, in, pl_out, &pl_sw);
 
         gs_write(init);
         memset(gs_out, 0xEE, kOutBytes);
-        k->gs(gs_base, in, gs_out, &gs_sw);
+        const int gs_kept = k->gs(gs_base, in, gs_out, &gs_sw);
         gs_read(gs_area);
 
-        const int ok_out = memcmp(gs_out, pl_out, kOutBytes) == 0;
-        const int ok_area = memcmp(gs_area, g_plain, kAreaBytes) == 0;
-        const int ok_sw = gs_sw == pl_sw;
-        const int ok = ok_out && ok_area && ok_sw;
-        printf("%s", ok ? "PASS" : "FAIL");
-        if (!ok) {
-            printf("  (%s%s%s)", ok_out ? "" : "out ", ok_area ? "" : "mem ",
-                   ok_sw ? "" : "sw");
-            for (int b = 0; b < kOutBytes; b += 8) {
-                if (memcmp(gs_out + b, pl_out + b, 8) != 0) {
-                    uint64_t g;
-                    uint64_t p;
-                    memcpy(&g, gs_out + b, 8);
-                    memcpy(&p, pl_out + b, 8);
-                    printf(" out+%d gs=%016llx plain=%016llx", b, (unsigned long long)g,
-                           (unsigned long long)p);
-                }
-            }
-            if (!ok_sw) {
-                printf(" sw gs=%04x plain=%04x", gs_sw, pl_sw);
-            }
+        int fs_kept = 1;
+        if (fs_ok) {
+            memcpy(g_fsarea, init, kAreaBytes);
+            memset(fs_out, 0xEE, kOutBytes);
+            fs_kept = k->fs(fs_base, in, fs_out, &fs_sw);
         }
-        printf("\n");
+
+        // Print the details first, then the verdict, so a failing line
+        // still ends in FAIL for the harness.
+        int ok = 1;
+        if (!pl_kept || !gs_kept || !fs_kept) {
+            printf(" [register clobbered:%s%s%s]", pl_kept ? "" : " plain", gs_kept ? "" : " gs",
+                   fs_kept ? "" : " fs");
+            ok = 0;
+        }
+        if (check_expected(k->name, pl_out, g_plain) != 0) {
+            ok = 0;
+        }
+        if (!same_as_plain("gs", gs_out, gs_area, gs_sw, pl_out, pl_sw)) {
+            ok = 0;
+        }
+        if (fs_ok && !same_as_plain("fs", fs_out, g_fsarea, fs_sw, pl_out, pl_sw)) {
+            ok = 0;
+        }
+        printf("%s%s\n", ok ? "" : "  ", ok ? "PASS" : "FAIL");
         ok ? pass++ : fail++;
     }
 
