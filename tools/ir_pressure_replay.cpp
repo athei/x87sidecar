@@ -229,6 +229,7 @@ int main(int argc, char** argv) try {
     cfg.enable_bridge_v2 = 1;
     cfg.bridge_max_gap = 2;
     cfg.bridge_max_total = 8;
+    cfg.native_transport = 1;
     cfg.enable_ir_split = no_split ? 0 : 1;
     cfg.enable_ir_remat = (no_split || no_remat) ? 0 : 1;
     cfg.log_ir_split = log_split ? 1 : 0;

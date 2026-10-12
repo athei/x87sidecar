@@ -87,6 +87,23 @@ copy those fields directly. The sidecar's compact binary64 slots at offset
 `0x08`, stride 8 are private to a reply. The wrapper converts on entry and
 exit, after flushing deferred TOP, tags and permutations.
 
+That conversion rounds every valid slot to binary64, which loses the low
+bits of an int64 of 2^53 or more held on the x87 stack from one reply to
+the next. Delphi's `System.Move` copies memory that way: it loads 8-byte
+chunks with `fild` and stores them with `fistp` on the other side of
+conditional branches and loops, and NosTale lost file paths to it. So a
+reply whose x87 instructions are all `fild`, `fist`, `fistp`, `fisttp`,
+`fldcw`, `fnstcw` or no-ops is a native transport reply: it skips the
+conversion, `fild` writes the exact 80-bit value straight into the native
+slot, and the integer stores convert the native slot under the control
+word's rounding mode. Slots such a reply does not touch are neither read
+nor written, and memory holds only the native layout at both of its map
+entries. Its emitters write no NZCV and branch only forward, like the
+boundary. `X87_NATIVE_TRANSPORT=0` turns this off for bisecting.
+`test_delphi_move` runs the routine itself, and `test_x87_native_state` and
+`test_x87_signal_context` check the payload in a save area and in a signal
+context.
+
 An opaque save/restore round trip can hide a layout mismatch: the same
 misinterpreted bytes can be copied out and back unchanged. It fails when a
 handler reads or edits the saved registers. `test_x87_signal_context` checks
@@ -96,10 +113,10 @@ the handler. `test_x87_native_state` checks all eight FXSAVE/FXRSTOR slots and
 binary64 bit preservation across separate replies, including subnormals.
 
 `tests/test_x87_signal_storm.c` runs the reported chain and one case per x87
-opcode under a SIGUSR1 storm and compares every iteration bit for bit. Stock
-Rosetta itself shifts the x87 stack when a signal lands in its `fcomp`,
-`fcompp` or `ficomp` translations; the harness records that as a stock
-divergence.
+opcode, plus two native transport runs, under a SIGUSR1 storm and compares
+every iteration bit for bit. Stock Rosetta itself shifts the x87 stack when
+a signal lands in its `fcomp`, `fcompp` or `ficomp` translations; the
+harness records that as a stock divergence.
 
 ## When the translator runs out of registers
 
@@ -201,14 +218,19 @@ the IR lowering, roughly a hundred of them. It is not done.
 A 64-bit integer loaded with `fild m64` is exact on real x87 for every value,
 so `fild m64; fistp m64` copies any `int64_t`. Compilers use that pair to
 move 64-bit integers atomically on 32-bit x86 without SSE2, and Delphi's
-`System.Move` copies memory with it. When the `fild` and its `fistp` or
-`fisttp` are in the same translated run and nothing else reads the value,
-the sidecar copies the eight bytes without converting them: the
-`fild_fistp` fusion handles a lone pair and an IR pass handles the pair
-inside a longer run. A value that meets any other instruction, or whose
-`fistp` falls in a later block, goes through binary64, and above 2^53 in
-magnitude it is rounded: 2^53 + 1 comes back as 2^53 and 2^62 + 3 as 2^62.
-With the IR off only an adjacent pair stays exact.
+`System.Move` copies memory with it. The sidecar copies these values
+exactly, within a block and across blocks. A reply made only of integer
+loads and stores is a native transport reply (see
+[Asynchronous signals inside emitted code](#asynchronous-signals-inside-emitted-code))
+and keeps the 80-bit value in the native slot, so an int64 held on the
+stack from one block to the next arrives intact. Inside a run that also
+holds other instructions, the `fild_fistp` fusion (a lone pair, or up to
+three nested pairs) and an IR pass copy the eight bytes as long as nothing
+else reads the value. What remains is a value that meets arithmetic, or that
+is on the stack while a reply with floating-point work runs, since that
+reply converts its slots to binary64: above 2^53 in magnitude it is rounded,
+and 2^53 + 1 comes back as 2^53 and 2^62 + 3 as 2^62. With the IR off, a
+copy inside such a mixed run is exact only where the fusion matches it.
 
 `fld m80; fstp m80`, the code for a `long double` or Delphi `Extended`
 assignment, is copied the same way by the `fld_fstp_m80` fusion: the ten
@@ -271,9 +293,13 @@ depending on the configuration and the run.
 The knob keeps the original FZ and FIZ bits in the halfword at +6 of the x87
 state. That halfword belongs to native slot 0, and is free only because the
 compact layout keeps its doubles at +8, stride 8, and the entry and exit
-conversions read and write slot 0 before and after the halfword is used. If
-the sidecar ever keeps values inside the native slots (+6, stride 10)
-between the conversions, the saved bits have to move somewhere else.
+conversions read and write slot 0 before and after the halfword is used.
+Native transport replies do work on the native slots (+6, stride 10), and
+are still safe: they skip the boundary, so they neither write nor read the
+saved bits, and their integer conversions and `LDR D` / `STR D` copies do no
+floating-point arithmetic, so FZ and FIZ do not affect them. Any other reply
+that kept values inside the native slots would need the saved bits moved
+somewhere else.
 
 `test_x87_ftz_daz` covers loads, stores, arithmetic and compares under each
 bit, the guest's FTZ and DAZ still applying to SSE code later in the same

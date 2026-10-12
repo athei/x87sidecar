@@ -145,6 +145,9 @@ RosettaConfig load_config_from_env() {
     cfg.enable_ir_split = env_default_on("X87_ENABLE_IR_SPLIT");
     cfg.enable_ir_remat = env_default_on("X87_ENABLE_IR_REMAT");
     cfg.log_ir_split = env_truthy("X87_LOG_IR_SPLIT") ? 1 : 0;
+    // Native transport replies (Translator.cpp).  Default ON; =0 is the
+    // rollback and bisect switch that restores the binary64 round trip.
+    cfg.native_transport = env_default_on("X87_NATIVE_TRANSPORT");
 
     // Test-only gate pool clamps: make register-pressure splits
     // deterministically reproducible regardless of stock's dynamic FPR
@@ -447,6 +450,15 @@ void print_env_help(std::FILE* out) {
         "  X87_DISABLE_SINGLE_FAST=1     disable the fused single-op fast path for\n"
         "                                isolated (run==1) fld/fst/fstp — fall back\n"
         "                                to the generic per-op emitters\n"
+        "  X87_NATIVE_TRANSPORT=0        put replies made only of fild, fist, fistp,\n"
+        "                                fisttp, fldcw, fnstcw, fnop, fdisi and feni\n"
+        "                                back through the binary64 register file.\n"
+        "                                Default ON: such replies work on the native\n"
+        "                                80-bit registers, so an int64 held on the x87\n"
+        "                                stack across branches (Delphi's System.Move)\n"
+        "                                stays exact.  For rollback and bisecting only;\n"
+        "                                with it off every such value of 2^53 or more\n"
+        "                                is rounded.\n"
         "  X87_ENABLE_FMA_CONTRACT=1     fold fmul+fadd/fsub into a single FMA (IR pass,\n"
         "                                fld_arith_arithp fusion, arith_faddp peephole).\n"
         "                                Off by default: real x87 rounds the product\n"

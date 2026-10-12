@@ -27,8 +27,8 @@ enum class FusionId : int {
     arith_fstp,       // non-popping ARITH + FSTP mem (2-instruction, skip intermediate stack store)
     arith_faddp,      // FMUL + FADDP/FSUBP/FSUBRP → FMADD/FMSUB/FNMSUB (FMA fusion)
     fstp_arith_fstp,  // FSTP mem + non-popping ARITH mem + FSTP mem (3-instruction, batched 2-pop)
-    fild_fistp,       // FILD m64 + FISTP/FISTTP m64 as an exact 64-bit copy (the peephole and
-                      // the IR pass_exact_i64_copy)
+    fild_fistp,       // FILD m64 + FISTP/FISTTP m64 as an exact 64-bit copy (the peephole,
+                      // also nested up to three pairs deep, and the IR pass_exact_i64_copy)
     fld_fstp_m80,     // FLD m80 + FSTP m80 (2-instruction, raw ten-byte copy)
     kCount
 };
@@ -135,6 +135,18 @@ struct RosettaConfig {
     uint8_t log_bridge;               // X87_LOG_BRIDGE            one stderr line per bridged
                                       //                           compile (hash, counts) and per
                                       //                           fallback.
+    uint8_t native_transport;         // X87_NATIVE_TRANSPORT      (default ON) a reply whose x87
+                                      //                           ops are all fild / fist / fistp /
+                                      //                           fisttp / fldcw / fnstcw and the
+                                      //                           no-ops fnop / fdisi / feni
+                                      //                           works on Rosetta's native 80-bit
+                                      //                           slots directly, so int64 values
+                                      //                           held on the x87 stack across
+                                      //                           replies stay exact.  Set =0 to
+                                      //                           put such replies back through
+                                      //                           the binary64 register file (for
+                                      //                           rollback and bisecting only:
+                                      //                           that path rounds |v| >= 2^53).
 
     // X87_BRIDGE_HASH_LIST / X87_NO_BRIDGE_HASH_LIST — per-block bridging
     // bisect, same semantics and hash key as the rollback lists above:

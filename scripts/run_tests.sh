@@ -7,8 +7,9 @@
 #   1. Native Rosetta (baseline)
 #   2. x87sidecar (IR + fusions enabled, default config)
 #   3. x87sidecar with X87_DISABLE_X87_IR=1 (direct translator only).
-#      Skips EXACT_I64_COPY_SKIP: without the IR, fild m64 to fistp m64
-#      copies longer than a lone pair round through binary64.
+#      Skips EXACT_I64_COPY_SKIP: without the IR, a fild m64 to fistp m64
+#      copy in a run that also holds a float op such as fstpl rounds
+#      through binary64.
 #   4. x87sidecar with X87_DISABLE_X87_IR=1 + X87_DISABLE_ALL_FUSIONS=1.
 #      Skips EXACT_I64_COPY_SKIP, as phase 3, and the tests in
 #      NO_FUSION_SKIP, whose exact results need a fusion.
@@ -24,8 +25,7 @@
 #   9. x87sidecar with X87_FAST_ROUND=2 on a curated same-block-FLDCW set
 #      (cross-block RC is mis-rounded by design under =2)
 #  10. x87sidecar with X87_ENABLE_BRIDGE=0 (bridging defaults ON; this
-#      phase keeps the unbridged dispatch under regression test).  Skips
-#      EXACT_I64_COPY_SKIP: copies split by a mov gap round through binary64.
+#      phase keeps the unbridged dispatch under regression test)
 #  11. x87sidecar with X87_BRIDGE_V2=0 (v2 defaults ON; this phase keeps
 #      the v1-only bridged dispatch under regression test)
 #  12. test_decoder_fcomp_st and test_decoder_arpl, three ways each: both
@@ -134,6 +134,7 @@ ALL_TESTS=(
     test_fist_indefinite
     test_fist_pressure
     test_fild_fistp_copy
+    test_delphi_move
     test_fcmov
     test_ficom
     test_rc_recache
@@ -397,10 +398,11 @@ if [[ $NATIVE_ONLY -eq 0 ]]; then
     done
 fi
 
-# fild m64 into fistp/fisttp m64 is copied exactly by the IR pass
-# (pass_exact_i64_copy) for longer runs and by the fild_fistp peephole for a
-# lone pair.  With the IR off (phases 3 and 4) or bridging off (phase 10),
-# the longer runs and the bridged ones go through binary64 and round every
+# fild m64 into fistp/fisttp m64 is copied exactly by a native transport
+# reply when the run holds only integer loads and stores, by the IR pass
+# (pass_exact_i64_copy) for longer runs mixing in other ops, and by the
+# fild_fistp peephole for a lone pair.  With the IR off (phases 3 and 4) a
+# run that also holds an fstpl goes through binary64 and rounds every
 # |v| >= 2^53 by design, so the exact-copy test is skipped there.
 EXACT_I64_COPY_SKIP=(
     test_fild_fistp_copy
@@ -605,9 +607,6 @@ if [[ $NATIVE_ONLY -eq 0 ]]; then
     echo -e "${BOLD}=== Phase 10: x87sidecar X87_ENABLE_BRIDGE=0 (bridging off) ===${NC}"
 
     for t in "${TESTS[@]}"; do
-        if exact_i64_copy_skipped "$t"; then
-            continue
-        fi
         BINARY="$TESTS_BIN/$t"
         if [[ ! -x "$BINARY" ]]; then
             echo -e "${YELLOW}SKIP${NC}  $t  (binary not found)"

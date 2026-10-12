@@ -493,6 +493,7 @@ RosettaConfig make_production_cfg() {
     cfg.enable_bridge_v2 = 1;
     cfg.bridge_max_gap = 2;
     cfg.bridge_max_total = 8;
+    cfg.native_transport = 1;
     // Rollback knobs default ON too but only matter to Translator's gate
     // cascade, which measurePattern doesn't exercise (it builds a fresh
     // x87 cache per call); leave them 0 here.

@@ -319,11 +319,11 @@ The sidecar holds x87 values as binary64 rather than the 80-bit extended
 format. At the 53-bit precision control Windows uses, arithmetic results
 match the hardware as long as intermediate values stay inside the binary64
 exponent range; at 64-bit or 24-bit precision control, for 64-bit
-integers above 2^53 and for sequences that carry extra precision from one
-instruction to the next, such as the `fyl2x`-based `pow`, they do not. A
-`fild m64; fistp m64` copy inside one translated run and an adjacent
-`fld m80; fstp m80` pair move their bytes unchanged; a `fild m64; fistp m64`
-copy whose halves fall in different blocks is still rounded.
+integers above 2^53 that meet arithmetic and for sequences that carry extra
+precision from one instruction to the next, such as the `fyl2x`-based
+`pow`, they do not. A `fild m64; fistp m64` copy moves its eight bytes
+unchanged, within a block or across blocks, and so does an adjacent
+`fld m80; fstp m80` pair.
 [docs/internals.md](docs/internals.md#precision-and-the-floating-point-environment)
 lists the measured differences, including how x87 code interacts with MXCSR.
 
@@ -332,7 +332,9 @@ the guest state from there, so every instruction the sidecar emits is one
 the runtime's decoder knows, control flow only goes forward, and a run is
 answered with one reply so the map has entries only where the state is
 complete. The private binary64 register file is converted to Rosetta's native
-80-bit layout at those boundaries. The signal tests check both arithmetic
+80-bit layout at those boundaries, except in replies that only move
+integers, which work on the 80-bit registers directly so an int64 held on
+the stack across branches stays exact. The signal tests check both arithmetic
 under a SIGUSR1 storm and reading or replacing the saved x87 context in
 64-bit and 32-bit compatibility mode.
 
@@ -372,7 +374,7 @@ python3 scripts/test_unhooked_fallback.py  # unhooked fallback, no privileges
 bash scripts/run_benchmarks.sh           # build + benchmark table
 ```
 
-The harness runs 103 self-checking x86-64 test binaries under stock Rosetta
+The harness runs 104 self-checking x86-64 test binaries under stock Rosetta
 and then under the sidecar in ten configurations (default, IR off, fusions
 off, hook bypassed, FMA contraction on, clamped register pool, pressure
 relief off, fast rounding, bridging off, bridging v2 off), plus a
@@ -415,9 +417,10 @@ knowing. Bracketed values are defaults.
 | `X87_ENABLE_BRIDGE=0` | disable carrying one IR run across short `mov`/`lea` gaps between x87 segments [on] |
 | `X87_BRIDGE_V2=0` | disable bridging across flag-writing ALU whose flags Rosetta's liveness proves dead [on] |
 | `X87_ENABLE_IR_SPLIT=0`, `X87_ENABLE_IR_REMAT=0` | disable register-pressure relief: splitting over-pressure runs, sinking long-lived values [on] |
+| `X87_NATIVE_TRANSPORT=0` | put replies made only of integer loads and stores (`fild`, `fistp`, ...) back through the binary64 register file, which rounds int64 values of 2^53 or more held on the stack; for bisecting [on] |
 | `X87_DISABLE_X87_IR=1` | direct translator only, no IR pipeline |
 | `X87_DISABLE_ALL_FUSIONS=1`, `X87_DISABLE_FUSIONS=f1,f2` | disable every fusion, or the named ones (`--help` lists the names) |
-| `X87_DISABLE_FUSIONS=fild_fistp,fld_fstp_m80` | send `fild m64; fistp m64` and `fld m80; fstp m80` copies through binary64 instead of copying the bytes exactly [both on] |
+| `X87_DISABLE_FUSIONS=fild_fistp,fld_fstp_m80` | send adjacent `fld m80; fstp m80` pairs, and `fild m64; fistp m64` pairs in runs with other x87 work, through binary64 instead of copying the bytes exactly; replies of only integer loads and stores stay exact through native transport [both on] |
 | `X87_DISABLE_SINGLE_FAST=1`, `X87_DISABLE_CACHE=1` | disable the single-op fast path, the cross-instruction register cache |
 | `X87_STRICT_ALLOC=1` | assert when the translator runs out of scratch registers, instead of declining the request to stock with one `failed in block hash=0xH` line [off; the test harness sets it] |
 

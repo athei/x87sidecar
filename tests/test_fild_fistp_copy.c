@@ -5,8 +5,9 @@
  * stores back unchanged.  Delphi's System.Move copies memory this way, eight
  * bytes at a time, and eight ASCII bytes read as an int64 are around 2^62.
  * The sidecar holds x87 values as binary64, which rounds every |v| >= 2^53,
- * so these copies need the raw 64-bit path: the IR pass for runs of three or
- * more instructions, the fild_fistp peephole for a lone pair.
+ * so these copies need the raw 64-bit path: a native transport reply for a
+ * run of integer loads and stores only, the IR pass for longer runs mixing
+ * in other ops, and the fild_fistp peephole for a lone or nested pair.
  *
  * Every check is bit-exact.  The cases cover the plain pair, one load
  * duplicated with fld st(0) and stored twice, overlapping moves in both

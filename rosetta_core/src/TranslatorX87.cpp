@@ -1,6 +1,7 @@
 #include "rosetta_core/TranslatorX87.h"
 
 #include <bit>
+#include <cassert>
 #include <cstdint>
 #include <utility>
 
@@ -2883,6 +2884,119 @@ auto translate_fist(TranslationResult* a1, IRInstr* a2) -> void {
     free_gpr(*a1, Wd_int);
     x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp);
     free_gpr(*a1, Wd_tmp);
+}
+
+// =============================================================================
+// Native transport: FILD / FIST / FISTP / FISTTP on the native f80 slots
+//
+// Used for replies whose x87 ops are all integer loads and stores, control
+// word moves and no-ops (X87Cache::is_native_transport_run).  Such a reply
+// skips emit_native_state_boundary, so the register file stays in Rosetta's
+// packed f80 layout throughout and every slot the reply does not touch is
+// neither read nor written.  FILD writes the exact f80 of the integer; the
+// stores convert the slot's f80 to an integer exactly, under the control
+// word's rounding mode.  Nothing goes through binary64, so an int64 held on
+// the stack across replies keeps all 64 bits, as Delphi's System.Move
+// needs.
+//
+// Xst_base is not pinned in this mode (x87_begin), which leaves the five
+// scratch GPRs the integer store needs besides Xbase, TOP and Wd_tmp.
+// =============================================================================
+auto translate_fild_native(TranslationResult* a1, IRInstr* a2) -> void {
+    AssemblerBuffer& buf = a1->insn_buf;
+    auto [Xbase, Wd_top] = x87_begin(*a1, buf);
+    const IROperandSize int_size = a2->operands[0].mem.size;
+
+    const int Wd_tmp = alloc_gpr(*a1, 2);
+    const int Wd_tmp2 = alloc_gpr(*a1, 3);
+    const int Xint = alloc_free_gpr(*a1);  // survives the push
+
+    // Sign-extended int64 in Xint.
+    const int addr_reg =
+        compute_operand_address(*a1, /*is_64bit=*/true, &a2->operands[0], GPR::XZR);
+    if (int_size == IROperandSize::S16) {
+        emit_ldr_str_imm(buf, 1, 0, 1, 0, addr_reg, Xint);        // LDRH
+        emit_bitfield(buf, 1, 0 /*SBFM*/, 1, 0, 15, Xint, Xint);  // SXTH Xint
+    } else if (int_size == IROperandSize::S32) {
+        emit_ldr_str_imm(buf, 2, 0, 1, 0, addr_reg, Xint);        // LDR W
+        emit_bitfield(buf, 1, 0 /*SBFM*/, 1, 0, 31, Xint, Xint);  // SXTW Xint
+    } else {
+        emit_ldr_str_imm(buf, 3, 0, 1, 0, addr_reg, Xint);  // LDR X
+    }
+    free_gpr(*a1, addr_reg);
+
+    x87_push(buf, *a1, Xbase, Wd_top, Wd_tmp, Wd_tmp2);
+    free_gpr(*a1, Wd_tmp2);
+
+    const int Xs = alloc_free_gpr(*a1);
+    const int Xe = alloc_free_gpr(*a1);
+    emit_native_slot_addr(buf, Wd_tmp, Xbase, Wd_top);
+    emit_i64_to_f80_slot(buf, Wd_tmp, Xint, Xs, Xe);
+    free_gpr(*a1, Xe);
+    free_gpr(*a1, Xs);
+    free_gpr(*a1, Xint);
+
+    x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp);
+    free_gpr(*a1, Wd_tmp);
+}
+
+static void translate_int_store_native(TranslationResult* a1, IRInstr* a2, NativeIntRound round,
+                                       bool pop) {
+    AssemblerBuffer& buf = a1->insn_buf;
+    auto [Xbase, Wd_top] = x87_begin(*a1, buf);
+    const IROperandSize int_size = a2->operands[0].mem.size;
+    int bits = 64;
+    int store_size = 3;
+    if (int_size == IROperandSize::S16) {
+        bits = 16;
+        store_size = 1;
+    } else if (int_size == IROperandSize::S32) {
+        bits = 32;
+        store_size = 2;
+    }
+
+    const int Wd_tmp = alloc_gpr(*a1, 2);
+    const int Xslot = alloc_free_gpr(*a1);
+    const int Xint = alloc_free_gpr(*a1);
+    const int Xm = alloc_free_gpr(*a1);
+    const int Wx = alloc_free_gpr(*a1);
+
+    // ST(0) is physical slot TOP: a transport reply has no FXCH, so the
+    // permutation is always the identity here.
+    assert(!a1->x87_cache.perm_dirty && "native transport reply with a pending FXCH permutation");
+    emit_native_slot_addr(buf, Xslot, Xbase, Wd_top);
+    emit_f80_slot_to_int(buf, Xbase, Xslot, Xint, Xm, Wx, Wd_tmp, round, bits);
+    free_gpr(*a1, Wx);
+    free_gpr(*a1, Xm);
+    free_gpr(*a1, Xslot);
+
+    const int addr_reg =
+        compute_operand_address(*a1, /*is_64bit=*/true, &a2->operands[0], GPR::XZR);
+    emit_str_imm(buf, store_size, Xint, addr_reg, /*imm12=*/0);
+    free_gpr(*a1, addr_reg);
+    free_gpr(*a1, Xint);
+
+    if (pop) {
+        x87_pop(buf, *a1, Xbase, Wd_top, Wd_tmp);
+    }
+    x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp);
+    free_gpr(*a1, Wd_tmp);
+}
+
+static NativeIntRound native_store_round(const TranslationResult& a1) {
+    return x87_fast_round_active(a1) ? NativeIntRound::kNearest : NativeIntRound::kControlWord;
+}
+
+auto translate_fist_native(TranslationResult* a1, IRInstr* a2) -> void {
+    translate_int_store_native(a1, a2, native_store_round(*a1), /*pop=*/false);
+}
+
+auto translate_fistp_native(TranslationResult* a1, IRInstr* a2) -> void {
+    translate_int_store_native(a1, a2, native_store_round(*a1), /*pop=*/true);
+}
+
+auto translate_fisttp_native(TranslationResult* a1, IRInstr* a2) -> void {
+    translate_int_store_native(a1, a2, NativeIntRound::kChop, /*pop=*/true);
 }
 
 // =============================================================================

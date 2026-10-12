@@ -731,6 +731,93 @@ static auto try_fuse_fld_fstp_m80(TranslationResult* a1, IRInstr* fld_instr, IRI
 }
 
 // =============================================================================
+// Peephole: k x FILD m64, then k x FISTP/FISTTP m64 → k exact 64-bit copies
+//
+// The nested form of the pair above, for k = 3 and 2: the stores take the
+// loaded values in reverse, so the n-th store writes the value of the
+// (k+1-n)-th load.  Every load happens before every store, as on x87, so
+// overlapping source and destination behave the same.  The values are held
+// in GPRs: base, TOP, Xst_base, Wd_tmp, three values and one address
+// scratch fill the eight-register pool exactly.  The pool can be smaller
+// (stock may hold scratch registers, and this shape is reached when the IR
+// refused the run, possibly for GPR pressure), so the fusion counts what
+// it needs against the free mask before it emits anything and declines
+// when the mask is short.
+//
+// Returns 2k (instructions consumed) if fused, std::nullopt otherwise.
+// =============================================================================
+
+static bool is_exact_i64_operand(IRInstr* instr) {
+    const IROperand* op = &instr->operands[0];
+    return op->kind != IROperandKind::Register && op->mem.size == IROperandSize::S64 &&
+           op->mem.seg_override == 0;
+}
+
+static auto try_fuse_fild_fistp_nested(TranslationResult* a1, IRInstr* instrs, int64_t num,
+                                       int64_t idx) -> std::optional<int> {
+    int k = 3;
+    for (; k >= 2; --k) {
+        if (idx + 2 * k > num) {
+            continue;
+        }
+        bool match = true;
+        for (int j = 0; j < k && match; ++j) {
+            IRInstr* load = &instrs[idx + j];
+            IRInstr* store = &instrs[idx + k + j];
+            match =
+                load->opcode() == kOpcodeName_fild && is_exact_i64_operand(load) &&
+                (store->opcode() == kOpcodeName_fistp || store->opcode() == kOpcodeName_fisttp) &&
+                is_exact_i64_operand(store);
+        }
+        if (match) {
+            break;
+        }
+    }
+    if (k < 2) {
+        return std::nullopt;
+    }
+    // x87_begin's registers, Wd_tmp, the k values, and one address scratch
+    // (compute_operand_address takes at most one for a non-segment operand,
+    // and each is freed before the next).
+    const int need = x87_begin_gpr_need(*a1) + 1 + k + 1;
+    if (__builtin_popcount(a1->free_gpr_mask) < need) {
+        return std::nullopt;
+    }
+
+    AssemblerBuffer& buf = a1->insn_buf;
+    auto [Xbase, Wd_top] = x87_begin(*a1, buf);
+    const int Wd_tmp = alloc_gpr(*a1, 2);
+
+    // Net-zero-stack fusion, as in try_fuse_fild_fistp.
+    if (!(a1->x87_cache.tag_push_pending && a1->x87_cache.top_dirty)) {
+        x87_flush_top(buf, *a1, Xbase, Wd_top, Wd_tmp);
+    }
+
+    int values[3];
+    for (int j = 0; j < k; ++j) {
+        values[j] = alloc_free_gpr(*a1);
+        const int addr =
+            compute_operand_address(*a1, /*is_64bit=*/true, &instrs[idx + j].operands[0], GPR::XZR);
+        emit_ldr_str_imm(buf, 3, 0, 1, 0, addr, values[j]);  // LDR X
+        free_gpr(*a1, addr);
+    }
+    for (int j = 0; j < k; ++j) {
+        const int addr = compute_operand_address(*a1, /*is_64bit=*/true,
+                                                 &instrs[idx + k + j].operands[0], GPR::XZR);
+        emit_str_imm(buf, 3, values[k - 1 - j], addr, 0);
+        free_gpr(*a1, addr);
+    }
+    for (int j = k - 1; j >= 0; --j) {
+        free_gpr(*a1, values[j]);
+    }
+
+    x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp, /*consumed=*/2 * k);
+    free_gpr(*a1, Wd_tmp);
+
+    return 2 * k;
+}
+
+// =============================================================================
 // Peephole: FXCH ST(1) + FSTP ST(1) → just pop
 //
 // The swap's effect is destroyed by the pop — both instructions collapse
@@ -2764,6 +2851,9 @@ static auto try_fuse_fld_group(TranslationResult* tr, IRInstr* instrs, int64_t n
 
     // Exact int64 copy first: no longer fusion starts with fild + fistp.
     if (!fusion_disabled(disabled_mask, FusionId::fild_fistp)) {
+        if (auto r = try_fuse_fild_fistp_nested(tr, instrs, num, idx)) {
+            return r;
+        }
         if (auto r = try_fuse_fild_fistp(tr, cur, next)) {
             return r;
         }
