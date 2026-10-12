@@ -39,6 +39,27 @@ void emit_f80_to_f64_convert(AssemblerBuffer& buf, int Xmant_inout, int Wexp, in
 void emit_f64_to_f80(AssemblerBuffer& buf, int Xaddr_slot, int Dd_src, int Xbits, int Wexp,
                      int Wd_tmp);
 
+// The same conversions without touching NZCV, in four GPRs.  Control flow is
+// CBZ/CBNZ/TBZ/TBNZ and B, all forward.
+//
+// emit_f80_bits_to_f64: Xm holds the 64-bit significand and Wx the sign and
+// exponent halfword (bits 31:16 zero, as LDRH leaves them).  Xm receives the
+// binary64 bits emit_f80_to_f64_convert would produce.  Wx, Xt1 and Xt2 are
+// clobbered.
+void emit_f80_bits_to_f64(AssemblerBuffer& buf, int Xm, int Wx, int Xt1, int Xt2);
+
+// emit_f64_bits_to_f80: writes the f80 for the binary64 bits in Xb to
+// [Xaddr, #0..#9], the bytes emit_f64_to_f80 writes.  Xb, We and Wt are
+// clobbered; Xaddr is not.
+void emit_f64_bits_to_f80(AssemblerBuffer& buf, int Xaddr, int Xb, int We, int Wt);
+
+// Copies the ten bytes at [Xsrc, #src_off] to [Xdst, #dst_off] with two
+// overlapping 8-byte LDUR/STUR pairs (bytes 0-7 and 2-9).  Both loads come
+// before the stores.  Offsets must keep src_off + 2 and dst_off + 2 within
+// the signed 9-bit range.  Xt1 and Xt2 are clobbered.
+void emit_copy_f80(AssemblerBuffer& buf, int Xdst, int dst_off, int Xsrc, int src_off, int Xt1,
+                   int Xt2);
+
 // Bracket a complete translate_insn reply. Entering converts native packed
 // f80 to private compact f64; leaving converts it back. Preserves NZCV and
 // allocator masks. Must run outside an active x87 register-cache run.

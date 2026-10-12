@@ -1,5 +1,6 @@
 #include "rosetta_core/TranslatorX87F80.hpp"
 
+#include <cassert>
 #include <cstdint>
 
 #include "rosetta_core/AssemblerBuffer.h"
@@ -556,6 +557,192 @@ static void bind_imm19(AssemblerBuffer& buf, uint64_t at) {
 
 static void bind_imm26(AssemblerBuffer& buf, uint64_t at) {
     buf.data[at / 4] |= static_cast<uint32_t>((buf.end - at) / 4) & 0x3FFFFFFU;
+}
+
+static void and_mask(AssemblerBuffer& buf, int is_64bit, int Rd, int Rn, uint64_t mask) {
+    LogicalImmEncoding enc;
+    const bool ok = is_bitmask_immediate(is_64bit != 0, mask, enc);
+    assert(ok);
+    (void)ok;
+    emit_and_imm(buf, is_64bit, Rd, enc.N, enc.immr, enc.imms, Rn);
+}
+
+static void orr_mask(AssemblerBuffer& buf, int is_64bit, int Rd, int Rn, uint64_t mask) {
+    LogicalImmEncoding enc;
+    const bool ok = is_bitmask_immediate(is_64bit != 0, mask, enc);
+    assert(ok);
+    (void)ok;
+    emit_orr_imm(buf, is_64bit, Rd, Rn, enc.N, enc.immr, enc.imms);
+}
+
+// ── Flag-free f80 <-> binary64 ──────────────────────────────────────────────
+//
+// The same results as emit_f80_to_f64_convert and emit_f64_to_f80, written
+// for code that holds the x87 registers in the native layout and converts
+// one slot at a time inside a run: four GPRs, no NZCV write, and control
+// flow through CBZ/CBNZ/TBZ/TBNZ and B only, all forward.
+
+// With e the biased exponent and m the significand, a normal result is
+// built as (hi << 52) + r, where hi = sign << 11 | (e - 15361) and r is m
+// rounded to its top 53 bits, the integer bit included.  r = 2^53 after a
+// rounding carry adds one more to the exponent field, and an exponent field
+// of 0x7FF that way is infinity with a zero fraction, so neither needs a
+// case of its own.  e - 15361 >= 0x7FE overflows before rounding and goes
+// to the path that also takes infinities and NaNs.
+//
+// An unnormal (integer bit clear) is read as if the bit were set, except
+// that its rounding never carries into the exponent: r | 2^52 keeps the
+// field of r = 2^52 at the exponent's own value, as the flag-based version
+// computes it.
+void emit_f80_bits_to_f64(AssemblerBuffer& buf, int Xm, int Wx, int Xt1, int Xt2) {
+    and_mask(buf, 0, Xt1, Wx, 0x7fff);
+    emit_add_imm(buf, 0, /*sub*/ 1, 0, /*LSL 12*/ 1, 4, Xt1, Xt1);  // e - 16384
+    emit_add_imm(buf, 0, 0, 0, 0, 1023, Xt1, Xt1);                 // e - 15361
+    const auto small = emit_tbz_fwd(buf, 1, Xt1, 31);
+    emit_add_imm(buf, 0, /*sub*/ 1, 0, 0, 0x7fe, Xt1, Xt2);
+    const auto big = emit_tbz_fwd(buf, 0, Xt2, 31);
+
+    emit_bitfield(buf, 0, /*UBFM*/ 2, 0, 15, 15, Wx, Xt2);                 // sign
+    emit_add_sub_shifted_reg(buf, 0, 0, 0, /*LSL*/ 0, Xt2, 11, Xt1, Xt1);  // hi
+    // Round to nearest even at bit 11: the carry of (bit 11 + 0x3FF + the
+    // low 11 bits) out of bit 11 is the increment.
+    emit_bitfield(buf, 1, /*UBFM*/ 2, 1, 11, 11, Xm, Xt2);
+    emit_add_imm(buf, 0, 0, 0, 0, 0x3ff, Xt2, Xt2);
+    and_mask(buf, 0, Wx, Xm, 0x7ff);
+    emit_add_sub_shifted_reg(buf, 0, 0, 0, 0, Wx, 0, Xt2, Xt2);
+    const auto unnormal = emit_tbz_fwd(buf, 0, Xm, 63);
+    emit_bitfield(buf, 1, /*UBFM*/ 2, 1, 11, 63, Xm, Xm);                 // LSR #11
+    emit_add_sub_shifted_reg(buf, 1, 0, 0, /*LSR*/ 1, Xt2, 11, Xm, Xm);   // r
+    emit_add_sub_shifted_reg(buf, 1, 0, 0, /*LSL*/ 0, Xt1, 52, Xm, Xm);   // + hi << 52
+    const auto done_normal = emit_b_fwd(buf);
+
+    bind_imm14(buf, unnormal);
+    emit_bitfield(buf, 1, 2, 1, 11, 63, Xm, Xm);
+    emit_add_sub_shifted_reg(buf, 1, 0, 0, 1, Xt2, 11, Xm, Xm);
+    orr_mask(buf, 1, Xm, Xm, uint64_t(1) << 52);
+    emit_add_sub_shifted_reg(buf, 1, 0, 0, 0, Xt1, 52, Xm, Xm);
+    const auto done_unnormal = emit_b_fwd(buf);
+
+    // e <= 15360: a subnormal or zero result, m >> (15372 - e) rounded to
+    // nearest even.  The bits shifted out, aligned at bit 63 in Wx, round
+    // up when the top one is set and either another one is or the result is
+    // odd.
+    bind_imm14(buf, small);
+    emit_add_sub_shifted_reg(buf, 0, /*sub*/ 1, 0, 0, Xt1, 0, 31, Xt2);  // 15361 - e
+    emit_add_imm(buf, 0, 0, 0, 0, 11, Xt2, Xt2);                       // shift
+    emit_bitfield(buf, 0, 2, 0, 15, 15, Wx, Xt1);                      // sign
+    emit_add_imm(buf, 0, /*sub*/ 1, 0, 0, 64, Xt2, Wx);
+    const auto tiny = emit_tbz_fwd(buf, 0, Wx, 31);
+    emit_add_sub_shifted_reg(buf, 0, 1, 0, 0, Xt2, 0, 31, Wx);  // 64 - shift, modulo 64
+    emit_lslv(buf, 1, Wx, Xm, Wx);
+    buf.emit(0x9ac02400U | (static_cast<uint32_t>(Xt2) << 16) | (static_cast<uint32_t>(Xm) << 5) |
+             static_cast<uint32_t>(Xm));  // LSRV Xm, Xm, Xt2
+    const auto below_half = emit_tbz_fwd(buf, 0, Wx, 63);
+    emit_bitfield(buf, 1, 2, 1, 63, 62, Wx, Wx);  // LSL #1
+    emit_bitfield(buf, 1, /*BFM*/ 1, 1, 0, 0, Xm, Wx);  // BFXIL Wx, Xm, #0, #1
+    const auto even_half = emit_cbz_fwd(buf, 1, 0, Wx);
+    emit_add_imm(buf, 1, 0, 0, 0, 1, Xm, Xm);
+    bind_imm14(buf, below_half);
+    bind_imm19(buf, even_half);
+    emit_logical_shifted_reg(buf, 1, /*ORR*/ 1, 0, 0, Xt1, 63, Xm, Xm);
+    const auto done_small = emit_b_fwd(buf);
+
+    // shift >= 64: half the smallest subnormal or less.  Only shift == 64
+    // with m above 2^63 rounds up, to that subnormal.
+    bind_imm14(buf, tiny);
+    const auto zero_far = emit_cbz_fwd(buf, 0, 1, Wx);
+    const auto zero_low = emit_tbz_fwd(buf, 0, Xm, 63);
+    emit_bitfield(buf, 1, 2, 1, 63, 62, Xm, Xm);  // LSL #1
+    const auto exact_half = emit_cbz_fwd(buf, 1, 0, Xm);
+    emit_movn(buf, 1, /*MOVZ*/ 2, 0, 1, Xm);
+    const auto to_sign = emit_b_fwd(buf);
+    bind_imm19(buf, zero_far);
+    bind_imm14(buf, zero_low);
+    emit_movn(buf, 1, /*MOVZ*/ 2, 0, 0, Xm);
+    bind_imm19(buf, exact_half);
+    bind_imm26(buf, to_sign);
+    emit_logical_shifted_reg(buf, 1, 1, 0, 0, Xt1, 63, Xm, Xm);
+    const auto done_tiny = emit_b_fwd(buf);
+
+    // e - 15361 >= 0x7FE: e == 0x7FFF is an infinity or NaN; anything else
+    // overflows binary64 and becomes infinity.  A NaN keeps the top 52
+    // fraction bits below the integer bit and is quieted.
+    bind_imm14(buf, big);
+    orr_mask(buf, 0, Xt2, Wx, 0x8000);
+    emit_add_imm(buf, 0, 0, 0, 0, 1, Xt2, Xt2);
+    const auto finite = emit_tbz_fwd(buf, 0, Xt2, 16);
+    emit_bitfield(buf, 1, 2, 1, 63, 62, Xm, Xt2);  // fraction, LSL #1
+    emit_bitfield(buf, 1, 2, 1, 11, 62, Xm, Xm);   // UBFX Xm, Xm, #11, #52
+    const auto infinity = emit_cbz_fwd(buf, 1, 0, Xt2);
+    orr_mask(buf, 1, Xm, Xm, uint64_t(1) << 51);
+    const auto nan_done = emit_b_fwd(buf);
+    bind_imm14(buf, finite);
+    emit_movn(buf, 1, 2, 0, 0, Xm);
+    bind_imm19(buf, infinity);
+    bind_imm26(buf, nan_done);
+    orr_mask(buf, 1, Xm, Xm, 0x7ff0000000000000ULL);
+    emit_bitfield(buf, 0, 2, 0, 15, 15, Wx, Xt2);
+    emit_logical_shifted_reg(buf, 1, 1, 0, 0, Xt2, 63, Xm, Xm);
+
+    bind_imm26(buf, done_normal);
+    bind_imm26(buf, done_unnormal);
+    bind_imm26(buf, done_small);
+    bind_imm26(buf, done_tiny);
+}
+
+// Normal, zero, subnormal (normalised with CLZ, every bit kept) and
+// infinity or NaN (integer bit set, exponent 0x7FFF), as emit_f64_to_f80.
+// The infinity test is exponent + 1 reaching bit 11, where that version
+// compares.
+void emit_f64_bits_to_f80(AssemblerBuffer& buf, int Xaddr, int Xb, int We, int Wt) {
+    emit_bitfield(buf, 1, 2, 1, 52, 62, Xb, We);  // UBFX We, Xb, #52, #11
+    emit_bitfield(buf, 1, 2, 1, 48, 63, Xb, Wt);  // LSR Wt, Xb, #48
+    and_mask(buf, 0, Wt, Wt, 0x8000);             // sign at bit 15
+    emit_bitfield(buf, 1, 2, 1, 53, 52, Xb, Xb);  // LSL Xb, Xb, #11
+    const auto zero_sub = emit_cbz_fwd(buf, 0, 0, We);
+    emit_add_imm(buf, 0, 0, 0, 0, 1, We, We);
+    const auto inf_nan = emit_tbz_fwd(buf, 1, We, 11);
+    orr_mask(buf, 1, Xb, Xb, uint64_t(1) << 63);
+    emit_add_imm(buf, 0, 0, 0, 1, 3, We, We);      // +12288
+    emit_add_imm(buf, 0, 0, 0, 0, 0xbff, We, We);  // +3071: exp + 15360 in all
+    emit_logical_shifted_reg(buf, 0, 1, 0, 0, Wt, 0, We, We);
+    emit_str_imm(buf, 3, Xb, Xaddr, 0);
+    emit_str_imm(buf, 1, We, Xaddr, 4);
+    const auto done_normal = emit_b_fwd(buf);
+
+    bind_imm19(buf, zero_sub);
+    const auto zero = emit_cbz_fwd(buf, 1, 0, Xb);
+    buf.emit(0xdac01000U | (static_cast<uint32_t>(Xb) << 5) | static_cast<uint32_t>(We));  // CLZ
+    emit_lslv(buf, 1, We, Xb, Xb);
+    emit_add_sub_shifted_reg(buf, 0, 1, 0, 0, We, 0, 31, We);
+    emit_add_imm(buf, 0, 0, 0, 1, 3, We, We);
+    emit_add_imm(buf, 0, 0, 0, 0, 0xc01, We, We);  // 15361 - clz
+    emit_logical_shifted_reg(buf, 0, 1, 0, 0, Wt, 0, We, We);
+    emit_str_imm(buf, 3, Xb, Xaddr, 0);
+    emit_str_imm(buf, 1, We, Xaddr, 4);
+    const auto done_sub = emit_b_fwd(buf);
+    bind_imm19(buf, zero);
+    emit_str_imm(buf, 3, 31, Xaddr, 0);
+    emit_str_imm(buf, 1, Wt, Xaddr, 4);
+    const auto done_zero = emit_b_fwd(buf);
+
+    bind_imm14(buf, inf_nan);
+    orr_mask(buf, 1, Xb, Xb, uint64_t(1) << 63);
+    emit_str_imm(buf, 3, Xb, Xaddr, 0);
+    orr_mask(buf, 0, We, Wt, 0x7fff);
+    emit_str_imm(buf, 1, We, Xaddr, 4);
+
+    bind_imm26(buf, done_normal);
+    bind_imm26(buf, done_sub);
+    bind_imm26(buf, done_zero);
+}
+
+void emit_copy_f80(AssemblerBuffer& buf, int Xdst, int dst_off, int Xsrc, int src_off, int Xt1,
+                   int Xt2) {
+    emit_ldur_stur(buf, 3, /*LDUR*/ 1, static_cast<int16_t>(src_off), Xsrc, Xt1);
+    emit_ldur_stur(buf, 3, 1, static_cast<int16_t>(src_off + 2), Xsrc, Xt2);
+    emit_ldur_stur(buf, 3, /*STUR*/ 0, static_cast<int16_t>(dst_off), Xdst, Xt1);
+    emit_ldur_stur(buf, 3, 0, static_cast<int16_t>(dst_off + 2), Xdst, Xt2);
 }
 
 // 6 + 10 * phys as two shifted adds and an immediate, the same address the
