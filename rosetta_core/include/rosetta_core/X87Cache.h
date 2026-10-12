@@ -67,11 +67,11 @@ struct X87Cache {
 
     // Block and instruction at which a request ran out of scratch registers.
     // Every later request in the block is declined too, until stock moves to
-    // another block or starts this one over.  Stock and the sidecar do not
-    // keep every flag in the same place (the sidecar's FCMOVU reads PF from
-    // V, which stock's FUCOMI leaves clear), so once an instruction has gone
-    // to stock, the rest of the block, which may read what it left behind,
-    // goes there too.  Stock reuses IRBlock objects, so the block is also
+    // another block or starts this one over.  The flags do not require this:
+    // stock and the sidecar keep the guest EFLAGS in the same NZCV layout
+    // (TranslatorX87Helpers.hpp), so either can read what the other set.  It
+    // is kept because a failed request is rare and the rule only costs speed
+    // in that block.  Stock reuses IRBlock objects, so the block is also
     // identified by its length and the guest pc of its first instruction.
     const IRBlock* declined_block = nullptr;
     int32_t declined_idx = -1;

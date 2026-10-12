@@ -322,3 +322,32 @@ void emit_fcom_cc_pack(AssemblerBuffer& buf, TranslationResult& a1, int Wd_resul
 // Allocates/frees 1 GPR internally for the RMW scratch.
 // =============================================================================
 void emit_fcom_cc_write_sw(AssemblerBuffer& buf, TranslationResult& a1, int Xbase, int Wd_packed);
+
+// =============================================================================
+// Guest EFLAGS in NZCV, as stock Rosetta keeps them at instruction boundaries
+// (its pushf, popf, lahf and sahf translations pack and unpack exactly this):
+//
+//   N = SF   Z = ZF   C = !CF   V = OF   bit 27 = AF   bit 26 = PF
+//
+// Bits 26 and 27 are below the four AArch64 flags.  Apple cores write them on
+// flag-setting instructions and MRS/MSR NZCV read and write them, but no
+// AArch64 condition code tests them, so a PF reader goes through MRS.
+// =============================================================================
+
+// FCMOV conditions beyond the AArch64 condition codes: FCMOVU and FCMOVNU
+// test PF, which only NZCV bit 26 holds.
+inline constexpr int kFcmovCondPF = 16;   // PF == 1
+inline constexpr int kFcmovCondNPF = 17;  // PF == 0
+inline constexpr int kNzcvPfBit = 26;
+
+// FCOMI/FUCOMI flags.  Pre: NZCV holds an FCMP of ST(0) against ST(i).  Post:
+// NZCV holds the guest EFLAGS FCOMI leaves: ZF, PF and CF from the compare,
+// SF, OF and AF clear.  Allocates and frees 3 GPRs.
+void emit_fcomi_nzcv(AssemblerBuffer& buf, TranslationResult& a1);
+
+// FCMOVcc: Dd = cond ? Dtrue : Dfalse, where cond is an AArch64 condition
+// code (the six flag conditions FCMOV uses) or kFcmovCondPF/kFcmovCondNPF.
+// Branches only forward and emits no FCSEL.  The PF forms take one GPR for
+// the MRS.
+void emit_fcmov_select(AssemblerBuffer& buf, TranslationResult& a1, int Dd, int Dtrue, int Dfalse,
+                       int cond);

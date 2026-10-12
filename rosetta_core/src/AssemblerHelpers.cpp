@@ -953,6 +953,18 @@ auto emit_cbz(AssemblerBuffer& buf, int is_64bit, int is_nz, int Rt, int imm19) 
     buf.emit(insn);
 }
 
+auto emit_tbz(AssemblerBuffer& buf, int is_nz, int Rt, int bit, int imm14) -> void {
+    // TBZ/TBNZ Rt, #bit, #imm14
+    // Encoding: b5 | 011011 | op | b40 | imm14 | Rt   (0x36 / 0x37)
+    uint32_t insn = 0x36000000U;
+    insn |= static_cast<uint32_t>((bit >> 5) & 1) << 31;
+    insn |= static_cast<uint32_t>(is_nz != 0) << 24;
+    insn |= static_cast<uint32_t>(bit & 0x1F) << 19;
+    insn |= (static_cast<uint32_t>(imm14) & 0x3FFFU) << 5;
+    insn |= static_cast<uint32_t>(Rt & 0x1F);
+    buf.emit(insn);
+}
+
 auto emit_b(AssemblerBuffer& buf, int imm26) -> void {
     // B #imm26
     // Encoding: 0 00101 | imm26

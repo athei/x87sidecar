@@ -2639,31 +2639,20 @@ auto translate_frndint(TranslationResult* a1, IRInstr* /*a2*/) -> void {
 // EFLAGS, which Rosetta maps to AArch64 NZCV.  This is far simpler — no
 // status_word RMW needed, no NZCV save/restore.
 //
-// Rosetta EFLAGS → NZCV mapping:  N=SF, Z=ZF, C=!CF, V=OF
-// For FCOMI, SF=0 and OF is used for PF (parity = unordered):
-//   N=0 always, Z=ZF, C=!CF, V=PF
+// Rosetta EFLAGS → NZCV mapping:  N=SF, Z=ZF, C=!CF, V=OF, bit 27=AF,
+// bit 26=PF (see emit_fcomi_nzcv).  FCOMI clears SF, OF and AF:
+//   GT: CF=0,ZF=0,PF=0 → N=0,Z=0,C=1,V=0, bit 26=0
+//   LT: CF=1,ZF=0,PF=0 → N=0,Z=0,C=0,V=0, bit 26=0
+//   EQ: CF=0,ZF=1,PF=0 → N=0,Z=1,C=1,V=0, bit 26=0
+//   UN: CF=1,ZF=1,PF=1 → N=0,Z=1,C=0,V=0, bit 26=1
 //
-// Desired NZCV for each FCOMI outcome:
-//   GT: CF=0,ZF=0,PF=0 → N=0,Z=0,C=1,V=0
-//   LT: CF=1,ZF=0,PF=0 → N=0,Z=0,C=0,V=0
-//   EQ: CF=0,ZF=1,PF=0 → N=0,Z=1,C=1,V=0
-//   UN: CF=1,ZF=1,PF=1 → N=0,Z=1,C=0,V=1
-//
-// AArch64 FCMP output NZCV:
-//   GT: N=0,Z=0,C=1,V=0 → matches ✓
-//   LT: N=1,Z=0,C=0,V=0 → N wrong (need 0)
-//   EQ: N=0,Z=1,C=1,V=0 → matches ✓
-//   UN: N=0,Z=0,C=1,V=1 → Z wrong (need 1), C wrong (need 0)
-//
-// Fix: N_new=0, Z_new=Z|V, C_new=C&!V, V_new=V
-//
-// 9 emitted instructions (branchless) vs ~30+ for runtime BL round-trip.
+// FCMP plus 9 instructions (branchless) vs ~30+ for runtime BL round-trip.
 //
 // Register allocation:
 //   Xbase   (gpr pool 0) — X87State base
 //   Wd_top  (gpr pool 1) — current TOP; updated by pop if FCOMIP/FUCOMIP
 //   Wd_tmp  (gpr pool 2) — scratch for emit_load_st, pop RMW
-//   Wd_z, Wd_v, Wd_c (free pool) — CSET results; freed after packing
+//   3 free-pool GPRs inside emit_fcomi_nzcv, freed after packing
 //   Dd_st0  (fpr free)   — ST(0) value
 //   Dd_src  (fpr free)   — ST(i) value
 // =============================================================================
@@ -2690,43 +2679,8 @@ auto translate_fcomi(TranslationResult* a1, IRInstr* a2) -> void {
     free_fpr(*a1, Dd_src);
     free_fpr(*a1, Dd_st0);
 
-    // Branchless NZCV fixup: extract conditions while NZCV is live.
-    const int Wd_z = alloc_free_gpr(*a1);
-    const int Wd_v = alloc_free_gpr(*a1);
-    const int Wd_c = alloc_free_gpr(*a1);
-
-    // All three CSETs must execute before any MSR clobbers NZCV.
-    emit_cset(buf, /*is_64bit=*/0, /*cond=*/0 /*EQ*/, Wd_z);  // 1 if equal
-    emit_cset(buf, /*is_64bit=*/0, /*cond=*/6 /*VS*/, Wd_v);  // 1 if overflow (unordered)
-    emit_cset(buf, /*is_64bit=*/0, /*cond=*/2 /*CS*/, Wd_c);  // 1 if carry set
-
-    // Z_new = Z | V  (EQ or unordered)
-    emit_logical_shifted_reg(buf, 0, /*ORR*/ 1, 0, /*LSL*/ 0, Wd_v, 0, Wd_z, Wd_z);
-    // C_new = C & !V  (carry clear for unordered)
-    emit_logical_shifted_reg(buf, 0, /*AND*/ 0, /*N=invert*/ 1, /*LSL*/ 0, Wd_v, 0, Wd_c, Wd_c);
-
-    // Pack into NZCV format: [31]=N=0, [30]=Z, [29]=C, [28]=V=PF, [26]=PF
-    // Two consumers of this NZCV value use different bit positions for the
-    // unordered/PF flag:
-    //   bit 26: Rosetta's jp/jnp translation reads PF via ubfx w, w, #26, #1
-    //   bit 28: AArch64 FCSEL VS/VC conditions (used by translate_fcmov)
-    // Set Wd_v at both positions to satisfy both consumers.
-    // LSL Wd_z, Wd_z, #30
-    emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/2 /*UBFM*/, /*N=*/0,
-                  /*immr=*/2, /*imms=*/1, Wd_z, Wd_z);
-    // ORR Wd_z, Wd_z, Wd_c, LSL #29
-    emit_logical_shifted_reg(buf, 0, /*ORR*/ 1, 0, /*LSL*/ 0, Wd_c, 29, Wd_z, Wd_z);
-    // ORR Wd_z, Wd_z, Wd_v, LSL #28  (V = PF, for FCMOV FCSEL VS/VC)
-    emit_logical_shifted_reg(buf, 0, /*ORR*/ 1, 0, /*LSL*/ 0, Wd_v, 28, Wd_z, Wd_z);
-    // ORR Wd_z, Wd_z, Wd_v, LSL #26  (PF slot, for Rosetta jp/jnp ubfx #26)
-    emit_logical_shifted_reg(buf, 0, /*ORR*/ 1, 0, /*LSL*/ 0, Wd_v, 26, Wd_z, Wd_z);
-
-    // MSR NZCV, Wd_z — set the corrected flags
-    emit_msr_nzcv(buf, Wd_z);
-
-    free_gpr(*a1, Wd_c);
-    free_gpr(*a1, Wd_v);
-    free_gpr(*a1, Wd_z);
+    // Branchless NZCV fixup into stock's EFLAGS layout (PF in bit 26).
+    emit_fcomi_nzcv(buf, *a1);
 
     // Pop if FCOMIP / FUCOMIP.
     if (is_popping) {
@@ -3065,12 +3019,13 @@ auto translate_fisubr(TranslationResult* a1, IRInstr* a2) -> void {
 //   FCMOVNB  (CF=0)          → CS (C=1)                      = condition 2
 //   FCMOVNBE (CF=0 & ZF=0)  → HI (C=1 & Z=0)                = condition 8
 //   FCMOVNE  (ZF=0)          → NE (Z=0)                      = condition 1
-//   FCMOVU   (PF=1)          → VS (V=1)                      = condition 6
-//   FCMOVNU  (PF=0)          → VC (V=0)                      = condition 7
+//   FCMOVU   (PF=1)          → NZCV bit 26 set               = kFcmovCondPF
+//   FCMOVNU  (PF=0)          → NZCV bit 26 clear             = kFcmovCondNPF
 //
-// AArch64 FCSEL Dd, Dn, Dm, cond selects Dn if cond, else Dm.
-//   FCSEL Dd_st0, Dd_src, Dd_st0, cond
-//   = if (cond) Dd_st0 = Dd_src; else Dd_st0 = Dd_st0 (no change)
+// PF is not V: stock keeps OF in V and PF in NZCV bit 26, whoever set the
+// flags (FCOMI, UCOMISD, SAHF, POPF, an integer op).
+//
+// emit_fcmov_select: if (cond) Dd_st0 = Dd_src; else Dd_st0 unchanged.
 //
 // Register allocation:
 //   Xbase  (gpr pool 0) — X87State base
@@ -3078,13 +3033,14 @@ auto translate_fisubr(TranslationResult* a1, IRInstr* a2) -> void {
 //   Wd_tmp (gpr pool 2) — offset scratch for emit_{load,store}_st
 //   Dd_st0 (fpr free)   — current ST(0) value
 //   Dd_src (fpr free)   — ST(i) value (the candidate replacement)
+//   1 free-pool GPR inside emit_fcmov_select for FCMOVU and FCMOVNU
 // =============================================================================
 auto translate_fcmov(TranslationResult* a1, IRInstr* a2) -> void {
     AssemblerBuffer& buf = a1->insn_buf;
     auto [Xbase, Wd_top] = x87_begin(*a1, buf);
     const int Xst_base = x87_get_st_base(*a1);
 
-    // Map opcode to AArch64 condition code.
+    // Map opcode to an AArch64 condition code, or kFcmovCondPF/NPF for PF.
     int aarch64_cond;
     switch (a2->opcode()) {
         case kOpcodeName_fcmovb:
@@ -3106,11 +3062,11 @@ auto translate_fcmov(TranslationResult* a1, IRInstr* a2) -> void {
             aarch64_cond = 1;
             break;  // NE
         case kOpcodeName_fcmovu:
-            aarch64_cond = 6;
-            break;  // VS
+            aarch64_cond = kFcmovCondPF;
+            break;
         case kOpcodeName_fcmovnu:
-            aarch64_cond = 7;
-            break;  // VC
+            aarch64_cond = kFcmovCondNPF;
+            break;
         default:
             aarch64_cond = 14;
             break;  // AL (should never happen)
@@ -3136,9 +3092,9 @@ auto translate_fcmov(TranslationResult* a1, IRInstr* a2) -> void {
     const int Wk =
         emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Dd_st0, Xst_base);
 
-    // FCSEL: if (cond) result = Dd_src, else result = Dd_st0
-    // NZCV is live from prior x86 ALU/FCOMI — this is what FCMOV tests.
-    emit_fcsel_f64(buf, Dd_st0, Dd_src, Dd_st0, aarch64_cond);
+    // if (cond) result = Dd_src, else result = Dd_st0.  NZCV holds the guest
+    // EFLAGS from whatever set them last — this is what FCMOV tests.
+    emit_fcmov_select(buf, *a1, Dd_st0, Dd_src, Dd_st0, aarch64_cond);
 
     // Store result back to ST(0).
     emit_store_st_at_offset(buf, Xbase, Wk, Dd_st0, Xst_base);

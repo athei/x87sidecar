@@ -855,3 +855,76 @@ void emit_fcom_cc_write_sw(AssemblerBuffer& buf, TranslationResult& a1, int Xbas
 
     free_gpr(a1, Wd_sw);
 }
+
+// =============================================================================
+// FCOMI flags from an FCMP.
+//
+//   outcome   FCMP NZCV   x86 ZF PF CF   NZCV wanted (C = !CF)   bit 26
+//   GT        0 0 1 0          0  0  0   0 0 1 0                 0
+//   LT        1 0 0 0          0  0  1   0 0 0 0                 0
+//   EQ        0 1 1 0          1  0  0   0 1 1 0                 0
+//   UN        0 0 1 1          1  1  1   0 1 0 0                 1
+//
+// So Z = Z | V, C = C & !V, PF (bit 26) = V, and N, V and AF (bit 27) are 0:
+// FCOMI clears SF, OF and AF.  V must stay clear even though it is where
+// the compare found the unordered result, since a later `jo`, `seto` or
+// `pushf` reads it as OF.
+// =============================================================================
+void emit_fcomi_nzcv(AssemblerBuffer& buf, TranslationResult& a1) {
+    const int Wd_z = alloc_free_gpr(a1);
+    const int Wd_v = alloc_free_gpr(a1);
+    const int Wd_c = alloc_free_gpr(a1);
+
+    // All three CSETs must execute before the MSR replaces NZCV.
+    emit_cset(buf, /*is_64bit=*/0, /*cond=*/0 /*EQ*/, Wd_z);  // 1 if equal
+    emit_cset(buf, /*is_64bit=*/0, /*cond=*/6 /*VS*/, Wd_v);  // 1 if unordered
+    emit_cset(buf, /*is_64bit=*/0, /*cond=*/2 /*CS*/, Wd_c);  // 1 if carry set
+
+    // Z = Z | V  (equal or unordered)
+    emit_logical_shifted_reg(buf, 0, /*ORR*/ 1, 0, /*LSL*/ 0, Wd_v, 0, Wd_z, Wd_z);
+    // C = C & !V  (carry clear for unordered, CF set)
+    emit_logical_shifted_reg(buf, 0, /*AND*/ 0, /*N=invert*/ 1, /*LSL*/ 0, Wd_v, 0, Wd_c, Wd_c);
+
+    // Pack: [30] = Z, [29] = C, [26] = PF.  N, V and bit 27 stay 0.
+    emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/2 /*UBFM*/, /*N=*/0, /*immr=*/2, /*imms=*/1, Wd_z,
+                  Wd_z);  // LSL #30
+    emit_logical_shifted_reg(buf, 0, /*ORR*/ 1, 0, /*LSL*/ 0, Wd_c, 29, Wd_z, Wd_z);
+    emit_logical_shifted_reg(buf, 0, /*ORR*/ 1, 0, /*LSL*/ 0, Wd_v, kNzcvPfBit, Wd_z, Wd_z);
+
+    emit_msr_nzcv(buf, Wd_z);
+
+    free_gpr(a1, Wd_c);
+    free_gpr(a1, Wd_v);
+    free_gpr(a1, Wd_z);
+}
+
+// =============================================================================
+// FCMOVcc select.  The flag conditions are a B.cond over a register move
+// (emit_fcsel_f64).  PF has no condition code, so FCMOVU and FCMOVNU read
+// NZCV into a GPR and TBZ/TBNZ on bit 26 over the move instead.  Every
+// branch skips exactly the one instruction after it.
+// =============================================================================
+void emit_fcmov_select(AssemblerBuffer& buf, TranslationResult& a1, int Dd, int Dtrue, int Dfalse,
+                       int cond) {
+    if (cond != kFcmovCondPF && cond != kFcmovCondNPF) {
+        emit_fcsel_f64(buf, Dd, Dtrue, Dfalse, cond);
+        return;
+    }
+    const bool want_pf = cond == kFcmovCondPF;
+    const int Wd_flags = alloc_free_gpr(a1);
+    emit_mrs_nzcv(buf, Wd_flags);
+    if (Dd == Dfalse) {
+        // Skip the move unless the condition holds.
+        emit_tbz(buf, /*is_nz=*/want_pf ? 0 : 1, Wd_flags, kNzcvPfBit, 2);
+        emit_fmov_f64_reg(buf, Dd, Dtrue);
+    } else if (Dd == Dtrue) {
+        // Skip the move when the condition holds.
+        emit_tbz(buf, /*is_nz=*/want_pf ? 1 : 0, Wd_flags, kNzcvPfBit, 2);
+        emit_fmov_f64_reg(buf, Dd, Dfalse);
+    } else {
+        emit_fmov_f64_reg(buf, Dd, Dfalse);
+        emit_tbz(buf, /*is_nz=*/want_pf ? 0 : 1, Wd_flags, kNzcvPfBit, 2);
+        emit_fmov_f64_reg(buf, Dd, Dtrue);
+    }
+    free_gpr(a1, Wd_flags);
+}
