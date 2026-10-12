@@ -43,7 +43,8 @@
 #      still fail under x87sidecar without the knob
 #  16. test_flags_handoff with X87_STOCK_OPS handing the fcomi family, then
 #      the fcmov family, to stock, with the IR on and off: guest flags set
-#      by one translator and read by the other
+#      by one translator and read by the other.  Each run must resolve every
+#      name and hand at least one block to stock
 #   R. replay tests/data/geom_block_874c40.ir under --fpr-pool 8 and
 #      assert the pressure splits keep it on the IR path (fpr_fail=0), then
 #      replay tests/data/fist_pressure.ir the same way and assert it exits 0
@@ -837,9 +838,13 @@ fi
 # leaves the compares to the sidecar, so each translator reads PF, ZF and CF
 # where the other wrote them.  The other phases cover stock's SSE, integer,
 # sahf and popf setters and its setcc, jcc, cmovcc, lahf and pushf readers.
+# A misspelt name, or a list that handed no block to stock, would pass
+# without testing anything, so each run must resolve every name to its
+# opcode id and report at least one block handed over.
+# Each entry is "<X87_STOCK_OPS value>|<opcode ids it resolves to>".
 FLAGS_HANDOFF_STOCK_OPS=(
-    fcomi,fucomi,fcomip,fucomip
-    fcmovu,fcmovnu,fcmovb,fcmove,fcmovbe,fcmovnb,fcmovne,fcmovnbe
+    "fcomi,fucomi,fcomip,fucomip|4"
+    "fcmovu,fcmovnu,fcmovb,fcmove,fcmovbe,fcmovnb,fcmovne,fcmovnbe|8"
 )
 if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then
     echo ""
@@ -850,11 +855,27 @@ if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then
         echo -e "${YELLOW}SKIP${NC}  test_flags_handoff  (binary not found)"
         ERRORS=$((ERRORS + 1))
     else
-        for ops in "${FLAGS_HANDOFF_STOCK_OPS[@]}"; do
+        for entry in "${FLAGS_HANDOFF_STOCK_OPS[@]}"; do
+            ops="${entry%%|*}"
+            want_ids="${entry##*|}"
             for ir_off in 0 1; do
+                echo "      X87_STOCK_OPS=$ops X87_DISABLE_X87_IR=$ir_off"
                 EXIT=0
                 OUT=$(X87_STOCK_OPS=$ops X87_DISABLE_X87_IR=$ir_off "$LOADER" "$BINARY" \
                     2>/dev/null | filter_runtime_lines) || EXIT=$?
+                if grep -q 'X87_STOCK_OPS: unknown opcode' <<<"$OUT" ||
+                    ! grep -q "X87_STOCK_OPS: $want_ids opcode ids resolved" <<<"$OUT"; then
+                    TOTAL=$((TOTAL + 1))
+                    echo -e "${RED}FAIL${NC}  test_flags_handoff  (X87_STOCK_OPS did not resolve to $want_ids opcode ids)"
+                    FAILED=$((FAILED + 1))
+                    continue
+                fi
+                if ! grep -q '\[x87stock\] hit #1 ' <<<"$OUT"; then
+                    TOTAL=$((TOTAL + 1))
+                    echo -e "${RED}FAIL${NC}  test_flags_handoff  (no block handed to stock)"
+                    FAILED=$((FAILED + 1))
+                    continue
+                fi
                 check_output "test_flags_handoff" "$OUT" "$EXIT"
             done
         done
