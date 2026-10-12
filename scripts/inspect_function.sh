@@ -62,6 +62,7 @@ ALL_FUSIONS=(
     fstp_fld
     arith_fstp
     arith_faddp
+    fld_fstp_m80
 )
 
 # ---- parse optional arguments ------------------------------------------------

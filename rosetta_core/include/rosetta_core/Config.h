@@ -27,6 +27,7 @@ enum class FusionId : int {
     arith_fstp,       // non-popping ARITH + FSTP mem (2-instruction, skip intermediate stack store)
     arith_faddp,      // FMUL + FADDP/FSUBP/FSUBRP → FMADD/FMSUB/FNMSUB (FMA fusion)
     fstp_arith_fstp,  // FSTP mem + non-popping ARITH mem + FSTP mem (3-instruction, batched 2-pop)
+    fld_fstp_m80,     // FLD m80 + FSTP m80 (2-instruction, raw ten-byte copy)
     kCount
 };
 

@@ -7,7 +7,8 @@
 #   1. Native Rosetta (baseline)
 #   2. x87sidecar (IR + fusions enabled, default config)
 #   3. x87sidecar with X87_DISABLE_X87_IR=1 (direct translator only)
-#   4. x87sidecar with X87_DISABLE_X87_IR=1 + X87_DISABLE_ALL_FUSIONS=1
+#   4. x87sidecar with X87_DISABLE_X87_IR=1 + X87_DISABLE_ALL_FUSIONS=1.
+#      Skips the tests in NO_FUSION_SKIP, whose exact results need a fusion.
 #   5. x87sidecar with X87_DISABLE_HOOK=1 (stock translate_insn only)
 #   6. x87sidecar with X87_ENABLE_FMA_CONTRACT=1 (FMA contraction is off by
 #      default; this phase keeps the IR FMA nodes, the FMA-reduce lowering
@@ -149,6 +150,7 @@ ALL_TESTS=(
     test_x87_signal_storm
     test_x87_signal_context
     test_x87_native_state
+    test_m80_copy
 )
 
 RED='\033[0;31m'
@@ -377,11 +379,25 @@ if [[ $NATIVE_ONLY -eq 0 ]]; then
 fi
 
 # ── Phase 4: x87sidecar, IR disabled + all fusions disabled ──────────────
+# Some results are exact only through a fusion: a lone FLD m80 or FSTP m80
+# converts through the binary64 register file, and only the adjacent pair
+# copies the ten bytes.  The tests that assert those exact results are
+# skipped here by design.
+NO_FUSION_SKIP=(
+    test_m80_copy
+)
 if [[ $NATIVE_ONLY -eq 0 ]]; then
     echo ""
     echo -e "${BOLD}=== Phase 4: x87sidecar (IR disabled, fusions disabled) ===${NC}"
 
     for t in "${TESTS[@]}"; do
+        skip=0
+        for s in "${NO_FUSION_SKIP[@]}"; do
+            [[ "$t" == "$s" ]] && skip=1
+        done
+        if [[ $skip -eq 1 ]]; then
+            continue
+        fi
         BINARY="$TESTS_BIN/$t"
         if [[ ! -x "$BINARY" ]]; then
             echo -e "${YELLOW}SKIP${NC}  $t  (binary not found)"

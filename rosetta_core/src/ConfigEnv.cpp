@@ -37,6 +37,7 @@ constexpr FusionEntry kFusionTable[] = {
     {.name = "arith_fstp", .id = FusionId::arith_fstp},
     {.name = "arith_faddp", .id = FusionId::arith_faddp},
     {.name = "fstp_arith_fstp", .id = FusionId::fstp_arith_fstp},
+    {.name = "fld_fstp_m80", .id = FusionId::fld_fstp_m80},
 };
 
 }  // namespace
