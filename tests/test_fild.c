@@ -192,6 +192,105 @@ static void test_fild_stack(void) {
 }
 
 /* ------------------------------------------------------------------ */
+/* fild m64 values that must not be copied raw                          */
+/* ------------------------------------------------------------------ */
+
+/* The sidecar copies fild m64 into fistp m64 as raw bits.  These shapes
+ * look similar but use the value as a number, so they must keep converting. */
+
+static void check_i64(const char* name, int64_t got, int64_t expected) {
+    if (got != expected) {
+        printf("FAIL  %-40s  got=0x%016llx  expected=0x%016llx\n", name, (unsigned long long)got,
+               (unsigned long long)expected);
+        failures++;
+        return;
+    }
+    printf("PASS  %s\n", name);
+}
+
+static void check_i32(const char* name, int32_t got, int32_t expected) {
+    if (got != expected) {
+        printf("FAIL  %-40s  got=0x%08x  expected=0x%08x\n", name, (uint32_t)got,
+               (uint32_t)expected);
+        failures++;
+        return;
+    }
+    printf("PASS  %s\n", name);
+}
+
+/* Accept either result: real x87 keeps 64 mantissa bits, the sidecar's
+ * binary64 rounds.  The integer indefinite is wrong under both. */
+static void check_i64_either(const char* name, int64_t got, int64_t exact, int64_t rounded) {
+    if (got == (int64_t)0x8000000000000000ULL || (got != exact && got != rounded)) {
+        printf("FAIL  %-40s  got=0x%016llx  expected=0x%016llx or 0x%016llx\n", name,
+               (unsigned long long)got, (unsigned long long)exact, (unsigned long long)rounded);
+        failures++;
+        return;
+    }
+    printf("PASS  %s\n", name);
+}
+
+static void test_fild_m64_not_raw(void) {
+    /* Arithmetic in between: 2^52 + 1 + 1 is exact in binary64 too, and a
+     * raw copy would store 2^52 + 1. */
+    {
+        const int64_t v = (1LL << 52) + 1;
+        int64_t out = 0;
+        __asm__ volatile(
+            "fildll  %1\n\t"
+            "fld1\n\t"
+            "faddp\n\t"
+            "fistpll %0\n\t"
+            : "=m"(out)
+            : "m"(v)
+            : "st");
+        check_i64("fildll fld1 faddp fistpll", out, 0x0010000000000002LL);
+    }
+
+    /* Narrower store: the value converts, it is not truncated to its low
+     * 32 bits. */
+    {
+        const int64_t v = 123456789;
+        int32_t out = 0;
+        __asm__ volatile(
+            "fildll  %1\n\t"
+            "fistpl  %0\n\t"
+            : "=m"(out)
+            : "m"(v)
+            : "st");
+        check_i32("fildll fistpl in range", out, 123456789);
+    }
+    {
+        const int64_t v = 0x5357452E46535745LL;
+        int32_t out = 0;
+        __asm__ volatile(
+            "fildll  %1\n\t"
+            "fistpl  %0\n\t"
+            : "=m"(out)
+            : "m"(v)
+            : "st");
+        check_i32("fildll fistpl out of range", out, (int32_t)0x80000000);
+    }
+
+    /* The same value stored as m32 and then m64: the m64 store is not a
+     * pure copy, so the sidecar still rounds it through binary64. */
+    {
+        const int64_t v = 0x5357452E46535745LL;
+        int32_t out32 = 0;
+        int64_t out64 = 0;
+        __asm__ volatile(
+            "fildll  %2\n\t"
+            "fistl   %0\n\t"
+            "fistpll %1\n\t"
+            : "=m"(out32), "=m"(out64)
+            : "m"(v)
+            : "st");
+        check_i32("fildll fistl fistpll, m32", out32, (int32_t)0x80000000);
+        check_i64_either("fildll fistl fistpll, m64", out64, v, 0x5357452E46535800LL);
+    }
+}
+
+/* ------------------------------------------------------------------ */
 /* Entry point                                                          */
 /* ------------------------------------------------------------------ */
 
@@ -207,6 +306,9 @@ int main(void) {
 
     printf("\n=== Stack discipline ===\n");
     test_fild_stack();
+
+    printf("\n=== FILD m64 used as a number ===\n");
+    test_fild_m64_not_raw();
 
     printf("\n%s  (%d failure%s)\n", failures == 0 ? "ALL PASS" : "SOME FAILURES", failures,
            failures == 1 ? "" : "s");

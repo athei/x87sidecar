@@ -585,6 +585,68 @@ static auto try_fuse_fld_fstp(TranslationResult* a1, IRInstr* fld_instr, IRInstr
 }
 
 // =============================================================================
+// Peephole: FILD m64 + FISTP/FISTTP m64 → exact 64-bit copy
+//
+// Real x87 holds any int64 exactly, so the pair copies 8 bytes unchanged
+// whatever the rounding mode.  The binary64 round trip through SCVTF and
+// FCVT* rounds every |v| >= 2^53 instead.  Delphi's System.Move copies memory
+// with this pair (fild; fistp; add; jl), and two-instruction runs never reach
+// the IR, whose pass_exact_i64_copy handles longer runs.  The push and pop
+// cancel, so the pair is a plain LDR D / STR D, load first.
+//
+// Segment-override operands are declined: a GS address takes a fixed pool
+// slot inside compute_operand_address.
+//
+// Returns 2 (instructions consumed) if fused, std::nullopt otherwise.
+// =============================================================================
+
+static auto try_fuse_fild_fistp(TranslationResult* a1, IRInstr* fild_instr, IRInstr* fistp_instr)
+    -> std::optional<int> {
+    if (fild_instr->opcode() != kOpcodeName_fild) {
+        return std::nullopt;
+    }
+    if (fistp_instr->opcode() != kOpcodeName_fistp && fistp_instr->opcode() != kOpcodeName_fisttp) {
+        return std::nullopt;
+    }
+    IROperand* src = &fild_instr->operands[0];
+    IROperand* dst = &fistp_instr->operands[0];
+    if (src->kind == IROperandKind::Register || dst->kind == IROperandKind::Register) {
+        return std::nullopt;
+    }
+    if (src->mem.size != IROperandSize::S64 || dst->mem.size != IROperandSize::S64) {
+        return std::nullopt;
+    }
+    if (src->mem.seg_override != 0 || dst->mem.seg_override != 0) {
+        return std::nullopt;
+    }
+
+    AssemblerBuffer& buf = a1->insn_buf;
+    auto [Xbase, Wd_top] = x87_begin(*a1, buf);
+    const int Wd_tmp = alloc_gpr(*a1, 2);
+
+    // Net-zero-stack fusion, as in try_fuse_fld_fstp.
+    if (!(a1->x87_cache.tag_push_pending && a1->x87_cache.top_dirty)) {
+        x87_flush_top(buf, *a1, Xbase, Wd_top, Wd_tmp);
+    }
+
+    const int Dd_val = alloc_free_fpr(*a1);
+
+    const int src_addr = compute_operand_address(*a1, /*is_64bit=*/true, src, GPR::XZR);
+    emit_fldr_imm(buf, 3, Dd_val, src_addr, 0);
+    free_gpr(*a1, src_addr);
+
+    const int dst_addr = compute_operand_address(*a1, /*is_64bit=*/true, dst, GPR::XZR);
+    emit_fstr_imm(buf, 3, Dd_val, dst_addr, 0);
+    free_gpr(*a1, dst_addr);
+
+    free_fpr(*a1, Dd_val);
+    x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp, /*consumed=*/2);
+    free_gpr(*a1, Wd_tmp);
+
+    return 2;
+}
+
+// =============================================================================
 // Peephole: FXCH ST(1) + FSTP ST(1) → just pop
 //
 // The swap's effect is destroyed by the pop — both instructions collapse
@@ -2597,6 +2659,13 @@ static auto try_fuse_fld_group(TranslationResult* tr, IRInstr* instrs, int64_t n
                                uint64_t disabled_mask) -> std::optional<int> {
     IRInstr* cur = &instrs[idx];
     IRInstr* next = &instrs[idx + 1];  // caller guarantees idx+1 < num
+
+    // Exact int64 copy first: no longer fusion starts with fild + fistp.
+    if (!fusion_disabled(disabled_mask, FusionId::fild_fistp)) {
+        if (auto r = try_fuse_fild_fistp(tr, cur, next)) {
+            return r;
+        }
+    }
 
     // 4-instruction fusions (longest first)
     if (idx + 3 < num) {

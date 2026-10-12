@@ -2073,16 +2073,8 @@ static int split_prefix_len(const Context& ctx, int first_over_node, int attempt
 // Lives here (not X87IROptimize.cpp) because candidate legality and payoff
 // are joined at the hip with the peak_live_fprs model above.
 
-// FStsw packs payloads into its input slots (inputs[1] = destination
-// register index, inputs[2] = top_delta snapshot — see build()); only
-// inputs[0] (the fused FCmp reference) is a node id.  Every walk below
-// that interprets inputs as node references must skip the payload slots,
-// or a payload value that happens to collide with a node index gets
-// remapped/retargeted and the lowering emits garbage (observed as a WoW
-// guest SIGSEGV when remat rewrote an FStsw's register-index payload).
-static inline int node_ref_input_count(const Node& n) {
-    return n.op == Op::FStsw ? 1 : 3;
-}
+// Every walk below that interprets inputs as node references skips FStsw's
+// payload slots via node_ref_input_count (X87IR.h).
 
 // Insert a copy of nodes[src] at index `pos` (shifting [pos..) up one) and
 // return false if the node budget is exhausted.  All node references —
@@ -2210,6 +2202,7 @@ static bool remat_relieve_fpr_pressure(Context& ctx, int budget) {
             const int use = last_use[h];
             // A load may not cross a memory write or FStsw (writes AX or
             // memory) between its original position and the sunk position.
+            // LoadCW is fnstcw, a 16-bit memory write.
             if (is_load) {
                 bool barrier = false;
                 for (int j = h + 1; j < use && !barrier; j++) {
@@ -2224,6 +2217,7 @@ static bool remat_relieve_fpr_pressure(Context& ctx, int budget) {
                         case Op::StoreI32:
                         case Op::StoreI64:
                         case Op::StoreCW:
+                        case Op::LoadCW:
                         case Op::FStsw:
                         // Bridge nodes: a bridge store may alias the load,
                         // and any bridge register write may redefine the

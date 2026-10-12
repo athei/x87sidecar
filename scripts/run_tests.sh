@@ -6,7 +6,8 @@
 # Phases:
 #   1. Native Rosetta (baseline)
 #   2. x87sidecar (IR + fusions enabled, default config)
-#   3. x87sidecar with X87_DISABLE_X87_IR=1 (direct translator only)
+#   3. x87sidecar with X87_DISABLE_X87_IR=1 (direct translator only).
+#      Phases 3, 4 and 10 skip EXACT_I64_COPY_SKIP.
 #   4. x87sidecar with X87_DISABLE_X87_IR=1 + X87_DISABLE_ALL_FUSIONS=1
 #   5. x87sidecar with X87_DISABLE_HOOK=1 (stock translate_insn only)
 #   6. x87sidecar with X87_ENABLE_FMA_CONTRACT=1 (FMA contraction is off by
@@ -108,6 +109,7 @@ ALL_TESTS=(
     test_fistp_multi
     test_fist_indefinite
     test_fist_pressure
+    test_fild_fistp_copy
     test_fcmov
     test_ficom
     test_rc_recache
@@ -361,12 +363,31 @@ if [[ $NATIVE_ONLY -eq 0 ]]; then
     done
 fi
 
+# fild m64 into fistp/fisttp m64 is copied exactly by the IR pass
+# (pass_exact_i64_copy) for longer runs and by the fild_fistp peephole for a
+# lone pair.  With the IR off (phases 3 and 4) or bridging off (phase 10),
+# the longer runs and the bridged ones go through binary64 and round every
+# |v| >= 2^53 by design, so the exact-copy test is skipped there.
+EXACT_I64_COPY_SKIP=(
+    test_fild_fistp_copy
+)
+exact_i64_copy_skipped() {
+    local s
+    for s in "${EXACT_I64_COPY_SKIP[@]}"; do
+        [[ "$1" == "$s" ]] && return 0
+    done
+    return 1
+}
+
 # ── Phase 3: x87sidecar, IR disabled ─────────────────────────────────────
 if [[ $NATIVE_ONLY -eq 0 ]]; then
     echo ""
     echo -e "${BOLD}=== Phase 3: x87sidecar (IR disabled) ===${NC}"
 
     for t in "${TESTS[@]}"; do
+        if exact_i64_copy_skipped "$t"; then
+            continue
+        fi
         BINARY="$TESTS_BIN/$t"
         if [[ ! -x "$BINARY" ]]; then
             echo -e "${YELLOW}SKIP${NC}  $t  (binary not found)"
@@ -385,6 +406,9 @@ if [[ $NATIVE_ONLY -eq 0 ]]; then
     echo -e "${BOLD}=== Phase 4: x87sidecar (IR disabled, fusions disabled) ===${NC}"
 
     for t in "${TESTS[@]}"; do
+        if exact_i64_copy_skipped "$t"; then
+            continue
+        fi
         BINARY="$TESTS_BIN/$t"
         if [[ ! -x "$BINARY" ]]; then
             echo -e "${YELLOW}SKIP${NC}  $t  (binary not found)"
@@ -533,6 +557,9 @@ if [[ $NATIVE_ONLY -eq 0 ]]; then
     echo -e "${BOLD}=== Phase 10: x87sidecar X87_ENABLE_BRIDGE=0 (bridging off) ===${NC}"
 
     for t in "${TESTS[@]}"; do
+        if exact_i64_copy_skipped "$t"; then
+            continue
+        fi
         BINARY="$TESTS_BIN/$t"
         if [[ ! -x "$BINARY" ]]; then
             echo -e "${YELLOW}SKIP${NC}  $t  (binary not found)"
