@@ -69,6 +69,17 @@ inline auto x87_begin(TranslationResult& a1, AssemblerBuffer& buf) -> std::pair<
     return {Xbase, Wd_top};
 }
 
+// The number of scratch GPRs x87_begin will allocate in the current cache
+// state, for emitters that check the free mask before emitting.  Mirrors
+// x87_begin above.
+inline int x87_begin_gpr_need(const TranslationResult& a1) {
+    const auto& c = a1.x87_cache;
+    if (c.run_remaining > 0 && c.gprs_valid) {
+        return (!c.st_base_valid && !c.native_transport) ? 1 : 0;
+    }
+    return 2 + ((c.run_remaining > 0 && !c.native_transport) ? 1 : 0);
+}
+
 inline int x87_get_st_base(TranslationResult& a1) {
     return (a1.x87_cache.gprs_valid && a1.x87_cache.st_base_valid) ? a1.x87_cache.st_base_gpr : -1;
 }

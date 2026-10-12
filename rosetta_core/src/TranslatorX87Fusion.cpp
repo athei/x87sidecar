@@ -654,7 +654,11 @@ static auto try_fuse_fild_fistp(TranslationResult* a1, IRInstr* fild_instr, IRIn
 // (k+1-n)-th load.  Every load happens before every store, as on x87, so
 // overlapping source and destination behave the same.  The values are held
 // in GPRs: base, TOP, Xst_base, Wd_tmp, three values and one address
-// scratch fill the eight-register pool exactly.
+// scratch fill the eight-register pool exactly.  The pool can be smaller
+// (stock may hold scratch registers, and this shape is reached when the IR
+// refused the run, possibly for GPR pressure), so the fusion counts what
+// it needs against the free mask before it emits anything and declines
+// when the mask is short.
 //
 // Returns 2k (instructions consumed) if fused, std::nullopt otherwise.
 // =============================================================================
@@ -666,7 +670,7 @@ static bool is_exact_i64_operand(IRInstr* instr) {
 }
 
 static auto try_fuse_fild_fistp_nested(TranslationResult* a1, IRInstr* instrs, int64_t num,
-                                        int64_t idx) -> std::optional<int> {
+                                       int64_t idx) -> std::optional<int> {
     int k = 3;
     for (; k >= 2; --k) {
         if (idx + 2 * k > num) {
@@ -676,16 +680,23 @@ static auto try_fuse_fild_fistp_nested(TranslationResult* a1, IRInstr* instrs, i
         for (int j = 0; j < k && match; ++j) {
             IRInstr* load = &instrs[idx + j];
             IRInstr* store = &instrs[idx + k + j];
-            match = load->opcode() == kOpcodeName_fild && is_exact_i64_operand(load) &&
-                    (store->opcode() == kOpcodeName_fistp ||
-                     store->opcode() == kOpcodeName_fisttp) &&
-                    is_exact_i64_operand(store);
+            match =
+                load->opcode() == kOpcodeName_fild && is_exact_i64_operand(load) &&
+                (store->opcode() == kOpcodeName_fistp || store->opcode() == kOpcodeName_fisttp) &&
+                is_exact_i64_operand(store);
         }
         if (match) {
             break;
         }
     }
     if (k < 2) {
+        return std::nullopt;
+    }
+    // x87_begin's registers, Wd_tmp, the k values, and one address scratch
+    // (compute_operand_address takes at most one for a non-segment operand,
+    // and each is freed before the next).
+    const int need = x87_begin_gpr_need(*a1) + 1 + k + 1;
+    if (__builtin_popcount(a1->free_gpr_mask) < need) {
         return std::nullopt;
     }
 
