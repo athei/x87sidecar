@@ -8,10 +8,11 @@
  * so these copies need the raw 64-bit path: the IR pass for runs of three or
  * more instructions, the fild_fistp peephole for a lone pair.
  *
- * Every check is bit-exact.  The cases cover the plain pair, overlapping
- * moves in both directions, a store into a source that was already read, a
- * store that a later fild reads back, a run mixing an exact copy with an
- * fstpl, the Delphi loop, and bridged mov gaps.  The last case puts an
+ * Every check is bit-exact.  The cases cover the plain pair, one load
+ * duplicated with fld st(0) and stored twice, overlapping moves in both
+ * directions, a store into a source that was already read, a store that a
+ * later fild reads back, a run mixing an exact copy with an fstpl, the
+ * Delphi loop, and bridged mov gaps.  The last case puts an
  * fnstcw that writes the first source between that load and its store, so
  * a pressure relief that moved the load past the fnstcw would read the
  * control word (run_tests.sh's X87_FPR_POOL_LIMIT=5 phase asks for that
@@ -89,6 +90,18 @@ static void move16(const int64_t* src, int64_t* dst) {
         "fistpll 8(%0)\n"
         :
         : "r"(dst), "r"(src)
+        : "memory");
+}
+
+/* One load, duplicated with fld st(0) and stored twice: b = c = a. */
+static void copy_twice(const int64_t* a, int64_t* b, int64_t* c) {
+    __asm__ volatile(
+        "fildll  (%0)\n\t"
+        "fld     %%st(0)\n\t"
+        "fistpll (%1)\n\t"
+        "fistpll (%2)\n"
+        :
+        : "r"(a), "r"(b), "r"(c)
         : "memory");
 }
 
@@ -242,6 +255,15 @@ int main(void) {
             check_i64(name, buf[0], v);
             check_i64(name, buf[1], w);
             check_i64(name, buf[2], w);
+        }
+        {
+            int64_t b = 0;
+            int64_t c = 0;
+            copy_twice(&v, &b, &c);
+            snprintf(name, sizeof(name), "fld st(0), two stores b [%d]", i);
+            check_i64(name, b, v);
+            snprintf(name, sizeof(name), "fld st(0), two stores c [%d]", i);
+            check_i64(name, c, v);
         }
         {
             int64_t a = v;

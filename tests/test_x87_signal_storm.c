@@ -13,8 +13,9 @@
  *
  * The first sequence is the 2^x chain from issue #23, which lost the effect of
  * `fld1; faddp` in one execution out of thousands in a live game.  The rest is
- * one case per x87 opcode the sidecar translates, so the whole emitter surface
- * is exercised.
+ * one case per x87 opcode the sidecar translates, plus the two paths that copy
+ * fild m64 into fistp m64 as raw bits, so the whole emitter surface is
+ * exercised.
  *
  * argv[1] selects the storm variant (default "all"):
  *   none    no storm (control)
@@ -234,6 +235,11 @@ X87_SEQ(seq_fisttp16, "fld " D "\n\tfisttp " S16 "\n\tfild " S16 "\n\t")
 X87_SEQ(seq_fisttp32, "fld " D "\n\tfisttp " S32 "\n\tfild " S32 "\n\t")
 X87_SEQ(seq_fisttp64, "fld " D "\n\tfisttp " S64 "\n\tfild " S64 "\n\t")
 X87_SEQ(seq_fbstp, "fld " D2 "\n\tfbstp " S80 "\n\tfbld " S80 "\n\t")
+/* fild m64 into fistp m64 is a raw 64-bit copy, read back as a double.  The
+ * nop ends the x87 run, so the pair goes to the fild_fistp peephole; without
+ * it the run is long enough for the IR's exact-copy pass. */
+X87_SEQ(seq_fild64_copy, "fild " D "\n\tfistp " S64 "\n\tnop\n\tfld " S64 "\n\t")
+X87_SEQ(seq_fild64_copy_ir, "fild " D "\n\tfistp " S64 "\n\tfld " S64 "\n\t")
 
 /* Arithmetic, register forms. */
 X87_SEQ(seq_fadd_st, "fld " D "\n\tfld " D2 "\n\tfadd st, st(1)\n\tfstp st(1)\n\t")
@@ -353,7 +359,9 @@ static const struct op_case k_op_cases[] = {
     {"fstp_sti", seq_fstp_sti},   {"fist16", seq_fist16},       {"fist32", seq_fist32},
     {"fistp16", seq_fistp16},     {"fistp32", seq_fistp32},     {"fistp64", seq_fistp64},
     {"fisttp16", seq_fisttp16},   {"fisttp32", seq_fisttp32},   {"fisttp64", seq_fisttp64},
-    {"fbstp", seq_fbstp},         {"fadd_st", seq_fadd_st},     {"faddp", seq_faddp},
+    {"fbstp", seq_fbstp},         {"fild64_copy", seq_fild64_copy},
+    {"fild64_copy_ir", seq_fild64_copy_ir},
+    {"fadd_st", seq_fadd_st},     {"faddp", seq_faddp},
     {"fsub_st", seq_fsub_st},     {"fsubr_st", seq_fsubr_st},   {"fsubp", seq_fsubp},
     {"fsubrp", seq_fsubrp},       {"fmul_st", seq_fmul_st},     {"fmulp", seq_fmulp},
     {"fdiv_st", seq_fdiv_st},     {"fdivr_st", seq_fdivr_st},   {"fdivp", seq_fdivp},

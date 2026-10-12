@@ -196,7 +196,8 @@ static void test_fild_stack(void) {
 /* ------------------------------------------------------------------ */
 
 /* The sidecar copies fild m64 into fistp m64 as raw bits.  These shapes
- * look similar but use the value as a number, so they must keep converting. */
+ * look similar but use the value as a number or keep it on the stack, so
+ * they must keep converting. */
 
 static void check_i64(const char* name, int64_t got, int64_t expected) {
     if (got != expected) {
@@ -231,8 +232,9 @@ static void check_i64_either(const char* name, int64_t got, int64_t exact, int64
 }
 
 static void test_fild_m64_not_raw(void) {
-    /* Arithmetic in between: 2^52 + 1 + 1 is exact in binary64 too, and a
-     * raw copy would store 2^52 + 1. */
+    /* Arithmetic in between: 2^52 + 1 + 1 is exact in binary64 too.  A load
+     * wrongly taken as raw bits would read 2^52 + 1 as a double of about
+     * 2.2e-308, and the store would write 1. */
     {
         const int64_t v = (1LL << 52) + 1;
         int64_t out = 0;
@@ -273,9 +275,11 @@ static void test_fild_m64_not_raw(void) {
     }
 
     /* The same value stored as m32 and then m64: the m64 store is not a
-     * pure copy, so the sidecar still rounds it through binary64. */
+     * pure copy, so the sidecar still rounds it through binary64.  Taken as
+     * raw bits, either value would read as a tiny double and the m32 store
+     * would write 0. */
     {
-        const int64_t v = 0x5357452E46535745LL;
+        const int64_t v = (1LL << 53) + 1;
         int32_t out32 = 0;
         int64_t out64 = 0;
         __asm__ volatile(
@@ -285,8 +289,94 @@ static void test_fild_m64_not_raw(void) {
             : "=m"(out32), "=m"(out64)
             : "m"(v)
             : "st");
-        check_i32("fildll fistl fistpll, m32", out32, (int32_t)0x80000000);
-        check_i64_either("fildll fistl fistpll, m64", out64, v, 0x5357452E46535800LL);
+        check_i32("fildll fistl fistpll 2^53+1, m32", out32, (int32_t)0x80000000);
+        check_i64_either("fildll fistl fistpll 2^53+1, m64", out64, v, 1LL << 53);
+    }
+    {
+        const int64_t v = 123456789;
+        int32_t out32 = 0;
+        int64_t out64 = 0;
+        __asm__ volatile(
+            "fildll  %2\n\t"
+            "fistl   %0\n\t"
+            "fistpll %1\n\t"
+            : "=m"(out32), "=m"(out64)
+            : "m"(v)
+            : "st");
+        check_i32("fildll fistl fistpll in range, m32", out32, 123456789);
+        check_i64("fildll fistl fistpll in range, m64", out64, 123456789);
+    }
+
+    /* A copy whose value also stays on the stack past the end of the run:
+     * the stack keeps the number, so the fstpl in the next block stores
+     * (double)v, not v's raw bits. */
+    {
+        const int64_t v = 0x5357452E46535745LL;
+        const double vd = (double)v;
+        int64_t b = 0;
+        double d = 0.0;
+        int64_t d_bits;
+        int64_t vd_bits;
+        __asm__ volatile(
+            "fildll  (%0)\n\t"
+            "fld     %%st(0)\n\t"
+            "fistpll (%1)\n\t"
+            "fld1\n\t"
+            "fstp    %%st(0)\n\t"
+            "jmp     1f\n"
+            "1:\n\t"
+            "fstpl   (%2)\n"
+            :
+            : "r"(&v), "r"(&b), "r"(&d)
+            : "memory");
+        memcpy(&d_bits, &d, sizeof(d));
+        memcpy(&vd_bits, &vd, sizeof(vd));
+        check_i64("fildll left on the stack, fstpl", d_bits, vd_bits);
+        check_i64_either("fildll left on the stack, fistpll", b, v, 0x5357452E46535800LL);
+    }
+
+    /* Values that fcomi compares as well as copies.  -1 taken as raw bits
+     * is a NaN, which would compare unordered and set CF. */
+    {
+        const int64_t a = -1;
+        const int64_t b = 5;
+        int64_t c = 0;
+        int64_t d = 0;
+        unsigned char below = 0xff;
+        __asm__ volatile(
+            "fildll  (%1)\n\t"
+            "fildll  (%2)\n\t"
+            "fcomi   %%st(1), %%st\n\t"
+            "setb    %0\n\t"
+            "fistpll (%3)\n\t"
+            "fistpll (%4)\n"
+            : "=q"(below)
+            : "r"(&a), "r"(&b), "r"(&c), "r"(&d)
+            : "memory", "cc");
+        check_i64("fildll fildll fcomi setb, below", below, 0);
+        check_i64("fildll fildll fcomi setb, ST(0)", c, 5);
+        check_i64("fildll fildll fcomi setb, ST(1)", d, -1);
+    }
+    {
+        /* The same with the stores inside the run, ahead of the setb. */
+        const int64_t a = -1;
+        const int64_t b = 5;
+        int64_t c = 0;
+        int64_t d = 0;
+        unsigned char below = 0xff;
+        __asm__ volatile(
+            "fildll  (%1)\n\t"
+            "fildll  (%2)\n\t"
+            "fcomi   %%st(1), %%st\n\t"
+            "fistpll (%3)\n\t"
+            "fistpll (%4)\n\t"
+            "setb    %0\n"
+            : "=q"(below)
+            : "r"(&a), "r"(&b), "r"(&c), "r"(&d)
+            : "memory", "cc");
+        check_i64("fildll fildll fcomi fistpll, below", below, 0);
+        check_i64("fildll fildll fcomi fistpll, ST(0)", c, 5);
+        check_i64("fildll fildll fcomi fistpll, ST(1)", d, -1);
     }
 }
 

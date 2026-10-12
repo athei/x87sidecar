@@ -7,8 +7,10 @@
 #   1. Native Rosetta (baseline)
 #   2. x87sidecar (IR + fusions enabled, default config)
 #   3. x87sidecar with X87_DISABLE_X87_IR=1 (direct translator only).
-#      Phases 3, 4 and 10 skip EXACT_I64_COPY_SKIP.
-#   4. x87sidecar with X87_DISABLE_X87_IR=1 + X87_DISABLE_ALL_FUSIONS=1
+#      Skips EXACT_I64_COPY_SKIP: without the IR, fild m64 to fistp m64
+#      copies longer than a lone pair round through binary64.
+#   4. x87sidecar with X87_DISABLE_X87_IR=1 + X87_DISABLE_ALL_FUSIONS=1.
+#      Skips EXACT_I64_COPY_SKIP, as phase 3.
 #   5. x87sidecar with X87_DISABLE_HOOK=1 (stock translate_insn only)
 #   6. x87sidecar with X87_ENABLE_FMA_CONTRACT=1 (FMA contraction is off by
 #      default; this phase keeps the IR FMA nodes, the FMA-reduce lowering
@@ -21,7 +23,8 @@
 #   9. x87sidecar with X87_FAST_ROUND=2 on a curated same-block-FLDCW set
 #      (cross-block RC is mis-rounded by design under =2)
 #  10. x87sidecar with X87_ENABLE_BRIDGE=0 (bridging defaults ON; this
-#      phase keeps the unbridged dispatch under regression test)
+#      phase keeps the unbridged dispatch under regression test).  Skips
+#      EXACT_I64_COPY_SKIP: copies split by a mov gap round through binary64.
 #  11. x87sidecar with X87_BRIDGE_V2=0 (v2 defaults ON; this phase keeps
 #      the v1-only bridged dispatch under regression test)
 #  12. test_decoder_fcomp_st and test_decoder_arpl, three ways each: both
