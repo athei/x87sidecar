@@ -5,6 +5,14 @@
 // Usage:
 //   ir_pressure_replay <ir_blob> [--fpr-pool N] [--gpr-pool N] [--no-split] [--log]
 //
+// --fpr-pool N narrows only the gate (X87_FPR_POOL_LIMIT); the FPR mask the
+// lowering draws from is always the default eight.  --gpr-pool N (5-8)
+// narrows the gate and also the GPR mask the lowering draws from, so a GPR
+// model undercount asserts here.  The direct and fusion translators have
+// no pressure gate and expect most of the eight scratch GPRs, so below 8
+// a blob can also assert outside the IR path (on the shipped blobs, the
+// same pools assert with X87_DISABLE_X87_IR set).
+//
 // <ir_blob> is a raw IRInstr[] file, no header.  Produced by
 //   profile_analyze --dump-ir-binary 0xH out.ir <profile.prof>
 //
@@ -63,7 +71,31 @@ struct ReplayStats {
     uint16_t tally_max_gpr_peak = 0;
 };
 
-ReplayStats runOnce(const std::vector<IRInstr>& instrs, const RosettaConfig& cfg) {
+// The scratch GPR mask handed to the translator for a pool of `gpr_pool`
+// registers (0 = all eight).  Lowering then really draws from that many,
+// so a GPR model undercount asserts in the replay instead of borrowing a
+// register the gate did not count.  Slots are dropped in an order that
+// keeps the ones the lowering takes by index (alloc_gpr: 0, 1, 2 for
+// Xbase/Wd_top/Wd_tmp, 3 for the RC cache, 6 for Xst_base): 7 first (only
+// the GS TLS base routine takes it by index), then 5 and 4.  Returns 0
+// for a pool below 5, which would remove a slot taken by index.
+uint32_t gpr_mask_for_pool(int gpr_pool) {
+    if (gpr_pool <= 0 || gpr_pool >= 8) {
+        return kGprScratchMask;
+    }
+    if (gpr_pool < 5) {
+        return 0;
+    }
+    static constexpr int kDropOrder[3] = {7, 5, 4};
+    uint32_t mask = kGprScratchMask;
+    for (int k = 0; k < 8 - gpr_pool; k++) {
+        mask &= ~(1U << kGprScratchPool[kDropOrder[k]]);
+    }
+    return mask;
+}
+
+ReplayStats runOnce(const std::vector<IRInstr>& instrs, const RosettaConfig& cfg,
+                    uint32_t gpr_mask) {
     static ThreadContextOffsets stub_tco{};
 
     TranslationResult result{};
@@ -72,7 +104,7 @@ ReplayStats runOnce(const std::vector<IRInstr>& instrs, const RosettaConfig& cfg
     result.insn_buf.end = 0;
     result.insn_buf.end_cap = kBufSize;
     result.insn_buf.use_heap = 1;
-    result.free_gpr_mask = kGprScratchMask;
+    result.free_gpr_mask = gpr_mask;
     result.free_fpr_mask = kFprScratchMask;
     result._unoccupied_temporary_fprs_for_xmm_scalars = kFprScratchMask;
     result._pinned_temporary_scalars = 0;
@@ -203,7 +235,12 @@ int main(int argc, char** argv) try {
     cfg.fpr_pool_limit = static_cast<uint8_t>(fpr_pool);
     cfg.gpr_pool_limit = static_cast<uint8_t>(gpr_pool);
 
-    const ReplayStats s = runOnce(instrs, cfg);
+    const uint32_t gpr_mask = gpr_mask_for_pool(gpr_pool);
+    if (gpr_mask == 0) {
+        std::fprintf(stderr, "error: --gpr-pool must be between 5 and 8\n");
+        return 2;
+    }
+    const ReplayStats s = runOnce(instrs, cfg, gpr_mask);
 
     std::printf("instrs=%zu fpr_pool=%s gpr_pool=%s split=%s\n", instrs.size(),
                 fpr_pool > 0 ? std::to_string(fpr_pool).c_str() : "full",

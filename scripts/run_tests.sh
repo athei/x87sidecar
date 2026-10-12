@@ -721,7 +721,7 @@ if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then
         ERRORS=$((ERRORS + 1))
     else
         REXIT=0
-        ROUT=$("$REPLAY_BIN" "$FPATAN_IR" --fpr-pool 8 2>&1) || REXIT=$?
+        ROUT=$("$REPLAY_BIN" "$FPATAN_IR" --fpr-pool 8 --gpr-pool 8 2>&1) || REXIT=$?
         if [[ $REXIT -eq 0 ]] && grep -q '^max_gpr_peak,9$' <<<"$ROUT"; then
             echo -e "${GREEN}PASS${NC}  ir_fpatan_rc_replay (gpr peak 9 seen)"
             PASSED=$((PASSED + 1))
