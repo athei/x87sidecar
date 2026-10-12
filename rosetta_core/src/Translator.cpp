@@ -181,10 +181,6 @@ static void flush_run_and_release(TranslationResult& tr) {
     tr.free_gpr_mask = cache.stock_free_gpr_mask;
 }
 
-static bool precise_faults() {
-    return g_rosetta_config == nullptr || g_rosetta_config->precise_faults != 0;
-}
-
 // Bytes an x87 instruction reads or writes through its memory operand.
 static int x87_access_bytes(const IRInstr& insn, const IROperand& op) {
     switch (insn.opcode()) {
@@ -323,7 +319,7 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
     // the flag clear, as every request that ends does.
     const RequestEntry entry = capture_request_entry(*translation_result);
     cache.native_transport = transport ? 1 : 0;
-    if (native_boundary && precise_faults())
+    if (native_boundary && precise_faults_enabled())
         emit_fault_probe(*translation_result, instr_array[insn_idx]);
     const bool traced =
         native_boundary && x87trace::matches(instr_array, static_cast<size_t>(num_instrs));
@@ -547,7 +543,7 @@ static auto translate_instruction_impl(TranslationResult* translation_result, IR
                 // exit conversion, so the extra replies cost little.  An
                 // adjacent fild m64 / fistp m64 pair stays one reply (see
                 // try_fuse_fld_group).
-                const int run = cache.native_transport && precise_faults()
+                const int run = cache.native_transport && precise_faults_enabled()
                                     ? 1
                                     : X87Cache::lookahead(instr_array, num_instrs, insn_idx);
                 cache.set_run(run);
