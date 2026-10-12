@@ -486,12 +486,15 @@ auto translate_fild(TranslationResult* a1, IRInstr* a2) -> void {
 
     const int Wd_tmp = alloc_gpr(*a1, 2);
     const int Wd_tmp2 = alloc_gpr(*a1, 3);
-    const int Wd_int = alloc_free_gpr(*a1);  // survives emit_x87_push
     const int Dd_val = alloc_free_fpr(*a1);
 
-    // Step 1: compute source memory address
+    // Step 1: compute source memory address.  Wd_int is allocated after it:
+    // a GS operand takes two scratch registers plus the fixed X29 while the
+    // address is formed, and with Xst_base held in a run there is no room
+    // for Wd_int as well.
     const int addr_reg =
         compute_operand_address(*a1, /*is_64bit=*/true, &a2->operands[0], GPR::XZR);
+    const int Wd_int = alloc_free_gpr(*a1);  // survives emit_x87_push
 
     // Step 2: load integer from memory into Wd_int, sign-extending as needed.
     // Wd_int is a free-pool register distinct from Wd_tmp, so emit_x87_push
