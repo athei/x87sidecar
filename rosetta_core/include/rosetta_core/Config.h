@@ -57,6 +57,14 @@ struct RosettaConfig {
                                       //   bit-exact and a fused one is not.  The difference
                                       //   amplifies through cancellation (corrupted audio
                                       //   resample steps in Call of Duty 2).
+    uint8_t ignore_ftz_daz;           // X87_IGNORE_FTZ_DAZ        clear FPCR.FZ/FIZ for the
+                                      //   length of each x87 reply and restore them after, so
+                                      //   MXCSR.FTZ/DAZ no longer flush x87 denormals (real
+                                      //   x87 ignores both bits).  Default OFF: when off the
+                                      //   reply boundary is unchanged; when on, every reply
+                                      //   gains 6 instructions (13 and two taken branches
+                                      //   with values on the x87 stack) and, with FTZ or
+                                      //   DAZ set, two FPCR writes (about 20 ns).
     uint8_t enable_fma_reduce;        // X87_ENABLE_FMA_REDUCE     NEON FMA-reduction pass
                                       //                           (default ON, but it only sees
                                       //                           FMAdd nodes pass_fma creates,

@@ -4,6 +4,8 @@
 
 #include "rosetta_core/AssemblerBuffer.h"
 #include "rosetta_core/AssemblerHelpers.hpp"
+#include "rosetta_core/Config.h"
+#include "rosetta_core/CoreConfig.h"
 #include "rosetta_core/TranslatorX87Helpers.hpp"
 
 namespace TranslatorX87 {
@@ -262,6 +264,100 @@ void emit_f64_to_f80(AssemblerBuffer& buf, int Xaddr_slot, int Dd_src, int Xbits
     emit_str_imm(buf, 1, Wexp, Xaddr_slot, 4);
 }
 
+// X87_IGNORE_FTZ_DAZ=1. Real x87 has no flush-to-zero: MXCSR.FTZ and DAZ only
+// apply to SSE. Rosetta maps them to FPCR.FZ (bit 24) and FPCR.FIZ (bit 0),
+// and the emitted x87 code does its arithmetic and f32/f64 conversions under
+// the guest's FPCR, so with either bit set a denormal input or result becomes
+// zero, down to a plain `fld m32; fstp m32` copy. With the knob set, the reply
+// clears both bits on entry and puts them back on exit. With it unset (the
+// default) the boundary emits exactly what it emits without this code, so
+// programs that never set FTZ or DAZ pay nothing.
+//
+// FPCR is only written when a bit has to change. On an M5 Max a MSR to FPCR
+// costs about 3.5 ns even when it writes the value already there, and about
+// 10 ns when it changes FZ or FIZ, against under 1 ns for a short run. A
+// taken branch per boundary was measurable on short runs too, so in the usual
+// case (no flush bit set, nothing to convert) both bits are folded into the
+// empty-stack test and the boundary still takes one branch. With values on
+// the stack, entry and exit each take one more branch.
+//
+// A signal handler that interrupts a run starts with the FPCR the run set,
+// so it reads FTZ and DAZ as clear; the MXCSR in its signal context is
+// correct, and the interrupted code gets both bits back when it returns.
+//
+// Stash, the halfword at +6: bit 0 set when the exit has to restore, bit 1
+// the original FZ, bit 2 the original FIZ. Every entry writes it, after the
+// entry conversion has read native slot 0, and the exit reads it before the
+// exit conversion rewrites that slot. It is free only because the compact
+// layout keeps doubles at +8, stride 8, and so never touches +6..+7 between
+// the two conversions. If values are ever kept inside the native slots
+// (+6, stride 10) instead, this halfword is slot 0's data and the stash must
+// move somewhere else.
+//
+// Nothing here touches NZCV and every branch goes forward.
+static constexpr int16_t kFpcrStashHalfword = 3;  // +6, in halfwords
+static constexpr int kFpcrFz = 24;
+static constexpr int kFpcrFiz = 0;
+
+static bool ignore_ftz_daz() {
+    return g_rosetta_config != nullptr && g_rosetta_config->ignore_ftz_daz != 0;
+}
+
+static void patch_forward(AssemblerBuffer& buf, size_t at) {
+    buf.data[at / 4] |= static_cast<uint32_t>((buf.end - at) / 4) << 5;
+}
+
+static void emit_tbnz(AssemblerBuffer& buf, int Wt, int bit) {
+    buf.emit(0x37000000U | (static_cast<uint32_t>(bit) << 19) | static_cast<uint32_t>(Wt));
+}
+
+// Wquiet = Wtags1 with bit 16 kept only when no flush bit is set in Wfpcr:
+//   BIC Wquiet, Wtags1, Wfpcr, LSL #16   (FIZ, bit 0)
+//   BIC Wquiet, Wquiet, Wfpcr, LSR #8    (FZ, bit 24)
+static void emit_quiet_entry_test(AssemblerBuffer& buf, int Wtags1, int Wfpcr, int Wquiet) {
+    emit_logical_shifted_reg(buf, 0, /*AND*/ 0, /*n=*/1, /*LSL*/ 0, Wfpcr, 16 - kFpcrFiz, Wtags1,
+                             Wquiet);
+    emit_logical_shifted_reg(buf, 0, /*AND*/ 0, /*n=*/1, /*LSR*/ 1, Wfpcr, kFpcrFz - 16, Wquiet,
+                             Wquiet);
+}
+
+// Entry path for a non-empty stack or a set flush bit. Reads FPCR again, since
+// the conversion reused the registers. With neither bit set it branches to
+// `to_quiet`; otherwise it stores the stash, clears both bits and branches to
+// `to_done`. The caller patches both branches.
+static void emit_fpcr_enter_slow(AssemblerBuffer& buf, int base, int Xfpcr, int Wbits,
+                                 size_t& to_quiet, size_t& to_done) {
+    emit_mrs_fpcr(buf, Xfpcr);
+    emit_bitfield(buf, 0, /*UBFM*/ 2, 0, kFpcrFz, kFpcrFz, Xfpcr, Wbits);        // FZ -> bit 0
+    emit_bitfield(buf, 0, /*BFM*/ 1, 0, /*immr=*/31, /*imms=*/0, Xfpcr, Wbits);  // FIZ -> bit 1
+    to_quiet = buf.end;
+    emit_cbz(buf, 0, 0, Wbits, 0);
+    emit_bitfield(buf, 0, /*UBFM*/ 2, 0, 31, 30, Wbits, Wbits);  // LSL #1
+    LogicalImmEncoding one;
+    is_bitmask_immediate(false, 1, one);
+    emit_orr_imm(buf, 0, Wbits, Wbits, one.N, one.immr, one.imms);
+    emit_ldr_str_imm(buf, 1, 0, /*STR*/ 0, kFpcrStashHalfword, base, Wbits);
+    LogicalImmEncoding no_fz;
+    LogicalImmEncoding no_fiz;
+    is_bitmask_immediate(false, ~(uint64_t(1) << kFpcrFz) & 0xFFFFFFFFULL, no_fz);
+    is_bitmask_immediate(false, ~(uint64_t(1) << kFpcrFiz) & 0xFFFFFFFFULL, no_fiz);
+    emit_and_imm(buf, 0, Xfpcr, no_fz.N, no_fz.immr, no_fz.imms, Xfpcr);
+    emit_and_imm(buf, 0, Xfpcr, no_fiz.N, no_fiz.immr, no_fiz.imms, Xfpcr);
+    emit_msr_fpcr(buf, Xfpcr);
+    to_done = buf.end;
+    buf.emit(0x14000000U);  // B .done
+}
+
+// Exit restore, entered with the stash in Wstash (bit 0 known set).
+static void emit_fpcr_restore(AssemblerBuffer& buf, int Xfpcr, int Wstash) {
+    emit_mrs_fpcr(buf, Xfpcr);
+    emit_bitfield(buf, 0, /*UBFM*/ 2, 0, 1, 31, Wstash, Wstash);                   // LSR #1
+    emit_bitfield(buf, 0, /*BFM*/ 1, 0, /*immr=*/32 - kFpcrFz, 0, Wstash, Xfpcr);  // BFI #24, #1
+    emit_bitfield(buf, 0, /*UBFM*/ 2, 0, 1, 31, Wstash, Wstash);                   // LSR #1
+    emit_bitfield(buf, 0, /*BFM*/ 1, 0, kFpcrFiz, 0, Wstash, Xfpcr);               // BFXIL #0, #1
+    emit_msr_fpcr(buf, Xfpcr);
+}
+
 // Rosetta imports/exports physical x87 slots as packed f80 at +6, stride 10.
 // Our emitters use compact doubles at +8, stride 8, only within one reply.
 // Convert in place from low to high when shrinking, high to low when expanding,
@@ -280,12 +376,36 @@ void emit_native_state_boundary(TranslationResult& tr, bool entering) {
     const int tmp = alloc_free_gpr(tr);
     const int fp = alloc_free_fpr(tr);
     emit_x87_base(buf, tr, base);
+    // Without X87_IGNORE_FTZ_DAZ the boundary is the plain conversion: no
+    // FPCR access, no stash, and `quiet` is never emitted.
+    const bool fpcr = ignore_ftz_daz();
+    // Entry: Xmant = FPCR. Exit: Wsign = stash.
+    if (fpcr && entering)
+        emit_mrs_fpcr(buf, mant);
+    else if (fpcr)
+        emit_ldr_str_imm(buf, 1, 0, /*LDR*/ 1, kFpcrStashHalfword, base, sign);
     emit_ldr_str_imm(buf, 1, 0, 1, 2, base, exp);
     // The empty-stack path leaves NZCV untouched. Adding one to a loaded
-    // halfword sets bit 16 exactly when every tag is empty (0xffff).
+    // halfword sets bit 16 exactly when every tag is empty (0xffff). Waux
+    // keeps that bit only when FPCR needs no change either.
     emit_add_imm(buf, 0, 0, 0, 0, 1, exp, exp);
+    size_t quiet = 0;
+    if (fpcr) {
+        if (entering)
+            emit_quiet_entry_test(buf, exp, mant, aux);
+        else  // BIC Waux, Wexp, Wsign, LSL #16 (restore flag)
+            emit_logical_shifted_reg(buf, 0, /*AND*/ 0, /*n=*/1, /*LSL*/ 0, sign, 16, exp, aux);
+        quiet = buf.end;
+        emit_tbnz(buf, aux, 16);  // .quiet
+        if (!entering) {
+            const auto keep = buf.end;
+            emit_cbz(buf, 0, 0, sign, 0);  // CBZ Wsign, .convert
+            emit_fpcr_restore(buf, mant, sign);
+            patch_forward(buf, keep);
+        }
+    }
     const auto empty = buf.end;
-    buf.emit(0x37000000U | (16U << 19) | exp);  // TBNZ Wexp, #16, .done
+    emit_tbnz(buf, exp, 16);  // entry: .fpcr, exit: .quiet (knob off: .done)
     emit_mrs_nzcv(buf, flags);
     for (int j = 0; j < 8; ++j) {
         const int i = entering ? j : 7 - j;
@@ -307,7 +427,24 @@ void emit_native_state_boundary(TranslationResult& tr, bool entering) {
         buf.data[skip / 4] = 0x54000000U | (static_cast<uint32_t>((buf.end - skip) / 4) << 5);
     }
     emit_msr_nzcv(buf, flags);
-    buf.data[empty / 4] |= static_cast<uint32_t>((buf.end - empty) / 4) << 5;
+    if (!fpcr) {
+        patch_forward(buf, empty);
+    } else if (entering) {
+        // .fpcr, after the conversion has read native slot 0 at +6.
+        patch_forward(buf, empty);
+        size_t to_quiet = 0;
+        size_t to_done = 0;
+        emit_fpcr_enter_slow(buf, base, mant, sign, to_quiet, to_done);
+        // .quiet: nothing to restore on exit.
+        patch_forward(buf, to_quiet);
+        patch_forward(buf, quiet);
+        emit_ldr_str_imm(buf, 1, 0, /*STR*/ 0, kFpcrStashHalfword, base, GPR::XZR);
+        // .done
+        buf.data[to_done / 4] |= static_cast<uint32_t>((buf.end - to_done) / 4) & 0x3FFFFFFU;
+    } else {
+        patch_forward(buf, empty);
+        patch_forward(buf, quiet);
+    }
     free_fpr(tr, fp);
     tr.free_gpr_mask = saved_mask;
 }

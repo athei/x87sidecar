@@ -315,6 +315,18 @@ has to get right too. FMA contraction is opt-in (`X87_ENABLE_FMA_CONTRACT=1`) be
 before the add, and at the 53-bit precision Windows processes run at the
 unfused form is the exact one.
 
+The sidecar holds x87 values as binary64 rather than the 80-bit extended
+format. At the 53-bit precision control Windows uses, arithmetic results
+match the hardware as long as intermediate values stay inside the binary64
+exponent range; at 64-bit or 24-bit precision control, for 64-bit
+integers above 2^53 and for sequences that carry extra precision from one
+instruction to the next, such as the `fyl2x`-based `pow`, they do not. A
+`fild m64; fistp m64` copy inside one translated run and an adjacent
+`fld m80; fstp m80` pair move their bytes unchanged; a `fild m64; fistp m64`
+copy whose halves fall in different blocks is still rounded.
+[docs/internals.md](docs/internals.md#precision-and-the-floating-point-environment)
+lists the measured differences, including how x87 code interacts with MXCSR.
+
 When an asynchronous signal lands inside a translated run, Rosetta steps to the next instruction-map entry and takes
 the guest state from there, so every instruction the sidecar emits is one
 the runtime's decoder knows, control flow only goes forward, and a run is
@@ -365,12 +377,13 @@ and then under the sidecar in ten configurations (default, IR off, fusions
 off, hook bypassed, FMA contraction on, clamped register pool, pressure
 relief off, fast rounding, bridging off, bridging v2 off), plus a
 cooperative-attach smoke test, the two decoder tests three ways, the inline
-BCD translators with `X87_STOCK_BCD=0`, an allocation fault-injection phase
-and an IR replay phase. The stock run is the baseline: a case that fails
-there is reported XFAIL in later phases rather than gating, and the stock
-run itself may only fail for tests listed in `KNOWN_STOCK_DIVERGENCE`. The
-harness uses the default attach path, so it needs `x87sidecar_entitled` or
-root.
+BCD translators with `X87_STOCK_BCD=0`, an allocation fault-injection phase,
+the FTZ/DAZ test with and without `X87_IGNORE_FTZ_DAZ` (`test_x87_ftz_daz`
+runs only in that phase) and an IR replay phase. The stock run is the
+baseline: a case that fails there is reported XFAIL in later phases rather
+than gating, and the stock run itself may only fail for tests listed in
+`KNOWN_STOCK_DIVERGENCE`. The harness uses the default attach path, so it
+needs `x87sidecar_entitled` or root.
 
 When the translator runs out of scratch registers it declines the request
 and stock Rosetta translates that instruction, which keeps a program running
@@ -397,12 +410,14 @@ knowing. Bracketed values are defaults.
 | variable | effect |
 |---|---|
 | `X87_ENABLE_FMA_CONTRACT=1` | fold `fmul` + `fadd`/`fsub` into one FMA [off, see above] |
+| `X87_IGNORE_FTZ_DAZ=1` | keep x87 denormals when the program sets MXCSR FTZ or DAZ, as real x87 does; costs 6 to 13 instructions per x87 run (plus up to two taken branches when the x87 stack is not empty), and about 20 ns per run while FTZ or DAZ is set [off, see [docs/internals.md](docs/internals.md#precision-and-the-floating-point-environment)] |
 | `X87_FAST_ROUND=1` | skip rounding-mode dispatch; unsafe for code that uses `fldcw`. `=2` skips it only in blocks with no control-word writer, still speculative [off] |
 | `X87_ENABLE_BRIDGE=0` | disable carrying one IR run across short `mov`/`lea` gaps between x87 segments [on] |
 | `X87_BRIDGE_V2=0` | disable bridging across flag-writing ALU whose flags Rosetta's liveness proves dead [on] |
 | `X87_ENABLE_IR_SPLIT=0`, `X87_ENABLE_IR_REMAT=0` | disable register-pressure relief: splitting over-pressure runs, sinking long-lived values [on] |
 | `X87_DISABLE_X87_IR=1` | direct translator only, no IR pipeline |
 | `X87_DISABLE_ALL_FUSIONS=1`, `X87_DISABLE_FUSIONS=f1,f2` | disable every fusion, or the named ones (`--help` lists the names) |
+| `X87_DISABLE_FUSIONS=fild_fistp,fld_fstp_m80` | send `fild m64; fistp m64` and `fld m80; fstp m80` copies through binary64 instead of copying the bytes exactly [both on] |
 | `X87_DISABLE_SINGLE_FAST=1`, `X87_DISABLE_CACHE=1` | disable the single-op fast path, the cross-instruction register cache |
 | `X87_STRICT_ALLOC=1` | assert when the translator runs out of scratch registers, instead of declining the request to stock with one `failed in block hash=0xH` line [off; the test harness sets it] |
 
@@ -448,6 +463,7 @@ Loader and sidecar diagnostics:
 | `X87_NO_IR_CACHE=1`, `X87_NO_TCO_CACHE=1` | re-read the IR array or the thread-context layout on every request |
 | `X87_NO_PREAUTH=1` | skip acquiring the developer-tools right before launch (default attach only) |
 | `X87_FORCE_UNSUPPORTED=1` | treat the installed Rosetta as unsupported at launch; a cooperative target then runs without the hook |
+| `X87_FAIL_ALLOC_EVERY=N` | test-only fault injection: every Nth scratch register allocation fails as if the pool were empty, to exercise the decline path [off] |
 | `X87_FORCE_ABANDON=entry\|decode\|thread` | give up after the named hook step; a cooperative target is rolled back and runs without the hook |
 
 ## License

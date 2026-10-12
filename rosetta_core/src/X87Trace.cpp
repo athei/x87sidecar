@@ -59,7 +59,7 @@ void emit_boundary(TranslationResult& tr, uint64_t site, bool end_of_block) {
     emit_str_imm(buf, 3, value, record, 3);
     emit_mrs_nzcv(buf, value);
     emit_str_imm(buf, 3, value, record, 4);
-    buf.emit(0xD53B4400U | uint32_t(value));  // MRS Xvalue, FPCR
+    emit_mrs_fpcr(buf, value);
     emit_str_imm(buf, 3, value, record, 5);
     emit_x87_base(buf, tr, state);
     for (int i = 0; i < 11; ++i) {
