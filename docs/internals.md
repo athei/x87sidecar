@@ -118,6 +118,88 @@ every iteration bit for bit. Stock Rosetta itself shifts the x87 stack when
 a signal lands in its `fcomp`, `fcompp` or `ficomp` translations; the
 harness records that as a stock divergence.
 
+## Memory faults inside emitted code
+
+A synchronous fault, such as a load from a `PROT_NONE` page, is recovered
+the other way round. The faulting instruction must not complete, so the
+runtime cannot step forward. It rolls back instead: it takes the ARM code
+from the start of the faulting pc's instruction-map entry up to the faulting
+instruction, and asks the translator library whether any of it changed
+state. If nothing did, the guest handler gets the entry's x86 address as rip
+and the guest state from the thread context. If something did, the runtime
+aborts the process with `unexpectedly need to EmulateForward on a
+synchronous exception`. As far as that check is concerned, these change
+state: every store, including atomics; writes to NZCV or FPCR; writes to x0
+through x15 and x17, which hold guest registers; and all scalar
+floating-point data processing, `fmov` and `fcvt` included, because it can
+set FPSR flags. Loads into scratch registers, writes to x16, x22 through x30,
+and `bl` do not count.
+
+Stock Rosetta has one map entry per x86 instruction, and its x87
+translations access guest memory before they change anything: `fldl (%rsi)`
+is `ldr x22, [x6]` followed by a call into a runtime routine, and
+`fstps (%rsi)` is a call that returns the value, then `str w22, [x6]`, then
+the pop. The routines' own floating-point work is out of the check's sight.
+
+The sidecar's replies start with the conversion from the native register
+layout to the compact one, which compares and stores, so a fault in any
+guest access after it aborts, even in a lone `fstps`. So the memory
+operand of each reply's first x87 instruction is probed before anything
+else in the reply (`emit_fault_probe`): its first and last byte are
+loaded, with a single load of the access width when that is 2, 4 or 8
+bytes, and the target of a store also gets `staddb wzr`, an atomic add of
+zero to its first byte, which leaves memory unchanged and faults where a
+store would. The atomic counts as a state change, so a reply can only
+hold one, and it comes last. A fault in a probe rolls back to the reply's
+start, which is that instruction with the state from before it, and once
+the probes pass, the real access cannot fault. For an operand with a base
+and a displacement the probe is two instructions for a load and three for
+a store; for a bare register, one and two. The probe instructions are
+ordinary loads and an LSE atomic, which the runtime also steps over for
+asynchronous signals: stock translates `lock add` to `ldaddal`.
+
+That covers an x87 memory instruction alone in its reply, the first
+instruction of a run (IR, fusion or bridged), and every instruction of a
+native transport run: a run of only integer loads and stores is answered
+one instruction per reply, so each access starts its own reply. Those
+replies have no conversion at either end, so splitting them costs little:
+in `test_delphi_move` a run of two `fild` or two `fistp` takes six or
+seven more instructions as two replies than as one, and `fild` and
+`fistp` still copy the native slot exactly. One exception is kept: an
+adjacent `fild m64; fistp m64` pair stays one fused reply of about five
+instructions, which as two replies would be about ninety, and it is the
+inner loop of `System.Move`.
+A fault in its store rolls back to the `fild`, with the state from before
+it: a handler that makes the page accessible and returns gets the right
+result, one that skips the reported instruction does not. The nested
+pairs of that fusion (`fild; fild; fistp; fistp`) are not used in such
+runs, because a second store behind the first would abort; split, two
+nested pairs take about a hundred instructions instead of nine. Delphi's
+`System.Move` has no such sequence.
+
+A fault in a later instruction of a floating-point run still aborts. That
+instruction has no map entry of its own, and giving it one would mean
+writing the x87 state back to memory in the native layout before every
+memory access of the run, which is the cost the run reply exists to avoid.
+Probing the later accesses at the start of the reply as well would not help:
+the rollback would report the run's first instruction as rip, so a handler
+that skips the faulting instruction would skip the wrong one, and a second
+store probe would itself change state before the faulting one. This needs
+the x87 state to stay in the native layout throughout. A store that crosses
+from a writable page into a read-only one also still aborts, since only the
+first byte can be write-probed. `X87_PRECISE_FAULTS=0` turns the probes and
+the transport split off, for bisecting, and with `X87_NATIVE_TRANSPORT=0`
+an integer-only run is an ordinary floating-point run again.
+
+`tests/test_x87_sync_fault.c` checks rip, fault address, control word,
+status word, tags and stack contents in the handler against a reference
+taken just before the instruction, then either makes the page accessible
+and returns or moves rip past the instruction, and compares the final state
+and memory with an unfaulted run and with a run that leaves the instruction
+out. The harness runs the cases above; `SYNC_FAULT_IN_RUN=1` adds the ones
+inside longer floating-point runs, which abort under the sidecar and pass
+under stock Rosetta.
+
 ## When the translator runs out of registers
 
 The IR pipeline checks a run's register pressure against the scratch pools
