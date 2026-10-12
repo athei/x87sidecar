@@ -116,7 +116,8 @@ struct RosettaConfig {
                                       //                           fallback.
     uint8_t native_transport;         // X87_NATIVE_TRANSPORT      (default ON) a reply whose x87
                                       //                           ops are all fild / fist / fistp /
-                                      //                           fisttp / fldcw / fnstcw / fnop
+                                      //                           fisttp / fldcw / fnstcw and the
+                                      //                           no-ops fnop / fdisi / feni
                                       //                           works on Rosetta's native 80-bit
                                       //                           slots directly, so int64 values
                                       //                           held on the x87 stack across

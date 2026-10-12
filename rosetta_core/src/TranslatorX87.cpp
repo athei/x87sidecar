@@ -1,6 +1,7 @@
 #include "rosetta_core/TranslatorX87.h"
 
 #include <bit>
+#include <cassert>
 #include <cstdint>
 #include <utility>
 
@@ -3015,6 +3016,7 @@ static void translate_int_store_native(TranslationResult* a1, IRInstr* a2, Nativ
 
     // ST(0) is physical slot TOP: a transport reply has no FXCH, so the
     // permutation is always the identity here.
+    assert(!a1->x87_cache.perm_dirty && "native transport reply with a pending FXCH permutation");
     emit_native_slot_addr(buf, Xslot, Xbase, Wd_top);
     emit_f80_slot_to_int(buf, Xbase, Xslot, Xint, Xm, Wx, Wd_tmp, round, bits);
     free_gpr(*a1, Wx);
