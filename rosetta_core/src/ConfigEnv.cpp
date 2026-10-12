@@ -138,6 +138,7 @@ RosettaConfig load_config_from_env() {
     cfg.disable_x87_ir = env_truthy("X87_DISABLE_X87_IR") ? 1 : 0;
     cfg.disable_x87_single_fast = env_truthy("X87_DISABLE_SINGLE_FAST") ? 1 : 0;
     cfg.enable_fma_contract = env_truthy("X87_ENABLE_FMA_CONTRACT") ? 1 : 0;
+    cfg.ignore_ftz_daz = env_truthy("X87_IGNORE_FTZ_DAZ") ? 1 : 0;
     cfg.enable_fma_reduce = env_default_on("X87_ENABLE_FMA_REDUCE");
     cfg.enable_ir_split = env_default_on("X87_ENABLE_IR_SPLIT");
     cfg.enable_ir_remat = env_default_on("X87_ENABLE_IR_REMAT");
@@ -431,6 +432,13 @@ void print_env_help(std::FILE* out) {
         "                                before the add, and at the 53-bit precision\n"
         "                                Windows processes run at the unfused form is\n"
         "                                bit-exact while the fused one is not\n"
+        "  X87_IGNORE_FTZ_DAZ=1          keep x87 denormals when the program sets\n"
+        "                                MXCSR.FTZ or DAZ, as real x87 does: each x87\n"
+        "                                run clears FPCR.FZ/FIZ and restores them after.\n"
+        "                                Off by default; when on, every run gains 6 to\n"
+        "                                13 instructions (and two taken branches when\n"
+        "                                the x87 stack is not empty), and with FTZ or\n"
+        "                                DAZ set two FPCR writes (about 20 ns per run)\n"
         "  X87_ENABLE_FMA_REDUCE=0       disable NEON FMA-reduction lowering for serial\n"
         "                                FMADD chains.  Default ON, but it only acts on\n"
         "                                the FMAdd nodes contraction creates, so it\n"

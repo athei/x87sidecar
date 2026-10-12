@@ -163,12 +163,52 @@ example across a call.
 
 Rosetta maps MXCSR.RC to FPCR.RMode, MXCSR.FTZ to FPCR.FZ and MXCSR.DAZ to
 FPCR.FIZ, and the emitted x87 code runs under that FPCR. Real x87 ignores all
-three. So a program that sets FTZ or DAZ for its SSE code also gets its x87
-denormals flushed to zero, down to a plain `fld m32; fstp m32` copy of a
-denormal float, which MSVC `/arch:IA32` code uses for float copies, and,
-under DAZ, a denormal compares equal to zero. Stock Rosetta keeps them.
+three. So by default a program that sets FTZ or DAZ for its SSE code also
+gets its x87 denormals flushed to zero, down to a plain `fld m32; fstp m32`
+copy of a denormal float, which MSVC `/arch:IA32` code uses for float
+copies, and, under DAZ, a denormal compares equal to zero. Stock Rosetta
+keeps them.
 
-Rounding control has the same cause: x87 arithmetic rounds by MXCSR.RC
+`X87_IGNORE_FTZ_DAZ=1` makes each translation reply clear FZ and FIZ on
+entry and restore them on exit (see `emit_native_state_boundary`). It is off
+by default because it has a cost for every program, not only for the ones
+that set FTZ or DAZ. With neither bit set and an empty x87 stack at both
+ends of the reply, a reply gains six instructions and no taken branch. With
+values on the stack, entry gains nine instructions and one taken branch and
+exit four instructions and one taken branch. On the benchmarks that costs up
+to 36 percent on the one-instruction loops of `bench_load` and `bench_store`,
+3 to 28 percent on the short chains of `bench_fstp_fld`, and up to 13
+percent on the dot product, `f2xm1` and `fsin` benchmarks. With a bit set,
+the two FPCR writes cost about 20 ns per reply: a loop around
+`fld m32; fstp m32` goes from under 1 ns per iteration to 22 ns, where stock
+Rosetta takes 10 ns, and a loop around a six-instruction arithmetic run goes
+from 1.2 ns to 23 ns, where stock takes 72 ns. With the knob off the emitted
+code is the same as without the feature.
+
+With the knob on, a signal handler that interrupts an x87 run sees FTZ and
+DAZ clear: `stmxcsr` in the handler reads them as off, because the handler
+starts with the FPCR the run had cleared. The MXCSR saved in the signal
+context is correct, and the interrupted code gets FTZ and DAZ back when the
+handler returns. Under a SIGUSR1 storm against a loop of short x87 runs with
+both bits set, between 0.02 and 4 percent of the handlers saw them clear,
+depending on the configuration and the run.
+
+The knob keeps the original FZ and FIZ bits in the halfword at +6 of the x87
+state. That halfword belongs to native slot 0, and is free only because the
+compact layout keeps its doubles at +8, stride 8, and the entry and exit
+conversions read and write slot 0 before and after the halfword is used. If
+the sidecar ever keeps values inside the native slots (+6, stride 10)
+between the conversions, the saved bits have to move somewhere else.
+
+`test_x87_ftz_daz` covers loads, stores, arithmetic and compares under each
+bit, the guest's FTZ and DAZ still applying to SSE code later in the same
+block, and a signal storm while the bits are set. The SSE checks report a
+skip on a runtime that does not apply the bit to SSE at all; the x87 checks
+never do. `run_tests.sh` runs it in a phase of its own: natively and with
+the knob it must pass, and without the knob it must fail with its failure
+count rather than crash.
+
+The knob does not cover rounding control: x87 arithmetic rounds by MXCSR.RC
 rather than by the RC field of the control word. The control word's RC is
 honoured by `fist`, `fistp` and `frndint`, which dispatch on it explicitly,
 but `fadd` and the other arithmetic instructions round to nearest under a

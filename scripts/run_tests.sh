@@ -27,6 +27,9 @@
 #      must trap under native Rosetta, pass under x87sidecar (the
 #      decode_opcode hook substitutes a decodable encoding), and trap again
 #      under X87_NO_DECODE_HOOK=1
+#  13. test_x87_ftz_daz: passes under native Rosetta and under x87sidecar
+#      with X87_IGNORE_FTZ_DAZ=1 (default, IR off, fusions off), and must
+#      still fail under x87sidecar without the knob
 #   R. replay tests/data/geom_block_874c40.ir under --fpr-pool 8 and
 #      assert the pressure splits keep it on the IR path (fpr_fail=0)
 #
@@ -611,6 +614,63 @@ if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then
         expect_decode "ARPL   x87sidecar"           pass "$LOADER" "$ARPL_BIN"
         expect_decode "ARPL   X87_NO_DECODE_HOOK=1" trap env X87_NO_DECODE_HOOK=1 "$LOADER" \
             "$ARPL_BIN"
+    fi
+fi
+
+# ── Phase 13: X87_IGNORE_FTZ_DAZ (x87 denormals under MXCSR FTZ/DAZ) ─────
+# test_x87_ftz_daz is not in ALL_TESTS because its result depends on a knob
+# that is off by default: without X87_IGNORE_FTZ_DAZ=1 the sidecar flushes
+# x87 denormals when MXCSR.FTZ or DAZ is set, which the test reports as
+# failures.  Here it must pass natively and with the knob on (the boundary
+# code is shared by every dispatch path, so default, IR off and fusions off
+# cover it), and must still fail with the knob off, so a knob that silently
+# stopped working, or a default that changed, does not pass unnoticed.
+if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then
+    echo ""
+    echo -e "${BOLD}=== Phase 13: X87_IGNORE_FTZ_DAZ (x87 denormals under FTZ/DAZ) ===${NC}"
+
+    FTZ_BIN="$TESTS_BIN/test_x87_ftz_daz"
+    if [[ ! -x "$FTZ_BIN" ]]; then
+        echo -e "${YELLOW}SKIP${NC}  test_x87_ftz_daz  (binary not found)"
+        ERRORS=$((ERRORS + 1))
+    else
+        # $1 = label, $2 = 'pass' or 'fail' (what the run must do), $3.. = command
+        expect_ftz() {
+            local label="$1" want="$2"
+            shift 2
+            TOTAL=$((TOTAL + 1))
+            local out exit_code=0
+            out=$("$@" 2>/dev/null | filter_runtime_lines) || exit_code=$?
+            # A run that ends any other way (a signal, an abort, no summary
+            # line) is a crash, never the expected failure.
+            local got="crash (exit=$exit_code)"
+            if [[ $exit_code -eq 0 ]] && ! grep -qE 'FAIL' <<<"$out" &&
+                grep -qE '^0 failure' <<<"$out"; then
+                got="pass"
+            elif [[ $exit_code -eq 1 ]] && grep -qE '^[1-9][0-9]* failure' <<<"$out"; then
+                got="fail"
+            fi
+            local verb="fails"
+            [[ "$want" == "pass" ]] && verb="passes"
+            if [[ "$got" == "$want" ]]; then
+                echo -e "${GREEN}PASS${NC}  $label  ($verb as expected)"
+                PASSED=$((PASSED + 1))
+            else
+                echo -e "${RED}FAIL${NC}  $label  (wanted $want, got $got)"
+                FAILED=$((FAILED + 1))
+                awk '/FAIL/ && ++n <= 6 { print "      " $0 }' <<<"$out"
+                tail -3 <<<"$out" | sed 's/^/      /'
+            fi
+        }
+
+        expect_ftz "ftz_daz  native Rosetta"             pass "$FTZ_BIN"
+        expect_ftz "ftz_daz  knob on"                    pass env X87_IGNORE_FTZ_DAZ=1 \
+            "$LOADER" "$FTZ_BIN"
+        expect_ftz "ftz_daz  knob on, IR off"            pass env X87_IGNORE_FTZ_DAZ=1 \
+            X87_DISABLE_X87_IR=1 "$LOADER" "$FTZ_BIN"
+        expect_ftz "ftz_daz  knob on, IR + fusions off"  pass env X87_IGNORE_FTZ_DAZ=1 \
+            X87_DISABLE_X87_IR=1 X87_DISABLE_ALL_FUSIONS=1 "$LOADER" "$FTZ_BIN"
+        expect_ftz "ftz_daz  knob off (flushes)"         fail "$LOADER" "$FTZ_BIN"
     fi
 fi
 

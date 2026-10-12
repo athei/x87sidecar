@@ -930,6 +930,16 @@ auto emit_msr_nzcv(AssemblerBuffer& buf, int Xd) -> void {
     buf.emit(0xD51B4200U | static_cast<uint32_t>(Xd & 0x1F));
 }
 
+auto emit_mrs_fpcr(AssemblerBuffer& buf, int Xd) -> void {
+    // MRS Xd, FPCR: op0=3, op1=3, CRn=4, CRm=4, op2=0
+    buf.emit(0xD53B4400U | static_cast<uint32_t>(Xd & 0x1F));
+}
+
+auto emit_msr_fpcr(AssemblerBuffer& buf, int Xd) -> void {
+    // MSR FPCR, Xd: same sysreg with L=0
+    buf.emit(0xD51B4400U | static_cast<uint32_t>(Xd & 0x1F));
+}
+
 auto emit_cbz(AssemblerBuffer& buf, int is_64bit, int is_nz, int Rt, int imm19) -> void {
     // CBZ/CBNZ Rt, #imm19
     // Encoding: sf | 011010 | b5=0 | op | imm19 | Rt

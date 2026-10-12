@@ -366,13 +366,14 @@ python3 scripts/test_unhooked_fallback.py  # unhooked fallback, no privileges
 bash scripts/run_benchmarks.sh           # build + benchmark table
 ```
 
-The harness runs 90 self-checking x86-64 test binaries under stock Rosetta
+The harness runs 92 self-checking x86-64 test binaries under stock Rosetta
 and then under the sidecar in ten configurations (default, IR off, fusions
 off, hook bypassed, FMA contraction on, clamped register pool, pressure
 relief off, fast rounding, bridging off, bridging v2 off), plus a
-cooperative-attach smoke test, the two decoder tests three ways and an IR
-replay phase. The stock run is the baseline: a case that fails there is
-reported XFAIL in later phases rather than gating, and the stock run itself
+cooperative-attach smoke test, the two decoder tests three ways, the FTZ/DAZ
+test with and without `X87_IGNORE_FTZ_DAZ` and an IR replay phase. The stock
+run is the baseline: a case that fails there is reported XFAIL in later
+phases rather than gating, and the stock run itself
 may only fail for tests listed in `KNOWN_STOCK_DIVERGENCE`. The harness uses
 the default attach path, so it needs `x87sidecar_entitled` or root.
 
@@ -394,6 +395,7 @@ knowing. Bracketed values are defaults.
 | variable | effect |
 |---|---|
 | `X87_ENABLE_FMA_CONTRACT=1` | fold `fmul` + `fadd`/`fsub` into one FMA [off, see above] |
+| `X87_IGNORE_FTZ_DAZ=1` | keep x87 denormals when the program sets MXCSR FTZ or DAZ, as real x87 does; costs 6 to 13 instructions per x87 run (plus up to two taken branches when the x87 stack is not empty), and about 20 ns per run while FTZ or DAZ is set [off, see [docs/internals.md](docs/internals.md#precision-and-the-floating-point-environment)] |
 | `X87_FAST_ROUND=1` | skip rounding-mode dispatch; unsafe for code that uses `fldcw`. `=2` skips it only in blocks with no control-word writer, still speculative [off] |
 | `X87_ENABLE_BRIDGE=0` | disable carrying one IR run across short `mov`/`lea` gaps between x87 segments [on] |
 | `X87_BRIDGE_V2=0` | disable bridging across flag-writing ALU whose flags Rosetta's liveness proves dead [on] |
