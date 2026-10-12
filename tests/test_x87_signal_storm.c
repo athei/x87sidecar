@@ -30,6 +30,7 @@
 #include <math.h>
 #include <pthread.h>
 #include <signal.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -125,25 +126,54 @@ static void* jit_thread(void* arg) {
 
 /* ── the x87 sequences ────────────────────────────────────────────────── */
 
-/* Input block, rax points at it.  Offsets are what the asm bodies use. */
+/* Input block, rax points at it.  The asm bodies address its fields through
+ * the OFF_* offsets below, which the static asserts pin to the layout (a
+ * long double is 16-byte aligned, so f80 sits at +48, not right after i64). */
 struct input {
-    double d;          /* +0   */
-    float f;           /* +8   */
-    float pad_f;       /* +12  */
-    int32_t i32;       /* +16  */
-    int32_t pad_i;     /* +20  */
-    int16_t i16;       /* +24  */
-    int16_t pad_s[3];  /* +26  */
-    int64_t i64;       /* +32  */
-    long double f80;   /* +40, 16 bytes */
-    unsigned char bcd[10]; /* +56 */
+    double d;
+    float f;
+    float pad_f;
+    int32_t i32;
+    int32_t pad_i;
+    int16_t i16;
+    int16_t pad_s[3];
+    int64_t i64;
+    long double f80;
+    unsigned char bcd[10];
     unsigned char pad_b[6];
-    uint16_t cw;       /* +72  */
+    uint16_t cw;
     uint16_t pad_c[3];
-    double d2;         /* +80  */
-    double small;      /* +88  */
-    unsigned char scratch[1024] __attribute__((aligned(16))); /* +96 */
+    double d2;
+    double small;
+    unsigned char scratch[1024] __attribute__((aligned(16)));
 };
+
+#define OFF_D 0
+#define OFF_F 8
+#define OFF_I32 16
+#define OFF_I16 24
+#define OFF_I64 32
+#define OFF_F80 48
+#define OFF_BCD 64
+#define OFF_CW 80
+#define OFF_D2 88
+#define OFF_SMALL 96
+#define OFF_SCRATCH 112
+
+_Static_assert(offsetof(struct input, d) == OFF_D, "d offset");
+_Static_assert(offsetof(struct input, f) == OFF_F, "f offset");
+_Static_assert(offsetof(struct input, i32) == OFF_I32, "i32 offset");
+_Static_assert(offsetof(struct input, i16) == OFF_I16, "i16 offset");
+_Static_assert(offsetof(struct input, i64) == OFF_I64, "i64 offset");
+_Static_assert(offsetof(struct input, f80) == OFF_F80, "f80 offset");
+_Static_assert(offsetof(struct input, bcd) == OFF_BCD, "bcd offset");
+_Static_assert(offsetof(struct input, cw) == OFF_CW, "cw offset");
+_Static_assert(offsetof(struct input, d2) == OFF_D2, "d2 offset");
+_Static_assert(offsetof(struct input, small) == OFF_SMALL, "small offset");
+_Static_assert(offsetof(struct input, scratch) == OFF_SCRATCH, "scratch offset");
+/* fxsave needs a 16-byte aligned area and writes 512 bytes. */
+_Static_assert(OFF_SCRATCH % 16 == 0, "scratch alignment");
+_Static_assert(sizeof(((struct input*)0)->scratch) >= 512, "scratch size");
 
 struct result {
     double value;
@@ -171,21 +201,25 @@ static uint64_t as_u64(double d) {
                            "st(5)", "st(6)", "st(7)");                               \
     }
 
-#define D "qword ptr [rax]"
-#define F "dword ptr [rax+8]"
-#define I32 "dword ptr [rax+16]"
-#define I16 "word ptr [rax+24]"
-#define I64 "qword ptr [rax+32]"
-#define F80 "tbyte ptr [rax+40]"
-#define BCD "tbyte ptr [rax+56]"
-#define CW "word ptr [rax+72]"
-#define D2 "qword ptr [rax+80]"
-#define SMALL "qword ptr [rax+88]"
-#define S32 "dword ptr [rax+96]"
-#define S16 "word ptr [rax+96]"
-#define S64 "qword ptr [rax+96]"
-#define S80 "tbyte ptr [rax+96]"
-#define SMEM "[rax+96]"
+#define STR_(x) #x
+#define STR(x) STR_(x)
+#define AT(off) "[rax+" STR(off) "]"
+
+#define D "qword ptr " AT(OFF_D)
+#define F "dword ptr " AT(OFF_F)
+#define I32 "dword ptr " AT(OFF_I32)
+#define I16 "word ptr " AT(OFF_I16)
+#define I64 "qword ptr " AT(OFF_I64)
+#define F80 "tbyte ptr " AT(OFF_F80)
+#define BCD "tbyte ptr " AT(OFF_BCD)
+#define CW "word ptr " AT(OFF_CW)
+#define D2 "qword ptr " AT(OFF_D2)
+#define SMALL "qword ptr " AT(OFF_SMALL)
+#define S32 "dword ptr " AT(OFF_SCRATCH)
+#define S16 "word ptr " AT(OFF_SCRATCH)
+#define S64 "qword ptr " AT(OFF_SCRATCH)
+#define S80 "tbyte ptr " AT(OFF_SCRATCH)
+#define SMEM AT(OFF_SCRATCH)
 
 /* Issue #23's chain: 2^x. */
 X87_SEQ(seq_chain,
@@ -322,7 +356,9 @@ X87_SEQ(seq_fxch, "fld " D "\n\tfld " D2 "\n\tfxch\n\tfstp st(1)\n\t")
 X87_SEQ(seq_fxch2, "fld " D "\n\tfld " D2 "\n\tfld1\n\tfxch st(2)\n\tfaddp\n\tfaddp\n\t")
 X87_SEQ(seq_ffree, "fld " D "\n\tfld " D2 "\n\tffree st(1)\n\tfstp st(1)\n\t")
 X87_SEQ(seq_fincdec, "fld " D "\n\tfdecstp\n\tfincstp\n\t")
-X87_SEQ(seq_fldcw, "fldcw " CW "\n\tfld " D "\n\t")
+/* fldcw loads input.cw and puts the caller's control word back afterwards,
+ * so no case changes the control word the later ones run under. */
+X87_SEQ(seq_fldcw, "fnstcw " S16 "\n\tfldcw " CW "\n\tfld " D "\n\tfldcw " S16 "\n\t")
 X87_SEQ(seq_fnstcw, "fld " D "\n\tfnstcw " S16 "\n\tfldcw " S16 "\n\t")
 X87_SEQ(seq_fnstsw, "fld " D "\n\tfnstsw " S16 "\n\t")
 X87_SEQ(seq_fnclex, "fld " D "\n\tfnclex\n\t")
