@@ -322,8 +322,11 @@ exponent range; at 64-bit or 24-bit precision control, for 64-bit
 integers above 2^53 that meet arithmetic and for sequences that carry extra
 precision from one instruction to the next, such as the `fyl2x`-based
 `pow`, they do not. A `fild m64; fistp m64` copy moves its eight bytes
-unchanged, within a block or across blocks, and so does an adjacent
-`fld m80; fstp m80` pair.
+unchanged, within a block or across blocks, unless the value is still on
+the stack while a reply with floating-point work runs, or sits inside a
+mixed run that the fusion does not match with the IR off; then a value
+above 2^53 is rounded. An adjacent `fld m80; fstp m80` pair is copied
+unchanged.
 [docs/internals.md](docs/internals.md#precision-and-the-floating-point-environment)
 lists the measured differences, including how x87 code interacts with MXCSR.
 
