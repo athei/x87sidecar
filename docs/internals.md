@@ -150,8 +150,10 @@ translated. The register form, the only one seen in practice, needs four
 scratch GPRs.
 
 `X87_STRICT_ALLOC=1` keeps the assert, and the test harness sets it so a
-pressure-model bug still fails a test. `X87_FAIL_ALLOC_EVERY=N` fails every
-Nth allocation in the process. The harness runs a set of tests with it at
+pressure-model bug still fails a test. `ir_pressure_replay` and
+`rollback_diff` always assert; `profile_analyze` declines and reports the
+count in an `alloc_declines` row. `X87_FAIL_ALLOC_EVERY=N` fails every Nth
+allocation in the process. The harness runs a set of tests with it at
 several N without strict mode; `test_alloc_decline` covers long runs, split
 runs, a bridged region, integer stores, compares, `fucomi` followed by
 `fcmovu`, and a transcendental. When no allocation fails, the emitted code

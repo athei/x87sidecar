@@ -202,6 +202,9 @@ int main(int argc, char** argv) try {
     cfg.log_ir_split = log_split ? 1 : 0;
     cfg.fpr_pool_limit = static_cast<uint8_t>(fpr_pool);
     cfg.gpr_pool_limit = static_cast<uint8_t>(gpr_pool);
+    // A replay exists to find pressure-model bugs, so a failed allocation
+    // asserts here instead of being declined.
+    cfg.strict_alloc = 1;
 
     const ReplayStats s = runOnce(instrs, cfg);
 
