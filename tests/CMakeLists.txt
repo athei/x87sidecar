@@ -105,6 +105,7 @@ add_x86_sample_lowzero(test_x87_signal_context)
 add_x86_sample(test_x87_native_state)
 add_x86_sample(test_m80_copy)
 add_x86_sample(test_bcd_exact)
+add_x86_sample(test_alloc_decline)
 
 # Invoked by the opt-in tracing regression, not the arithmetic phase matrix.
 add_x86_sample(test_x87_trace_threads)

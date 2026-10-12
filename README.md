@@ -360,16 +360,24 @@ python3 scripts/test_unhooked_fallback.py  # unhooked fallback, no privileges
 bash scripts/run_benchmarks.sh           # build + benchmark table
 ```
 
-The harness runs 94 self-checking x86-64 test binaries under stock Rosetta
+The harness runs 103 self-checking x86-64 test binaries under stock Rosetta
 and then under the sidecar in ten configurations (default, IR off, fusions
 off, hook bypassed, FMA contraction on, clamped register pool, pressure
 relief off, fast rounding, bridging off, bridging v2 off), plus a
 cooperative-attach smoke test, the two decoder tests three ways, the inline
-BCD translators with `X87_STOCK_BCD=0` and an IR replay phase. The stock
-run is the baseline: a case that fails there is reported XFAIL in later
-phases rather than gating, and the stock run itself may only fail for tests
-listed in `KNOWN_STOCK_DIVERGENCE`. The harness uses the default attach
-path, so it needs `x87sidecar_entitled` or root.
+BCD translators with `X87_STOCK_BCD=0`, an allocation fault-injection phase
+and an IR replay phase. The stock run is the baseline: a case that fails
+there is reported XFAIL in later phases rather than gating, and the stock
+run itself may only fail for tests listed in `KNOWN_STOCK_DIVERGENCE`. The
+harness uses the default attach path, so it needs `x87sidecar_entitled` or
+root.
+
+When the translator runs out of scratch registers it declines the request
+and stock Rosetta translates that instruction, which keeps a program running
+on a register-pressure bug. The harness sets `X87_STRICT_ALLOC=1` so that
+the same bug fails a test instead, and its fault-injection phase runs a set
+of tests with `X87_FAIL_ALLOC_EVERY=N`, which fails every Nth allocation, to
+check that the declined requests leave every result unchanged.
 
 | tool | purpose |
 |---|---|
@@ -396,6 +404,7 @@ knowing. Bracketed values are defaults.
 | `X87_DISABLE_X87_IR=1` | direct translator only, no IR pipeline |
 | `X87_DISABLE_ALL_FUSIONS=1`, `X87_DISABLE_FUSIONS=f1,f2` | disable every fusion, or the named ones (`--help` lists the names) |
 | `X87_DISABLE_SINGLE_FAST=1`, `X87_DISABLE_CACHE=1` | disable the single-op fast path, the cross-instruction register cache |
+| `X87_STRICT_ALLOC=1` | assert when the translator runs out of scratch registers, instead of declining the request to stock with one `failed in block hash=0xH` line [off; the test harness sets it] |
 
 Per-block knobs, keyed by the content hash `profile_analyze` prints, for
 bisecting a suspected miscompile in a live workload or working around one at
@@ -434,7 +443,7 @@ Loader and sidecar diagnostics:
 | variable | effect |
 |---|---|
 | `X87_LOGS=1` | verbose loader logging |
-| `X87_LOG_THROUGHPUT=1` | requests per second, traps per request and cache hit rates every 2 s |
+| `X87_LOG_THROUGHPUT=1` | requests per second, traps per request, cache hit rates and allocation declines every 2 s |
 | `X87_LOG_OPS=1` | one line per translated op; high volume, for freeze bisects |
 | `X87_NO_IR_CACHE=1`, `X87_NO_TCO_CACHE=1` | re-read the IR array or the thread-context layout on every request |
 | `X87_NO_PREAUTH=1` | skip acquiring the developer-tools right before launch (default attach only) |

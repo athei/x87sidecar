@@ -66,6 +66,7 @@ std::atomic<uint64_t> g_statVmSyscalls{0};  // mach_vm_* traps on the translate 
 std::atomic<uint64_t> g_statTcoHits{0};     // TCO served from cache
 std::atomic<uint64_t> g_statIrHits{0};      // IR array served from cache (probe read only)
 std::atomic<uint64_t> g_statIrMisses{0};    // IR array read in full
+std::atomic<uint64_t> g_statAllocDeclines{0};  // requests declined after an allocation failure
 
 // X87_PROFILE state.  Opened once at sidecar startup; closed when the
 // receive thread exits (i.e. parent process death).  Block-id assignment
@@ -2672,9 +2673,39 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask, const Translate
             kOpcodeName_fxrstor,  // SSE-era extended
         };
         const uint16_t op = localIR[req.insn_idx].opcode();
+        // The translator ran out of scratch registers and put the request
+        // back as it found it (Translator::translate_instruction).  Stock
+        // translates this instruction and the rest of the block, whose
+        // requests come back declined without a line of their own.  One line
+        // per failure, since each one is a pressure-model bug.
+        if (tr.alloc_failure != nullptr) {
+            if (!irc.hash_valid) {
+                irc.hash = profile::hash_ir_stream(localIR, req.num_instrs);
+                irc.hash_valid = true;
+            }
+            const uint64_t n = g_statAllocDeclines.fetch_add(1, std::memory_order_relaxed) + 1;
+            const char* name = (op < kOpcodeNames.size()) ? kOpcodeNames[op] : "?";
+            char line[224];
+            snprintf(line, sizeof(line),
+                     "[rosettax87] %s failed in block hash=0x%016llx at %s idx=%llu/%llu; "
+                     "declined to stock with the rest of the block (#%llu)\n",
+                     tr.alloc_failure, static_cast<unsigned long long>(irc.hash), name,
+                     static_cast<unsigned long long>(req.insn_idx),
+                     static_cast<unsigned long long>(req.num_instrs),
+                     static_cast<unsigned long long>(n));
+            fputs(line, stdout);
+            fflush(stdout);
+            if (FILE* df = diagLog()) {
+                fputs(line, df);
+                fflush(df);
+            }
+        }
         // stock_hash_hit, stock_bcd_hit: the None reply is a deliberate
         // whole-block exclusion, not a missing handler.
-        const bool deliberate = stock_hash_hit || stock_bcd_hit ||
+        const bool declined_block =
+            tr.x87_cache.declined_block == reinterpret_cast<const IRBlock*>(req.block);
+        const bool deliberate = stock_hash_hit || stock_bcd_hit || tr.alloc_failure != nullptr ||
+                                declined_block ||
                                 std::ranges::find(kKnownFallThrough, op) != kKnownFallThrough.end();
         if (!deliberate) {
             const char* name = (op < kOpcodeNames.size()) ? kOpcodeNames[op] : "?";
@@ -2833,13 +2864,15 @@ void* reporterEntry(void* /*arg*/) {
         // cumulative hits/misses so rates are readable at a glance.
         fprintf(stdout,
                 "[rosettax87] sidecar: %llu req/s (total %llu) vm/req=%.2f "
-                "ir=%llu/%llu tco=%llu\n",
+                "ir=%llu/%llu tco=%llu alloc_declines=%llu\n",
                 static_cast<unsigned long long>(delta / kReporterPeriodSec),
                 static_cast<unsigned long long>(cur),
                 static_cast<double>(vm_delta) / static_cast<double>(delta),
                 static_cast<unsigned long long>(g_statIrHits.load(std::memory_order_relaxed)),
                 static_cast<unsigned long long>(g_statIrMisses.load(std::memory_order_relaxed)),
-                static_cast<unsigned long long>(g_statTcoHits.load(std::memory_order_relaxed)));
+                static_cast<unsigned long long>(g_statTcoHits.load(std::memory_order_relaxed)),
+                static_cast<unsigned long long>(
+                    g_statAllocDeclines.load(std::memory_order_relaxed)));
         fflush(stdout);
     }
 }

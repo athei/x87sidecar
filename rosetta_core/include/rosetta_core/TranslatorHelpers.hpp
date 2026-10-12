@@ -26,7 +26,10 @@
 //
 // Allocates the next available scratch GPR from the pool at pool_index.
 // Marks the register as occupied in translation.free_gpr_mask.
-// Asserts if the pool slot is already occupied — callers must not double-allocate.
+// If the pool slot is already occupied (callers must not double-allocate),
+// records the failure in translation.alloc_failure, which declines the
+// request, or asserts under X87_STRICT_ALLOC.  Every allocator below does
+// the same when its pool is empty.
 //
 // pool_index: position in kGprScratchPool (0-based). Use sequentially:
 //   0 for first scratch GPR, 1 for second, etc.
@@ -35,6 +38,10 @@
 // =============================================================================
 
 auto alloc_gpr(TranslationResult& translation, int pool_index) -> int;
+
+// X87_FAIL_ALLOC_EVERY: make every Nth allocation in the process fail as if
+// its pool were empty (0 = off).  Called by rosetta_set_config.
+void configure_alloc_fault_injection(uint32_t every);
 
 // ---------------------------------------------------------------------------
 // alloc_free_gpr — allocate lowest free scratch GPR directly from mask

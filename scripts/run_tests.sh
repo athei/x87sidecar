@@ -35,6 +35,9 @@
 #  13. x87sidecar with X87_STOCK_BCD=0 on test_fbld and test_fbstp, the only
 #      phase that reaches the inline FBLD/FBSTP translators (blocks
 #      containing them go to stock by default)
+#  14. a representative set under X87_FAIL_ALLOC_EVERY=N for several N,
+#      without X87_STRICT_ALLOC: requests whose register allocation fails
+#      are declined to stock, and every result must still match
 #   R. replay tests/data/geom_block_874c40.ir under --fpr-pool 8 and
 #      assert the pressure splits keep it on the IR path (fpr_fail=0), then
 #      replay tests/data/fist_pressure.ir the same way and assert it exits 0
@@ -42,6 +45,11 @@
 #      tests/data/ir_dup_input.ir and assert it exits 0 with every x87
 #      instruction on the IR path, then tests/data/ir_fpatan_rc.ir and
 #      assert it exits 0 with the fpatan's GPR peak predicted
+#
+# Every phase runs with X87_STRICT_ALLOC=1, so a register allocation that
+# fails asserts and crashes the test instead of being declined to stock.
+# The decline keeps a program running in the field; here a pressure-model
+# bug has to show up as a failure.  Phase 14 alone turns it off.
 #
 # Phase 1 doubles as the baseline the other phases are read against.  A
 # case that fails there fails with the sidecar nowhere in the picture, so
@@ -172,6 +180,7 @@ ALL_TESTS=(
     test_x87_native_state
     test_m80_copy
     test_bcd_exact
+    test_alloc_decline
 )
 
 RED='\033[0;31m'
@@ -199,6 +208,8 @@ if [[ ${#SELECTED_TESTS[@]} -gt 0 ]]; then
 else
     TESTS=("${ALL_TESTS[@]}")
 fi
+
+export X87_STRICT_ALLOC=1
 
 if [[ $DO_BUILD -eq 1 ]]; then
     echo -e "${CYAN}Building...${NC}"
@@ -699,6 +710,51 @@ if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then
         EXIT=0
         OUT=$(X87_STOCK_BCD=0 "$LOADER" "$BINARY" 2>/dev/null | filter_runtime_lines) || EXIT=$?
         check_output "$t" "$OUT" "$EXIT"
+    done
+fi
+
+# ── Phase 14: allocation failures declined to stock ──────────────────────
+# X87_FAIL_ALLOC_EVERY=N fails every Nth scratch register allocation, which
+# makes the translator drop the request it was working on and decline it.
+# The N values move the failures around: N=1 declines every request at its
+# first allocation, the larger ones land inside IR lowering, bridged regions,
+# split runs and transcendentals.  Results must match the other phases.  A
+# run at N=1 that never declined means the injection is not reaching the
+# allocators, which would make the phase test nothing.
+ALLOC_FAIL_TESTS=(
+    test_alloc_decline
+    test_x87_full
+    test_ir_split
+    test_bridge_alu
+    test_fistp_multi
+    test_fsincos
+    test_fxch
+    test_x87_native_state
+)
+ALLOC_FAIL_EVERY=(1 3 17 43 97 251)
+if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then
+    echo ""
+    echo -e "${BOLD}=== Phase 14: X87_FAIL_ALLOC_EVERY=N (allocation failures declined) ===${NC}"
+
+    for n in "${ALLOC_FAIL_EVERY[@]}"; do
+        for t in "${ALLOC_FAIL_TESTS[@]}"; do
+            BINARY="$TESTS_BIN/$t"
+            if [[ ! -x "$BINARY" ]]; then
+                echo -e "${YELLOW}SKIP${NC}  $t  (binary not found)"
+                ERRORS=$((ERRORS + 1))
+                continue
+            fi
+            EXIT=0
+            OUT=$(X87_STRICT_ALLOC=0 X87_FAIL_ALLOC_EVERY=$n "$LOADER" "$BINARY" 2>/dev/null |
+                filter_runtime_lines) || EXIT=$?
+            if [[ $n -eq 1 ]] && ! grep -q 'declined to stock' <<<"$OUT"; then
+                TOTAL=$((TOTAL + 1))
+                echo -e "${RED}FAIL${NC}  $t  (N=1 declined nothing)"
+                FAILED=$((FAILED + 1))
+                continue
+            fi
+            check_output "$t" "$OUT" "$EXIT"
+        done
     done
 fi
 

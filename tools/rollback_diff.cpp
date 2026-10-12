@@ -208,9 +208,12 @@ int main(int argc, char** argv) try {
 
     // Two configs: shipping defaults vs same + rollback enabled for both
     // investigation branches.  All other knobs equal.  Empty hash lists
-    // keep rollback firing whenever the per-branch enable knob is set.
+    // keep rollback firing whenever the per-branch enable knob is set.  A
+    // failed allocation asserts rather than being declined, so a pressure
+    // bug cannot hide as a silent difference between the two runs.
     const auto base_cfg = []() {
         RosettaConfig c{};
+        c.strict_alloc = 1;
         return c;
     };
 

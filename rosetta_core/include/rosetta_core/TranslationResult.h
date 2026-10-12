@@ -124,9 +124,17 @@ struct TranslationResult {
 
     // ── OPT-1: Per-instance x87 base/TOP register cache ────────────────────────
     X87Cache x87_cache;
+
+    // Name of the first allocator that could not hand out a scratch register
+    // during the current Translator::translate_instruction call, or null.
+    // Cleared on entry; when set on exit the call returned nullopt and left
+    // the result as it found it, so stock translates the instruction.
+    const char* alloc_failure;
 };
 
 // sizeof changed from 0x288 due to OPT-1 cache fields appended at end.
+// The in-process AOT hook patches stock's allocation size to 0x400.
+static_assert(sizeof(TranslationResult) <= 0x400, "TranslationResult outgrew the AOT allocation");
 static_assert(offsetof(TranslationResult, ir_module_data) == 0x00,
               "TranslationResult::ir_module_data offset mismatch");
 static_assert(offsetof(TranslationResult, insn_buf) == 0x10,
