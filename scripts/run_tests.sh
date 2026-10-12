@@ -249,6 +249,29 @@ filter_runtime_lines() {
     grep -v -E 'RosettaRuntimex87 built|Installing JIT|JIT Translation Hook|try_fuse_|CORE_LOG|\] X87_FAIL_ALLOC_EVERY='
 }
 
+# run_bounded SECONDS COMMAND...: run COMMAND in a process group of its own
+# and kill the whole group if it is still running after SECONDS, exiting 124
+# like timeout(1), which macOS does not ship.  For runs expected to end in
+# an abort, where a process left behind would otherwise stall the harness
+# until CI's idle timeout.  Otherwise exits as COMMAND did, 128 + the signal
+# number when a signal ended it.
+run_bounded() {
+    perl -e '
+        my $secs = shift;
+        my $pid = fork() // die "fork: $!";
+        if ($pid == 0) {
+            setpgrp(0, 0);
+            exec @ARGV or exit 127;
+        }
+        $SIG{ALRM} = sub { kill "KILL", -$pid; waitpid($pid, 0); exit 124; };
+        alarm $secs;
+        waitpid($pid, 0);
+        my $status = $?;
+        alarm 0;
+        exit($status & 127 ? 128 + ($status & 127) : $status >> 8);
+    ' "$@"
+}
+
 TOTAL=0
 PASSED=0
 FAILED=0
@@ -956,16 +979,25 @@ if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then
         done
         # Without the knob a store at the start of a reply has to abort the
         # process with the runtime's message; anything else, a pass
-        # included, means the knob or its default changed.
+        # included, means the knob or its default changed.  Through the
+        # cooperative attach, which the bundles use: on kernels where the
+        # default attach's release leaves the target traced (the reply-first
+        # detach in main.cpp), the runtime's abort is delivered as a Mach
+        # exception that nothing answers, so the target never exits and the
+        # sidecar waits for it forever.  That hung CI here.  Bounded, so
+        # that a hang reports a failure instead.
         TOTAL=$((TOTAL + 1))
         EXIT=0
-        OUT=$(SYNC_FAULT_CASE=s_fstp64 "$LOADER" "$SF_BIN" 2>&1) || EXIT=$?
-        if [[ $EXIT -ne 0 ]] &&
+        OUT=$(run_bounded 60 env SYNC_FAULT_CASE=s_fstp64 "$LOADER" --cooperative "$SF_BIN" 2>&1) ||
+            EXIT=$?
+        if [[ $EXIT -ne 0 && $EXIT -ne 124 ]] &&
             grep -q 'unexpectedly need to EmulateForward on a synchronous exception' <<<"$OUT"; then
             echo -e "${GREEN}PASS${NC}  sync_fault  knob off (aborts as expected)"
             PASSED=$((PASSED + 1))
         else
-            echo -e "${RED}FAIL${NC}  sync_fault  knob off  (wanted the EmulateForward abort, got exit=$EXIT)"
+            REASON="got exit=$EXIT"
+            [[ $EXIT -eq 124 ]] && REASON="timed out after 60 s"
+            echo -e "${RED}FAIL${NC}  sync_fault  knob off  (wanted the EmulateForward abort, $REASON)"
             FAILED=$((FAILED + 1))
             tail -3 <<<"$OUT" | sed 's/^/      /'
         fi
