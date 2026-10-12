@@ -146,9 +146,12 @@ static void emit_fld_value(AssemblerBuffer& buf, TranslationResult& a1,
         case kFildM16:
         case kFildM32:
         case kFildM64: {
-            const int Wd_int = alloc_free_gpr(a1);
+            // Address first: a GS operand needs two scratch registers plus
+            // the fixed X29 while it is formed, more than the callers leave
+            // free if Wd_int is already held.
             const int addr =
                 compute_operand_address(a1, /*is_64bit=*/true, &fld_instr->operands[0], GPR::XZR);
+            const int Wd_int = alloc_free_gpr(a1);
             if (cls.source == kFildM16) {
                 emit_ldr_str_imm(buf, 1, 0, 1, 0, addr, Wd_int);     // LDRH
                 emit_bitfield(buf, 0, 0, 0, 0, 15, Wd_int, Wd_int);  // SXTH

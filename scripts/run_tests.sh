@@ -34,7 +34,10 @@
 #   R. replay tests/data/geom_block_874c40.ir under --fpr-pool 8 and
 #      assert the pressure splits keep it on the IR path (fpr_fail=0), then
 #      replay tests/data/fist_pressure.ir the same way and assert it exits 0
-#      with one split per block
+#      with one split per block and no GPR refusals, then
+#      tests/data/ir_dup_input.ir and assert it exits 0 with every x87
+#      instruction on the IR path, then tests/data/ir_fpatan_rc.ir and
+#      assert it exits 0 with the fpatan's GPR peak predicted
 #
 # Phase 1 doubles as the baseline the other phases are read against.  A
 # case that fails there fails with the sidecar nowhere in the picture, so
@@ -97,6 +100,9 @@ ALL_TESTS=(
     test_ir_split
     test_ir_remat
     test_ir_split_trans
+    test_ir_dup_input
+    test_ir_fpatan_rc
+    test_ir_split_gs
     test_bridge_mov
     test_bridge_lea
     test_bridge_flags
@@ -117,6 +123,8 @@ ALL_TESTS=(
     test_ficom
     test_rc_recache
     test_fstpt_gs
+    test_mem_bare_reg
+    test_x87_gs_operand
     test_ir_gate_tag_push
     test_fma_reduce
     test_fma_reduce_strided
@@ -678,7 +686,10 @@ if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then
     # values live at an integer store, whose indefinite guard takes one more
     # FPR.  On the 8-slot pool the gate has to see that register and split,
     # or the lowering runs out of FPRs and asserts.  Exactly one split per
-    # block shows that every block still reaches its stores.
+    # block shows that every block still reaches its stores.  The suffix
+    # after each split starts with Xbase, Wd_top and Xst_base already held
+    # by the run cache; no GPR refusals shows the GPR model does not charge
+    # those to the pool a second time.
     echo ""
     echo -e "${BOLD}=== Replay: fist_pressure.ir under --fpr-pool 8 ===${NC}"
     TOTAL=$((TOTAL + 1))
@@ -690,11 +701,62 @@ if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then
         REXIT=0
         ROUT=$("$REPLAY_BIN" "$FIST_IR" --fpr-pool 8 2>&1) || REXIT=$?
         if [[ $REXIT -eq 0 ]] && grep -q '^ir_fpr_fail,0$' <<<"$ROUT" && \
-           grep -q '^ir_split,5$' <<<"$ROUT"; then
-            echo -e "${GREEN}PASS${NC}  fist_pressure_replay (fpr_fail=0, splits fired)"
+           grep -q '^ir_gpr_fail,0$' <<<"$ROUT" && grep -q '^ir_split,5$' <<<"$ROUT"; then
+            echo -e "${GREEN}PASS${NC}  fist_pressure_replay (fpr_fail=0, gpr_fail=0, splits fired)"
             PASSED=$((PASSED + 1))
         else
             echo -e "${RED}FAIL${NC}  fist_pressure_replay  (exit=$REXIT)"
+            echo "$ROUT" | sed 's/^/      /'
+            FAILED=$((FAILED + 1))
+        fi
+    fi
+
+    # tests/data/ir_dup_input.ir is test_ir_dup_input's four blocks: fyl2x,
+    # fpatan and fscale with both operands the same node, and just enough
+    # other values live to reach the 8-slot pool if that node is counted
+    # twice.  The run has to be relieved before the lowering asserts, and
+    # all 38 x87 instructions have to stay on the IR path.
+    echo ""
+    echo -e "${BOLD}=== Replay: ir_dup_input.ir under --fpr-pool 8 ===${NC}"
+    TOTAL=$((TOTAL + 1))
+    DUP_IR="$ROOT_DIR/tests/data/ir_dup_input.ir"
+    if [[ ! -x "$REPLAY_BIN" || ! -f "$DUP_IR" ]]; then
+        echo -e "${YELLOW}SKIP${NC}  ir_dup_input_replay  (tool or blob not found)"
+        ERRORS=$((ERRORS + 1))
+    else
+        REXIT=0
+        ROUT=$("$REPLAY_BIN" "$DUP_IR" --fpr-pool 8 2>&1) || REXIT=$?
+        if [[ $REXIT -eq 0 ]] && grep -q '^ir_fpr_fail,0$' <<<"$ROUT" && \
+           grep -q '^ir,38$' <<<"$ROUT"; then
+            echo -e "${GREEN}PASS${NC}  ir_dup_input_replay (fpr_fail=0, all on IR)"
+            PASSED=$((PASSED + 1))
+        else
+            echo -e "${RED}FAIL${NC}  ir_dup_input_replay  (exit=$REXIT)"
+            echo "$ROUT" | sed 's/^/      /'
+            FAILED=$((FAILED + 1))
+        fi
+    fi
+
+    # tests/data/ir_fpatan_rc.ir is test_ir_fpatan_rc's two blocks: fpatan
+    # in a run that pins the cached rounding control, at a fresh run start
+    # with the full 8-GPR pool.  The model has to predict 5 pinned + 4 for
+    # fpatan = 9 and keep the run off the lowering, which otherwise runs out
+    # of GPRs and asserts.
+    echo ""
+    echo -e "${BOLD}=== Replay: ir_fpatan_rc.ir on the full GPR pool ===${NC}"
+    TOTAL=$((TOTAL + 1))
+    FPATAN_IR="$ROOT_DIR/tests/data/ir_fpatan_rc.ir"
+    if [[ ! -x "$REPLAY_BIN" || ! -f "$FPATAN_IR" ]]; then
+        echo -e "${YELLOW}SKIP${NC}  ir_fpatan_rc_replay  (tool or blob not found)"
+        ERRORS=$((ERRORS + 1))
+    else
+        REXIT=0
+        ROUT=$("$REPLAY_BIN" "$FPATAN_IR" --fpr-pool 8 --gpr-pool 8 2>&1) || REXIT=$?
+        if [[ $REXIT -eq 0 ]] && grep -q '^max_gpr_peak,9$' <<<"$ROUT"; then
+            echo -e "${GREEN}PASS${NC}  ir_fpatan_rc_replay (gpr peak 9 seen)"
+            PASSED=$((PASSED + 1))
+        else
+            echo -e "${RED}FAIL${NC}  ir_fpatan_rc_replay  (exit=$REXIT)"
             echo "$ROUT" | sed 's/^/      /'
             FAILED=$((FAILED + 1))
         fi

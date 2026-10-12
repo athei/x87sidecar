@@ -112,6 +112,25 @@ static bool build_int_store(Context& ctx, IROperand* op, int16_t val_node, bool 
     return true;
 }
 
+// A memory operand with a segment override needs more scratch registers than
+// the single address register peak_live_gprs charges for it: the address
+// without the segment, the segment base, and for GS the fixed X29 that the
+// TLS base routine requires.  Such instructions end the run and go to the
+// per-instruction translators, as the bridge predicates already do for
+// integer instructions.  compute_operand_address reads seg_override at the
+// same offset for every operand kind it accepts, so check all three.
+static bool has_segment_override(const IRInstr& instr) {
+    for (int k = 0; k < instr.num_operands && k < 4; k++) {
+        const IROperand& op = instr.operands[k];
+        if ((op.kind == IROperandKind::MemRef || op.kind == IROperandKind::AbsMem ||
+             op.kind == IROperandKind::Immediate) &&
+            op.mem.seg_override != 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // ── Non-popping binary arithmetic ───────────────────────────────────────────
 
 // Handles FADD/FSUB/FSUBR/FMUL/FDIV/FDIVR (non-popping).
@@ -490,6 +509,11 @@ bool build(Context& ctx, IRInstr* instr_array, int64_t num_instrs, int64_t start
         const auto op = instr->opcode();
         const int16_t nodes_before = ctx.num_nodes;
         bool ok = true;
+
+        if (has_segment_override(*instr)) {
+            ctx.fail_opcode = static_cast<uint16_t>(op);
+            break;
+        }
 
         switch (op) {
             // ── Loads / pushes ──────────────────────────────────────────
