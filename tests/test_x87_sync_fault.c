@@ -94,10 +94,14 @@ enum group { PRECISE, IN_RUN };
  * whole.  BRIDGE_POST is a run that bridging joins across a mov. */
 #define RUN_PRE "fldl 0x10(%rdi)\nfmul %st(1), %st\n"
 #define RUN_POST "fldl 0x18(%rdi)\nfmulp\nfadd %st(1), %st\n"
+/* The same length for a stack one shorter, after a popping store. */
+#define RUN_POST_POP "fldl 0x18(%rdi)\nfmul %st(1), %st\nfadd %st(1), %st\n"
 #define BRIDGE_POST "fmull 0x10(%rdi)\nmov 0x38(%rdi), %rcx\nfaddl 0x18(%rdi)\nfstpl (%rdx)\n"
 /* Integer loads and stores only: a native transport run.  TR_PRE ends in
- * an m16 load so that an fistpll after it is not a fused copy pair. */
-#define TR_PRE "fildll 0x38(%rdi)\nfilds 0xc0(%rdi)\n"
+ * m16 loads so that an fistpll after it is not a fused copy pair, and so
+ * that TR_POST's 32-bit store finds a small value whether or not the
+ * instruction under test ran. */
+#define TR_PRE "fildll 0x38(%rdi)\nfilds 0xc0(%rdi)\nfilds 0xc0(%rdi)\n"
 #define TR_POST "fistpl 8(%rdx)\nfildl 0x24(%rdi)\nfistpll 16(%rdx)\n"
 
 #define CASES(X)                                                                                \
@@ -142,8 +146,8 @@ enum group { PRECISE, IN_RUN };
     X(PRECISE, r_first_fld80, M_F80, IN, "", "fldt (%rsi)", RUN_POST)                           \
     X(PRECISE, r_first_fild32, M_I32, IN, "", "fildl (%rsi)", RUN_POST)                         \
     X(PRECISE, r_first_fadd64, M_F64, IN, "", "faddl (%rsi)", RUN_POST)                         \
-    X(PRECISE, r_first_fstp64, M_NONE, IN, "", "fstpl (%rsi)", RUN_POST)                        \
-    X(PRECISE, r_first_fistp32, M_NONE, IN, "", "fistpl (%rsi)", RUN_POST)                      \
+    X(PRECISE, r_first_fstp64, M_NONE, IN, "", "fstpl (%rsi)", RUN_POST_POP)                    \
+    X(PRECISE, r_first_fistp32, M_NONE, IN, "", "fistpl (%rsi)", RUN_POST_POP)                  \
     X(PRECISE, r_first_fnstcw, M_NONE, IN, "", "fnstcw (%rsi)", RUN_POST)                       \
     X(PRECISE, b_first_fld64, M_F64, IN, "", "fldl (%rsi)", BRIDGE_POST)                        \
     X(PRECISE, b_first_fstp64, M_NONE, IN, "", "fstpl (%rsi)", "fldl 0x18(%rdi)\n" BRIDGE_POST) \
@@ -161,9 +165,9 @@ enum group { PRECISE, IN_RUN };
     X(PRECISE, t_fild32, M_I32, IN, TR_PRE, "fildl (%rsi)", "fistpl (%rdx)\n" TR_POST)          \
     X(PRECISE, t_fild64, M_I64, IN, TR_PRE, "fildll (%rsi)", "fistpll (%rdx)\n" TR_POST)        \
     X(PRECISE, t_fist32, M_NONE, IN, TR_PRE, "fistl (%rsi)", TR_POST)                           \
-    X(PRECISE, t_fistp16, M_NONE, IN, TR_PRE, "fistps (%rsi)", "fildll 0x38(%rdi)\n" TR_POST)   \
-    X(PRECISE, t_fistp64, M_NONE, IN, TR_PRE, "fistpll (%rsi)", "fildll 0x38(%rdi)\n" TR_POST)  \
-    X(PRECISE, t_fisttp32, M_NONE, IN, TR_PRE, "fisttpl (%rsi)", "fildll 0x38(%rdi)\n" TR_POST) \
+    X(PRECISE, t_fistp16, M_NONE, IN, TR_PRE, "fistps (%rsi)", "filds 0xc0(%rdi)\n" TR_POST)    \
+    X(PRECISE, t_fistp64, M_NONE, IN, TR_PRE, "fistpll (%rsi)", "filds 0xc0(%rdi)\n" TR_POST)   \
+    X(PRECISE, t_fisttp32, M_NONE, IN, TR_PRE, "fisttpl (%rsi)", "filds 0xc0(%rdi)\n" TR_POST)  \
     X(PRECISE, t_fldcw, M_CW, IN, TR_PRE, "fldcw (%rsi)", TR_POST)                              \
     X(PRECISE, t_fnstcw, M_NONE, IN, TR_PRE, "fnstcw (%rsi)", TR_POST)                          \
     X(PRECISE, t_first_fild64, M_I64, IN, "", "fildll (%rsi)", "fistpll (%rdx)\n" TR_POST)      \
@@ -171,8 +175,8 @@ enum group { PRECISE, IN_RUN };
     X(PRECISE, t_nested_store, M_NONE, IN, "fildll 0x38(%rdi)\nfildll 0x38(%rdi)\n"              \
       "fistpll 8(%rdx)\n", "fistpll (%rsi)", "")                                                \
     /* the access straddles into the protected page */                                          \
-    X(PRECISE, x_fld64, M_NONE, CROSS, "", "fldl (%rsi)", "")                                   \
-    X(PRECISE, x_fld80, M_NONE, CROSS, "", "fldt (%rsi)", RUN_POST)                             \
+    X(PRECISE, x_fld64, M_F64, CROSS, "", "fldl (%rsi)", "")                                    \
+    X(PRECISE, x_fld80, M_F80, CROSS, "", "fldt (%rsi)", RUN_POST)                              \
     X(PRECISE, x_fstp64, M_NONE, CROSS, "", "fstpl (%rsi)", "")                                 \
     X(PRECISE, x_fistp64, M_NONE, CROSS, TR_PRE, "fistpll (%rsi)", TR_POST)                     \
     X(PRECISE, x_fnsave, M_NONE, CROSS, "", "fnsave (%rsi)", "")                                \
@@ -385,6 +389,12 @@ static void capture(struct outcome* o, const struct io* io) {
     memcpy(o->scratch, scratch, SCRATCH);
 }
 
+/* Status word exception flags, stack fault and summary bit.  Stock Rosetta
+ * sets them and the sidecar does not (docs/internals.md), and under
+ * allocation failure injection the same instruction can be translated by
+ * either one from run to run, so they are not compared. */
+static const uint16_t kExceptionFlags = 0x00ff;
+
 static uint16_t u16(const uint8_t* p) {
     uint16_t v;
     memcpy(&v, p, 2);
@@ -418,7 +428,7 @@ static int check_context(const struct test_case* c, const char* how, const uint8
                seen.fcw, fcw);
         bad++;
     }
-    if (seen.fsw != fsw) {
+    if ((seen.fsw & ~kExceptionFlags) != (fsw & ~kExceptionFlags)) {
         printf("FAIL  sync fault %s %s: status word %04x, expected %04x\n", c->name, how,
                seen.fsw, fsw);
         bad++;
@@ -459,7 +469,9 @@ static int compare_outcome(const struct test_case* c, const char* how, const str
         if (((u16(want->save + 8) >> (2 * ((top + k) & 7))) & 3) != 3 &&
             memcmp(got->save + 28 + 10 * k, want->save + 28 + 10 * k, 10) != 0)
             regs_differ = 1;
-    if (memcmp(got->save, want->save, 12) != 0 || regs_differ) {
+    if (u16(got->save) != u16(want->save) ||
+        (u16(got->save + 4) & ~kExceptionFlags) != (u16(want->save + 4) & ~kExceptionFlags) ||
+        u16(got->save + 8) != u16(want->save + 8) || regs_differ) {
         printf("FAIL  sync fault %s %s: final x87 state differs (cw %04x/%04x sw %04x/%04x "
                "tw %04x/%04x)\n",
                c->name, how, u16(got->save), u16(want->save), u16(got->save + 4),
