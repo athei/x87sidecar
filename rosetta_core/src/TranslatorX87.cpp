@@ -2909,11 +2909,13 @@ auto translate_fild_native(TranslationResult* a1, IRInstr* a2) -> void {
 
     const int Wd_tmp = alloc_gpr(*a1, 2);
     const int Wd_tmp2 = alloc_gpr(*a1, 3);
-    const int Xint = alloc_free_gpr(*a1);  // survives the push
 
-    // Sign-extended int64 in Xint.
+    // Sign-extended int64 in Xint.  Xint is allocated after the address, as
+    // in translate_fild: a GS operand takes two scratch registers plus the
+    // fixed X29 while the address is formed.
     const int addr_reg =
         compute_operand_address(*a1, /*is_64bit=*/true, &a2->operands[0], GPR::XZR);
+    const int Xint = alloc_free_gpr(*a1);  // survives the push
     if (int_size == IROperandSize::S16) {
         emit_ldr_str_imm(buf, 1, 0, 1, 0, addr_reg, Xint);        // LDRH
         emit_bitfield(buf, 1, 0 /*SBFM*/, 1, 0, 15, Xint, Xint);  // SXTH Xint
