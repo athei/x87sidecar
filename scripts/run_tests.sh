@@ -49,7 +49,8 @@
 #  17. test_x87_sync_fault: passes under native Rosetta and under x87sidecar
 #      with X87_PRECISE_FAULTS=1 (default, IR off, fusions off, run cache
 #      off, clamped register pool, bridging off, X87_STOCK_BCD=0 and
-#      X87_FAIL_ALLOC_EVERY=N), and one of its faults must still abort the
+#      X87_FAIL_ALLOC_EVERY=N), with its in-run group too under
+#      X87_NATIVE_SLOTS=1, and one of its faults must still abort the
 #      process without the knob, under both the cooperative and the default
 #      attach
 #  18. test_crash_after_release: a target that is no longer traced after
@@ -1063,6 +1064,18 @@ if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then
             # shellcheck disable=SC2086
             OUT=$(run_bounded "$TEST_TIMEOUT" env X87_PRECISE_FAULTS=1 $cfg "$LOADER" "$SF_BIN" \
                 2>/dev/null | filter_runtime_lines) || EXIT=$?
+            check_output "test_x87_sync_fault" "$OUT" "$EXIT"
+        done
+        # X87_NATIVE_SLOTS ends a reply before every later memory access, so
+        # there the in-run group (SYNC_FAULT_IN_RUN=1) has to pass as well.
+        for cfg in "" "X87_DISABLE_X87_IR=1 X87_DISABLE_ALL_FUSIONS=1" "X87_DISABLE_CACHE=1" \
+            "X87_IGNORE_FTZ_DAZ=1"; do
+            echo "      X87_PRECISE_FAULTS=1 X87_NATIVE_SLOTS=1 SYNC_FAULT_IN_RUN=1 $cfg"
+            EXIT=0
+            # shellcheck disable=SC2086
+            OUT=$(run_bounded "$TEST_TIMEOUT" env X87_PRECISE_FAULTS=1 X87_NATIVE_SLOTS=1 \
+                SYNC_FAULT_IN_RUN=1 $cfg "$LOADER" "$SF_BIN" 2>/dev/null | filter_runtime_lines) ||
+                EXIT=$?
             check_output "test_x87_sync_fault" "$OUT" "$EXIT"
         done
         for n in "${ALLOC_FAIL_EVERY[@]}"; do

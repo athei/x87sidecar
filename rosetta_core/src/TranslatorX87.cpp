@@ -200,20 +200,17 @@ auto translate_fld(TranslationResult* a1, IRInstr* a2) -> void {
     if (a2->operands[0].kind == IROperandKind::Register &&
         x87_slot_holds_f80_at(resolve_depth(*a1, a2->operands[1].reg.reg.index()))) {
         // X87_NATIVE_SLOTS: ST(i) holds an 80-bit image; the new ST(0) gets
-        // the same ten bytes.
+        // the same ten bytes.  The image waits in Dd_val and an H register
+        // across the push, which needs every GPR the plain path gives it.
         const int depth_src = a2->operands[1].reg.reg.index();
-        const int Xt1 = alloc_free_gpr(*a1);
-        const int Xt2 = alloc_free_gpr(*a1);
-        emit_native_st_addr(buf, Xbase, Wd_top, resolve_depth(*a1, depth_src), Wd_tmp, Xst_base);
-        emit_ldr_str_imm(buf, 3, 0, /*LDR*/ 1, 0, Wd_tmp, Xt1);
-        emit_ldr_str_imm(buf, 1, 0, /*LDRH*/ 1, 4, Wd_tmp, Xt2);
+        const int Hd_val = alloc_free_fpr(*a1);
+        emit_native_slot_image(buf, Xbase, Wd_top, resolve_depth(*a1, depth_src), Wd_tmp, Dd_val,
+                               Hd_val, Xst_base, /*store=*/false);
         x87_push(buf, *a1, Xbase, Wd_top, Wd_tmp, Wd_tmp2);
         free_gpr(*a1, Wd_tmp2);
-        emit_native_st_addr(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Xst_base);
-        emit_ldr_str_imm(buf, 3, 0, /*STR*/ 0, 0, Wd_tmp, Xt1);
-        emit_ldr_str_imm(buf, 1, 0, /*STRH*/ 0, 4, Wd_tmp, Xt2);
-        free_gpr(*a1, Xt2);
-        free_gpr(*a1, Xt1);
+        emit_native_slot_image(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Dd_val, Hd_val,
+                               Xst_base, /*store=*/true);
+        free_fpr(*a1, Hd_val);
         x87_slot_note_native(resolve_depth(*a1, 0));
     } else if (a2->operands[0].kind == IROperandKind::Register) {
         // FLD ST(i) — D9 C0+i

@@ -34,10 +34,11 @@
  * reply, and the runtime can only roll a fault back to the start of a
  * reply, so a fault in an instruction that is not the first of its reply
  * still aborts the process (docs/internals.md, "Memory faults inside
- * emitted code").  The store of a fused fild m64 / fistp m64 pair is
- * rolled back to the fild instead, and a 10-byte store that crosses into a
- * read-only page aborts.  Those cases are in a second group that runs only
- * with SYNC_FAULT_IN_RUN=1; under stock Rosetta they pass.
+ * emitted code"), and the store of a fused fild m64 / fistp m64 pair is
+ * rolled back to the fild instead.  Those cases are in a second group that
+ * runs only with SYNC_FAULT_IN_RUN=1.  They pass under stock Rosetta, and
+ * under x87sidecar with X87_NATIVE_SLOTS=1 as well, which ends a reply
+ * before each later memory access when X87_PRECISE_FAULTS=1.
  *
  * SYNC_FAULT_CASE=<name> runs one case of either group (wc for the
  * IOSurface group); SYNC_FAULT_LIST=1 prints every name with its group.
@@ -131,8 +132,8 @@ static char scratch_area[4096] __attribute__((aligned(4096)));
 
 enum init { M_NONE, M_F32, M_F64, M_F80, M_I16, M_I32, M_I64, M_BCD, M_CW, M_ENV, M_SAVE };
 
-/* Groups: PRECISE must pass everywhere; IN_RUN is not precise under the
- * sidecar yet and runs only on request. */
+/* Groups: PRECISE must pass everywhere; IN_RUN is precise under the sidecar
+ * only with X87_NATIVE_SLOTS=1 and runs only on request. */
 enum group { PRECISE, IN_RUN };
 
 /* Protection of the target page while the case runs. */
@@ -271,6 +272,7 @@ enum err { E_RD, E_WR, E_WP };
     X(PRECISE, o_first_fstp64, M_NONE, IN, P_RO, E_WR, "", "fstpl (%rsi)", RUN_POST_POP)          \
     X(PRECISE, o_fstp_fld, M_NONE, IN, P_RO, E_WR, "", "fstpl (%rsi)", "fldl 0x10(%rdi)")         \
     X(PRECISE, o_cross_fstp64, M_NONE, CROSS, P_RO, E_WR, "", "fstpl (%rsi)", "")                 \
+    X(PRECISE, o_cross_fstp80, M_NONE, CROSS, P_RO, E_WR, "", "fstpt (%rsi)", "")                 \
     /* other operand forms */                                                                     \
     X(PRECISE, a_disp_fld64, M_F64, IN, P_NONE, E_RD, DISP_PRE, "fldl 0x40(%r8)", "")             \
     X(PRECISE, a_disp_fstp64, M_NONE, IN, P_NONE, E_WP, DISP_PRE, "fstpl 0x40(%r8)", "")          \
@@ -285,7 +287,7 @@ enum err { E_RD, E_WR, E_WP };
     X(PRECISE, a_gs_fld64, M_F64, IN, P_NONE, E_RD, GS_PRE, "fldl %gs:(%rcx)", "")                \
     X(PRECISE, a_gs_fstp64, M_NONE, IN, P_NONE, E_WP, GS_PRE, "fstpl %gs:(%rcx)", "")             \
     X(PRECISE, a_gs_fstp64_ro, M_NONE, IN, P_RO, E_WR, GS_PRE, "fstpl %gs:(%rcx)", "")            \
-    /* later in a floating-point run: still aborts under the sidecar */                           \
+    /* later in a floating-point run: precise only with X87_NATIVE_SLOTS=1 */                     \
     X(IN_RUN, r_fld32, M_F32, IN, P_NONE, E_RD, RUN_PRE, "flds (%rsi)", RUN_POST)                 \
     X(IN_RUN, r_fld64, M_F64, IN, P_NONE, E_RD, RUN_PRE, "fldl (%rsi)", RUN_POST)                 \
     X(IN_RUN, r_fld80, M_F80, IN, P_NONE, E_RD, RUN_PRE, "fldt (%rsi)", RUN_POST)                 \
@@ -338,9 +340,7 @@ enum err { E_RD, E_WR, E_WP };
       "fldl 0x10(%rdi)\nfmull 0x18(%rdi)\n", "fstpl (%rsi)", "")                                  \
     X(IN_RUN, f_arithp_fstp, M_NONE, IN, P_NONE, E_WP, "faddp\n", "fstpl (%rsi)", "")             \
     /* the store of a fused fild m64 / fistp m64 pair: rolled back to the fild */                 \
-    X(IN_RUN, t_pair_store, M_NONE, IN, P_NONE, E_WR, "fildll 0x38(%rdi)\n", "fistpll (%rsi)", "")\
-    /* a 10-byte store crossing into a read-only page: only its first byte is write-probed */     \
-    X(IN_RUN, o_cross_fstp80, M_NONE, CROSS, P_RO, E_WR, "", "fstpt (%rsi)", "")
+    X(IN_RUN, t_pair_store, M_NONE, IN, P_NONE, E_WR, "fildll 0x38(%rdi)\n", "fistpll (%rsi)", "")
 
 /* 32-bit compatibility mode. */
 #define CASES32(X)                                                                                \

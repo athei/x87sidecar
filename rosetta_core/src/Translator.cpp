@@ -438,6 +438,31 @@ static bool x87_writes_memory(uint16_t opcode) {
     }
 }
 
+static bool x87_accesses_memory(const IRInstr& insn) {
+    for (int i = 0; i < insn.num_operands && i < 4; i++) {
+        const auto kind = insn.operands[i].kind;
+        if (kind == IROperandKind::MemRef || kind == IROperandKind::AbsMem) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// X87_PRECISE_FAULTS with X87_NATIVE_SLOTS: every reply ends in the native
+// layout with nothing deferred, so a reply may stop before any instruction.
+// Stopping before each one that accesses guest memory makes that access the
+// first of its reply, where emit_fault_probe covers it and a fault rolls
+// back to that instruction with the state from before it.  Returns how many
+// instructions from idx (at least one, at most limit) a reply may take so
+// that only its first accesses memory.
+static int precise_window(const IRInstr* instrs, int64_t num, int64_t idx, int limit) {
+    int k = 1;
+    while (k < limit && idx + k < num && !x87_accesses_memory(instrs[idx + k])) {
+        k++;
+    }
+    return k;
+}
+
 // A memory fault in translated code is recovered by rolling back to the
 // start of the instruction-map entry the faulting pc belongs to, and there
 // is one entry per reply.  The runtime only rolls back when nothing before
@@ -455,7 +480,8 @@ static bool x87_writes_memory(uint16_t opcode) {
 // or of its first and last byte for 10 and 108 bytes; one load also covers
 // an unaligned access that crosses a page.  A store is probed by loading
 // those bytes and writing them back unchanged: the full access width for 2,
-// 4 and 8 bytes, otherwise the first byte after a load of the last.  The
+// 4 and 8 bytes, otherwise the first byte after a load of the last, or, when
+// the store crosses a page, the halfword that straddles the boundary.  The
 // write-back is the reply's only state change before the probe completes,
 // so a fault in it still rolls back, and it faults where the store would,
 // including on a read-only page.  An atomic would leave no window, but LSE
@@ -472,7 +498,8 @@ static bool x87_writes_memory(uint16_t opcode) {
 // PROT_NONE page faults in the probe's load, so the handler sees a read
 // fault where stock reports a write.  Accesses further into a reply are
 // not probed: rolling back to the reply start would report the wrong
-// instruction.
+// instruction.  With X87_NATIVE_SLOTS there are none: a reply ends before
+// every later access (precise_window).
 static void emit_fault_probe(TranslationResult& tr, IRInstr& insn) {
     IROperand* mem = nullptr;
     for (int i = 0; i < insn.num_operands && i < 4; i++) {
@@ -498,6 +525,33 @@ static void emit_fault_probe(TranslationResult& tr, IRInstr& insn) {
         if (store) {
             emit_ldr_str_imm(buf, size, 0, /*STR*/ 0, 0, Xaddr, Xval);
         }
+    } else if (store && bytes > 1) {
+        // A 10- or 108-byte store is written back as one halfword: the one
+        // that straddles the page boundary when the store crosses a page,
+        // its first two bytes otherwise, so all of it is on one page.  Both
+        // bytes are part of the store either way, and the one write-back
+        // faults on whichever page is not writable.  The runtime's check
+        // reads the code before the faulting instruction in order, ignoring
+        // branches, so there is no second write-back on another path: the
+        // address is selected without branching or flags.  With e = the
+        // last byte's address and c = page(e) - page(addr), 0 or 1:
+        //   p = addr + (((page(e) << 12) - 1 - addr) & -c)
+        const int Xend = alloc_free_gpr(tr);
+        const int Xc = alloc_free_gpr(tr);
+        emit_add_imm(buf, 1, 0, 0, 0, bytes - 1, Xaddr, Xend);
+        emit_bitfield(buf, 1, /*UBFM*/ 2, 1, 12, 63, Xend, Xend);  // page(e)
+        emit_bitfield(buf, 1, /*UBFM*/ 2, 1, 12, 63, Xaddr, Xc);   // page(addr)
+        emit_add_sub_shifted_reg(buf, 1, /*sub*/ 1, 0, 0, Xc, 0, Xend, Xc);       // c
+        emit_bitfield(buf, 1, /*UBFM*/ 2, 1, 52, 51, Xend, Xend);  // page(e) << 12
+        emit_add_sub_shifted_reg(buf, 1, /*sub*/ 1, 0, 0, Xaddr, 0, Xend, Xend);
+        emit_add_imm(buf, 1, /*sub*/ 1, 0, 0, 1, Xend, Xend);       // boundary - 1 - addr
+        emit_add_sub_shifted_reg(buf, 1, /*sub*/ 1, 0, 0, Xc, 0, GPR::XZR, Xc);  // -c
+        emit_logical_shifted_reg(buf, 1, /*AND*/ 0, 0, 0, Xc, 0, Xend, Xend);
+        emit_add_sub_shifted_reg(buf, 1, 0, 0, 0, Xend, 0, Xaddr, Xend);         // p
+        emit_ldr_str_imm(buf, /*size=*/1, 0, /*LDRH*/ 1, 0, Xend, Xval);
+        emit_ldr_str_imm(buf, 1, 0, /*STRH*/ 0, 0, Xend, Xval);
+        free_gpr(tr, Xc);
+        free_gpr(tr, Xend);
     } else {
         if (bytes > 1) {
             emit_ldr_str_imm(buf, /*size=*/0, 0, /*LDR*/ 1, bytes - 1, Xaddr, GPR::XZR);
@@ -806,9 +860,15 @@ static auto translate_instruction_impl(TranslationResult* translation_result, IR
                 // exit conversion, so the extra replies cost little.  An
                 // adjacent fild m64 / fistp m64 pair stays one reply (see
                 // try_fuse_fld_group).
-                const int run = cache.native_transport && precise_faults_enabled()
-                                    ? 1
-                                    : X87Cache::lookahead(instr_array, num_instrs, insn_idx);
+                int run = cache.native_transport && precise_faults_enabled()
+                              ? 1
+                              : X87Cache::lookahead(instr_array, num_instrs, insn_idx);
+                // With X87_NATIVE_SLOTS a floating-point run ends before each
+                // later memory access, for the same reason (precise_window).
+                const bool split = cache.native_slots && precise_faults_enabled();
+                if (split) {
+                    run = precise_window(instr_array, num_instrs, insn_idx, run);
+                }
                 cache.set_run(run);
                 // Run bridging: at a fresh run start, check whether short v1
                 // gaps join this run to following x87 segments.  Stash the
@@ -835,8 +895,9 @@ static auto translate_instruction_impl(TranslationResult* translation_result, IR
                     }
                 }
                 // A native transport run is not bridged: the bridged region
-                // would be lowered by the IR into the compact layout.
-                if (bridge_allowed && run >= 1 && !cache.native_transport) {
+                // would be lowered by the IR into the compact layout.  Nor is
+                // a split run: the region would hold later memory accesses.
+                if (bridge_allowed && run >= 1 && !cache.native_transport && !split) {
                     const auto br = X87Cache::lookahead_bridged(
                         instr_array, num_instrs, insn_idx, g_rosetta_config->bridge_max_gap,
                         g_rosetta_config->bridge_max_total,
@@ -1408,7 +1469,13 @@ static auto translate_instruction_impl(TranslationResult* translation_result, IR
     if (cache.native_transport || soft_f80 || exact_fild) {
         fusions_mask |= ~(1ULL << static_cast<int>(FusionId::fild_fistp));
     }
-    const auto fused = TranslatorX87::try_peephole(translation_result, instr_array, num_instrs,
+    // With X87_PRECISE_FAULTS and native slots a fusion must not take an
+    // instruction that accesses memory after the first (precise_window),
+    // also when the run cache is off and a reply is not a run.
+    const int64_t fusion_num = cache.native_slots && precise_faults_enabled()
+                                   ? insn_idx + precise_window(instr_array, num_instrs, insn_idx, 8)
+                                   : num_instrs;
+    const auto fused = TranslatorX87::try_peephole(translation_result, instr_array, fusion_num,
                                                    insn_idx, fusions_mask);
 
     // ── Single-op fast path: fused emitters for isolated fld/fst/fstp ──────

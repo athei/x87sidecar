@@ -2866,8 +2866,13 @@ static auto try_fuse_fld_group(TranslationResult* tr, IRInstr* instrs, int64_t n
     // replies, and a fault in its store rolls back to the fild, which a
     // retry handles.  The nested pairs would put a second store after the
     // first, where a fault aborts.
+    // With X87_NATIVE_SLOTS as well, where every other x87 access is the
+    // first of its reply, the lone pair is split too, so its store faults
+    // precisely like the rest.
     const bool lone_pair_only = tr->x87_cache.native_transport != 0 && precise_faults_enabled();
-    if (!fusion_disabled(disabled_mask, FusionId::fild_fistp)) {
+    const bool no_pair =
+        lone_pair_only && g_rosetta_config != nullptr && g_rosetta_config->native_slots != 0;
+    if (!fusion_disabled(disabled_mask, FusionId::fild_fistp) && !no_pair) {
         if (!lone_pair_only) {
             if (auto r = try_fuse_fild_fistp_nested(tr, instrs, num, idx)) {
                 return r;
