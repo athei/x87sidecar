@@ -50,7 +50,11 @@
 #      with X87_PRECISE_FAULTS=1 (default, IR off, fusions off, run cache
 #      off, clamped register pool, bridging off, X87_STOCK_BCD=0 and
 #      X87_FAIL_ALLOC_EVERY=N), and one of its faults must still abort the
-#      process without the knob
+#      process without the knob, under both the cooperative and the default
+#      attach
+#  18. test_crash_after_release: a target that is no longer traced after
+#      the release and then dies (abort, SIGSEGV, SIGKILL, SIGILL, exit(3))
+#      must end with its own exit status natively and under both attaches
 #   R. replay tests/data/geom_block_874c40.ir under --fpr-pool 8 and
 #      assert the pressure splits keep it on the IR path (fpr_fail=0), then
 #      replay tests/data/fist_pressure.ir the same way and assert it exits 0
@@ -68,6 +72,9 @@
 # on, and skips phase 17.  Run it as
 # `X87_PRECISE_FAULTS=1 bash scripts/run_tests.sh test_x87_sync_fault`, or run
 # the full suite.
+#
+# Every run of the loader is bounded by TEST_TIMEOUT; a run that does not
+# finish in time is killed and reported as a failure of that test.
 #
 # Every phase runs with X87_STRICT_ALLOC=1, so a register allocation that
 # fails asserts and crashes the test instead of being declined to stock.
@@ -246,38 +253,24 @@ fi
 filter_runtime_lines() {
     # The sidecar announces X87_FAIL_ALLOC_EVERY on stdout, and the knob's
     # name would otherwise read as a FAIL line in check_output.
-    grep -v -E 'RosettaRuntimex87 built|Installing JIT|JIT Translation Hook|try_fuse_|CORE_LOG|\] X87_FAIL_ALLOC_EVERY='
+    # grep exits 1 when it prints nothing.  Report success then, so that with
+    # pipefail the pipeline carries the run's own status (124 for a timeout)
+    # instead of grep's.
+    grep -v -E 'RosettaRuntimex87 built|Installing JIT|JIT Translation Hook|try_fuse_|CORE_LOG|\] X87_FAIL_ALLOC_EVERY=' ||
+        [[ $? -eq 1 ]]
 }
 
-# run_bounded SECONDS COMMAND...: run COMMAND in a process group of its own
-# and kill the whole group if it is still running after SECONDS, exiting 124
-# like timeout(1), which macOS does not ship.  The group is also killed when
-# COMMAND exits, so nothing it left running can hold its output open.  For runs expected to end in
-# an abort, where a process left behind would otherwise stall the harness
-# until CI's idle timeout.  Otherwise exits as COMMAND did, 128 + the signal
-# number when a signal ended it.
-run_bounded() {
-    perl -e '
-        my $secs = shift;
-        my $pid = fork() // die "fork: $!";
-        if ($pid == 0) {
-            setpgrp(0, 0);
-            exec @ARGV or exit 127;
-        }
-        # Both sides set the group, so a kill below cannot race the child'"'"'s
-        # own setpgrp; the parent'"'"'s call fails harmlessly after the exec.
-        setpgrp($pid, $pid);
-        $SIG{ALRM} = sub { kill "KILL", -$pid; waitpid($pid, 0); exit 124; };
-        alarm $secs;
-        waitpid($pid, 0);
-        my $status = $?;
-        alarm 0;
-        # A group member left behind could still hold the output pipe and
-        # keep the caller'"'"'s $(...) waiting.
-        kill "KILL", -$pid;
-        exit($status & 127 ? 128 + ($status & 127) : $status >> 8);
-    ' "$@"
-}
+# Every run of the loader goes through run_bounded, so a target or sidecar
+# that never exits is reported as a failure instead of stalling the harness.
+# shellcheck source=scripts/run_bounded.sh
+source "$SCRIPT_DIR/run_bounded.sh"
+
+# Upper bound in seconds for one run of the loader.  The slowest test takes
+# about 6 s on an M-series Mac, so this only ever fires on a hang.  It has to
+# stay below the 90 s of silence after which scripts/diagnose_ci.py stops a
+# CI run, or a hang there is never reported against its test.  Exported for
+# test_x87_trace.sh, which bounds its own loader runs.
+export TEST_TIMEOUT="${TEST_TIMEOUT:-60}"
 
 TOTAL=0
 PASSED=0
@@ -335,6 +328,12 @@ check_output() {
     local out="$2"
     local exit_code="$3"
     TOTAL=$((TOTAL + 1))
+    if [[ "$exit_code" -eq 124 ]]; then
+        echo -e "${RED}FAIL${NC}  $name  (timed out after $TEST_TIMEOUT s)"
+        FAILED=$((FAILED + 1))
+        tail -5 <<<"$out" | sed 's/^/      /'
+        return 0
+    fi
     # Herestrings, not `echo "$out" | grep`: when $out exceeds the pipe
     # buffer, `grep -q` exits at the first match and echo takes EPIPE, which
     # pipefail turns into a failed pipeline — a passing test then gets
@@ -420,7 +419,8 @@ if [[ $NATIVE_ONLY -eq 0 ]]; then
             continue
         fi
         EXIT=0
-        OUT=$("$LOADER" "$BINARY" 2>/dev/null | filter_runtime_lines) || EXIT=$?
+        OUT=$(run_bounded "$TEST_TIMEOUT" "$LOADER" "$BINARY" 2>/dev/null | filter_runtime_lines) ||
+            EXIT=$?
         check_output "$t" "$OUT" "$EXIT"
     done
 fi
@@ -444,7 +444,8 @@ if [[ $NATIVE_ONLY -eq 0 ]]; then
             continue
         fi
         EXIT=0
-        OUT=$("$LOADER" --cooperative "$BINARY" 2>/dev/null | filter_runtime_lines) || EXIT=$?
+        OUT=$(run_bounded "$TEST_TIMEOUT" "$LOADER" --cooperative "$BINARY" 2>/dev/null |
+            filter_runtime_lines) || EXIT=$?
         check_output "$t" "$OUT" "$EXIT"
     done
 fi
@@ -482,7 +483,8 @@ if [[ $NATIVE_ONLY -eq 0 ]]; then
             continue
         fi
         EXIT=0
-        OUT=$(X87_DISABLE_X87_IR=1 "$LOADER" "$BINARY" 2>/dev/null | filter_runtime_lines) || EXIT=$?
+        OUT=$(run_bounded "$TEST_TIMEOUT" env X87_DISABLE_X87_IR=1 "$LOADER" "$BINARY" \
+            2>/dev/null | filter_runtime_lines) || EXIT=$?
         check_output "$t" "$OUT" "$EXIT"
     done
 fi
@@ -517,7 +519,8 @@ if [[ $NATIVE_ONLY -eq 0 ]]; then
             continue
         fi
         EXIT=0
-        OUT=$(X87_DISABLE_X87_IR=1 X87_DISABLE_ALL_FUSIONS=1 "$LOADER" "$BINARY" 2>/dev/null | filter_runtime_lines) || EXIT=$?
+        OUT=$(run_bounded "$TEST_TIMEOUT" env X87_DISABLE_X87_IR=1 X87_DISABLE_ALL_FUSIONS=1 \
+            "$LOADER" "$BINARY" 2>/dev/null | filter_runtime_lines) || EXIT=$?
         check_output "$t" "$OUT" "$EXIT"
     done
 fi
@@ -540,7 +543,8 @@ if [[ $NATIVE_ONLY -eq 0 ]]; then
             continue
         fi
         EXIT=0
-        OUT=$(X87_DISABLE_HOOK=1 "$LOADER" "$BINARY" 2>/dev/null | filter_runtime_lines) || EXIT=$?
+        OUT=$(run_bounded "$TEST_TIMEOUT" env X87_DISABLE_HOOK=1 "$LOADER" "$BINARY" \
+            2>/dev/null | filter_runtime_lines) || EXIT=$?
         check_output "$t" "$OUT" "$EXIT"
     done
 fi
@@ -573,7 +577,8 @@ if [[ $NATIVE_ONLY -eq 0 ]]; then
             continue
         fi
         EXIT=0
-        OUT=$(X87_ENABLE_FMA_CONTRACT=1 "$LOADER" "$BINARY" 2>/dev/null | filter_runtime_lines) || EXIT=$?
+        OUT=$(run_bounded "$TEST_TIMEOUT" env X87_ENABLE_FMA_CONTRACT=1 "$LOADER" "$BINARY" \
+            2>/dev/null | filter_runtime_lines) || EXIT=$?
         check_output "$t" "$OUT" "$EXIT"
     done
 fi
@@ -595,7 +600,8 @@ if [[ $NATIVE_ONLY -eq 0 ]]; then
             continue
         fi
         EXIT=0
-        OUT=$(X87_FPR_POOL_LIMIT=5 "$LOADER" "$BINARY" 2>/dev/null | filter_runtime_lines) || EXIT=$?
+        OUT=$(run_bounded "$TEST_TIMEOUT" env X87_FPR_POOL_LIMIT=5 "$LOADER" "$BINARY" \
+            2>/dev/null | filter_runtime_lines) || EXIT=$?
         check_output "$t" "$OUT" "$EXIT"
     done
 fi
@@ -616,7 +622,8 @@ if [[ $NATIVE_ONLY -eq 0 ]]; then
             continue
         fi
         EXIT=0
-        OUT=$(X87_ENABLE_IR_SPLIT=0 X87_ENABLE_IR_REMAT=0 "$LOADER" "$BINARY" 2>/dev/null | filter_runtime_lines) || EXIT=$?
+        OUT=$(run_bounded "$TEST_TIMEOUT" env X87_ENABLE_IR_SPLIT=0 X87_ENABLE_IR_REMAT=0 \
+            "$LOADER" "$BINARY" 2>/dev/null | filter_runtime_lines) || EXIT=$?
         check_output "$t" "$OUT" "$EXIT"
     done
 fi
@@ -645,7 +652,8 @@ if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then
             continue
         fi
         EXIT=0
-        OUT=$(X87_FAST_ROUND=2 "$LOADER" "$BINARY" 2>/dev/null | filter_runtime_lines) || EXIT=$?
+        OUT=$(run_bounded "$TEST_TIMEOUT" env X87_FAST_ROUND=2 "$LOADER" "$BINARY" \
+            2>/dev/null | filter_runtime_lines) || EXIT=$?
         check_output "$t" "$OUT" "$EXIT"
     done
 fi
@@ -665,7 +673,8 @@ if [[ $NATIVE_ONLY -eq 0 ]]; then
             continue
         fi
         EXIT=0
-        OUT=$(X87_ENABLE_BRIDGE=0 "$LOADER" "$BINARY" 2>/dev/null | filter_runtime_lines) || EXIT=$?
+        OUT=$(run_bounded "$TEST_TIMEOUT" env X87_ENABLE_BRIDGE=0 "$LOADER" "$BINARY" \
+            2>/dev/null | filter_runtime_lines) || EXIT=$?
         check_output "$t" "$OUT" "$EXIT"
     done
 fi
@@ -686,7 +695,8 @@ if [[ $NATIVE_ONLY -eq 0 ]]; then
             continue
         fi
         EXIT=0
-        OUT=$(X87_BRIDGE_V2=0 "$LOADER" "$BINARY" 2>/dev/null | filter_runtime_lines) || EXIT=$?
+        OUT=$(run_bounded "$TEST_TIMEOUT" env X87_BRIDGE_V2=0 "$LOADER" "$BINARY" \
+            2>/dev/null | filter_runtime_lines) || EXIT=$?
         check_output "$t" "$OUT" "$EXIT"
     done
 fi
@@ -714,10 +724,21 @@ if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then
             shift 2
             TOTAL=$((TOTAL + 1))
             local out exit_code=0
-            out=$("$@" 2>/dev/null | filter_runtime_lines) || exit_code=$?
-            local got="trap"
-            if [[ $exit_code -eq 0 ]] && ! grep -qE 'FAIL' <<<"$out"; then
+            out=$(run_bounded "$TEST_TIMEOUT" "$@" 2>/dev/null | filter_runtime_lines) ||
+                exit_code=$?
+            # A trapping run reports the SIGILL it caught in a FAIL line and
+            # exits 1; any other failure, a loader that did not start
+            # included, is neither result.
+            local got
+            if [[ $exit_code -eq 124 ]]; then
+                got="a timeout after $TEST_TIMEOUT s"
+            elif [[ $exit_code -eq 0 ]] && ! grep -qE 'FAIL' <<<"$out"; then
                 got="pass"
+                grep -qE 'PASS' <<<"$out" || got="exit 0 without a PASS line"
+            elif grep -qE 'FAIL.*SIGILL' <<<"$out"; then
+                got="trap"
+            else
+                got="exit $exit_code without a SIGILL line"
             fi
             local verb="traps"
             [[ "$want" == "pass" ]] && verb="passes"
@@ -765,7 +786,8 @@ if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then
             continue
         fi
         EXIT=0
-        OUT=$(X87_STOCK_BCD=0 "$LOADER" "$BINARY" 2>/dev/null | filter_runtime_lines) || EXIT=$?
+        OUT=$(run_bounded "$TEST_TIMEOUT" env X87_STOCK_BCD=0 "$LOADER" "$BINARY" \
+            2>/dev/null | filter_runtime_lines) || EXIT=$?
         check_output "$t" "$OUT" "$EXIT"
     done
 fi
@@ -805,9 +827,9 @@ if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then
                 continue
             fi
             EXIT=0
-            OUT=$(X87_STRICT_ALLOC=0 X87_FAIL_ALLOC_EVERY=$n "$LOADER" "$BINARY" 2>/dev/null |
-                filter_runtime_lines) || EXIT=$?
-            if [[ $n -eq 1 ]] && ! grep -q 'declined to stock' <<<"$OUT"; then
+            OUT=$(run_bounded "$TEST_TIMEOUT" env X87_STRICT_ALLOC=0 X87_FAIL_ALLOC_EVERY=$n \
+                "$LOADER" "$BINARY" 2>/dev/null | filter_runtime_lines) || EXIT=$?
+            if [[ $n -eq 1 && $EXIT -ne 124 ]] && ! grep -q 'declined to stock' <<<"$OUT"; then
                 TOTAL=$((TOTAL + 1))
                 echo -e "${RED}FAIL${NC}  $t  (N=1 declined nothing)"
                 FAILED=$((FAILED + 1))
@@ -847,12 +869,14 @@ if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then
             local out exit_code=0
             # The test's override that forces its non-FEAT_AFP tolerance must
             # not leak in from the calling shell and soften the strict path.
-            out=$(env -u X87_TEST_ASSUME_APPLE_FLUSH_REGISTER "$@" 2>/dev/null |
-                filter_runtime_lines) || exit_code=$?
+            out=$(run_bounded "$TEST_TIMEOUT" env -u X87_TEST_ASSUME_APPLE_FLUSH_REGISTER "$@" \
+                2>/dev/null | filter_runtime_lines) || exit_code=$?
             # A run that ends any other way (a signal, an abort, no summary
             # line) is a crash, never the expected failure.
             local got="crash (exit=$exit_code)"
-            if [[ $exit_code -eq 0 ]] && ! grep -qE 'FAIL' <<<"$out" &&
+            if [[ $exit_code -eq 124 ]]; then
+                got="a timeout after $TEST_TIMEOUT s"
+            elif [[ $exit_code -eq 0 ]] && ! grep -qE 'FAIL' <<<"$out" &&
                 grep -qE '^0 failure' <<<"$out"; then
                 got="pass"
             elif [[ $exit_code -eq 1 ]] && grep -qE '^[1-9][0-9]* failure' <<<"$out"; then
@@ -918,8 +942,13 @@ if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then
             for ir_off in 0 1; do
                 echo "      X87_STOCK_OPS=$ops X87_DISABLE_X87_IR=$ir_off"
                 EXIT=0
-                OUT=$(X87_STOCK_OPS=$ops X87_DISABLE_X87_IR=$ir_off "$LOADER" "$BINARY" \
-                    2>/dev/null | filter_runtime_lines) || EXIT=$?
+                OUT=$(run_bounded "$TEST_TIMEOUT" env X87_STOCK_OPS=$ops \
+                    X87_DISABLE_X87_IR=$ir_off "$LOADER" "$BINARY" 2>/dev/null |
+                    filter_runtime_lines) || EXIT=$?
+                if [[ $EXIT -eq 124 ]]; then
+                    check_output "test_flags_handoff" "$OUT" "$EXIT"
+                    continue
+                fi
                 if grep -q 'X87_STOCK_OPS: unknown opcode' <<<"$OUT" ||
                     ! grep -q "X87_STOCK_OPS: $want_ids opcode ids resolved" <<<"$OUT"; then
                     TOTAL=$((TOTAL + 1))
@@ -973,42 +1002,109 @@ if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then
             echo "      X87_PRECISE_FAULTS=1 $cfg"
             EXIT=0
             # shellcheck disable=SC2086
-            OUT=$(env X87_PRECISE_FAULTS=1 $cfg "$LOADER" "$SF_BIN" 2>/dev/null |
-                filter_runtime_lines) || EXIT=$?
+            OUT=$(run_bounded "$TEST_TIMEOUT" env X87_PRECISE_FAULTS=1 $cfg "$LOADER" "$SF_BIN" \
+                2>/dev/null | filter_runtime_lines) || EXIT=$?
             check_output "test_x87_sync_fault" "$OUT" "$EXIT"
         done
         for n in "${ALLOC_FAIL_EVERY[@]}"; do
             echo "      X87_PRECISE_FAULTS=1 X87_FAIL_ALLOC_EVERY=$n"
             EXIT=0
-            OUT=$(X87_PRECISE_FAULTS=1 X87_STRICT_ALLOC=0 X87_FAIL_ALLOC_EVERY=$n "$LOADER" \
-                "$SF_BIN" 2>/dev/null | filter_runtime_lines) || EXIT=$?
+            OUT=$(run_bounded "$TEST_TIMEOUT" env X87_PRECISE_FAULTS=1 X87_STRICT_ALLOC=0 \
+                X87_FAIL_ALLOC_EVERY=$n "$LOADER" "$SF_BIN" 2>/dev/null | filter_runtime_lines) ||
+                EXIT=$?
             check_output "test_x87_sync_fault" "$OUT" "$EXIT"
         done
         # Without the knob a store at the start of a reply has to abort the
-        # process with the runtime's message; anything else, a pass
-        # included, means the knob or its default changed.  Through the
-        # cooperative attach, which the bundles use.  Under the default
-        # attach on macOS 26.6.2, CI hung here: the aborting target stayed
-        # stopped under trace with the sidecar as its tracer, and the sidecar
-        # kept waiting for it to exit.  The reply-first detach in main.cpp
-        # leaves the target traced on that kernel, which presumably holds
-        # the fatal signal, but the mechanism is not confirmed.  Bounded, so
-        # that a hang reports a failure instead.
-        TOTAL=$((TOTAL + 1))
-        EXIT=0
-        OUT=$(run_bounded 60 env SYNC_FAULT_CASE=s_fstp64 "$LOADER" --cooperative "$SF_BIN" 2>&1) ||
-            EXIT=$?
-        if [[ $EXIT -ne 0 && $EXIT -ne 124 ]] &&
-            grep -q 'unexpectedly need to EmulateForward on a synchronous exception' <<<"$OUT"; then
-            echo -e "${GREEN}PASS${NC}  sync_fault  knob off (aborts as expected)"
-            PASSED=$((PASSED + 1))
-        else
-            REASON="got exit=$EXIT"
-            [[ $EXIT -eq 124 ]] && REASON="timed out after 60 s"
-            echo -e "${RED}FAIL${NC}  sync_fault  knob off  (wanted the EmulateForward abort, $REASON)"
-            FAILED=$((FAILED + 1))
-            tail -3 <<<"$OUT" | sed 's/^/      /'
-        fi
+        # process with the runtime's message and SIGABRT; anything else, a
+        # pass included, means the knob or its default changed.  Through the
+        # cooperative attach, which the bundles use, and through the default
+        # attach.  The runtime aborts from its exception server thread while
+        # the faulting thread waits for that server's reply, which is the
+        # case that hung the default attach while the released target was
+        # still traced (see "Releasing the default attach stop" in
+        # docs/internals.md).
+        # $1 = label, $2.. = loader flags
+        expect_sf_abort() {
+            local label="$1"
+            shift
+            TOTAL=$((TOTAL + 1))
+            local out exit_code=0
+            out=$(run_bounded "$TEST_TIMEOUT" env SYNC_FAULT_CASE=s_fstp64 "$LOADER" "$@" \
+                "$SF_BIN" 2>&1) || exit_code=$?
+            if [[ $exit_code -eq 134 ]] &&
+                grep -q 'unexpectedly need to EmulateForward on a synchronous exception' <<<"$out"; then
+                echo -e "${GREEN}PASS${NC}  sync_fault  knob off, $label (aborts as expected)"
+                PASSED=$((PASSED + 1))
+            else
+                local reason="got exit=$exit_code"
+                [[ $exit_code -eq 124 ]] && reason="timed out after $TEST_TIMEOUT s"
+                echo -e "${RED}FAIL${NC}  sync_fault  knob off, $label  (wanted the EmulateForward abort, $reason)"
+                FAILED=$((FAILED + 1))
+                tail -3 <<<"$out" | sed 's/^/      /'
+            fi
+        }
+        expect_sf_abort "cooperative" --cooperative
+        expect_sf_abort "default attach"
+    fi
+fi
+
+# ── Phase 18: fatal signals after the default attach releases the target ─
+# test_crash_after_release is not in ALL_TESTS: it dies on purpose, in the
+# way its argument names, after one x87 instruction.  Before dying it checks
+# that it is no longer traced and prints its release line, or exits 1.  Each
+# run must print that line, end with the target's own exit status, natively
+# and through both attaches, within the timeout, and the attached runs must
+# not have fallen back to running without the hook.
+CRASH_AFTER_RELEASE_CASES=(
+    "abort 134"
+    "segv 139"
+    "kill9 137"
+    "trap 132"
+    "exit 3"
+)
+if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then
+    echo ""
+    echo -e "${BOLD}=== Phase 18: fatal signals after the release (test_crash_after_release) ===${NC}"
+
+    CR_BIN="$TESTS_BIN/test_crash_after_release"
+    if [[ ! -x "$CR_BIN" ]]; then
+        echo -e "${YELLOW}SKIP${NC}  test_crash_after_release  (binary not found)"
+        ERRORS=$((ERRORS + 1))
+    else
+        for entry in "${CRASH_AFTER_RELEASE_CASES[@]}"; do
+            mode="${entry% *}"
+            want="${entry#* }"
+            for how in native default cooperative; do
+                case "$how" in
+                native) cmd=("$CR_BIN" "$mode") ;;
+                default) cmd=("$LOADER" "$CR_BIN" "$mode") ;;
+                cooperative) cmd=("$LOADER" --cooperative "$CR_BIN" "$mode") ;;
+                esac
+                TOTAL=$((TOTAL + 1))
+                EXIT=0
+                OUT=$(run_bounded "$TEST_TIMEOUT" "${cmd[@]}" 2>&1) || EXIT=$?
+                label="crash_after_release  $mode, $how"
+                reason=""
+                if [[ $EXIT -eq 124 ]]; then
+                    reason="timed out after $TEST_TIMEOUT s"
+                elif [[ $EXIT -ne $want ]]; then
+                    reason="got exit=$EXIT"
+                elif ! grep -q '^released, x87 result 1\.0, ' <<<"$OUT"; then
+                    reason="no release line"
+                elif [[ $how != native ]] &&
+                    grep -qE 'RUNNING WITHOUT X87 ACCELERATION|x87 hook not installed' <<<"$OUT"; then
+                    reason="ran without the hook"
+                fi
+                if [[ -z "$reason" ]]; then
+                    echo -e "${GREEN}PASS${NC}  $label  (exit=$EXIT)"
+                    PASSED=$((PASSED + 1))
+                else
+                    echo -e "${RED}FAIL${NC}  $label  ($reason)"
+                    FAILED=$((FAILED + 1))
+                    tail -3 <<<"$OUT" | sed 's/^/      /'
+                fi
+            done
+        done
     fi
 fi
 
@@ -1125,6 +1221,10 @@ echo ""
 # correctly on ARM hardware. The fixture includes the selected hash in both modes.
 if [[ $NATIVE_ONLY -eq 0 && " ${TESTS[*]} " == *" test_x87_signal_context "* ]]; then
     EXIT=0
+    # The script bounds each of its loader runs with run_bounded and
+    # TEST_TIMEOUT and exits 124 when one times out.  Wrapping the script
+    # itself would not help: a kill of its group does not reach the groups
+    # of the runs inside it.
     OUT=$(bash "$SCRIPT_DIR/test_x87_trace.sh" "$BUILD_DIR" 2>&1) || EXIT=$?
     check_output "x87_trace" "$OUT" "$EXIT"
 fi

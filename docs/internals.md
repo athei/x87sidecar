@@ -41,11 +41,64 @@ target to exit. This reproduced on unchanged master after the CI runner
 moved from macOS 26.5.2 to 26.6.2.
 
 That Tahoe kernel family now uses the same reply-before-detach sequence as
-newer Golden Gate kernels: catch SIGSTOP, hold a Mach task suspend, suppress
-and reply to the signal while still traced, restore exception ports,
-attempt ptrace detach, then balance the task suspend. Older Tahoe builds and early Golden
-Gate kernels retain their existing sequence. The Tahoe cutoff is the
-verified build, not a claim about the first build to change this behavior.
+newer Golden Gate kernels: catch SIGSTOP, hold a Mach task suspend,
+suppress and reply to the signal while still traced, balance the task
+suspend, catch a SIGCONT stop, restore exception ports, then detach from
+that stop (see below). Older Tahoe builds and early Golden Gate kernels
+retain their existing sequence. The Tahoe cutoff is the verified build, not
+a claim about the first build to change this behavior.
+
+In that sequence the ptrace detach used to fail. `PT_DETACH` returns EBUSY
+unless the target's `p_stat` is `SSTOP`, which for a traced target means a
+signal stop held by the debugger, and the `PT_THUPDATE` that suppresses the
+SIGSTOP in the reply sets it back to `SRUN`. The target then ran for the
+rest of its life with `P_LTRACED` set, which changes how XNU delivers a
+fatal signal. Without a tracer, a default fatal signal that the sending
+thread blocks is redirected to another thread and ends that thread's kernel
+wait with `thread_abort`. With `P_LTRACED` set, the redirected signal only
+gets `thread_abort_safely`, which does not end a wait for a Mach exception
+reply.
+
+Rosetta's own abort is that case. When a guest memory fault inside
+sidecar-translated x87 code cannot be handled (`X87_PRECISE_FAULTS` off),
+Rosetta's exception server thread prints `unexpectedly need to
+EmulateForward` and calls `abort_with_payload`, while the faulting thread
+waits for that server's reply. The SIGABRT went to the waiting thread and
+stayed pending there. The target stayed in state `S` with the traced flag
+set, not stopped, so `waitid` reported nothing, and the sidecar waited for
+its exit forever. This reproduced on macOS 27.0.1 with
+`SYNC_FAULT_CASE=s_fstp64` under the default attach. CI on 26.6.2 showed the
+same symptom in the same check; that the mechanism there is the same is
+inferred, since that build cannot be run locally. A fatal signal raised by a
+guest thread on itself (`abort`, a NULL store, `ud2`, SIGKILL) was not
+affected, since that thread is not waiting in the kernel.
+
+The release now stops the target once more after the reply: it sends
+SIGCONT, balances the task suspend, catches the SIGCONT stop, restores the
+exception ports, and detaches from that stop, which succeeds and clears
+`P_LTRACED`. The held exception is then released with a plain Mach reply.
+On macOS 27.0.1 the signal held at the stop is delivered to the target after
+a successful detach, although `PT_DETACH` passes no signal. That is why a
+detach from a held SIGSTOP stop, as the classic sequence does, leaves the
+target stopped (state `T`), which is also what 26.6.2 showed and the reason
+for the reply-first sequence. A SIGCONT delivered to a running process has
+no effect unless it has a SIGCONT handler, and the release happens during
+Rosetta's init, before guest code can install one.
+
+The target inherits its signal mask from the loader. If SIGCONT is blocked
+in it, the SIGCONT stop would not arrive until the guest unblocks the
+signal, so the loader then skips that step and releases the target traced,
+as before. The same happens if the stop does not arrive or the detach still
+fails.
+
+`test_crash_after_release` checks through `sysctl` that it is no longer
+traced after the release, then dies in one of five ways and must end with
+its own exit status; it fails against a loader that leaves the target
+traced. The fatal signals it raises do not hang even then, so the
+default-attach `s_fstp64` check in phase 17 of `run_tests.sh` is the one that
+reproduces the hang itself. Every run of the loader in `run_tests.sh` is
+bounded, so a target that does not exit is reported as a failure of its
+test.
 
 `test_detach_signals` checks that a released target can receive SIGUSR1 in
 its own handler without involving x87 arithmetic. CI also watches the test
