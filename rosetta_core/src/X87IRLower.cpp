@@ -178,6 +178,7 @@ static SimpleMemRef get_simple_mem(const Node& n) {
     if ((op.mem.mem_flags & 2U) != 0) {  // index register present
         return {.ok = false, .base_reg = 0, .disp = 0};
     }
+    // Defensive: build() already ends a run at any segment-override operand.
     if (op.mem.seg_override != 0) {
         return {.ok = false, .base_reg = 0, .disp = 0};
     }

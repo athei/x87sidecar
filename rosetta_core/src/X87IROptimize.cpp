@@ -376,6 +376,7 @@ static bool extract_simple_mem(const Node& n, uint8_t* base_reg, int64_t* disp) 
     if ((op.mem.mem_flags & 2U) != 0) {  // index register present
         return false;
     }
+    // Defensive: build() already ends a run at any segment-override operand.
     if (op.mem.seg_override != 0) {
         return false;
     }

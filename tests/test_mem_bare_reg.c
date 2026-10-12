@@ -184,7 +184,8 @@ static int same(double got, double want) {
         report(#name " run", kept && same(out, (want)));                                 \
     } while (0)
 
-// sw & 0x4700: C3 C2 C1 C0.  12 > 3 sets none; 12 == 12 sets C3.
+// sw & 0x4500: C3 C2 C0, the compare result.  C1 is left out on purpose,
+// as in test_ficom.  12 > 3 sets none; 12 == 12 sets C3.
 #define CHECK_COM(name, itype, m, want_cc, want_top)                                     \
     do {                                                                                 \
         uint16_t sw = 0xFFFF;                                                            \
