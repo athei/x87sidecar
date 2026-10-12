@@ -26,7 +26,10 @@
 //
 // Allocates the next available scratch GPR from the pool at pool_index.
 // Marks the register as occupied in translation.free_gpr_mask.
-// Asserts if the pool slot is already occupied — callers must not double-allocate.
+// If the pool slot is already occupied (callers must not double-allocate),
+// records the failure in translation.alloc_failure, which declines the
+// request, or asserts under X87_STRICT_ALLOC.  Every allocator below does
+// the same when its pool is empty.
 //
 // pool_index: position in kGprScratchPool (0-based). Use sequentially:
 //   0 for first scratch GPR, 1 for second, etc.

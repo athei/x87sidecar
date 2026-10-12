@@ -101,6 +101,53 @@ Rosetta itself shifts the x87 stack when a signal lands in its `fcomp`,
 `fcompp` or `ficomp` translations; the harness records that as a stock
 divergence.
 
+## When the translator runs out of registers
+
+The IR pipeline checks a run's register pressure against the scratch pools
+before lowering it, and splits the run when its model says the run does not
+fit. The direct emitters need a few registers each and assume the pools have
+them. Either can be wrong: the model can miscount, or stock can leave a
+smaller pool than usual. A failed allocation used to assert, which killed
+the sidecar and, through the stub, the game. NosTale crashed this way.
+
+Now the allocator records the failure in the `TranslationResult` and hands
+out a placeholder register, so the emitter runs to the end of the request
+without touching the free masks. `Translator::translate_instruction` then
+puts back what the request changed (the emitted words, the fixup lists, the
+GPR and FPR masks and the x87 cache) and returns `nullopt`, and stock
+translates the instruction. The sidecar logs one line naming the allocator,
+the block hash and the instruction, and counts the declines in the
+`X87_LOG_THROUGHPUT` line.
+
+This is sound wherever in the request the failure happens, because a request
+is a whole run (see the previous section): it starts with the cache released
+and the x87 state complete in native format in memory, and none of its code
+is kept, including the entry conversion. A failure after a split run has
+lowered its first part, inside a bridged region or in the exit conversion is
+discarded the same way. The x87 cache goes back to its state at the start of
+the request with the run released, as after any declined request. When the
+request had moved the cache onto a new block, or found stock translating the
+block over from the start, the restored cache does not name the block, so
+the next request in it enters the block afresh.
+
+The rest of the block goes to stock as well: later requests in it are
+declined without translating, until stock moves to another block or starts
+this one over. Stock and the sidecar do not keep every flag in the same
+place. The sidecar's `fcmovu` reads PF from V, which stock's `fucomi` leaves
+clear, so a sidecar instruction must not read flags that a stock translation
+of the same block set. Instructions translated before the failure stay, since
+stock's readers find what the sidecar writes. A block declined from its
+first request gets no block profiler counter.
+
+ARPL is the exception. Stock has no opcode for it, so a failure while
+translating it still aborts, and an ARPL later in a declined block is still
+translated. The register form, the only one seen in practice, needs four
+scratch GPRs.
+
+`X87_STRICT_ALLOC=1` keeps the assert, and the test harness sets it so a
+pressure-model bug still fails a test. When no allocation fails, the
+emitted code is unchanged.
+
 ## Encodings Rosetta's decoder rejects
 
 Two encodings that real hardware runs are absent from Rosetta's decode

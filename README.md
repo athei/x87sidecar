@@ -392,6 +392,7 @@ knowing. Bracketed values are defaults.
 | `X87_DISABLE_X87_IR=1` | direct translator only, no IR pipeline |
 | `X87_DISABLE_ALL_FUSIONS=1`, `X87_DISABLE_FUSIONS=f1,f2` | disable every fusion, or the named ones (`--help` lists the names) |
 | `X87_DISABLE_SINGLE_FAST=1`, `X87_DISABLE_CACHE=1` | disable the single-op fast path, the cross-instruction register cache |
+| `X87_STRICT_ALLOC=1` | assert when the translator runs out of scratch registers, instead of declining the request to stock with one `failed in block hash=0xH` line [off; the test harness sets it] |
 
 Per-block knobs, keyed by the content hash `profile_analyze` prints, for
 bisecting a suspected miscompile in a live workload or working around one at
@@ -429,7 +430,7 @@ Loader and sidecar diagnostics:
 | variable | effect |
 |---|---|
 | `X87_LOGS=1` | verbose loader logging |
-| `X87_LOG_THROUGHPUT=1` | requests per second, traps per request and cache hit rates every 2 s |
+| `X87_LOG_THROUGHPUT=1` | requests per second, traps per request, cache hit rates and allocation declines every 2 s |
 | `X87_LOG_OPS=1` | one line per translated op; high volume, for freeze bisects |
 | `X87_NO_IR_CACHE=1`, `X87_NO_TCO_CACHE=1` | re-read the IR array or the thread-context layout on every request |
 | `X87_NO_PREAUTH=1` | skip acquiring the developer-tools right before launch (default attach only) |

@@ -59,6 +59,16 @@ struct X87Cache {
 
     IRBlock* prev_block = nullptr;
 
+    // Block and instruction at which a request ran out of scratch registers.
+    // Every later request in the block is declined too, until stock moves to
+    // another block or starts this one over.  Stock and the sidecar do not
+    // keep every flag in the same place (the sidecar's FCMOVU reads PF from
+    // V, which stock's FUCOMI leaves clear), so once an instruction has gone
+    // to stock, the rest of the block, which may read what it left behind,
+    // goes there too.
+    const IRBlock* declined_block = nullptr;
+    int32_t declined_idx = -1;
+
     // Stock's free_gpr_mask word as it arrived at the current x87 entry
     // (run start or isolated op).  Stock's translate_insn carries its
     // register-allocator state across a block in this TR field; every

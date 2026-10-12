@@ -30,6 +30,11 @@
 #   R. replay tests/data/geom_block_874c40.ir under --fpr-pool 8 and
 #      assert the pressure splits keep it on the IR path (fpr_fail=0)
 #
+# Every phase runs with X87_STRICT_ALLOC=1, so a register allocation that
+# fails asserts and crashes the test instead of being declined to stock.
+# The decline keeps a program running in the field; here a pressure-model
+# bug has to show up as a failure.
+#
 # Phase 1 doubles as the baseline the other phases are read against.  A
 # case that fails there fails with the sidecar nowhere in the picture, so
 # it is stock Rosetta's and none of our phases can make it pass; a later
@@ -176,6 +181,8 @@ if [[ ${#SELECTED_TESTS[@]} -gt 0 ]]; then
 else
     TESTS=("${ALL_TESTS[@]}")
 fi
+
+export X87_STRICT_ALLOC=1
 
 if [[ $DO_BUILD -eq 1 ]]; then
     echo -e "${CYAN}Building...${NC}"

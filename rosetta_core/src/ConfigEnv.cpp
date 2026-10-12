@@ -165,6 +165,10 @@ RosettaConfig load_config_from_env() {
     parse_pool_limit("X87_FPR_POOL_LIMIT", cfg.fpr_pool_limit);
     parse_pool_limit("X87_GPR_POOL_LIMIT", cfg.gpr_pool_limit);
 
+    // A failed scratch register allocation declines the request to stock
+    // unless X87_STRICT_ALLOC asks for the assert.
+    cfg.strict_alloc = env_truthy("X87_STRICT_ALLOC") ? 1 : 0;
+
     // Run bridging v1.  Default ON since 2026-07-04 (clean TurtleWoW soak;
     // measured -6.18% exec-weighted ARM on the capture).  Set =0 to disable;
     // X87_BRIDGE_HASH_LIST / X87_NO_BRIDGE_HASH_LIST bisect per block.
@@ -458,6 +462,12 @@ void print_env_help(std::FILE* out) {
         "                                pressure gate believes is available, making\n"
         "                                splits deterministic (allocation unaffected)\n"
         "  X87_GPR_POOL_LIMIT=N          test-only GPR-side equivalent\n"
+        "  X87_STRICT_ALLOC=1            assert when the translator runs out of\n"
+        "                                scratch registers.  Without it the request\n"
+        "                                is declined to stock Rosetta and one line\n"
+        "                                names the block hash and the allocator.\n"
+        "                                The test harness sets it so a register\n"
+        "                                pressure bug still crashes there\n"
         "  X87_ENABLE_BRIDGE=0           disable run bridging (default ON): bridging\n"
         "                                carries one IR run across short gaps of\n"
         "                                flag-transparent 32/64-bit mov/lea\n"

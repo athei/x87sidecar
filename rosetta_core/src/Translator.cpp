@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <optional>
 
 #include "TranslatorX87Internal.hpp"
@@ -43,6 +44,100 @@ static auto translate_instruction_impl(TranslationResult* translation_result, IR
                                        IRInstr* instr_array, int64_t num_instrs, int64_t insn_idx)
     -> std::optional<int64_t>;
 
+static profile::BlockTally block_tally(const X87Cache& cache) {
+    return profile::BlockTally{
+        .ir_ops = cache.tally_ir,
+        .peephole_ops = cache.tally_peep,
+        .single_ops = cache.tally_single,
+        .fallthrough_ops = cache.tally_ft,
+        .ir_build_fail_ops = cache.tally_ir_build_fail,
+        .ir_fpr_fail_ops = cache.tally_ir_fpr_fail,
+        .ir_gpr_fail_ops = cache.tally_ir_gpr_fail,
+        .max_gpr_peak = cache.tally_max_gpr_peak,
+        .ir_split_runs = cache.tally_ir_split,
+        .ir_remat_runs = cache.tally_ir_remat,
+        .bridge_ops = cache.tally_bridge,
+        .bridge_fail_runs = cache.tally_bridge_fail,
+    };
+}
+
+// What a request can change in the result before it is known to succeed:
+// the emitted words, the fixup lists, the register masks and the x87 cache.
+// A request whose allocator ran dry is put back to this and declined.
+struct RequestEntry {
+    uint64_t buf_end;
+    uint64_t fixup_count[6];
+    uint32_t free_gpr_mask;
+    uint32_t free_fpr_mask;
+    uint32_t pinned_temporary_scalars;
+    X87Cache cache;
+};
+
+static constexpr TransactionalList<Fixup> TranslationResult::* kFixupLists[6] = {
+    &TranslationResult::external_fixups, &TranslationResult::internal_fixups,
+    &TranslationResult::_fixups,         &TranslationResult::field_B0,
+    &TranslationResult::dyld_stub_fixups, &TranslationResult::field_1A8,
+};
+
+static RequestEntry capture_request_entry(const TranslationResult& tr) {
+    RequestEntry e{.buf_end = tr.insn_buf.end,
+                   .fixup_count = {},
+                   .free_gpr_mask = tr.free_gpr_mask,
+                   .free_fpr_mask = tr.free_fpr_mask,
+                   .pinned_temporary_scalars = tr._pinned_temporary_scalars,
+                   .cache = tr.x87_cache};
+    for (size_t i = 0; i < 6; i++) {
+        e.fixup_count[i] = (tr.*kFixupLists[i]).element_count();
+    }
+    return e;
+}
+
+// Undo a request that ran out of scratch registers, so that stock, which
+// translates the instruction instead, finds the result as the request found
+// it.  This is sound at any point inside the request because a request is
+// a whole run (see translate_instruction): it starts with the cache released
+// and the x87 state complete in memory, and nothing it emitted is kept.  The
+// cache goes back to its entry state with the run released, as after any
+// declined request.  When the request had moved the cache onto a new block,
+// the entry state is the previous block's, so the next request enters the
+// block afresh and its execution counter is emitted with code that is kept.
+// A request that found stock translating the block again is treated the
+// same way, by forgetting the block.  The rest of the block goes to stock as
+// well (X87Cache::declined_block).
+static void decline_after_alloc_failure(TranslationResult& tr, const RequestEntry& entry,
+                                        const IRBlock* block, int64_t insn_idx) {
+    tr.insn_buf.end = entry.buf_end;
+    for (size_t i = 0; i < 6; i++) {
+        auto& list = tr.*kFixupLists[i];
+        list.end = list.begin + entry.fixup_count[i];
+    }
+    tr.free_gpr_mask = entry.free_gpr_mask;
+    tr.free_fpr_mask = entry.free_fpr_mask;
+    tr._pinned_temporary_scalars = entry.pinned_temporary_scalars;
+
+    const uint32_t attempted_bid = tr.x87_cache.profile_bid;
+    auto& cache = tr.x87_cache;
+    cache = entry.cache;
+    cache.invalidate();
+    cache.bridge_pending_total = 0;
+    cache.bridge_pending_idx = -1;
+    if (cache.prev_block == block && insn_idx <= cache.last_insn_idx) {
+        cache.prev_block = nullptr;
+    }
+    const bool same_block = cache.prev_block == block;
+    if (same_block) {
+        cache.last_insn_idx = static_cast<int32_t>(insn_idx);
+    }
+    cache.last_next_idx = -1;
+    cache.declined_block = block;
+    cache.declined_idx = static_cast<int32_t>(insn_idx);
+    // The attempt mirrored tallies for ops whose code was just dropped.
+    if (attempted_bid != profile::kOverflowId) {
+        profile::set_block_tally(attempted_bid,
+                                 same_block ? block_tally(cache) : profile::BlockTally{});
+    }
+}
+
 // Flush every deferred piece of x87 state to memory and release the run.
 // Only for the path that must not happen: an instruction inside a run the
 // lookahead counted as handled came back declined.  The ops already emitted
@@ -66,6 +161,17 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
     auto& cache = translation_result->x87_cache;
     const auto start = translation_result->insn_buf.end;
     const auto op = instr_array[insn_idx].opcode();
+    translation_result->alloc_failure = nullptr;
+    // The rest of a block in which a request ran out of registers goes to
+    // stock (X87Cache::declined_block).  ARPL cannot, and reads no x87 flags.
+    if (cache.declined_block != nullptr) {
+        if (cache.declined_block != block || insn_idx <= cache.declined_idx) {
+            cache.declined_block = nullptr;
+        } else if (op != kOpcodeName_arpl) {
+            cache.last_next_idx = -1;
+            return std::nullopt;
+        }
+    }
     // Metadata-only ops and FXSAVE/FXRSTOR go to stock, which consumes
     // native state directly. Every handled x87 reply uses compact state
     // internally and must export native f80 after its cache is flushed.
@@ -76,12 +182,15 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
     const bool traced =
         native_boundary && x87trace::matches(instr_array, static_cast<size_t>(num_instrs));
     const uint64_t trace_site = uint64_t(instr_array[insn_idx].pc) << 32;
+    const RequestEntry entry = capture_request_entry(*translation_result);
     if (traced)
         x87trace::emit_boundary(*translation_result, trace_site | (uint64_t(insn_idx) << 1));
     if (native_boundary)
         TranslatorX87::emit_native_state_boundary(*translation_result, true);
-    auto ret =
-        translate_instruction_impl(translation_result, block, instr_array, num_instrs, insn_idx);
+    auto ret = translation_result->alloc_failure != nullptr
+                   ? std::nullopt
+                   : translate_instruction_impl(translation_result, block, instr_array,
+                                                num_instrs, insn_idx);
 
     // A run is one reply.  Stock records one instruction-map entry per
     // translate_insn reply, and when an asynchronous signal lands in a
@@ -93,10 +202,14 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
     // each such entry was a point where a signal silently shifted the x87
     // stack (issue #23).  With the whole run in one reply the only entries
     // are the run's start and its end, where x87_end has flushed everything.
-    while (ret.has_value() && cache.active() && *ret < num_instrs) {
+    while (ret.has_value() && cache.active() && *ret < num_instrs &&
+           translation_result->alloc_failure == nullptr) {
         cache.last_next_idx = static_cast<int32_t>(*ret);
         const auto more =
             translate_instruction_impl(translation_result, block, instr_array, num_instrs, *ret);
+        if (!more.has_value() && translation_result->alloc_failure != nullptr) {
+            break;
+        }
         if (!more.has_value()) {
             static int declined_count = 0;
             if (++declined_count <= 10) {
@@ -112,7 +225,7 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
         }
         ret = more;
     }
-    if (native_boundary) {
+    if (native_boundary && translation_result->alloc_failure == nullptr) {
         if (ret) {
             TranslatorX87::emit_native_state_boundary(*translation_result, false);
             if (traced)
@@ -120,6 +233,22 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
                                         *ret == num_instrs);
         } else
             translation_result->insn_buf.end = start;
+    }
+    if (translation_result->alloc_failure != nullptr) {
+        // ARPL is the one opcode stock cannot be handed: it never had an id
+        // for it (see translate_instruction_impl).  The register form, the
+        // only one seen in practice, needs four scratch GPRs, so this is not
+        // expected to happen.
+        if (op == kOpcodeName_arpl) {
+            std::fprintf(stdout,
+                         "[rosettax87] %s failed while translating ARPL, which stock cannot "
+                         "translate; aborting\n",
+                         translation_result->alloc_failure);
+            std::fflush(stdout);
+            std::abort();
+        }
+        decline_after_alloc_failure(*translation_result, entry, block, insn_idx);
+        return std::nullopt;
     }
     cache.last_next_idx = ret.has_value() ? static_cast<int32_t>(*ret) : -1;
     return ret;
@@ -320,21 +449,7 @@ static auto translate_instruction_impl(TranslationResult* translation_result, IR
     // disabled or this block hit kMaxBlocks.
     const auto mirror_tally = [&] {
         if (cache.profile_bid != profile::kOverflowId) {
-            profile::set_block_tally(cache.profile_bid,
-                                     profile::BlockTally{
-                                         .ir_ops = cache.tally_ir,
-                                         .peephole_ops = cache.tally_peep,
-                                         .single_ops = cache.tally_single,
-                                         .fallthrough_ops = cache.tally_ft,
-                                         .ir_build_fail_ops = cache.tally_ir_build_fail,
-                                         .ir_fpr_fail_ops = cache.tally_ir_fpr_fail,
-                                         .ir_gpr_fail_ops = cache.tally_ir_gpr_fail,
-                                         .max_gpr_peak = cache.tally_max_gpr_peak,
-                                         .ir_split_runs = cache.tally_ir_split,
-                                         .ir_remat_runs = cache.tally_ir_remat,
-                                         .bridge_ops = cache.tally_bridge,
-                                         .bridge_fail_runs = cache.tally_bridge_fail,
-                                     });
+            profile::set_block_tally(cache.profile_bid, block_tally(cache));
         }
     };
 
