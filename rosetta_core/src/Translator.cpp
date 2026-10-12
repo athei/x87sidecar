@@ -1411,9 +1411,11 @@ static auto translate_instruction_impl(TranslationResult* translation_result, IR
     // Only when the cache is inactive (run==1, or cache disabled): no pinned
     // GPRs and no deferred TOP/tag/perm state can exist then — x87_end flushes
     // everything at run end.  Counts into tally_single so profile_analyze
-    // stays comparable across configs.  Its stores read ST(0) as binary64.
+    // stays comparable across configs.  Its fst and fstp read an 80-bit
+    // ST(0) without changing it, so a soft read (soft_f80) does not keep
+    // them off this path.
     bool single_fast = false;
-    if (!fused && !cache.active() && !cache.native_transport && !soft_f80 &&
+    if (!fused && !cache.active() && !cache.native_transport &&
         !(g_rosetta_config && g_rosetta_config->disable_x87_single_fast)) {
         single_fast = TranslatorX87::try_translate_single_fast(translation_result, cur_instr);
     }

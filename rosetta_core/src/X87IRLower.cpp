@@ -2597,6 +2597,22 @@ int compile_run(TranslationResult* result, IRInstr* instr_array, int64_t num_ins
             return 0;
         }
 
+        // lower()'s prologue flushes a leftover FXCH permutation through two
+        // FPRs, four when it moves 80-bit images (X87_NATIVE_SLOTS), before
+        // any node holds one.
+        if (result->x87_cache.perm_dirty) {
+            const int flush_fprs = x87_perm_moves_f80(result->x87_cache.perm) ? 4 : 2;
+            if (flush_fprs > available) {
+                if (out_reason) {
+                    *out_reason = IRFailReason::kFprPressure;
+                }
+                if (out_peak_gprs) {
+                    *out_peak_gprs = 0;
+                }
+                return 0;
+            }
+        }
+
         // Gate lowering on GPR pressure vs. available pool.
         int gpr_over_node = -1;
         const int peak_gprs =
