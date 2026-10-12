@@ -1031,6 +1031,44 @@ auto translate_fdivp(TranslationResult* a1, IRInstr* a2) -> void {
 }
 
 // =============================================================================
+// Integer memory source shared by FIADD, FISUB, FISUBR, FIMUL, FIDIV, FIDIVR,
+// FICOM and FICOMP: load the m16int/m32int at `op` and convert it to f64 in
+// Dd_int.
+//
+// The integer lands in the address register when that is a scratch, which
+// keeps it off Wd_tmp (emit_store_st_at_offset reuses the ST(0) offset held
+// there).  For a bare 64-bit [reg] or [index] operand the address register
+// is the guest register itself, so the integer goes to a separate scratch
+// instead (writable_addr_reg).
+// =============================================================================
+static void emit_load_int_operand(TranslationResult& a1, AssemblerBuffer& buf, IROperand* op,
+                                  bool is_m16, int Dd_int) {
+    const int addr_reg = compute_operand_address(a1, /*is_64bit=*/true, op, GPR::XZR);
+    const int Wd_int = writable_addr_reg(a1, addr_reg);
+
+    if (is_m16) {
+        // LDRH Wd_int, [addr_reg]: 16-bit zero-extending load
+        emit_ldr_str_imm(buf, /*size=*/1 /*16-bit*/, /*is_fp=*/0, /*opc=*/1 /*LDR*/,
+                         /*imm12=*/0, addr_reg, Wd_int);
+        // SXTH Wd_int, Wd_int: sign-extend bits[15:0] → W (SBFM W, W, #0, #15)
+        emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/0 /*SBFM*/, /*N=*/0,
+                      /*immr=*/0, /*imms=*/15, Wd_int, Wd_int);
+    } else {
+        // LDR Wd_int, [addr_reg]: 32-bit load (signed by virtue of SCVTF below)
+        emit_ldr_str_imm(buf, /*size=*/2 /*32-bit*/, /*is_fp=*/0, /*opc=*/1 /*LDR*/,
+                         /*imm12=*/0, addr_reg, Wd_int);
+    }
+
+    // SCVTF Dd_int, Wd_int: signed W → f64
+    emit_scvtf(buf, /*is_64bit_int=*/0, /*ftype=*/1, Dd_int, Wd_int);
+
+    if (Wd_int != addr_reg) {
+        free_gpr(a1, Wd_int);
+    }
+    free_gpr(a1, addr_reg);
+}
+
+// =============================================================================
 // FIADD — DA /0, DE /0
 //
 // x87 semantics:
@@ -1045,10 +1083,10 @@ auto translate_fdivp(TranslationResult* a1, IRInstr* a2) -> void {
 // Sequence:
 //   1. Load ST(0) as f64 into Dd_st0.
 //   2. Compute source address → addr_reg.
-//   3. Load 32-bit or 16-bit integer from memory into Wd_tmp.
+//   3. Load 32-bit or 16-bit integer from memory (emit_load_int_operand).
 //      For 16-bit: LDRH (zero-extend into W) then SXTH (sign-extend to W).
 //      For 32-bit: LDR W (loads a signed 32-bit directly).
-//   4. SCVTF Dd_int, Wd_tmp  — signed integer → f64.
+//   4. SCVTF Dd_int, W: signed integer → f64.
 //   5. FADD Dd_st0, Dd_st0, Dd_int.
 //   6. Store result back into ST(0).
 //
@@ -1060,8 +1098,8 @@ auto translate_fdivp(TranslationResult* a1, IRInstr* a2) -> void {
 // Register allocation:
 //   Xbase   (gpr pool 0) -- X87State base
 //   Wd_top  (gpr pool 1) -- current TOP (read-only; no push/pop here)
-//   Wd_tmp  (gpr pool 2) -- offset scratch for emit_load_st, then reused as
-//                           the integer load target and SCVTF source
+//   Wd_tmp  (gpr pool 2) -- offset scratch for emit_load_st, kept for
+//                           emit_store_st_at_offset
 //   Dd_st0  (fpr free pool) -- ST(0) value; receives the sum
 //   Dd_int  (fpr free pool) -- converted integer value
 //
@@ -1084,32 +1122,10 @@ auto translate_fiadd(TranslationResult* a1, IRInstr* a2) -> void {
     const int Wk10 =
         emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Dd_st0, Xst_base);
 
-    // Step 2: compute source memory address — allocates a separate free-pool GPR.
-    const int addr_reg =
-        compute_operand_address(*a1, /*is_64bit=*/true, &a2->operands[0], GPR::XZR);
-
-    // Step 3: load integer from memory into addr_reg (reusing it for the value).
-    // Opt 3: loading into addr_reg (not Wd_tmp) preserves the ST(0) byte offset
-    // in Wd_tmp so emit_store_st_at_offset can skip recomputing it below.
-    if (is_m16) {
-        // LDRH addr_reg, [addr_reg]  — 16-bit zero-extending load
-        emit_ldr_str_imm(buf, /*size=*/1 /*16-bit*/, /*is_fp=*/0, /*opc=*/1 /*LDR*/,
-                         /*imm12=*/0, addr_reg, addr_reg);
-        // SXTH addr_reg, addr_reg  — sign-extend bits[15:0] → W
-        // Encoded as SBFM W, W, #0, #15
-        emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/0 /*SBFM*/, /*N=*/0,
-                      /*immr=*/0, /*imms=*/15, addr_reg, addr_reg);
-    } else {
-        // LDR addr_reg, [addr_reg]  — 32-bit load (signed by virtue of SCVTF below)
-        emit_ldr_str_imm(buf, /*size=*/2 /*32-bit*/, /*is_fp=*/0, /*opc=*/1 /*LDR*/,
-                         /*imm12=*/0, addr_reg, addr_reg);
-    }
-
-    // Step 4: convert signed integer W → f64
-    // emit_scvtf: is_64bit_int=0 (32-bit source W), ftype=1 (f64 destination)
-    emit_scvtf(buf, /*is_64bit_int=*/0, /*ftype=*/1, Dd_int, addr_reg);
-
-    free_gpr(*a1, addr_reg);
+    // Steps 2-4: load the integer and convert it to f64.
+    // Opt 3: the integer never goes through Wd_tmp, which keeps the ST(0)
+    // byte offset there so emit_store_st_at_offset can skip recomputing it.
+    emit_load_int_operand(*a1, buf, &a2->operands[0], is_m16, Dd_int);
 
     // Step 5: add
     emit_fadd_f64(buf, Dd_st0, Dd_st0, Dd_int);
@@ -2331,28 +2347,10 @@ auto translate_fidiv(TranslationResult* a1, IRInstr* a2) -> void {
     const int Wk19 =
         emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Dd_st0, Xst_base);
 
-    // Step 2: compute source address
-    const int addr_reg =
-        compute_operand_address(*a1, /*is_64bit=*/true, &a2->operands[0], GPR::XZR);
-
-    // Step 3: load integer from memory into addr_reg (reusing it for the value).
-    // Opt 3: loading into addr_reg (not Wd_tmp) preserves the ST(0) byte offset
-    // in Wd_tmp so emit_store_st_at_offset can skip recomputing it below.
-    if (is_m16) {
-        emit_ldr_str_imm(buf, /*size=*/1 /*16-bit*/, /*is_fp=*/0, /*opc=*/1 /*LDR*/,
-                         /*imm12=*/0, addr_reg, addr_reg);
-        // SXTH addr_reg, addr_reg — sign-extend bits[15:0] → W
-        emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/0 /*SBFM*/, /*N=*/0,
-                      /*immr=*/0, /*imms=*/15, addr_reg, addr_reg);
-    } else {
-        emit_ldr_str_imm(buf, /*size=*/2 /*32-bit*/, /*is_fp=*/0, /*opc=*/1 /*LDR*/,
-                         /*imm12=*/0, addr_reg, addr_reg);
-    }
-
-    // Step 4: SCVTF Dd_int, addr_reg — signed W → f64
-    emit_scvtf(buf, /*is_64bit_int=*/0, /*ftype=*/1, Dd_int, addr_reg);
-
-    free_gpr(*a1, addr_reg);
+    // Steps 2-4: load the integer and convert it to f64.
+    // Opt 3: the integer never goes through Wd_tmp, which keeps the ST(0)
+    // byte offset there so emit_store_st_at_offset can skip recomputing it.
+    emit_load_int_operand(*a1, buf, &a2->operands[0], is_m16, Dd_int);
 
     // Step 5: FDIV ST(0), integer
     emit_fdiv_f64(buf, Dd_st0, Dd_st0, Dd_int);
@@ -2395,28 +2393,10 @@ auto translate_fimul(TranslationResult* a1, IRInstr* a2) -> void {
     const int Wk20 =
         emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Dd_st0, Xst_base);
 
-    // Step 2: compute source address
-    const int addr_reg =
-        compute_operand_address(*a1, /*is_64bit=*/true, &a2->operands[0], GPR::XZR);
-
-    // Step 3: load integer from memory into addr_reg (reusing it for the value).
-    // Opt 3: loading into addr_reg (not Wd_tmp) preserves the ST(0) byte offset
-    // in Wd_tmp so emit_store_st_at_offset can skip recomputing it below.
-    if (is_m16) {
-        emit_ldr_str_imm(buf, /*size=*/1 /*16-bit*/, /*is_fp=*/0, /*opc=*/1 /*LDR*/,
-                         /*imm12=*/0, addr_reg, addr_reg);
-        // SXTH addr_reg, addr_reg — sign-extend bits[15:0] → W
-        emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/0 /*SBFM*/, /*N=*/0,
-                      /*immr=*/0, /*imms=*/15, addr_reg, addr_reg);
-    } else {
-        emit_ldr_str_imm(buf, /*size=*/2 /*32-bit*/, /*is_fp=*/0, /*opc=*/1 /*LDR*/,
-                         /*imm12=*/0, addr_reg, addr_reg);
-    }
-
-    // Step 4: SCVTF Dd_int, addr_reg — signed W → f64
-    emit_scvtf(buf, /*is_64bit_int=*/0, /*ftype=*/1, Dd_int, addr_reg);
-
-    free_gpr(*a1, addr_reg);
+    // Steps 2-4: load the integer and convert it to f64.
+    // Opt 3: the integer never goes through Wd_tmp, which keeps the ST(0)
+    // byte offset there so emit_store_st_at_offset can skip recomputing it.
+    emit_load_int_operand(*a1, buf, &a2->operands[0], is_m16, Dd_int);
 
     // Step 5: FMUL ST(0), integer
     emit_fmul_f64(buf, Dd_st0, Dd_st0, Dd_int);
@@ -2458,27 +2438,10 @@ auto translate_fisub(TranslationResult* a1, IRInstr* a2) -> void {
     const int Wk21 =
         emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Dd_st0, Xst_base);
 
-    // Step 2: compute source address
-    const int addr_reg =
-        compute_operand_address(*a1, /*is_64bit=*/true, &a2->operands[0], GPR::XZR);
-
-    // Step 3: load integer from memory into addr_reg (reusing it for the value).
-    // Opt 3: loading into addr_reg (not Wd_tmp) preserves the ST(0) byte offset
-    // in Wd_tmp so emit_store_st_at_offset can skip recomputing it below.
-    if (is_m16) {
-        emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/1 /*LDR*/,
-                         /*imm12=*/0, addr_reg, addr_reg);
-        emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/0 /*SBFM*/, /*N=*/0,
-                      /*immr=*/0, /*imms=*/15, addr_reg, addr_reg);
-    } else {
-        emit_ldr_str_imm(buf, /*size=*/2, /*is_fp=*/0, /*opc=*/1 /*LDR*/,
-                         /*imm12=*/0, addr_reg, addr_reg);
-    }
-
-    // Step 4: SCVTF Dd_int, addr_reg — signed W → f64
-    emit_scvtf(buf, /*is_64bit_int=*/0, /*ftype=*/1, Dd_int, addr_reg);
-
-    free_gpr(*a1, addr_reg);
+    // Steps 2-4: load the integer and convert it to f64.
+    // Opt 3: the integer never goes through Wd_tmp, which keeps the ST(0)
+    // byte offset there so emit_store_st_at_offset can skip recomputing it.
+    emit_load_int_operand(*a1, buf, &a2->operands[0], is_m16, Dd_int);
 
     // Step 5: FSUB ST(0) = ST(0) - integer
     emit_fsub_f64(buf, Dd_st0, Dd_st0, Dd_int);
@@ -2522,27 +2485,10 @@ auto translate_fidivr(TranslationResult* a1, IRInstr* a2) -> void {
     const int Wk22 =
         emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Dd_st0, Xst_base);
 
-    // Step 2: compute source address
-    const int addr_reg =
-        compute_operand_address(*a1, /*is_64bit=*/true, &a2->operands[0], GPR::XZR);
-
-    // Step 3: load integer from memory into addr_reg (reusing it for the value).
-    // Opt 3: loading into addr_reg (not Wd_tmp) preserves the ST(0) byte offset
-    // in Wd_tmp so emit_store_st_at_offset can skip recomputing it below.
-    if (is_m16) {
-        emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/1 /*LDR*/,
-                         /*imm12=*/0, addr_reg, addr_reg);
-        emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/0 /*SBFM*/, /*N=*/0,
-                      /*immr=*/0, /*imms=*/15, addr_reg, addr_reg);
-    } else {
-        emit_ldr_str_imm(buf, /*size=*/2, /*is_fp=*/0, /*opc=*/1 /*LDR*/,
-                         /*imm12=*/0, addr_reg, addr_reg);
-    }
-
-    // Step 4: SCVTF Dd_int, addr_reg — signed W → f64
-    emit_scvtf(buf, /*is_64bit_int=*/0, /*ftype=*/1, Dd_int, addr_reg);
-
-    free_gpr(*a1, addr_reg);
+    // Steps 2-4: load the integer and convert it to f64.
+    // Opt 3: the integer never goes through Wd_tmp, which keeps the ST(0)
+    // byte offset there so emit_store_st_at_offset can skip recomputing it.
+    emit_load_int_operand(*a1, buf, &a2->operands[0], is_m16, Dd_int);
 
     // Step 5: FDIV Dd_st0, Dd_int, Dd_st0  — integer / ST(0)  (reversed)
     emit_fdiv_f64(buf, Dd_st0, Dd_int, Dd_st0);
@@ -2967,24 +2913,8 @@ auto translate_fisubr(TranslationResult* a1, IRInstr* a2) -> void {
     const int Wk =
         emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Dd_st0, Xst_base);
 
-    // Step 2: compute source address
-    const int addr_reg =
-        compute_operand_address(*a1, /*is_64bit=*/true, &a2->operands[0], GPR::XZR);
-
-    // Step 3: load integer from memory
-    if (is_m16) {
-        emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/1 /*LDR*/,
-                         /*imm12=*/0, addr_reg, addr_reg);
-        emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/0 /*SBFM*/, /*N=*/0,
-                      /*immr=*/0, /*imms=*/15, addr_reg, addr_reg);
-    } else {
-        emit_ldr_str_imm(buf, /*size=*/2, /*is_fp=*/0, /*opc=*/1 /*LDR*/,
-                         /*imm12=*/0, addr_reg, addr_reg);
-    }
-
-    // Step 4: SCVTF
-    emit_scvtf(buf, /*is_64bit_int=*/0, /*ftype=*/1, Dd_int, addr_reg);
-    free_gpr(*a1, addr_reg);
+    // Steps 2-4: load the integer and convert it to f64
+    emit_load_int_operand(*a1, buf, &a2->operands[0], is_m16, Dd_int);
 
     // Step 5: FSUB Dd_st0, Dd_int, Dd_st0 — integer - ST(0) (REVERSED)
     emit_fsub_f64(buf, Dd_st0, Dd_int, Dd_st0);
@@ -3134,25 +3064,8 @@ auto translate_ficom(TranslationResult* a1, IRInstr* a2) -> void {
     // Step 1: load ST(0).
     emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Dd_st0, Xst_base);
 
-    // Step 2: compute source memory address.
-    const int addr_reg =
-        compute_operand_address(*a1, /*is_64bit=*/true, &a2->operands[0], GPR::XZR);
-
-    // Step 3: load integer from memory.
-    if (is_m16) {
-        emit_ldr_str_imm(buf, /*size=*/1 /*16-bit*/, /*is_fp=*/0, /*opc=*/1 /*LDR*/,
-                         /*imm12=*/0, addr_reg, addr_reg);
-        // SXTH: sign-extend bits[15:0] → W
-        emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/0 /*SBFM*/, /*N=*/0,
-                      /*immr=*/0, /*imms=*/15, addr_reg, addr_reg);
-    } else {
-        emit_ldr_str_imm(buf, /*size=*/2 /*32-bit*/, /*is_fp=*/0, /*opc=*/1 /*LDR*/,
-                         /*imm12=*/0, addr_reg, addr_reg);
-    }
-
-    // Step 4: convert signed integer W → f64.
-    emit_scvtf(buf, /*is_64bit_int=*/0, /*ftype=*/1, Dd_int, addr_reg);
-    free_gpr(*a1, addr_reg);
+    // Steps 2-4: load the integer and convert it to f64.
+    emit_load_int_operand(*a1, buf, &a2->operands[0], is_m16, Dd_int);
 
     // Step 5: save NZCV, compare, map flags.
     emit_mrs_nzcv(buf, Wd_tmp2);
@@ -4095,12 +4008,13 @@ auto translate_frstor(TranslationResult* a1, IRInstr* a2) -> void {
 
     // ── 8 ST slots — unrolled f80 -> f64 conversion ──
     //
-    // Xaddr is mutated in place: bumped by +0x1C before iter 0, then +10
-    // between iterations.  After iter 7 it points past the last slot;
-    // we don't restore it.
+    // Xslot walks the image: Xaddr + 0x1C before iter 0, then +10 between
+    // iterations.  After iter 7 it points past the last slot.  Xslot is
+    // Xaddr itself unless that is a guest register (bare 64-bit [reg]),
+    // which must keep its value.
     //
     // GPR pressure: Xbase + Wd_top + Wd_tmp + Xst_base(cached only) +
-    // Xaddr + Xmant + Wexp + Xsign + Wd_aux = 8 (standalone) or 9 (cached).
+    // Xslot + Xmant + Wexp + Xsign + Wd_aux = 8 (standalone) or 9 (cached).
     // The 8-slot scratch pool just fits standalone.  In cached mode we
     // free Xst_base for the duration of the loop and re-derive it at the
     // end — emit_store_st falls back to its uncached path (3 extra insns
@@ -4112,6 +4026,7 @@ auto translate_frstor(TranslationResult* a1, IRInstr* a2) -> void {
         Xst_base = -1;  // force uncached emit_store_st in the loop
     }
 
+    const int Xslot = writable_addr_reg(*a1, Xaddr);
     const int Xmant = alloc_free_gpr(*a1);
     const int Wexp = alloc_free_gpr(*a1);
     const int Xsign = alloc_free_gpr(*a1);
@@ -4120,14 +4035,14 @@ auto translate_frstor(TranslationResult* a1, IRInstr* a2) -> void {
 
     for (int i = 0; i < 8; ++i) {
         const int delta = (i == 0) ? 0x1C : 10;
-        // Bump Xaddr to the start of the current slot.
+        // Bump Xslot to the start of the current slot.
         emit_add_imm(buf, /*is_64bit=*/1, /*is_sub=*/0, /*is_set_flags=*/0,
-                     /*shift=*/0, delta, Xaddr, Xaddr);
-        // LDR Xmant, [Xaddr, #0] — 8-byte mantissa.
-        emit_ldr_imm(buf, /*size=*/3, Xmant, Xaddr, /*imm12=*/0);
-        // LDRH Wexp, [Xaddr, #8] — 2-byte sign+exp word.
+                     /*shift=*/0, delta, (i == 0) ? Xaddr : Xslot, Xslot);
+        // LDR Xmant, [Xslot, #0]: 8-byte mantissa.
+        emit_ldr_imm(buf, /*size=*/3, Xmant, Xslot, /*imm12=*/0);
+        // LDRH Wexp, [Xslot, #8]: 2-byte sign+exp word.
         emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/1 /*LDR*/,
-                         /*imm12=*/4, Xaddr, Wexp);
+                         /*imm12=*/4, Xslot, Wexp);
         emit_f80_to_f64_convert(buf, Xmant, Wexp, Xsign, Wd_aux, Wd_tmp);
         emit_fmov_x_to_d(buf, Dd_val, Xmant);
         // Store into ST(i) (logical depth i from new TOP).
@@ -4139,6 +4054,9 @@ auto translate_frstor(TranslationResult* a1, IRInstr* a2) -> void {
     free_gpr(*a1, Xsign);
     free_gpr(*a1, Wexp);
     free_gpr(*a1, Xmant);
+    if (Xslot != Xaddr) {
+        free_gpr(*a1, Xslot);
+    }
     free_gpr(*a1, Xaddr);
 
     if (cached) {
@@ -4226,16 +4144,18 @@ auto translate_fsave(TranslationResult* a1, IRInstr* a2) -> void {
 
     // ── 8 ST slots — unrolled f64 -> f80 conversion ──
     //
-    // Per-iter: load ST(i) into Dd_src, bump Xaddr to slot i, call
-    // emit_f64_to_f80 (writes 10 bytes at [Xaddr]).  After the loop,
-    // Xaddr points past slot 7 — we don't restore it.
+    // Per-iter: load ST(i) into Dd_src, bump Xslot to slot i, call
+    // emit_f64_to_f80 (writes 10 bytes at [Xslot]).  After the loop,
+    // Xslot points past slot 7.  Xslot is Xaddr itself unless that is a
+    // guest register (bare 64-bit [reg]), which must keep its value.
     //
     // GPR pressure:
     //   persistent: Xbase, Wd_top, Wd_tmp, Xst_base(cached only),
-    //               Xaddr, Xbits, Wexp = 6 or 7
+    //               Xslot, Xbits, Wexp = 6 or 7
     //   per-iter:   no extra (Dd_src is FPR, no GPR cost)
     // = 7 worst case (cached).  Pool of 8 fits comfortably.
     const int Xst_base = x87_get_st_base(*a1);
+    const int Xslot = writable_addr_reg(*a1, Xaddr);
     const int Xbits = alloc_free_gpr(*a1);
     const int Wexp = alloc_free_gpr(*a1);
     const int Dd_src = alloc_free_fpr(*a1);
@@ -4243,17 +4163,20 @@ auto translate_fsave(TranslationResult* a1, IRInstr* a2) -> void {
     for (int i = 0; i < 8; ++i) {
         // Load ST(i) (logical depth i from current TOP).
         emit_load_st(buf, Xbase, Wd_top, /*stack_depth=*/i, Wd_tmp, Dd_src, Xst_base);
-        // Bump Xaddr to the start of the current slot.
+        // Bump Xslot to the start of the current slot.
         const int delta = (i == 0) ? 0x1C : 10;
         emit_add_imm(buf, /*is_64bit=*/1, /*is_sub=*/0, /*is_set_flags=*/0,
-                     /*shift=*/0, delta, Xaddr, Xaddr);
-        // Convert and store 10 bytes at [Xaddr, #0..#9].
-        emit_f64_to_f80(buf, Xaddr, Dd_src, Xbits, Wexp, Wd_tmp);
+                     /*shift=*/0, delta, (i == 0) ? Xaddr : Xslot, Xslot);
+        // Convert and store 10 bytes at [Xslot, #0..#9].
+        emit_f64_to_f80(buf, Xslot, Dd_src, Xbits, Wexp, Wd_tmp);
     }
 
     free_fpr(*a1, Dd_src);
     free_gpr(*a1, Wexp);
     free_gpr(*a1, Xbits);
+    if (Xslot != Xaddr) {
+        free_gpr(*a1, Xslot);
+    }
     free_gpr(*a1, Xaddr);
 
     // ── Re-initialize FPU state per Intel SDM (FSAVE = FSTENV + FINIT) ──

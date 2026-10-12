@@ -5,6 +5,7 @@
 
 #include <utility>
 
+#include "rosetta_core/Register.h"
 #include "rosetta_core/TranslationResult.h"
 #include "rosetta_core/TranslatorHelpers.hpp"
 #include "rosetta_core/TranslatorX87Helpers.hpp"
@@ -67,6 +68,20 @@ inline auto x87_begin(TranslationResult& a1, AssemblerBuffer& buf) -> std::pair<
 
 inline int x87_get_st_base(TranslationResult& a1) {
     return (a1.x87_cache.gprs_valid && a1.x87_cache.st_base_valid) ? a1.x87_cache.st_base_gpr : -1;
+}
+
+// compute_operand_address returns the guest register itself for a 64-bit
+// operand that is a bare base or index register with no displacement.  Code
+// that writes the address register, by loading through it into itself or by
+// stepping it through a buffer, would then overwrite guest state.  Returns
+// addr_reg when it is a scratch register the caller owns, otherwise a newly
+// allocated scratch.  The caller frees the result when it differs from
+// addr_reg.
+inline int writable_addr_reg(TranslationResult& a1, int addr_reg) {
+    if (addr_reg >= 0 && addr_reg < 32 && ((kGprScratchMask >> addr_reg) & 1U) != 0) {
+        return addr_reg;
+    }
+    return alloc_free_gpr(a1);
 }
 
 // OPT-G: Flush deferred permutation before push/pop.
