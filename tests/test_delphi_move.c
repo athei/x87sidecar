@@ -22,8 +22,19 @@
  * two variants: a handler that only counts and one that writes the saved
  * context back unchanged.
  *
- * Build: clang -arch x86_64 -O2 -o test_delphi_move test_delphi_move.c
+ * NosTale itself is 32-bit code, so the 9..32 byte path and the two-block
+ * Round shape also run unwidened in a 32-bit compatibility segment from the
+ * LDT, as in test_x87_signal_context.  The image is linked below 4 GB so the
+ * 32-bit code can address its buffers.  The large-block loops run in the
+ * widened routine only.
+ *
+ * Build: clang -arch x86_64 -O2 -Wl,-pagezero_size,0x4000 -o test_delphi_move \
+ *        test_delphi_move.c
  */
+#include <architecture/i386/desc.h>
+#include <architecture/i386/table.h>
+#include <errno.h>
+#include <i386/user_ldt.h>
 #include <math.h>
 #include <pthread.h>
 #include <signal.h>
@@ -570,6 +581,217 @@ static void test_trunc_shapes(void) {
     failures += bad != 0;
 }
 
+/* ── 32-bit compatibility mode ───────────────────────────────────────────── */
+
+/* Entered by a far jump with eax = source, edx = destination, ecx = count
+ * (9..32), esi:edi = the 64-bit return far pointer.  move32_gate is the
+ * RTL's 9..32 byte path with its own registers. */
+extern char move32_gate[], round32_gate[], roundd32_gate[];
+__asm__(
+    ".text\n"
+    ".p2align 4\n"
+    ".intel_syntax noprefix\n"
+    ".code32\n"
+    ".globl _move32_gate\n"
+    "_move32_gate:\n"
+    "    sub     ecx, 8\n"
+    "    fild    qword ptr [eax+ecx]\n"
+    "    fild    qword ptr [eax]\n"
+    "    cmp     ecx, 8\n"
+    "    jle     Lm32_small16\n"
+    "    fild    qword ptr [eax+8]\n"
+    "    cmp     ecx, 16\n"
+    "    jle     Lm32_small24\n"
+    "    fild    qword ptr [eax+16]\n"
+    "    fistp   qword ptr [edx+16]\n"
+    "Lm32_small24:\n"
+    "    fistp   qword ptr [edx+8]\n"
+    "Lm32_small16:\n"
+    "    fistp   qword ptr [edx]\n"
+    "    fistp   qword ptr [edx+ecx]\n"
+    "    push    edi\n"
+    "    push    esi\n"
+    "    retf\n"
+    ".globl _round32_gate\n"
+    "_round32_gate:\n"
+    "    fild    qword ptr [eax]\n"
+    "    jmp     Lr32_store\n"
+    "Lr32_store:\n"
+    "    fistp   qword ptr [edx]\n"
+    "    push    edi\n"
+    "    push    esi\n"
+    "    retf\n"
+    ".globl _roundd32_gate\n"
+    "_roundd32_gate:\n"
+    "    fld     qword ptr [eax]\n"
+    "    jmp     Lrd32_store\n"
+    "Lrd32_store:\n"
+    "    fistp   dword ptr [edx]\n"
+    "    push    edi\n"
+    "    push    esi\n"
+    "    retf\n"
+    ".code64\n"
+    ".att_syntax prefix\n");
+
+static uint16_t sel_cs32 = 0;
+static uint16_t sel_ds32 = 0;
+static uint16_t sel_cs64 = 0;
+
+static uint16_t ldt_sel(int index) {
+    return (uint16_t)((index << 3) | (1 << 2) | 3);
+}
+
+static uint16_t alloc_ldt_seg(int idx, int is_code) {
+    ldt_entry_t e;
+    memset(&e, 0, sizeof e);
+    if (is_code) {
+        e.code.limit00 = 0xFFFF;
+        e.code.type = DESC_CODE_READ;
+        e.code.dpl = 3;
+        e.code.present = 1;
+        e.code.limit16 = 0xF;
+        e.code.opsz = DESC_CODE_32B;
+        e.code.granular = DESC_GRAN_PAGE;
+    } else {
+        e.data.limit00 = 0xFFFF;
+        e.data.type = DESC_DATA_WRITE;
+        e.data.dpl = 3;
+        e.data.present = 1;
+        e.data.limit16 = 0xF;
+        e.data.stksz = DESC_DATA_32B;
+        e.data.granular = DESC_GRAN_PAGE;
+    }
+    if (i386_set_ldt(idx, &e, 1) < 0) {
+        printf("FAIL  i386_set_ldt(idx=%d,%s) failed (errno=%d %s)\n", idx,
+               is_code ? "code" : "data", errno, strerror(errno));
+        failures++;
+        return 0;
+    }
+    return ldt_sel(idx);
+}
+
+struct __attribute__((packed)) farptr32 {
+    uint32_t off;
+    uint16_t sel;
+};
+
+static void call32(void* gate, const void* eax, void* edx, uint32_t ecx) {
+    struct farptr32 to32 = {(uint32_t)(uintptr_t)gate, sel_cs32};
+    uint64_t in_eax = (uintptr_t)eax, in_edx = (uintptr_t)edx, in_ecx = ecx;
+    uint32_t in_ds32 = sel_ds32, in_cs64 = sel_cs64;
+    __asm__ volatile(
+        "leaq 1f(%%rip), %%rsi   \n"
+        "movl %k[incs], %%edi    \n"
+        "mov  %%ds, %%r10w       \n"
+        "mov  %%es, %%r8w        \n"
+        "mov  %%ss, %%r9w        \n"
+        "movl %k[inds], %%eax    \n"
+        "mov  %%ax, %%ds         \n"
+        "mov  %%ax, %%es         \n"
+        "mov  %%ax, %%ss         \n"
+        "movl %k[ineax], %%eax   \n"
+        "movl %k[inedx], %%edx   \n"
+        "movl %k[inecx], %%ecx   \n"
+        "ljmp *%[fp]             \n"
+        "1:                      \n"
+        "mov  %%r10w, %%ds       \n"
+        "mov  %%r8w, %%es        \n"
+        "mov  %%r9w, %%ss        \n"
+        :
+        : [ineax] "r"(in_eax), [inedx] "r"(in_edx), [inecx] "r"(in_ecx), [inds] "r"(in_ds32),
+          [incs] "r"(in_cs64), [fp] "m"(to32)
+        : "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "cc", "memory", "st",
+          "st(1)", "st(2)", "st(3)");
+}
+
+static void test_compat_mode(void) {
+    sel_cs32 = alloc_ldt_seg(3, 1);
+    sel_ds32 = alloc_ldt_seg(4, 0);
+    __asm__ volatile("mov %%cs, %0" : "=r"(sel_cs64));
+    if (sel_cs32 == 0 || sel_ds32 == 0) {
+        return;
+    }
+
+    /* The 9..32 byte path, separate and overlapping buffers. */
+    static const int kCounts32[] = {9, 15, 16, 17, 24, 25, 32};
+    static const int kShifts32[] = {0, 1, 13, -1, -13};
+    static unsigned char buf[160];
+    static unsigned char want[160];
+    static unsigned char src[64];
+    int bad = 0;
+    int cases = 0;
+    for (unsigned c = 0; c < sizeof(kCounts32) / sizeof(kCounts32[0]); c++) {
+        const int n = kCounts32[c];
+        for (int p = 0; p < P_COUNT; p++) {
+            for (unsigned s = 0; s < sizeof(kShifts32) / sizeof(kShifts32[0]); s++) {
+                const int shift = kShifts32[s];
+                char what[96];
+                cases++;
+                memset(buf, 0xAA, sizeof(buf));
+                if (shift == 0) {
+                    fill(src, n, p, (int)c);
+                    memcpy(want, buf, sizeof(want));
+                    memcpy(want + GUARD, src, (size_t)n);
+                    call32(move32_gate, src, buf + GUARD, (uint32_t)n);
+                } else {
+                    fill(buf + 64, n, p, (int)c);
+                    memcpy(want, buf, sizeof(want));
+                    memmove(want + 64 + shift, want + 64, (size_t)n);
+                    call32(move32_gate, buf + 64, buf + 64 + shift, (uint32_t)n);
+                }
+                snprintf(what, sizeof(what), "32-bit Move count=%d %s shift=%d", n,
+                         kPatternNames[p], shift);
+                bad += report_mismatch(what, buf, want, (int)sizeof(buf));
+            }
+        }
+    }
+    printf("%s  32-bit Move 9..32 bytes, separate and overlapping (%d cases, %d bad)\n",
+           bad ? "FAIL" : "PASS", cases, bad);
+    failures += bad != 0;
+
+    /* fild, jmp, fistp. */
+    bad = 0;
+    for (int i = 0; i < NSPECIALS; i++) {
+        static int64_t s;
+        static int64_t d;
+        s = kSpecials[i];
+        d = 0;
+        call32(round32_gate, &s, &d, 0);
+        if (d != s) {
+            printf("FAIL  32-bit fild, jmp, fistp 0x%016llx got=0x%016llx\n", (unsigned long long)s,
+                   (unsigned long long)d);
+            bad++;
+        }
+    }
+    printf("%s  32-bit fild, jmp, fistp (%d values)\n", bad ? "FAIL" : "PASS", NSPECIALS);
+    failures += bad != 0;
+
+    /* fld m64, jmp, fistp m32 under every rounding mode. */
+    bad = 0;
+    cases = 0;
+    for (int rc = 0; rc < 4; rc++) {
+        for (int i = 0; i < NROUND; i++) {
+            static double x;
+            static int32_t d;
+            x = kRoundInputs[i];
+            d = 0;
+            set_cw((uint16_t)(CW_DEFAULT | (rc << 10)));
+            call32(roundd32_gate, &x, &d, 0);
+            set_cw(CW_DEFAULT);
+            const uint64_t want32 = ref_store(x, rc, 32);
+            cases++;
+            if ((uint32_t)d != want32) {
+                printf("FAIL  32-bit fistp m32 rc=%d x=%.17g got=0x%x want=0x%llx\n", rc, x,
+                       (uint32_t)d, (unsigned long long)want32);
+                bad++;
+            }
+        }
+    }
+    printf("%s  32-bit Round shape, every RC (%d cases, %d bad)\n", bad ? "FAIL" : "PASS", cases,
+           bad);
+    failures += bad != 0;
+}
+
 /* ── Signal storm ────────────────────────────────────────────────────────── */
 
 enum variant { V_PLAIN, V_MODCTX };
@@ -721,6 +943,10 @@ int main(int argc, char** argv) {
     }
     run_storm(V_PLAIN, budget);
     run_storm(V_MODCTX, budget);
+
+    /* Last: once an LDT is installed, signal contexts use the larger
+     * layout, which the storm handler does not expect. */
+    test_compat_mode();
 
     printf("%d failure(s)\n", failures);
     return failures ? 1 : 0;
