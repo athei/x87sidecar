@@ -98,6 +98,7 @@ ALL_TESTS=(
     test_ir_split_trans
     test_ir_dup_input
     test_ir_fpatan_rc
+    test_ir_split_gs
     test_bridge_mov
     test_bridge_lea
     test_bridge_flags
