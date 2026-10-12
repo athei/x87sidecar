@@ -61,6 +61,24 @@ static profile::BlockTally block_tally(const X87Cache& cache) {
     };
 }
 
+// The IRG1 per-reason gate refusal counters and the RRR0 max-run-at-refusal
+// side table, both mirrored from the cache.
+static void mirror_block_gate_counters(uint32_t bid, const X87Cache& cache) {
+    profile::BlockIRGateCounters c{};
+    c.counts[profile::kIRGateReasonShortRun] = cache.tally_ir_gate_short_run;
+    c.counts[profile::kIRGateReasonTopDirty] = cache.tally_ir_gate_top_dirty;
+    c.counts[profile::kIRGateReasonTagPush] = cache.tally_ir_gate_tag_push;
+    c.counts[profile::kIRGateReasonDeferredPop] = cache.tally_ir_gate_deferred_pop;
+    c.counts[profile::kIRGateReasonPermDirty] = cache.tally_ir_gate_perm_dirty;
+    profile::set_block_ir_gate_counters(bid, c);
+
+    profile::BlockMaxRunAtRefuse mr{};
+    for (uint32_t r = 0; r < profile::kIRGateReasonCount; ++r) {
+        mr.max_run[r] = cache.max_run_at_gate[r];
+    }
+    profile::set_block_max_run_at_refuse(bid, mr);
+}
+
 // What a request can change in the result before it is known to succeed:
 // the emitted words, the fixup lists, the register masks and the x87 cache.
 // A request whose allocator ran dry is put back to this and declined.
@@ -99,13 +117,13 @@ static RequestEntry capture_request_entry(const TranslationResult& tr) {
 // and the x87 state complete in memory, and nothing it emitted is kept.  The
 // cache goes back to its entry state with the run released, as after any
 // declined request.  When the request had moved the cache onto a new block,
-// the entry state is the previous block's, so the next request enters the
-// block afresh and its execution counter is emitted with code that is kept.
-// A request that found stock translating the block again is treated the
-// same way, by forgetting the block.  The rest of the block goes to stock as
-// well (X87Cache::declined_block).
+// the entry state is the previous block's, so the block is entered afresh
+// the next time it is translated.  A request that found stock translating
+// the block again is treated the same way, by forgetting the block.  The
+// rest of the block goes to stock as well (X87Cache::declined_block).
 static void decline_after_alloc_failure(TranslationResult& tr, const RequestEntry& entry,
-                                        const IRBlock* block, int64_t insn_idx) {
+                                        const IRBlock* block, const IRInstr* instr_array,
+                                        int64_t num_instrs, int64_t insn_idx) {
     tr.insn_buf.end = entry.buf_end;
     for (size_t i = 0; i < 6; i++) {
         auto& list = tr.*kFixupLists[i];
@@ -131,10 +149,18 @@ static void decline_after_alloc_failure(TranslationResult& tr, const RequestEntr
     cache.last_next_idx = -1;
     cache.declined_block = block;
     cache.declined_idx = static_cast<int32_t>(insn_idx);
-    // The attempt mirrored tallies for ops whose code was just dropped.
-    if (attempted_bid != profile::kOverflowId) {
-        profile::set_block_tally(attempted_bid,
-                                 same_block ? block_tally(cache) : profile::BlockTally{});
+    cache.declined_num_instrs = static_cast<int32_t>(num_instrs);
+    cache.declined_start_pc = instr_array[0].pc;
+    // The attempt mirrored profile side tables for ops whose code was just
+    // dropped.  Within one translation of the block the cache holds what they
+    // said before, so mirror that back.  An attempt that had entered the
+    // block anew is left alone rather than zeroed, since the block id may
+    // carry an earlier translation's counts: its entries, and the
+    // latest-write build-fail opcode and top_dirty predecessor in any case,
+    // can then reflect the declined attempt.
+    if (attempted_bid != profile::kOverflowId && same_block) {
+        profile::set_block_tally(attempted_bid, block_tally(cache));
+        mirror_block_gate_counters(attempted_bid, cache);
     }
 }
 
@@ -165,7 +191,9 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
     // The rest of a block in which a request ran out of registers goes to
     // stock (X87Cache::declined_block).  ARPL cannot, and reads no x87 flags.
     if (cache.declined_block != nullptr) {
-        if (cache.declined_block != block || insn_idx <= cache.declined_idx) {
+        if (cache.declined_block != block || insn_idx <= cache.declined_idx ||
+            num_instrs != cache.declined_num_instrs ||
+            instr_array[0].pc != cache.declined_start_pc) {
             cache.declined_block = nullptr;
         } else if (op != kOpcodeName_arpl) {
             cache.last_next_idx = -1;
@@ -247,7 +275,8 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
             std::fflush(stdout);
             std::abort();
         }
-        decline_after_alloc_failure(*translation_result, entry, block, insn_idx);
+        decline_after_alloc_failure(*translation_result, entry, block, instr_array, num_instrs,
+                                    insn_idx);
         return std::nullopt;
     }
     cache.last_next_idx = ret.has_value() ? static_cast<int32_t>(*ret) : -1;
@@ -459,19 +488,7 @@ static auto translate_instruction_impl(TranslationResult* translation_result, IR
     // side-table (RRR0) — same trigger.
     const auto mirror_gate_counters = [&] {
         if (cache.profile_bid != profile::kOverflowId) {
-            profile::BlockIRGateCounters c{};
-            c.counts[profile::kIRGateReasonShortRun] = cache.tally_ir_gate_short_run;
-            c.counts[profile::kIRGateReasonTopDirty] = cache.tally_ir_gate_top_dirty;
-            c.counts[profile::kIRGateReasonTagPush] = cache.tally_ir_gate_tag_push;
-            c.counts[profile::kIRGateReasonDeferredPop] = cache.tally_ir_gate_deferred_pop;
-            c.counts[profile::kIRGateReasonPermDirty] = cache.tally_ir_gate_perm_dirty;
-            profile::set_block_ir_gate_counters(cache.profile_bid, c);
-
-            profile::BlockMaxRunAtRefuse mr{};
-            for (uint32_t r = 0; r < profile::kIRGateReasonCount; ++r) {
-                mr.max_run[r] = cache.max_run_at_gate[r];
-            }
-            profile::set_block_max_run_at_refuse(cache.profile_bid, mr);
+            mirror_block_gate_counters(cache.profile_bid, cache);
         }
     };
 

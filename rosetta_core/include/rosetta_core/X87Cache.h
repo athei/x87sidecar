@@ -65,9 +65,12 @@ struct X87Cache {
     // keep every flag in the same place (the sidecar's FCMOVU reads PF from
     // V, which stock's FUCOMI leaves clear), so once an instruction has gone
     // to stock, the rest of the block, which may read what it left behind,
-    // goes there too.
+    // goes there too.  Stock reuses IRBlock objects, so the block is also
+    // identified by its length and the guest pc of its first instruction.
     const IRBlock* declined_block = nullptr;
     int32_t declined_idx = -1;
+    int32_t declined_num_instrs = 0;
+    uint32_t declined_start_pc = 0;
 
     // Stock's free_gpr_mask word as it arrived at the current x87 entry
     // (run start or isolated op).  Stock's translate_insn carries its

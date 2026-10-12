@@ -136,8 +136,13 @@ this one over. Stock and the sidecar do not keep every flag in the same
 place. The sidecar's `fcmovu` reads PF from V, which stock's `fucomi` leaves
 clear, so a sidecar instruction must not read flags that a stock translation
 of the same block set. Instructions translated before the failure stay, since
-stock's readers find what the sidecar writes. A block declined from its
-first request gets no block profiler counter.
+stock's readers find what the sidecar writes. The rule stops at the block
+boundary: a stock `fucomi` at the end of a declined block followed by a
+sidecar `fcmovu` in the next block still reads PF wrong, as it already did
+for blocks handed to stock by `X87_STOCK_HASH_LIST` or `X87_STOCK_OPS`. A
+block declined from its first request gets no block profiler counter, and
+the profiler's per-block diagnostics for a declined block can include the
+declined attempt.
 
 ARPL is the exception. Stock has no opcode for it, so a failure while
 translating it still aborts, and an ARPL later in a declined block is still
@@ -149,8 +154,8 @@ pressure-model bug still fails a test. `X87_FAIL_ALLOC_EVERY=N` fails every
 Nth allocation in the process. The harness runs a set of tests with it at
 several N without strict mode; `test_alloc_decline` covers long runs, split
 runs, a bridged region, integer stores, compares, `fucomi` followed by
-`fcmovu`, and a transcendental. When
-no allocation fails, the emitted code is unchanged.
+`fcmovu`, and a transcendental. When no allocation fails, the emitted code
+is unchanged.
 
 ## Encodings Rosetta's decoder rejects
 
