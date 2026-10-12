@@ -650,6 +650,87 @@ static auto try_fuse_fild_fistp(TranslationResult* a1, IRInstr* fild_instr, IRIn
 }
 
 // =============================================================================
+// Peephole: FLD m80fp + FSTP m80fp → ten-byte copy
+//
+// `fld tbyte [src]; fstp tbyte [dst]` is what a long double assignment or a
+// Delphi Extended assignment compiles to.  The x87 moves the ten bytes
+// without converting them: FLD m80 does not quiet an SNaN and FSTP m80 does
+// not round, so every encoding arrives intact, including values outside
+// binary64's range, all 64 significand bits, NaN payloads, unnormals and
+// pseudo-denormals.  Stock Rosetta does the same.  Going through the
+// binary64 register file would lose all of that, so the pair becomes a copy
+// of eight plus two bytes.  The push and pop cancel exactly as in
+// try_fuse_fld_fstp: TOP and the tag word end where they started.
+//
+// Only the adjacent pair is exact.  A value loaded with FLD m80 that meets
+// any other instruction first, or reaches its FSTP m80 in a later reply, is
+// rounded to binary64 on the way.
+//
+// Returns 2 (instructions consumed) if fused, std::nullopt otherwise.
+// =============================================================================
+
+static auto try_fuse_fld_fstp_m80(TranslationResult* a1, IRInstr* fld_instr, IRInstr* fstp_instr)
+    -> std::optional<int> {
+    if (fld_instr->opcode() != kOpcodeName_fld || fstp_instr->opcode() != kOpcodeName_fstp) {
+        return std::nullopt;
+    }
+    if (fld_instr->operands[0].kind == IROperandKind::Register ||
+        fld_instr->operands[0].mem.size != IROperandSize::S80) {
+        return std::nullopt;
+    }
+    if (fstp_instr->operands[0].kind == IROperandKind::Register ||
+        fstp_instr->operands[0].mem.size != IROperandSize::S80) {
+        return std::nullopt;
+    }
+
+    AssemblerBuffer& buf = a1->insn_buf;
+    auto [Xbase, Wd_top] = x87_begin(*a1, buf);
+    const int Wd_tmp = alloc_gpr(*a1, 2);
+
+    // Same deferred-TOP handling as try_fuse_fld_fstp.
+    if (!(a1->x87_cache.tag_push_pending && a1->x87_cache.top_dirty)) {
+        x87_flush_top(buf, *a1, Xbase, Wd_top, Wd_tmp);
+    }
+
+    // Load both parts before computing the destination address, so the copy
+    // is right when source and destination overlap and only one address is
+    // live at a time.  The significand goes into an FPR and the sign and
+    // exponent word into Wd_tmp.  Neither may go into Xsrc: for a plain
+    // 64-bit base or index register with no displacement,
+    // compute_operand_address returns the guest register itself.
+    //   LDR  Dd_mant, [Xsrc]
+    //   LDRH Wd_tmp,  [Xsrc, #8]
+    //   STR  Dd_mant, [Xdst]
+    //   STRH Wd_tmp,  [Xdst, #8]
+    const int Dd_mant = alloc_free_fpr(*a1);
+    const int Xsrc =
+        compute_operand_address(*a1, /*is_64bit=*/true, &fld_instr->operands[0], GPR::XZR);
+    emit_fldr_imm(buf, /*size=*/3 /*D*/, Dd_mant, Xsrc, /*imm12=*/0);
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/1 /*LDR*/, /*imm12=*/4, Xsrc, Wd_tmp);
+    // Freed before the destination address is formed, so a segment-override
+    // destination still finds its scratch registers, including the fixed
+    // X29 slot the GS path takes.
+    free_gpr(*a1, Xsrc);
+
+    // If the STR succeeds and the STRH faults on the next page, the pair is
+    // re-executed from the FLD and re-reads a source that the STR may
+    // already have overwritten when source and destination overlap.  The
+    // x87 itself loads into a register first, so its restart behaviour
+    // differs; this case is left as it is.
+    const int Xdst =
+        compute_operand_address(*a1, /*is_64bit=*/true, &fstp_instr->operands[0], GPR::XZR);
+    emit_fstr_imm(buf, /*size=*/3 /*D*/, Dd_mant, Xdst, /*imm12=*/0);
+    emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/0 /*STR*/, /*imm12=*/4, Xdst, Wd_tmp);
+    free_gpr(*a1, Xdst);
+    free_fpr(*a1, Dd_mant);
+
+    x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp, /*consumed=*/2);
+    free_gpr(*a1, Wd_tmp);
+
+    return 2;
+}
+
+// =============================================================================
 // Peephole: FXCH ST(1) + FSTP ST(1) → just pop
 //
 // The swap's effect is destroyed by the pop — both instructions collapse
@@ -2712,6 +2793,11 @@ static auto try_fuse_fld_group(TranslationResult* tr, IRInstr* instrs, int64_t n
     // 2-instruction fusions
     if (!fusion_disabled(disabled_mask, FusionId::fld_arithp)) {
         if (auto r = try_fuse_fld_arithp(tr, cur, next)) {
+            return r;
+        }
+    }
+    if (!fusion_disabled(disabled_mask, FusionId::fld_fstp_m80)) {
+        if (auto r = try_fuse_fld_fstp_m80(tr, cur, next)) {
             return r;
         }
     }

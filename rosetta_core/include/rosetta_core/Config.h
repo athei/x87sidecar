@@ -29,6 +29,7 @@ enum class FusionId : int {
     fstp_arith_fstp,  // FSTP mem + non-popping ARITH mem + FSTP mem (3-instruction, batched 2-pop)
     fild_fistp,       // FILD m64 + FISTP/FISTTP m64 as an exact 64-bit copy (the peephole and
                       // the IR pass_exact_i64_copy)
+    fld_fstp_m80,     // FLD m80 + FSTP m80 (2-instruction, raw ten-byte copy)
     kCount
 };
 
@@ -152,6 +153,12 @@ struct RosettaConfig {
     // localize a miscompile to "blocks with opcode X" in one run, then narrow
     // by hash.  Resolved to opcode ids at env-parse time.
     std::vector<uint16_t> x87_stock_ops;  // sorted, binary-searched
+
+    // X87_STOCK_BCD=0 keeps blocks containing FBLD / FBSTP in the sidecar.
+    // By default (1) the sidecar hands every such block to stock, whose
+    // 80-bit registers carry all 18 BCD digits; the inline translators go
+    // through binary64 and keep about 16.
+    uint8_t x87_stock_bcd;
 
     // X87_DIAG_DIR — directory for <dir>/x87diag.<pid>.log, where the
     // sidecar mirrors the X87_LOG_HASH_LIST and X87_STOCK_HASH_LIST lines.

@@ -38,6 +38,7 @@ constexpr FusionEntry kFusionTable[] = {
     {.name = "arith_faddp", .id = FusionId::arith_faddp},
     {.name = "fstp_arith_fstp", .id = FusionId::fstp_arith_fstp},
     {.name = "fild_fistp", .id = FusionId::fild_fistp},
+    {.name = "fld_fstp_m80", .id = FusionId::fld_fstp_m80},
 };
 
 }  // namespace
@@ -250,6 +251,8 @@ RosettaConfig load_config_from_env() {
         }
         std::printf("\n");
     }
+
+    cfg.x87_stock_bcd = env_default_on("X87_STOCK_BCD");
 
     if (env_truthy("X87_DISABLE_ALL_FUSIONS")) {
         cfg.disabled_fusions_mask = ~0ULL;
@@ -498,6 +501,9 @@ void print_env_help(std::FILE* out) {
         "  X87_STOCK_OPS=name,...        hand to stock every block containing any of\n"
         "                                the listed opcodes (mnemonics, e.g. f2xm1);\n"
         "                                coarse one-run localizer, narrow by hash next\n"
+        "  X87_STOCK_BCD=0               translate blocks containing fbld or fbstp in\n"
+        "                                the sidecar (default ON hands them to stock,\n"
+        "                                whose 80-bit registers keep all 18 digits)\n"
         "  X87_LOG_HASH_LIST=H,...       write an uptime-stamped line per translate\n"
         "                                request of the listed blocks to the\n"
         "                                X87_DIAG_DIR file (same clock as WINEDEBUG\n"

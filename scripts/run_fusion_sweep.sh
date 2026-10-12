@@ -68,6 +68,7 @@ ALL_FUSIONS=(
     arith_fstp
     arith_faddp
     fild_fistp
+    fld_fstp_m80
 )
 
 # Tests that exercise fusion patterns

@@ -10,7 +10,8 @@
 #      Skips EXACT_I64_COPY_SKIP: without the IR, fild m64 to fistp m64
 #      copies longer than a lone pair round through binary64.
 #   4. x87sidecar with X87_DISABLE_X87_IR=1 + X87_DISABLE_ALL_FUSIONS=1.
-#      Skips EXACT_I64_COPY_SKIP, as phase 3.
+#      Skips EXACT_I64_COPY_SKIP, as phase 3, and the tests in
+#      NO_FUSION_SKIP, whose exact results need a fusion.
 #   5. x87sidecar with X87_DISABLE_HOOK=1 (stock translate_insn only)
 #   6. x87sidecar with X87_ENABLE_FMA_CONTRACT=1 (FMA contraction is off by
 #      default; this phase keeps the IR FMA nodes, the FMA-reduce lowering
@@ -31,6 +32,9 @@
 #      must trap under native Rosetta, pass under x87sidecar (the
 #      decode_opcode hook substitutes a decodable encoding), and trap again
 #      under X87_NO_DECODE_HOOK=1
+#  13. x87sidecar with X87_STOCK_BCD=0 on test_fbld and test_fbstp, the only
+#      phase that reaches the inline FBLD/FBSTP translators (blocks
+#      containing them go to stock by default)
 #   R. replay tests/data/geom_block_874c40.ir under --fpr-pool 8 and
 #      assert the pressure splits keep it on the IR path (fpr_fail=0), then
 #      replay tests/data/fist_pressure.ir the same way and assert it exits 0
@@ -165,6 +169,8 @@ ALL_TESTS=(
     test_x87_signal_storm
     test_x87_signal_context
     test_x87_native_state
+    test_m80_copy
+    test_bcd_exact
 )
 
 RED='\033[0;31m'
@@ -412,12 +418,26 @@ if [[ $NATIVE_ONLY -eq 0 ]]; then
 fi
 
 # ── Phase 4: x87sidecar, IR disabled + all fusions disabled ──────────────
+# Some results are exact only through a fusion: a lone FLD m80 or FSTP m80
+# converts through the binary64 register file, and only the adjacent pair
+# copies the ten bytes.  The tests that assert those exact results are
+# skipped here by design.
+NO_FUSION_SKIP=(
+    test_m80_copy
+)
+no_fusion_skipped() {
+    local s
+    for s in "${NO_FUSION_SKIP[@]}"; do
+        [[ "$1" == "$s" ]] && return 0
+    done
+    return 1
+}
 if [[ $NATIVE_ONLY -eq 0 ]]; then
     echo ""
     echo -e "${BOLD}=== Phase 4: x87sidecar (IR disabled, fusions disabled) ===${NC}"
 
     for t in "${TESTS[@]}"; do
-        if exact_i64_copy_skipped "$t"; then
+        if exact_i64_copy_skipped "$t" || no_fusion_skipped "$t"; then
             continue
         fi
         BINARY="$TESTS_BIN/$t"
@@ -653,6 +673,32 @@ if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then
         expect_decode "ARPL   X87_NO_DECODE_HOOK=1" trap env X87_NO_DECODE_HOOK=1 "$LOADER" \
             "$ARPL_BIN"
     fi
+fi
+
+# ── Phase 13: x87sidecar X87_STOCK_BCD=0 (inline FBLD/FBSTP, curated set) ─
+# Blocks containing FBLD or FBSTP go to stock by default, so no other phase
+# reaches the sidecar's own BCD translators.  This phase keeps them under
+# test on the cases they get right; test_bcd_exact needs all 18 digits and
+# only passes through stock.
+STOCK_BCD_OFF_TESTS=(
+    test_fbld
+    test_fbstp
+)
+if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then
+    echo ""
+    echo -e "${BOLD}=== Phase 13: x87sidecar X87_STOCK_BCD=0 (inline fbld/fbstp) ===${NC}"
+
+    for t in "${STOCK_BCD_OFF_TESTS[@]}"; do
+        BINARY="$TESTS_BIN/$t"
+        if [[ ! -x "$BINARY" ]]; then
+            echo -e "${YELLOW}SKIP${NC}  $t  (binary not found)"
+            ERRORS=$((ERRORS + 1))
+            continue
+        fi
+        EXIT=0
+        OUT=$(X87_STOCK_BCD=0 "$LOADER" "$BINARY" 2>/dev/null | filter_runtime_lines) || EXIT=$?
+        check_output "$t" "$OUT" "$EXIT"
+    done
 fi
 
 # ── Replay: captured WoW geom block through the clamped pressure gate ────
