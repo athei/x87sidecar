@@ -2017,9 +2017,21 @@ int peak_live_fprs(const Context& ctx, int budget, int* first_over_node) {
                 break;
         }
         if (trans_spike > 0) {
+            // Count each dying node once.  fld st(0) or fst st(i) can give
+            // both operands of fpatan / fyl2x / fscale the same node, and
+            // free_dead_inputs releases its FPR only once; counting it per
+            // operand undercounts the spike by one.
             int dying_inputs = 0;
-            for (short in : n.inputs) {
-                if (in >= 0 && last_use[in] == i && holding[in]) {
+            for (int k = 0; k < 3; k++) {
+                const short in = n.inputs[k];
+                if (in < 0 || last_use[in] != i || !holding[in]) {
+                    continue;
+                }
+                bool seen = false;
+                for (int m = 0; m < k; m++) {
+                    seen = seen || n.inputs[m] == in;
+                }
+                if (!seen) {
                     dying_inputs++;
                 }
             }

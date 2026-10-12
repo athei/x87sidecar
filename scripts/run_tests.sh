@@ -30,7 +30,8 @@
 #   R. replay tests/data/geom_block_874c40.ir under --fpr-pool 8 and
 #      assert the pressure splits keep it on the IR path (fpr_fail=0), then
 #      replay tests/data/fist_pressure.ir the same way and assert it exits 0
-#      with one split per block
+#      with one split per block, then tests/data/ir_dup_input.ir and assert
+#      it exits 0 with every x87 instruction on the IR path
 #
 # Phase 1 doubles as the baseline the other phases are read against.  A
 # case that fails there fails with the sidecar nowhere in the picture, so
@@ -93,6 +94,7 @@ ALL_TESTS=(
     test_ir_split
     test_ir_remat
     test_ir_split_trans
+    test_ir_dup_input
     test_bridge_mov
     test_bridge_lea
     test_bridge_flags
@@ -665,6 +667,32 @@ if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then
             PASSED=$((PASSED + 1))
         else
             echo -e "${RED}FAIL${NC}  fist_pressure_replay  (exit=$REXIT)"
+            echo "$ROUT" | sed 's/^/      /'
+            FAILED=$((FAILED + 1))
+        fi
+    fi
+
+    # tests/data/ir_dup_input.ir is test_ir_dup_input's four blocks: fyl2x,
+    # fpatan and fscale with both operands the same node, and just enough
+    # other values live to reach the 8-slot pool if that node is counted
+    # twice.  The run has to be relieved before the lowering asserts, and
+    # all 38 x87 instructions have to stay on the IR path.
+    echo ""
+    echo -e "${BOLD}=== Replay: ir_dup_input.ir under --fpr-pool 8 ===${NC}"
+    TOTAL=$((TOTAL + 1))
+    DUP_IR="$ROOT_DIR/tests/data/ir_dup_input.ir"
+    if [[ ! -x "$REPLAY_BIN" || ! -f "$DUP_IR" ]]; then
+        echo -e "${YELLOW}SKIP${NC}  ir_dup_input_replay  (tool or blob not found)"
+        ERRORS=$((ERRORS + 1))
+    else
+        REXIT=0
+        ROUT=$("$REPLAY_BIN" "$DUP_IR" --fpr-pool 8 2>&1) || REXIT=$?
+        if [[ $REXIT -eq 0 ]] && grep -q '^ir_fpr_fail,0$' <<<"$ROUT" && \
+           grep -q '^ir,38$' <<<"$ROUT"; then
+            echo -e "${GREEN}PASS${NC}  ir_dup_input_replay (fpr_fail=0, all on IR)"
+            PASSED=$((PASSED + 1))
+        else
+            echo -e "${RED}FAIL${NC}  ir_dup_input_replay  (exit=$REXIT)"
             echo "$ROUT" | sed 's/^/      /'
             FAILED=$((FAILED + 1))
         fi
