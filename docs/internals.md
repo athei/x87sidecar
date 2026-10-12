@@ -101,6 +101,82 @@ Rosetta itself shifts the x87 stack when a signal lands in its `fcomp`,
 `fcompp` or `ficomp` translations; the harness records that as a stock
 divergence.
 
+## Precision and the floating-point environment
+
+The sidecar holds x87 values as binary64 (53-bit significand, 11-bit
+exponent). Real x87 and stock Rosetta hold them in the 80-bit extended format
+(64-bit significand, 15-bit exponent) and round arithmetic results to the
+precision-control (PC) field of the control word. The sidecar never reads PC.
+The differences below were measured on macOS 27.0.1 on an M5 Max by running
+the same x86-64 programs under stock Rosetta and under the sidecar.
+
+At PC=53, the Windows default control word 0x027F, rounding every result to
+53 bits is what the hardware does, so `fadd`, `fsub`, `fmul`, `fdiv` and
+`fsqrt` agree bit for bit as long as intermediate values stay inside the
+binary64 exponent range. An intermediate below 2^-1022 becomes subnormal and
+loses bits, and one above 2^1023 overflows, where an 80-bit register would
+keep it normal: `(1 + 2^-52) * 2^-1060 * 2^1060` gives `1 + 2^-52` on stock and
+`1.0` in the sidecar.
+
+The other two settings cannot be matched by a binary64 register file, and
+stock honours both:
+
+| control word | expression | stock Rosetta | sidecar |
+|---|---|---|---|
+| 0x037F, PC=64 | `(1 + 2^-60) - 1` | 2^-60 | 0 |
+| 0x037F, PC=64 | `(1 + 2^-30) * (1 - 2^-30) - 1` | -2^-60 | 0 |
+| 0x007F, PC=24 | `(1 + 2^-30) - 1` | 0 | 2^-30 |
+| 0x007F, PC=24 | `x / 3 * 3 - x`, x = 1 + 2^-50 | -2^-50 | 0 |
+| 0x007F, PC=24 | `2^24 + 1` from `fld m32; fadd m32` | 2^24 | 2^24 + 1 |
+
+PC=64 is the control word of x86-64 macOS processes (0x037F) and of Delphi
+programs (`$1332`); their results lose up to 11 bits against the hardware.
+PC=24 is what wine's d3d8 and d3d9 set, as Windows does, when a device is
+created without `D3DCREATE_FPU_PRESERVE`; such programs get more precision
+than the hardware would give them, which matters to code that depends on
+single-precision rounding, such as lockstep simulations that have to agree
+with other machines. Emulating PC=24 would mean a runtime test of the control
+word and a round trip through single precision after every arithmetic result,
+at each of the arithmetic emit sites in the direct translator, the fusions and
+the IR lowering, roughly a hundred of them. It is not done.
+
+A 64-bit integer loaded with `fild m64` is exact on real x87 for every value,
+so `fild m64; fistp m64` copies any `int64_t`. In the sidecar a value above
+2^53 in magnitude is rounded on the way: 2^53 + 1 comes back as 2^53 and
+2^62 + 3 as 2^62. Compilers use that pair to move 64-bit integers atomically on
+32-bit x86 without SSE2.
+
+Precision lost between instructions is not recovered later. The pow idiom of
+older C runtimes and Delphi, `fyl2x` followed by `fld st0; frndint; fsub
+st(1), st; fxch; f2xm1; fld1; faddp; fscale`, relies on `y * log2(x)` keeping
+64 bits so that `2^frac` is accurate to double precision. Swept over 352
+integer-valued powers (`2^n`, `3^n` up to `13^n`, `10^n`, `1.5^n`, square
+roots of squares) at PC=53 and PC=64, stock returns all 352 exactly and the
+sidecar 160 of them: `pow(3, 2)` comes out as 8.999999999999998, so `(int)pow(3, 2)`
+is 8, and `pow(10, -2)` is three units in the last place low. A correctly
+rounded `fyl2x` would not fix this: with `y * log2(x)` rounded to binary64 and
+everything after it exact, 184 of the 352 are still wrong. Carrying the
+product as a double-double into the `fsub` makes all 352 exact, but that needs
+a fused lowering of the whole sequence and a `log2` accurate to about 2^-62,
+and it cannot help when the steps are spread over separate translations, for
+example across a call.
+
+Rosetta maps MXCSR.RC to FPCR.RMode, MXCSR.FTZ to FPCR.FZ and MXCSR.DAZ to
+FPCR.FIZ, and the emitted x87 code runs under that FPCR. Real x87 ignores all
+three. So a program that sets FTZ or DAZ for its SSE code also gets its x87
+denormals flushed to zero, down to a plain `fld m32; fstp m32` copy of a
+denormal float, which MSVC `/arch:IA32` code uses for float copies, and,
+under DAZ, a denormal compares equal to zero. Stock Rosetta keeps them.
+
+Rounding control has the same cause: x87 arithmetic rounds by MXCSR.RC
+rather than by the RC field of the control word. The control word's RC is
+honoured by `fist`, `fistp` and `frndint`, which dispatch on it explicitly,
+but `fadd` and the other arithmetic instructions round to nearest under a
+program that sets the x87 RC to chop, and round up under one that sets
+MXCSR.RC up. x87 arithmetic also sets the MXCSR status flags (precision,
+underflow) and leaves the x87 status word's exception flags clear, the
+reverse of the hardware.
+
 ## Encodings Rosetta's decoder rejects
 
 Two encodings that real hardware runs are absent from Rosetta's decode

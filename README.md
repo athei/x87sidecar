@@ -312,6 +312,15 @@ has to get right too. FMA contraction is opt-in (`X87_ENABLE_FMA_CONTRACT=1`) be
 before the add, and at the 53-bit precision Windows processes run at the
 unfused form is the exact one.
 
+The sidecar holds x87 values as binary64 rather than the 80-bit extended
+format. At the 53-bit precision control Windows uses, arithmetic results
+match the hardware as long as intermediate values stay inside the binary64
+exponent range; at 64-bit or 24-bit precision control, for 64-bit
+integers above 2^53 and for sequences that carry extra precision from one
+instruction to the next, such as the `fyl2x`-based `pow`, they do not.
+[docs/internals.md](docs/internals.md#precision-and-the-floating-point-environment)
+lists the measured differences, including how x87 code interacts with MXCSR.
+
 When an asynchronous signal lands inside a translated run, Rosetta steps to the next instruction-map entry and takes
 the guest state from there, so every instruction the sidecar emits is one
 the runtime's decoder knows, control flow only goes forward, and a run is
