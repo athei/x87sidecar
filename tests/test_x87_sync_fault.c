@@ -1,32 +1,54 @@
 /*
  * An x87 memory access that faults must reach the program's SIGSEGV/SIGBUS
  * handler with a precise context, as under stock Rosetta: rip at the faulting
- * instruction, and the x87 stack, TOP, status word and control word as they
- * were before it.  Windows programs under wine rely on this through
- * structured exception handling (guard pages, IsBadReadPtr, deliberate
- * access violations).
+ * instruction, the fault address and kind, and the x87 stack, TOP, status
+ * word and control word as they were before it.  Windows programs under
+ * wine rely on this through structured exception handling (guard pages,
+ * write watches, IsBadReadPtr, deliberate access violations).
  *
- * Every case runs one x87 instruction against a PROT_NONE page: alone in
+ * Every case runs one x87 instruction against a protected page: alone in
  * its translation reply, at the start of a longer x87 run (also one joined
  * across a mov by bridging), as the first half of a two-instruction run that
  * a fusion takes, in a run of integer loads and stores only, and straddling
- * the page boundary.  The handler checks the context against a reference
- * taken just before the instruction, then either makes the page accessible
- * and returns, so the instruction runs again, or moves rip past the
- * instruction.  The final x87 state and memory are compared with an
- * unfaulted run and with a run that leaves the instruction out.
+ * the page boundary.  The page is PROT_NONE, or read-only for stores (the
+ * write-watch path).  Operands are a bare register, a displacement, an
+ * index, RIP-relative and %gs-relative, and a set of cases runs in 32-bit
+ * compatibility mode through an LDT code segment, as wine's 32-bit programs
+ * do.  The handler checks the context against a reference taken just before
+ * the instruction, then either makes the page accessible and returns, so
+ * the instruction runs again, or moves rip past the instruction.  The final
+ * x87 state and memory are compared with an unfaulted run and with a run
+ * that leaves the instruction out.
+ *
+ * Fault kind: stock reports a load as a read fault (__err 0x4) and a store
+ * as a write fault (0x6).  The sidecar probes a store at the start of a
+ * reply with a load and a write-back, so a store into a PROT_NONE page that
+ * it probes is reported as a read fault.  Those cases (E_WP) accept either;
+ * every other case must match stock.
+ *
+ * A last group stores through x87 instructions into write-combined and
+ * uncached IOSurface memory, where LSE atomics take a bus error and plain
+ * loads and stores work.
  *
  * The sidecar answers a run of floating-point x87 instructions with one
  * reply, and the runtime can only roll a fault back to the start of a
  * reply, so a fault in an instruction that is not the first of its reply
  * still aborts the process (docs/internals.md, "Memory faults inside
  * emitted code").  The store of a fused fild m64 / fistp m64 pair is
- * rolled back to the fild instead.  Those cases are in a second group that
- * runs only with SYNC_FAULT_IN_RUN=1; under stock Rosetta they pass.
+ * rolled back to the fild instead, and a 10-byte store that crosses into a
+ * read-only page aborts.  Those cases are in a second group that runs only
+ * with SYNC_FAULT_IN_RUN=1; under stock Rosetta they pass.
  *
- * SYNC_FAULT_CASE=<name> runs one case of either group; SYNC_FAULT_LIST=1
- * prints every name with its group.
+ * SYNC_FAULT_CASE=<name> runs one case of either group (wc for the
+ * IOSurface group); SYNC_FAULT_LIST=1 prints every name with its group.
  */
+#include <IOSurface/IOSurface.h>
+#include <architecture/i386/desc.h>
+#include <architecture/i386/table.h>
+#include <errno.h>
+#include <i386/user_ldt.h>
+#include <pthread.h>
+#include <setjmp.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -47,9 +69,17 @@ struct io {
     uint8_t m80src[16];   /* 0x40 */
     uint8_t save[112];    /* 0x50, fnsave image */
     int16_t i16src;       /* 0xc0 */
+    int16_t pad1[3];      /* 0xc2 */
+    int64_t gsoff;        /* 0xc8, the target relative to the %gs base */
 };
 _Static_assert(__builtin_offsetof(struct io, save) == 0x50, "io layout");
 _Static_assert(__builtin_offsetof(struct io, i16src) == 0xc0, "io layout");
+_Static_assert(__builtin_offsetof(struct io, gsoff) == 0xc8, "io layout");
+
+/* Three pages: the middle one is the one the cases protect.  The binary is
+ * linked below 4 GB, so 32-bit code reaches all of it. */
+char g_pages[3 * 4096] __attribute__((aligned(4096)));
+static char scratch_area[4096] __attribute__((aligned(4096)));
 
 /* Each case is three functions: the case itself, a reference that stops
  * where the instruction would run, and the case without the instruction. */
@@ -66,22 +96,51 @@ _Static_assert(__builtin_offsetof(struct io, i16src) == 0xc0, "io layout");
     "fnsave 0x50(%rdi)\n" \
     "ret\n"
 
-#define DEFINE_CASE(group, name, init, off, pre, insn, post)                                  \
+#define DEFINE_CASE(group, name, init, off, prot, err, pre, insn, post)                       \
     __asm__(".text\n.p2align 4\n.globl _" #name "\n_" #name ":\n" SETUP pre                   \
             "\n.globl _" #name "_fault\n_" #name "_fault:\n" insn "\n.globl _" #name            \
             "_after\n_" #name "_after:\n" post FINISH ".p2align 4\n.globl _" #name              \
             "_ref\n_" #name "_ref:\n" SETUP pre FINISH ".p2align 4\n.globl _" #name "_skip\n_" \
             #name "_skip:\n" SETUP pre "\n" post FINISH);                                      \
-    extern void name(struct io*);                                                             \
-    extern void name##_ref(struct io*);                                                       \
-    extern void name##_skip(struct io*);                                                      \
-    extern char name##_fault[], name##_after[];
+    extern char name[], name##_ref[], name##_skip[], name##_fault[], name##_after[];
+
+/* The same in 32-bit code, entered by a far jump with the io block in EAX
+ * and left by a far return to CS:EIP held in EDI:ESI. */
+#define SETUP32                       \
+    "fninit\n"                        \
+    "fldcw 0x20(%eax)\n"              \
+    "mov 0x28(%eax), %ebx\n"          \
+    "mov 0x30(%eax), %edx\n"          \
+    "fldl 0x00(%eax)\n"               \
+    "fldl 0x08(%eax)\n"               \
+    "lfence\n"
+#define FINISH32          \
+    "\nlfence\n"          \
+    "fnsave 0x50(%eax)\n" \
+    "push %edi\n"         \
+    "push %esi\n"         \
+    "lret\n"
+
+#define DEFINE_CASE32(group, name, init, off, prot, err, pre, insn, post)                     \
+    __asm__(".text\n.p2align 4\n.code32\n.globl _" #name "\n_" #name ":\n" SETUP32 pre        \
+            "\n.globl _" #name "_fault\n_" #name "_fault:\n" insn "\n.globl _" #name            \
+            "_after\n_" #name "_after:\n" post FINISH32 ".p2align 4\n.globl _" #name            \
+            "_ref\n_" #name "_ref:\n" SETUP32 pre FINISH32 ".p2align 4\n.globl _" #name         \
+            "_skip\n_" #name "_skip:\n" SETUP32 pre "\n" post FINISH32 ".code64\n");          \
+    extern char name[], name##_ref[], name##_skip[], name##_fault[], name##_after[];
 
 enum init { M_NONE, M_F32, M_F64, M_F80, M_I16, M_I32, M_I64, M_BCD, M_CW, M_ENV, M_SAVE };
 
 /* Groups: PRECISE must pass everywhere; IN_RUN is not precise under the
  * sidecar yet and runs only on request. */
 enum group { PRECISE, IN_RUN };
+
+/* Protection of the target page while the case runs. */
+enum prot { P_NONE, P_RO };
+
+/* Fault kind expected: a read, a write, or a write that the sidecar's
+ * store probe reports as a read when the page is PROT_NONE. */
+enum err { E_RD, E_WR, E_WP };
 
 /* The operand normally sits well inside the protected page; CROSS puts it
  * 4 bytes before it, so an access of more than 4 bytes straddles the
@@ -103,151 +162,229 @@ enum group { PRECISE, IN_RUN };
  * instruction under test ran. */
 #define TR_PRE "fildll 0x38(%rdi)\nfilds 0xc0(%rdi)\nfilds 0xc0(%rdi)\n"
 #define TR_POST "fistpl 8(%rdx)\nfildl 0x24(%rdi)\nfistpll 16(%rdx)\n"
+/* Other operand forms, all reaching the target: r8 + 0x40,
+ * r8 + 4 * rcx + 8, the protected page through RIP, and %gs:rcx. */
+#define DISP_PRE "lea -0x40(%rsi), %r8\n"
+#define INDEX_PRE "mov $0x10, %ecx\nlea -0x48(%rsi), %r8\n"
+#define GS_PRE "mov 0xc8(%rdi), %rcx\n"
+#define RIP_M "_g_pages+0x1100(%rip)"
 
-#define CASES(X)                                                                                \
-    /* alone in a reply */                                                                      \
-    X(PRECISE, s_fld32, M_F32, IN, "", "flds (%rsi)", "")                                       \
-    X(PRECISE, s_fld64, M_F64, IN, "", "fldl (%rsi)", "")                                       \
-    X(PRECISE, s_fld80, M_F80, IN, "", "fldt (%rsi)", "")                                       \
-    X(PRECISE, s_fst32, M_NONE, IN, "", "fsts (%rsi)", "")                                      \
-    X(PRECISE, s_fst64, M_NONE, IN, "", "fstl (%rsi)", "")                                      \
-    X(PRECISE, s_fstp32, M_NONE, IN, "", "fstps (%rsi)", "")                                    \
-    X(PRECISE, s_fstp64, M_NONE, IN, "", "fstpl (%rsi)", "")                                    \
-    X(PRECISE, s_fstp80, M_NONE, IN, "", "fstpt (%rsi)", "")                                    \
-    X(PRECISE, s_fild16, M_I16, IN, "", "filds (%rsi)", "")                                     \
-    X(PRECISE, s_fild32, M_I32, IN, "", "fildl (%rsi)", "")                                     \
-    X(PRECISE, s_fild64, M_I64, IN, "", "fildll (%rsi)", "")                                    \
-    X(PRECISE, s_fist16, M_NONE, IN, "", "fists (%rsi)", "")                                    \
-    X(PRECISE, s_fist32, M_NONE, IN, "", "fistl (%rsi)", "")                                    \
-    X(PRECISE, s_fistp16, M_NONE, IN, "", "fistps (%rsi)", "")                                  \
-    X(PRECISE, s_fistp32, M_NONE, IN, "", "fistpl (%rsi)", "")                                  \
-    X(PRECISE, s_fistp64, M_NONE, IN, "", "fistpll (%rsi)", "")                                 \
-    X(PRECISE, s_fisttp32, M_NONE, IN, "", "fisttpl (%rsi)", "")                                \
-    X(PRECISE, s_fbld, M_BCD, IN, "", "fbld (%rsi)", "")                                        \
-    X(PRECISE, s_fbstp, M_NONE, IN, "", "fbstp (%rsi)", "")                                     \
-    X(PRECISE, s_fldcw, M_CW, IN, "", "fldcw (%rsi)", "")                                       \
-    X(PRECISE, s_fnstcw, M_NONE, IN, "", "fnstcw (%rsi)", "")                                   \
-    X(PRECISE, s_fnstsw, M_NONE, IN, "", "fnstsw (%rsi)", "")                                   \
-    X(PRECISE, s_fnsave, M_NONE, IN, "", "fnsave (%rsi)", "")                                   \
-    X(PRECISE, s_frstor, M_SAVE, IN, "", "frstor (%rsi)", "")                                   \
-    X(PRECISE, s_fnstenv, M_NONE, IN, "", "fnstenv (%rsi)", "")                                 \
-    X(PRECISE, s_fldenv, M_ENV, IN, "", "fldenv (%rsi)", "")                                    \
-    X(PRECISE, s_fadd64, M_F64, IN, "", "faddl (%rsi)", "")                                     \
-    X(PRECISE, s_fmul32, M_F32, IN, "", "fmuls (%rsi)", "")                                     \
-    X(PRECISE, s_fsubr64, M_F64, IN, "", "fsubrl (%rsi)", "")                                   \
-    X(PRECISE, s_fdiv32, M_F32, IN, "", "fdivs (%rsi)", "")                                     \
-    X(PRECISE, s_fcom64, M_F64, IN, "", "fcoml (%rsi)", "")                                     \
-    X(PRECISE, s_fcomp32, M_F32, IN, "", "fcomps (%rsi)", "")                                   \
-    X(PRECISE, s_fiadd32, M_I32, IN, "", "fiaddl (%rsi)", "")                                   \
-    X(PRECISE, s_fimul16, M_I16, IN, "", "fimuls (%rsi)", "")                                   \
-    X(PRECISE, s_ficom32, M_I32, IN, "", "ficoml (%rsi)", "")                                   \
-    /* first instruction of a longer run */                                                     \
-    X(PRECISE, r_first_fld64, M_F64, IN, "", "fldl (%rsi)", RUN_POST)                           \
-    X(PRECISE, r_first_fld80, M_F80, IN, "", "fldt (%rsi)", RUN_POST)                           \
-    X(PRECISE, r_first_fild32, M_I32, IN, "", "fildl (%rsi)", RUN_POST)                         \
-    X(PRECISE, r_first_fadd64, M_F64, IN, "", "faddl (%rsi)", RUN_POST)                         \
-    X(PRECISE, r_first_fstp64, M_NONE, IN, "", "fstpl (%rsi)", RUN_POST_POP)                    \
-    X(PRECISE, r_first_fistp32, M_NONE, IN, "", "fistpl (%rsi)", RUN_POST_POP)                  \
-    X(PRECISE, r_first_fnstcw, M_NONE, IN, "", "fnstcw (%rsi)", RUN_POST)                       \
-    X(PRECISE, b_first_fld64, M_F64, IN, "", "fldl (%rsi)", BRIDGE_POST)                        \
-    X(PRECISE, b_first_fstp64, M_NONE, IN, "", "fstpl (%rsi)", "fldl 0x18(%rdi)\n" BRIDGE_POST) \
-    /* first half of a two-instruction run that a fusion takes */                               \
-    X(PRECISE, f_fld_fstp_load, M_F64, IN, "", "fldl (%rsi)", "fstpl (%rdx)")                   \
-    X(PRECISE, f_m80_load, M_F80, IN, "", "fldt (%rsi)", "fstpt 0x20(%rdx)")                    \
-    X(PRECISE, f_arith_fstp_load, M_F64, IN, "", "fmull (%rsi)", "fstpl (%rdx)")                \
-    X(PRECISE, f_fstp_fld_store, M_NONE, IN, "", "fstpl (%rsi)", "fldl 0x10(%rdi)")             \
-    X(PRECISE, f_fld_arithp, M_F64, IN, "", "fldl (%rsi)", "faddp")                             \
-    X(PRECISE, f_fld_fcomp, M_F64, IN, "", "fldl (%rsi)", "fcompl 0x10(%rdi)")                  \
-    X(PRECISE, f_fld_arith_fstp_load, M_F64, IN, "", "fldl (%rsi)",                             \
-      "fmull 0x10(%rdi)\nfstpl (%rdx)")                                                         \
-    /* integer loads and stores only */                                                         \
-    X(PRECISE, t_fild16, M_I16, IN, TR_PRE, "filds (%rsi)", "fistps (%rdx)\n" TR_POST)          \
-    X(PRECISE, t_fild32, M_I32, IN, TR_PRE, "fildl (%rsi)", "fistpl (%rdx)\n" TR_POST)          \
-    X(PRECISE, t_fild64, M_I64, IN, TR_PRE, "fildll (%rsi)", "fistpll (%rdx)\n" TR_POST)        \
-    X(PRECISE, t_fist32, M_NONE, IN, TR_PRE, "fistl (%rsi)", TR_POST)                           \
-    X(PRECISE, t_fistp16, M_NONE, IN, TR_PRE, "fistps (%rsi)", "filds 0xc0(%rdi)\n" TR_POST)    \
-    X(PRECISE, t_fistp64, M_NONE, IN, TR_PRE, "fistpll (%rsi)", "filds 0xc0(%rdi)\n" TR_POST)   \
-    X(PRECISE, t_fisttp32, M_NONE, IN, TR_PRE, "fisttpl (%rsi)", "filds 0xc0(%rdi)\n" TR_POST)  \
-    X(PRECISE, t_fldcw, M_CW, IN, TR_PRE, "fldcw (%rsi)", TR_POST)                              \
-    X(PRECISE, t_fnstcw, M_NONE, IN, TR_PRE, "fnstcw (%rsi)", TR_POST)                          \
-    X(PRECISE, t_first_fild64, M_I64, IN, "", "fildll (%rsi)", "fistpll (%rdx)\n" TR_POST)      \
-    X(PRECISE, t_pair_load, M_I64, IN, "", "fildll (%rsi)", "fistpll (%rdx)")                   \
-    X(PRECISE, t_nested_store, M_NONE, IN, "fildll 0x38(%rdi)\nfildll 0x38(%rdi)\n"              \
-      "fistpll 8(%rdx)\n", "fistpll (%rsi)", "")                                                \
-    /* the access straddles into the protected page */                                          \
-    X(PRECISE, x_fld64, M_F64, CROSS, "", "fldl (%rsi)", "")                                    \
-    X(PRECISE, x_fld80, M_F80, CROSS, "", "fldt (%rsi)", RUN_POST)                              \
-    X(PRECISE, x_fstp64, M_NONE, CROSS, "", "fstpl (%rsi)", "")                                 \
-    X(PRECISE, x_fistp64, M_NONE, CROSS, TR_PRE, "fistpll (%rsi)", TR_POST)                     \
-    X(PRECISE, x_fnsave, M_NONE, CROSS, "", "fnsave (%rsi)", "")                                \
-    /* later in a floating-point run: still aborts under the sidecar */                         \
-    X(IN_RUN, r_fld32, M_F32, IN, RUN_PRE, "flds (%rsi)", RUN_POST)                             \
-    X(IN_RUN, r_fld64, M_F64, IN, RUN_PRE, "fldl (%rsi)", RUN_POST)                             \
-    X(IN_RUN, r_fld80, M_F80, IN, RUN_PRE, "fldt (%rsi)", RUN_POST)                             \
-    X(IN_RUN, r_fst32, M_NONE, IN, RUN_PRE, "fsts (%rsi)", RUN_POST)                            \
-    X(IN_RUN, r_fst64, M_NONE, IN, RUN_PRE, "fstl (%rsi)", RUN_POST)                            \
-    X(IN_RUN, r_fstp32, M_NONE, IN, RUN_PRE, "fstps (%rsi)", RUN_POST)                          \
-    X(IN_RUN, r_fstp64, M_NONE, IN, RUN_PRE, "fstpl (%rsi)", RUN_POST)                          \
-    X(IN_RUN, r_fstp80, M_NONE, IN, RUN_PRE, "fstpt (%rsi)", RUN_POST)                          \
-    X(IN_RUN, r_fild16, M_I16, IN, RUN_PRE, "filds (%rsi)", RUN_POST)                           \
-    X(IN_RUN, r_fild32, M_I32, IN, RUN_PRE, "fildl (%rsi)", RUN_POST)                           \
-    X(IN_RUN, r_fild64, M_I64, IN, RUN_PRE, "fildll (%rsi)", RUN_POST)                          \
-    X(IN_RUN, r_fist16, M_NONE, IN, RUN_PRE, "fists (%rsi)", RUN_POST)                          \
-    X(IN_RUN, r_fist32, M_NONE, IN, RUN_PRE, "fistl (%rsi)", RUN_POST)                          \
-    X(IN_RUN, r_fistp32, M_NONE, IN, RUN_PRE, "fistpl (%rsi)", RUN_POST)                        \
-    X(IN_RUN, r_fistp64, M_NONE, IN, RUN_PRE, "fistpll (%rsi)", RUN_POST)                       \
-    X(IN_RUN, r_fisttp32, M_NONE, IN, RUN_PRE, "fisttpl (%rsi)", RUN_POST)                      \
-    X(IN_RUN, r_fbld, M_BCD, IN, RUN_PRE, "fbld (%rsi)", RUN_POST)                              \
-    X(IN_RUN, r_fbstp, M_NONE, IN, RUN_PRE, "fbstp (%rsi)", RUN_POST)                           \
-    X(IN_RUN, r_fldcw, M_CW, IN, RUN_PRE, "fldcw (%rsi)", RUN_POST)                             \
-    X(IN_RUN, r_fnstcw, M_NONE, IN, RUN_PRE, "fnstcw (%rsi)", RUN_POST)                         \
-    X(IN_RUN, r_fnstsw, M_NONE, IN, RUN_PRE, "fnstsw (%rsi)", RUN_POST)                         \
-    X(IN_RUN, r_fnsave, M_NONE, IN, RUN_PRE, "fnsave (%rsi)", RUN_POST)                         \
-    X(IN_RUN, r_frstor, M_SAVE, IN, RUN_PRE, "frstor (%rsi)", RUN_POST)                         \
-    X(IN_RUN, r_fadd64, M_F64, IN, RUN_PRE, "faddl (%rsi)", RUN_POST)                           \
-    X(IN_RUN, r_fmul32, M_F32, IN, RUN_PRE, "fmuls (%rsi)", RUN_POST)                           \
-    X(IN_RUN, r_fsubr64, M_F64, IN, RUN_PRE, "fsubrl (%rsi)", RUN_POST)                         \
-    X(IN_RUN, r_fdiv32, M_F32, IN, RUN_PRE, "fdivs (%rsi)", RUN_POST)                           \
-    X(IN_RUN, r_fcom64, M_F64, IN, RUN_PRE, "fcoml (%rsi)", RUN_POST)                           \
-    X(IN_RUN, r_fcomp32, M_F32, IN, RUN_PRE, "fcomps (%rsi)", RUN_POST)                         \
-    X(IN_RUN, r_fiadd32, M_I32, IN, RUN_PRE, "fiaddl (%rsi)", RUN_POST)                         \
-    X(IN_RUN, r_fimul16, M_I16, IN, RUN_PRE, "fimuls (%rsi)", RUN_POST)                         \
-    X(IN_RUN, r_ficom32, M_I32, IN, RUN_PRE, "ficoml (%rsi)", RUN_POST)                         \
-    X(IN_RUN, r_last_fld64, M_F64, IN, RUN_PRE "fldl 0x18(%rdi)\nfaddp\n", "fldl (%rsi)", "")   \
-    X(IN_RUN, r_last_fstp64, M_NONE, IN, RUN_PRE "fldl 0x18(%rdi)\nfaddp\n", "fstpl (%rsi)",    \
-      "")                                                                                       \
-    X(IN_RUN, b_mid_fld64, M_F64, IN, "fldl 0x10(%rdi)\nmov 0x38(%rdi), %rcx\n", "fldl (%rsi)", \
-      "faddp\nfstpl (%rdx)")                                                                    \
-    X(IN_RUN, f_fld_fstp_store, M_NONE, IN, "fldl 0x10(%rdi)\n", "fstpl (%rsi)", "")            \
-    X(IN_RUN, f_fld_fstp32_store, M_NONE, IN, "fldl 0x18(%rdi)\n", "fstps (%rsi)", "")          \
-    X(IN_RUN, f_m80_store, M_NONE, IN, "fldt 0x40(%rdi)\n", "fstpt (%rsi)", "")                 \
-    X(IN_RUN, f_arith_fstp_store, M_NONE, IN, "fmull 0x10(%rdi)\n", "fstpl (%rsi)", "")         \
-    X(IN_RUN, f_fstp_fld_load, M_F64, IN, "fstpl (%rdx)\n", "fldl (%rsi)", "")                  \
-    X(IN_RUN, f_fld_arith_fstp_mid, M_F64, IN, "fldl 0x10(%rdi)\n", "fmull (%rsi)",             \
-      "fstpl (%rdx)")                                                                           \
-    X(IN_RUN, f_fld_arith_fstp_store, M_NONE, IN, "fldl 0x10(%rdi)\nfmull 0x18(%rdi)\n",        \
-      "fstpl (%rsi)", "")                                                                       \
-    X(IN_RUN, f_arithp_fstp, M_NONE, IN, "faddp\n", "fstpl (%rsi)", "")                         \
-    /* the store of a fused fild m64 / fistp m64 pair: rolled back to the fild */               \
-    X(IN_RUN, t_pair_store, M_NONE, IN, "fildll 0x38(%rdi)\n", "fistpll (%rsi)", "")
+#define RUN_POST32 "fldl 0x18(%eax)\nfmulp\nfadd %st(1), %st\n"
+#define RUN_POST_POP32 "fldl 0x18(%eax)\nfmul %st(1), %st\nfadd %st(1), %st\n"
+#define TR_PRE32 "fildll 0x38(%eax)\nfilds 0xc0(%eax)\nfilds 0xc0(%eax)\n"
+#define TR_POST32 "fistpl 8(%edx)\nfildl 0x24(%eax)\nfistpll 16(%edx)\n"
+
+#define CASES(X)                                                                                  \
+    /* alone in a reply */                                                                        \
+    X(PRECISE, s_fld32, M_F32, IN, P_NONE, E_RD, "", "flds (%rsi)", "")                           \
+    X(PRECISE, s_fld64, M_F64, IN, P_NONE, E_RD, "", "fldl (%rsi)", "")                           \
+    X(PRECISE, s_fld80, M_F80, IN, P_NONE, E_RD, "", "fldt (%rsi)", "")                           \
+    X(PRECISE, s_fst32, M_NONE, IN, P_NONE, E_WP, "", "fsts (%rsi)", "")                          \
+    X(PRECISE, s_fst64, M_NONE, IN, P_NONE, E_WP, "", "fstl (%rsi)", "")                          \
+    X(PRECISE, s_fstp32, M_NONE, IN, P_NONE, E_WP, "", "fstps (%rsi)", "")                        \
+    X(PRECISE, s_fstp64, M_NONE, IN, P_NONE, E_WP, "", "fstpl (%rsi)", "")                        \
+    X(PRECISE, s_fstp80, M_NONE, IN, P_NONE, E_WP, "", "fstpt (%rsi)", "")                        \
+    X(PRECISE, s_fild16, M_I16, IN, P_NONE, E_RD, "", "filds (%rsi)", "")                         \
+    X(PRECISE, s_fild32, M_I32, IN, P_NONE, E_RD, "", "fildl (%rsi)", "")                         \
+    X(PRECISE, s_fild64, M_I64, IN, P_NONE, E_RD, "", "fildll (%rsi)", "")                        \
+    X(PRECISE, s_fist16, M_NONE, IN, P_NONE, E_WR, "", "fists (%rsi)", "")                        \
+    X(PRECISE, s_fist32, M_NONE, IN, P_NONE, E_WR, "", "fistl (%rsi)", "")                        \
+    X(PRECISE, s_fistp16, M_NONE, IN, P_NONE, E_WR, "", "fistps (%rsi)", "")                      \
+    X(PRECISE, s_fistp32, M_NONE, IN, P_NONE, E_WR, "", "fistpl (%rsi)", "")                      \
+    X(PRECISE, s_fistp64, M_NONE, IN, P_NONE, E_WR, "", "fistpll (%rsi)", "")                     \
+    X(PRECISE, s_fisttp32, M_NONE, IN, P_NONE, E_WR, "", "fisttpl (%rsi)", "")                    \
+    X(PRECISE, s_fbld, M_BCD, IN, P_NONE, E_RD, "", "fbld (%rsi)", "")                            \
+    X(PRECISE, s_fbstp, M_NONE, IN, P_NONE, E_WP, "", "fbstp (%rsi)", "")                         \
+    X(PRECISE, s_fldcw, M_CW, IN, P_NONE, E_RD, "", "fldcw (%rsi)", "")                           \
+    X(PRECISE, s_fnstcw, M_NONE, IN, P_NONE, E_WR, "", "fnstcw (%rsi)", "")                       \
+    X(PRECISE, s_fnstsw, M_NONE, IN, P_NONE, E_WP, "", "fnstsw (%rsi)", "")                       \
+    X(PRECISE, s_fnsave, M_NONE, IN, P_NONE, E_WP, "", "fnsave (%rsi)", "")                       \
+    X(PRECISE, s_frstor, M_SAVE, IN, P_NONE, E_RD, "", "frstor (%rsi)", "")                       \
+    X(PRECISE, s_fnstenv, M_NONE, IN, P_NONE, E_WR, "", "fnstenv (%rsi)", "")                     \
+    X(PRECISE, s_fldenv, M_ENV, IN, P_NONE, E_RD, "", "fldenv (%rsi)", "")                        \
+    X(PRECISE, s_fadd64, M_F64, IN, P_NONE, E_RD, "", "faddl (%rsi)", "")                         \
+    X(PRECISE, s_fmul32, M_F32, IN, P_NONE, E_RD, "", "fmuls (%rsi)", "")                         \
+    X(PRECISE, s_fsubr64, M_F64, IN, P_NONE, E_RD, "", "fsubrl (%rsi)", "")                       \
+    X(PRECISE, s_fdiv32, M_F32, IN, P_NONE, E_RD, "", "fdivs (%rsi)", "")                         \
+    X(PRECISE, s_fcom64, M_F64, IN, P_NONE, E_RD, "", "fcoml (%rsi)", "")                         \
+    X(PRECISE, s_fcomp32, M_F32, IN, P_NONE, E_RD, "", "fcomps (%rsi)", "")                       \
+    X(PRECISE, s_fiadd32, M_I32, IN, P_NONE, E_RD, "", "fiaddl (%rsi)", "")                       \
+    X(PRECISE, s_fimul16, M_I16, IN, P_NONE, E_RD, "", "fimuls (%rsi)", "")                       \
+    X(PRECISE, s_ficom32, M_I32, IN, P_NONE, E_RD, "", "ficoml (%rsi)", "")                       \
+    /* first instruction of a longer run */                                                       \
+    X(PRECISE, r_first_fld64, M_F64, IN, P_NONE, E_RD, "", "fldl (%rsi)", RUN_POST)               \
+    X(PRECISE, r_first_fld80, M_F80, IN, P_NONE, E_RD, "", "fldt (%rsi)", RUN_POST)               \
+    X(PRECISE, r_first_fild32, M_I32, IN, P_NONE, E_RD, "", "fildl (%rsi)", RUN_POST)             \
+    X(PRECISE, r_first_fadd64, M_F64, IN, P_NONE, E_RD, "", "faddl (%rsi)", RUN_POST)             \
+    X(PRECISE, r_first_fstp64, M_NONE, IN, P_NONE, E_WP, "", "fstpl (%rsi)", RUN_POST_POP)        \
+    X(PRECISE, r_first_fistp32, M_NONE, IN, P_NONE, E_WP, "", "fistpl (%rsi)", RUN_POST_POP)      \
+    X(PRECISE, r_first_fnstcw, M_NONE, IN, P_NONE, E_WP, "", "fnstcw (%rsi)", RUN_POST)           \
+    X(PRECISE, b_first_fld64, M_F64, IN, P_NONE, E_RD, "", "fldl (%rsi)", BRIDGE_POST)            \
+    X(PRECISE, b_first_fstp64, M_NONE, IN, P_NONE, E_WP, "", "fstpl (%rsi)",                      \
+      "fldl 0x18(%rdi)\n" BRIDGE_POST)                                                            \
+    /* first half of a two-instruction run that a fusion takes */                                 \
+    X(PRECISE, f_fld_fstp_load, M_F64, IN, P_NONE, E_RD, "", "fldl (%rsi)", "fstpl (%rdx)")       \
+    X(PRECISE, f_m80_load, M_F80, IN, P_NONE, E_RD, "", "fldt (%rsi)", "fstpt 0x20(%rdx)")        \
+    X(PRECISE, f_arith_fstp_load, M_F64, IN, P_NONE, E_RD, "", "fmull (%rsi)", "fstpl (%rdx)")    \
+    X(PRECISE, f_fstp_fld_store, M_NONE, IN, P_NONE, E_WP, "", "fstpl (%rsi)", "fldl 0x10(%rdi)") \
+    X(PRECISE, f_fld_arithp, M_F64, IN, P_NONE, E_RD, "", "fldl (%rsi)", "faddp")                 \
+    X(PRECISE, f_fld_fcomp, M_F64, IN, P_NONE, E_RD, "", "fldl (%rsi)", "fcompl 0x10(%rdi)")      \
+    X(PRECISE, f_fld_arith_fstp_load, M_F64, IN, P_NONE, E_RD, "", "fldl (%rsi)",                 \
+      "fmull 0x10(%rdi)\nfstpl (%rdx)")                                                           \
+    /* integer loads and stores only */                                                           \
+    X(PRECISE, t_fild16, M_I16, IN, P_NONE, E_RD, TR_PRE, "filds (%rsi)",                         \
+      "fistps (%rdx)\n" TR_POST)                                                                  \
+    X(PRECISE, t_fild32, M_I32, IN, P_NONE, E_RD, TR_PRE, "fildl (%rsi)",                         \
+      "fistpl (%rdx)\n" TR_POST)                                                                  \
+    X(PRECISE, t_fild64, M_I64, IN, P_NONE, E_RD, TR_PRE, "fildll (%rsi)",                        \
+      "fistpll (%rdx)\n" TR_POST)                                                                 \
+    X(PRECISE, t_fist32, M_NONE, IN, P_NONE, E_WR, TR_PRE, "fistl (%rsi)", TR_POST)               \
+    X(PRECISE, t_fistp16, M_NONE, IN, P_NONE, E_WR, TR_PRE, "fistps (%rsi)",                      \
+      "filds 0xc0(%rdi)\n" TR_POST)                                                               \
+    X(PRECISE, t_fistp64, M_NONE, IN, P_NONE, E_WR, TR_PRE, "fistpll (%rsi)",                     \
+      "filds 0xc0(%rdi)\n" TR_POST)                                                               \
+    X(PRECISE, t_fisttp32, M_NONE, IN, P_NONE, E_WR, TR_PRE, "fisttpl (%rsi)",                    \
+      "filds 0xc0(%rdi)\n" TR_POST)                                                               \
+    X(PRECISE, t_fldcw, M_CW, IN, P_NONE, E_RD, TR_PRE, "fldcw (%rsi)", TR_POST)                  \
+    X(PRECISE, t_fnstcw, M_NONE, IN, P_NONE, E_WR, TR_PRE, "fnstcw (%rsi)", TR_POST)              \
+    X(PRECISE, t_first_fild64, M_I64, IN, P_NONE, E_RD, "", "fildll (%rsi)",                      \
+      "fistpll (%rdx)\n" TR_POST)                                                                 \
+    X(PRECISE, t_pair_load, M_I64, IN, P_NONE, E_RD, "", "fildll (%rsi)", "fistpll (%rdx)")       \
+    X(PRECISE, t_nested_store, M_NONE, IN, P_NONE, E_WR,                                          \
+      "fildll 0x38(%rdi)\nfildll 0x38(%rdi)\nfistpll 8(%rdx)\n", "fistpll (%rsi)", "")            \
+    /* the access straddles into the protected page */                                            \
+    X(PRECISE, x_fld64, M_F64, CROSS, P_NONE, E_RD, "", "fldl (%rsi)", "")                        \
+    X(PRECISE, x_fld80, M_F80, CROSS, P_NONE, E_RD, "", "fldt (%rsi)", RUN_POST)                  \
+    X(PRECISE, x_fstp64, M_NONE, CROSS, P_NONE, E_WP, "", "fstpl (%rsi)", "")                     \
+    X(PRECISE, x_fistp64, M_NONE, CROSS, P_NONE, E_WR, TR_PRE, "fistpll (%rsi)", TR_POST)         \
+    X(PRECISE, x_fnsave, M_NONE, CROSS, P_NONE, E_WP, "", "fnsave (%rsi)", "")                    \
+    /* stores into a read-only page */                                                            \
+    X(PRECISE, o_fstp32, M_NONE, IN, P_RO, E_WR, "", "fstps (%rsi)", "")                          \
+    X(PRECISE, o_fst64, M_NONE, IN, P_RO, E_WR, "", "fstl (%rsi)", "")                            \
+    X(PRECISE, o_fstp80, M_NONE, IN, P_RO, E_WR, "", "fstpt (%rsi)", "")                          \
+    X(PRECISE, o_fistp32, M_NONE, IN, P_RO, E_WR, "", "fistpl (%rsi)", "")                        \
+    X(PRECISE, o_fistp64_tr, M_NONE, IN, P_RO, E_WR, TR_PRE, "fistpll (%rsi)", TR_POST)           \
+    X(PRECISE, o_fnstcw, M_NONE, IN, P_RO, E_WR, "", "fnstcw (%rsi)", "")                         \
+    X(PRECISE, o_fnstsw, M_NONE, IN, P_RO, E_WR, "", "fnstsw (%rsi)", "")                         \
+    X(PRECISE, o_fnsave, M_NONE, IN, P_RO, E_WR, "", "fnsave (%rsi)", "")                         \
+    X(PRECISE, o_fbstp, M_NONE, IN, P_RO, E_WR, "", "fbstp (%rsi)", "")                           \
+    X(PRECISE, o_first_fstp64, M_NONE, IN, P_RO, E_WR, "", "fstpl (%rsi)", RUN_POST_POP)          \
+    X(PRECISE, o_fstp_fld, M_NONE, IN, P_RO, E_WR, "", "fstpl (%rsi)", "fldl 0x10(%rdi)")         \
+    X(PRECISE, o_cross_fstp64, M_NONE, CROSS, P_RO, E_WR, "", "fstpl (%rsi)", "")                 \
+    /* other operand forms */                                                                     \
+    X(PRECISE, a_disp_fld64, M_F64, IN, P_NONE, E_RD, DISP_PRE, "fldl 0x40(%r8)", "")             \
+    X(PRECISE, a_disp_fstp64, M_NONE, IN, P_NONE, E_WP, DISP_PRE, "fstpl 0x40(%r8)", "")          \
+    X(PRECISE, a_disp_fadd64_run, M_F64, IN, P_NONE, E_RD, DISP_PRE, "faddl 0x40(%r8)", RUN_POST) \
+    X(PRECISE, a_index_fld64, M_F64, IN, P_NONE, E_RD, INDEX_PRE, "fldl 0x8(%r8,%rcx,4)", "")     \
+    X(PRECISE, a_index_fstp64, M_NONE, IN, P_NONE, E_WP, INDEX_PRE, "fstpl 0x8(%r8,%rcx,4)", "")  \
+    X(PRECISE, a_index_fistp64_tr, M_NONE, IN, P_NONE, E_WR, TR_PRE INDEX_PRE,                    \
+      "fistpll 0x8(%r8,%rcx,4)", TR_POST)                                                         \
+    X(PRECISE, a_rip_fld64, M_F64, IN, P_NONE, E_RD, "", "fldl " RIP_M, "")                       \
+    X(PRECISE, a_rip_fstp64, M_NONE, IN, P_NONE, E_WP, "", "fstpl " RIP_M, "")                    \
+    X(PRECISE, a_rip_fstp64_ro, M_NONE, IN, P_RO, E_WR, "", "fstpl " RIP_M, "")                   \
+    X(PRECISE, a_gs_fld64, M_F64, IN, P_NONE, E_RD, GS_PRE, "fldl %gs:(%rcx)", "")                \
+    X(PRECISE, a_gs_fstp64, M_NONE, IN, P_NONE, E_WP, GS_PRE, "fstpl %gs:(%rcx)", "")             \
+    X(PRECISE, a_gs_fstp64_ro, M_NONE, IN, P_RO, E_WR, GS_PRE, "fstpl %gs:(%rcx)", "")            \
+    /* later in a floating-point run: still aborts under the sidecar */                           \
+    X(IN_RUN, r_fld32, M_F32, IN, P_NONE, E_RD, RUN_PRE, "flds (%rsi)", RUN_POST)                 \
+    X(IN_RUN, r_fld64, M_F64, IN, P_NONE, E_RD, RUN_PRE, "fldl (%rsi)", RUN_POST)                 \
+    X(IN_RUN, r_fld80, M_F80, IN, P_NONE, E_RD, RUN_PRE, "fldt (%rsi)", RUN_POST)                 \
+    X(IN_RUN, r_fst32, M_NONE, IN, P_NONE, E_WP, RUN_PRE, "fsts (%rsi)", RUN_POST)                \
+    X(IN_RUN, r_fst64, M_NONE, IN, P_NONE, E_WP, RUN_PRE, "fstl (%rsi)", RUN_POST)                \
+    X(IN_RUN, r_fstp32, M_NONE, IN, P_NONE, E_WP, RUN_PRE, "fstps (%rsi)", RUN_POST)              \
+    X(IN_RUN, r_fstp64, M_NONE, IN, P_NONE, E_WP, RUN_PRE, "fstpl (%rsi)", RUN_POST)              \
+    X(IN_RUN, r_fstp80, M_NONE, IN, P_NONE, E_WP, RUN_PRE, "fstpt (%rsi)", RUN_POST)              \
+    X(IN_RUN, r_fild16, M_I16, IN, P_NONE, E_RD, RUN_PRE, "filds (%rsi)", RUN_POST)               \
+    X(IN_RUN, r_fild32, M_I32, IN, P_NONE, E_RD, RUN_PRE, "fildl (%rsi)", RUN_POST)               \
+    X(IN_RUN, r_fild64, M_I64, IN, P_NONE, E_RD, RUN_PRE, "fildll (%rsi)", RUN_POST)              \
+    X(IN_RUN, r_fist16, M_NONE, IN, P_NONE, E_WP, RUN_PRE, "fists (%rsi)", RUN_POST)              \
+    X(IN_RUN, r_fist32, M_NONE, IN, P_NONE, E_WP, RUN_PRE, "fistl (%rsi)", RUN_POST)              \
+    X(IN_RUN, r_fistp32, M_NONE, IN, P_NONE, E_WP, RUN_PRE, "fistpl (%rsi)", RUN_POST)            \
+    X(IN_RUN, r_fistp64, M_NONE, IN, P_NONE, E_WP, RUN_PRE, "fistpll (%rsi)", RUN_POST)           \
+    X(IN_RUN, r_fisttp32, M_NONE, IN, P_NONE, E_WP, RUN_PRE, "fisttpl (%rsi)", RUN_POST)          \
+    X(IN_RUN, r_fbld, M_BCD, IN, P_NONE, E_RD, RUN_PRE, "fbld (%rsi)", RUN_POST)                  \
+    X(IN_RUN, r_fbstp, M_NONE, IN, P_NONE, E_WP, RUN_PRE, "fbstp (%rsi)", RUN_POST)               \
+    X(IN_RUN, r_fldcw, M_CW, IN, P_NONE, E_RD, RUN_PRE, "fldcw (%rsi)", RUN_POST)                 \
+    X(IN_RUN, r_fnstcw, M_NONE, IN, P_NONE, E_WP, RUN_PRE, "fnstcw (%rsi)", RUN_POST)             \
+    X(IN_RUN, r_fnstsw, M_NONE, IN, P_NONE, E_WP, RUN_PRE, "fnstsw (%rsi)", RUN_POST)             \
+    X(IN_RUN, r_fnsave, M_NONE, IN, P_NONE, E_WP, RUN_PRE, "fnsave (%rsi)", RUN_POST)             \
+    X(IN_RUN, r_frstor, M_SAVE, IN, P_NONE, E_RD, RUN_PRE, "frstor (%rsi)", RUN_POST)             \
+    X(IN_RUN, r_fadd64, M_F64, IN, P_NONE, E_RD, RUN_PRE, "faddl (%rsi)", RUN_POST)               \
+    X(IN_RUN, r_fmul32, M_F32, IN, P_NONE, E_RD, RUN_PRE, "fmuls (%rsi)", RUN_POST)               \
+    X(IN_RUN, r_fsubr64, M_F64, IN, P_NONE, E_RD, RUN_PRE, "fsubrl (%rsi)", RUN_POST)             \
+    X(IN_RUN, r_fdiv32, M_F32, IN, P_NONE, E_RD, RUN_PRE, "fdivs (%rsi)", RUN_POST)               \
+    X(IN_RUN, r_fcom64, M_F64, IN, P_NONE, E_RD, RUN_PRE, "fcoml (%rsi)", RUN_POST)               \
+    X(IN_RUN, r_fcomp32, M_F32, IN, P_NONE, E_RD, RUN_PRE, "fcomps (%rsi)", RUN_POST)             \
+    X(IN_RUN, r_fiadd32, M_I32, IN, P_NONE, E_RD, RUN_PRE, "fiaddl (%rsi)", RUN_POST)             \
+    X(IN_RUN, r_fimul16, M_I16, IN, P_NONE, E_RD, RUN_PRE, "fimuls (%rsi)", RUN_POST)             \
+    X(IN_RUN, r_ficom32, M_I32, IN, P_NONE, E_RD, RUN_PRE, "ficoml (%rsi)", RUN_POST)             \
+    X(IN_RUN, r_last_fld64, M_F64, IN, P_NONE, E_RD, RUN_PRE "fldl 0x18(%rdi)\nfaddp\n",          \
+      "fldl (%rsi)", "")                                                                          \
+    X(IN_RUN, r_last_fstp64, M_NONE, IN, P_NONE, E_WP, RUN_PRE "fldl 0x18(%rdi)\nfaddp\n",        \
+      "fstpl (%rsi)", "")                                                                         \
+    X(IN_RUN, b_mid_fld64, M_F64, IN, P_NONE, E_RD, "fldl 0x10(%rdi)\nmov 0x38(%rdi), %rcx\n",    \
+      "fldl (%rsi)", "faddp\nfstpl (%rdx)")                                                       \
+    X(IN_RUN, f_fld_fstp_store, M_NONE, IN, P_NONE, E_WP, "fldl 0x10(%rdi)\n", "fstpl (%rsi)",    \
+      "")                                                                                         \
+    X(IN_RUN, f_fld_fstp32_store, M_NONE, IN, P_NONE, E_WP, "fldl 0x18(%rdi)\n", "fstps (%rsi)",  \
+      "")                                                                                         \
+    X(IN_RUN, f_m80_store, M_NONE, IN, P_NONE, E_WP, "fldt 0x40(%rdi)\n", "fstpt (%rsi)", "")     \
+    X(IN_RUN, f_arith_fstp_store, M_NONE, IN, P_NONE, E_WP, "fmull 0x10(%rdi)\n",                 \
+      "fstpl (%rsi)", "")                                                                         \
+    X(IN_RUN, f_fstp_fld_load, M_F64, IN, P_NONE, E_RD, "fstpl (%rdx)\n", "fldl (%rsi)", "")      \
+    X(IN_RUN, f_fld_arith_fstp_mid, M_F64, IN, P_NONE, E_RD, "fldl 0x10(%rdi)\n", "fmull (%rsi)", \
+      "fstpl (%rdx)")                                                                             \
+    X(IN_RUN, f_fld_arith_fstp_store, M_NONE, IN, P_NONE, E_WP,                                   \
+      "fldl 0x10(%rdi)\nfmull 0x18(%rdi)\n", "fstpl (%rsi)", "")                                  \
+    X(IN_RUN, f_arithp_fstp, M_NONE, IN, P_NONE, E_WP, "faddp\n", "fstpl (%rsi)", "")             \
+    /* the store of a fused fild m64 / fistp m64 pair: rolled back to the fild */                 \
+    X(IN_RUN, t_pair_store, M_NONE, IN, P_NONE, E_WR, "fildll 0x38(%rdi)\n", "fistpll (%rsi)", "")\
+    /* a 10-byte store crossing into a read-only page: only its first byte is write-probed */     \
+    X(IN_RUN, o_cross_fstp80, M_NONE, CROSS, P_RO, E_WR, "", "fstpt (%rsi)", "")
+
+/* 32-bit compatibility mode. */
+#define CASES32(X)                                                                                \
+    X(PRECISE, c_fld64, M_F64, IN, P_NONE, E_RD, "", "fldl (%ebx)", "")                           \
+    X(PRECISE, c_fstp64, M_NONE, IN, P_NONE, E_WP, "", "fstpl (%ebx)", "")                        \
+    X(PRECISE, c_fstp80, M_NONE, IN, P_NONE, E_WP, "", "fstpt (%ebx)", "")                        \
+    X(PRECISE, c_fistp32, M_NONE, IN, P_NONE, E_WR, "", "fistpl (%ebx)", "")                      \
+    X(PRECISE, c_fild64_tr, M_I64, IN, P_NONE, E_RD, TR_PRE32, "fildll (%ebx)",                   \
+      "fistpll (%edx)\n" TR_POST32)                                                               \
+    X(PRECISE, c_first_fadd64, M_F64, IN, P_NONE, E_RD, "", "faddl (%ebx)", RUN_POST32)           \
+    X(PRECISE, c_first_fstp64, M_NONE, IN, P_NONE, E_WP, "", "fstpl (%ebx)", RUN_POST_POP32)      \
+    X(PRECISE, c_fnstcw, M_NONE, IN, P_NONE, E_WR, "", "fnstcw (%ebx)", "")                       \
+    X(PRECISE, c_fstp64_ro, M_NONE, IN, P_RO, E_WR, "", "fstpl (%ebx)", "")                       \
+    X(PRECISE, c_fistp64_ro, M_NONE, IN, P_RO, E_WR, "", "fistpll (%ebx)", "")                    \
+    X(PRECISE, c_disp_fstp64, M_NONE, IN, P_NONE, E_WP, "lea -0x40(%ebx), %ecx\n",                \
+      "fstpl 0x40(%ecx)", "")                                                                     \
+    X(PRECISE, c_index_fld64, M_F64, IN, P_NONE, E_RD, "mov $0x10, %edx\nlea -0x48(%ebx), %ecx\n",\
+      "fldl 0x8(%ecx,%edx,4)", "")                                                                \
+    X(IN_RUN, c_r_fstp64, M_NONE, IN, P_NONE, E_WP, "fldl 0x10(%eax)\nfmul %st(1), %st\n",        \
+      "fstpl (%ebx)", RUN_POST32)
 
 CASES(DEFINE_CASE)
+CASES32(DEFINE_CASE32)
 
 struct test_case {
     enum group group;
     const char* name;
     enum init init;
     int off;
-    void (*fn)(struct io*);
-    void (*ref)(struct io*);
-    void (*skip)(struct io*);
+    enum prot prot;
+    enum err err;
+    int compat;
+    const char* fn;
+    const char* ref;
+    const char* skip;
     const char* fault;
     const char* after;
 };
 
-#define TABLE_ENTRY(group, name, init, off, pre, insn, post) \
-    {group, #name, init, off, name, name##_ref, name##_skip, name##_fault, name##_after},
-static const struct test_case cases[] = {CASES(TABLE_ENTRY)};
+#define TABLE_ENTRY(group, name, init, off, prot, err, pre, insn, post) \
+    {group, #name, init, off, prot, err, 0, name, name##_ref, name##_skip, name##_fault, name##_after},
+#define TABLE_ENTRY32(group, name, init, off, prot, err, pre, insn, post) \
+    {group, #name, init, off, prot, err, 1, name, name##_ref, name##_skip, name##_fault, name##_after},
+static const struct test_case cases[] = {CASES(TABLE_ENTRY) CASES32(TABLE_ENTRY32)};
 
 /* fnstenv and fnsave images of a small known state, for fldenv and frstor. */
 __asm__(".text\n.p2align 4\n_make_images:\n"
@@ -262,11 +399,8 @@ extern void make_images(uint8_t* out, struct io* io);
 static uint8_t images[160];
 
 enum { REGION = 112, SCRATCH = 256 };
-enum mode { MODE_NONE, MODE_RETRY, MODE_SKIP };
+enum mode { MODE_NONE, MODE_RETRY, MODE_SKIP, MODE_WC };
 
-/* Two pages: the first stays accessible, the second (page) is the one the
- * cases protect. */
-static char* pages;
 static char* page;
 static char* scratch;
 static volatile enum mode mode;
@@ -275,21 +409,42 @@ static volatile int faults;
 static struct {
     uint64_t rip;
     uint64_t addr;
+    uint32_t err, trapno;
     int sig;
     uint16_t fcw, fsw;
     uint8_t ftw;
     uint8_t st[8][10];
 } seen;
 static int failures;
+static sigjmp_buf wc_jmp;
+static volatile int wc_sig;
+
+/* Rosetta uses the full mcontext once an LDT is installed.  Its extra
+ * segment registers move the FPU area; the exception state comes first and
+ * the 64-bit thread state leads the full thread state, so __es and rip stay
+ * where they are. */
+static _STRUCT_X86_FLOAT_STATE64* float_state(ucontext_t* uc) {
+    if (uc->uc_mcsize == sizeof(_STRUCT_MCONTEXT64_FULL) ||
+        uc->uc_mcsize == sizeof(_STRUCT_MCONTEXT_AVX64_FULL) ||
+        uc->uc_mcsize == sizeof(_STRUCT_MCONTEXT_AVX512_64_FULL))
+        return &((_STRUCT_MCONTEXT64_FULL*)uc->uc_mcontext)->__fs;
+    return &uc->uc_mcontext->__fs;
+}
 
 static void handler(int sig, siginfo_t* info, void* context) {
     ucontext_t* uc = context;
-    _STRUCT_X86_FLOAT_STATE64* fs = &uc->uc_mcontext->__fs;
+    if (mode == MODE_WC) {
+        wc_sig = sig;
+        siglongjmp(wc_jmp, 1);
+    }
+    _STRUCT_X86_FLOAT_STATE64* fs = float_state(uc);
     faults++;
     if (faults == 1) {
         seen.sig = sig;
         seen.rip = uc->uc_mcontext->__ss.__rip;
         seen.addr = (uint64_t)info->si_addr;
+        seen.err = uc->uc_mcontext->__es.__err;
+        seen.trapno = uc->uc_mcontext->__es.__trapno;
         memcpy(&seen.fcw, &fs->__fpu_fcw, 2);
         memcpy(&seen.fsw, &fs->__fpu_fsw, 2);
         seen.ftw = fs->__fpu_ftw;
@@ -300,6 +455,110 @@ static void handler(int sig, siginfo_t* info, void* context) {
         uc->uc_mcontext->__ss.__rip = (uint64_t)skip_to;
     else
         mprotect(page, 4096, PROT_READ | PROT_WRITE);
+}
+
+/* ── 32-bit compatibility mode, as in test_x87_signal_context ──────────── */
+
+static uint16_t sel_cs32, sel_ds32, sel_cs64;
+
+static uint16_t alloc_ldt_seg(int idx, int is_code) {
+    ldt_entry_t e;
+    memset(&e, 0, sizeof e);
+    if (is_code) {
+        e.code.limit00 = 0xFFFF;
+        e.code.type = DESC_CODE_READ;
+        e.code.dpl = 3;
+        e.code.present = 1;
+        e.code.limit16 = 0xF;
+        e.code.opsz = DESC_CODE_32B;
+        e.code.granular = DESC_GRAN_PAGE;
+    } else {
+        e.data.limit00 = 0xFFFF;
+        e.data.type = DESC_DATA_WRITE;
+        e.data.dpl = 3;
+        e.data.present = 1;
+        e.data.limit16 = 0xF;
+        e.data.stksz = DESC_DATA_32B;
+        e.data.granular = DESC_GRAN_PAGE;
+    }
+    if (i386_set_ldt(idx, &e, 1) < 0) {
+        printf("FAIL  sync fault: i386_set_ldt(%d) failed (errno=%d %s)\n", idx, errno,
+               strerror(errno));
+        failures++;
+        return 0;
+    }
+    return (uint16_t)((idx << 3) | (1 << 2) | 3);
+}
+
+struct __attribute__((packed)) farptr32 {
+    uint32_t off;
+    uint16_t sel;
+};
+
+static void call32(const char* entry, struct io* io) {
+    struct farptr32 to32 = {(uint32_t)(uintptr_t)entry, sel_cs32};
+    uint64_t in_eax = (uintptr_t)io;
+    uint32_t in_ds32 = sel_ds32, in_cs64 = sel_cs64;
+    __asm__ volatile(
+        "leaq 1f(%%rip), %%rsi   \n"
+        "movl %k[incs], %%edi    \n"
+        "mov  %%ds, %%r10w       \n"
+        "mov  %%es, %%r8w        \n"
+        "mov  %%ss, %%r9w        \n"
+        "movl %k[inds], %%eax    \n"
+        "mov  %%ax, %%ds         \n"
+        "mov  %%ax, %%es         \n"
+        "mov  %%ax, %%ss         \n"
+        "movl %k[ineax], %%eax   \n"
+        "ljmp *%[fp]             \n"
+        "1:                      \n"
+        "mov  %%r10w, %%ds       \n"
+        "mov  %%r8w, %%es        \n"
+        "mov  %%r9w, %%ss        \n"
+        :
+        : [ineax] "r"(in_eax), [inds] "r"(in_ds32), [incs] "r"(in_cs64), [fp] "m"(to32)
+        : "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "cc", "memory", "st",
+          "st(1)", "st(2)", "st(3)", "st(4)", "st(5)", "st(6)", "st(7)");
+}
+
+static void invoke(const struct test_case* c, const char* entry, struct io* io) {
+    if (c->compat)
+        call32(entry, io);
+    else
+        ((void (*)(struct io*))(uintptr_t)entry)(io);
+}
+
+/* ── %gs ───────────────────────────────────────────────────────────────── */
+
+/* The %gs base is the thread's TSD array: find it from a slot we set. */
+static uintptr_t gs_base;
+
+static int find_gs_base(void) {
+    static char marker;
+    pthread_key_t key;
+    if (pthread_key_create(&key, NULL) != 0 || pthread_setspecific(key, &marker) != 0)
+        return 0;
+    const uintptr_t slot = (uintptr_t)key * 8;
+    uint64_t via_gs;
+    __asm__ volatile("movq %%gs:(%1), %0" : "=r"(via_gs) : "r"(slot));
+    if (via_gs != (uintptr_t)&marker)
+        return 0;
+    const char* self = (const char*)pthread_self();
+    for (size_t off = 0; off < 16384; off += 8) {
+        void* v;
+        memcpy(&v, self + off, 8);
+        if (v == &marker && off >= slot) {
+            gs_base = (uintptr_t)(self + off) - slot;
+            /* Check by reading the protected page's neighbour through %gs. */
+            uint64_t want = 0x6773626173652121ULL, got;
+            memcpy(g_pages + 8, &want, 8);
+            __asm__ volatile("movq %%gs:(%1), %0"
+                             : "=r"(got)
+                             : "r"((uintptr_t)(g_pages + 8) - gs_base));
+            return got == want;
+        }
+    }
+    return 0;
 }
 
 static void prepare(struct io* io, const struct test_case* c) {
@@ -319,9 +578,10 @@ static void prepare(struct io* io, const struct test_case* c) {
     memcpy(io->m80src + 8, &e, 2);
     io->target = page + c->off;
     io->scratch = scratch;
+    io->gsoff = (int64_t)((uintptr_t)io->target - gs_base);
     memset(scratch, 0xa5, SCRATCH);
     mprotect(page, 4096, PROT_READ | PROT_WRITE);
-    memset(pages, 0x5a, 8192);
+    memset(page - 4096, 0x5a, 8192);
     char* t = io->target;
     switch (c->init) {
         case M_NONE:
@@ -423,6 +683,16 @@ static int check_context(const struct test_case* c, const char* how, const uint8
                (long long)(seen.addr - target));
         bad++;
     }
+    const uint32_t want_err = c->err == E_RD ? 0x4 : 0x6;
+    const int err_ok = seen.err == want_err ||
+                       (c->err == E_WP && c->prot == P_NONE && seen.err == 0x4);
+    if (!err_ok || seen.trapno != 14) {
+        printf("FAIL  sync fault %s %s: fault kind err=%#x trapno=%u, expected err=%#x%s "
+               "trapno=14\n",
+               c->name, how, seen.err, seen.trapno, want_err,
+               c->err == E_WP && c->prot == P_NONE ? " or 0x4" : "");
+        bad++;
+    }
     if (seen.fcw != fcw) {
         printf("FAIL  sync fault %s %s: control word %04x, expected %04x\n", c->name, how,
                seen.fcw, fcw);
@@ -517,16 +787,16 @@ static void run_case(const struct test_case* c) {
     prepare(&io, c);
     mode = MODE_NONE;
     faults = 0;
-    c->fn(&io);
+    invoke(c, c->fn, &io);
     capture(&normal, &io);
 
     prepare(&io, c);
-    c->ref(&io);
+    invoke(c, c->ref, &io);
     memcpy(ref, io.save, 108);
 
     prepare(&io, c);
     capture(&untouched, &io);
-    c->skip(&io);
+    invoke(c, c->skip, &io);
     capture(&skipped, &io);
     memcpy(skipped.region, untouched.region, REGION);
     if (faults != 0) {
@@ -535,15 +805,16 @@ static void run_case(const struct test_case* c) {
     }
 
     static const enum mode modes[] = {MODE_RETRY, MODE_SKIP};
+    uint32_t err = 0;
     for (int m = 0; m < 2; m++) {
         const char* how = modes[m] == MODE_RETRY ? "retry" : "skip";
         prepare(&io, c);
-        mprotect(page, 4096, PROT_NONE);
+        mprotect(page, 4096, c->prot == P_RO ? PROT_READ : PROT_NONE);
         memset(&seen, 0, sizeof(seen));
         faults = 0;
         skip_to = c->after;
         mode = modes[m];
-        c->fn(&io);
+        invoke(c, c->fn, &io);
         mode = MODE_NONE;
         capture(&got, &io);
         if (faults != 1) {
@@ -552,12 +823,94 @@ static void run_case(const struct test_case* c) {
             if (faults == 0)
                 continue;
         }
+        err = seen.err;
         bad += check_context(c, how, ref, (uintptr_t)io.target);
         bad += compare_outcome(c, how, &got, modes[m] == MODE_RETRY ? &normal : &skipped);
     }
     if (!bad)
-        printf("PASS  sync fault %s (signal %d)\n", c->name, seen.sig);
+        printf("PASS  sync fault %s (signal %d, err %#x)\n", c->name, seen.sig, err);
     failures += bad;
+}
+
+/* ── write-combined and uncached memory ────────────────────────────────── */
+
+/* x87 stores into the buffer: the first instruction of a reply (probed),
+ * one inside a run, an integer store, a 10-byte store, and loads.  All
+ * operands are naturally aligned, which uncached memory requires of every
+ * access. */
+__asm__(".text\n.p2align 4\n_wc_x87:\n"
+        "fninit\nfld1\nlfence\n"
+        "fstps (%rdi)\nlfence\n"
+        "fld1\nlfence\nfstpl 8(%rdi)\nlfence\n"
+        "fld1\nlfence\nfstpt 16(%rdi)\nlfence\n"
+        "fld1\nlfence\nfistpll 32(%rdi)\nlfence\n"
+        "fld1\nfld1\nfaddp\nfstpl 40(%rdi)\nlfence\n"
+        "fld1\nlfence\nfstpl 48(%rdi)\nfld1\nfstpl 56(%rdi)\nlfence\n"
+        "flds (%rdi)\nlfence\nfaddl 8(%rdi)\nlfence\nfstpl 64(%rdi)\nlfence\n"
+        "ret\n");
+extern void wc_x87(void* p);
+
+static void wc_case(const char* what, int cache_mode) {
+    CFMutableDictionaryRef d = CFDictionaryCreateMutable(
+        NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    const int values[] = {256, 256, 4, 0x42475241, cache_mode};
+    const CFStringRef keys[] = {kIOSurfaceWidth, kIOSurfaceHeight, kIOSurfaceBytesPerElement,
+                                kIOSurfacePixelFormat, kIOSurfaceCacheMode};
+    for (int i = 0; i < 5; i++) {
+        CFNumberRef n = CFNumberCreate(NULL, kCFNumberIntType, &values[i]);
+        CFDictionarySetValue(d, keys[i], n);
+        CFRelease(n);
+    }
+    IOSurfaceRef s = IOSurfaceCreate(d);
+    CFRelease(d);
+    if (s == NULL) {
+        printf("SKIP  sync fault wc %s: IOSurfaceCreate failed\n", what);
+        return;
+    }
+    IOSurfaceLock(s, 0, NULL);
+    /* Byte by byte: a memset or memcpy of uncached memory can use cache
+     * maintenance or vector accesses that fault there. */
+    volatile unsigned char* p = IOSurfaceGetBaseAddress(s);
+    for (int i = 0; i < 128; i++)
+        p[i] = 0;
+    wc_sig = 0;
+    mode = MODE_WC;
+    if (sigsetjmp(wc_jmp, 1) == 0)
+        wc_x87((void*)p);
+    mode = MODE_NONE;
+    unsigned char got[128];
+    for (int i = 0; i < 128; i++)
+        got[i] = p[i];
+    IOSurfaceUnlock(s, 0, NULL);
+    CFRelease(s);
+    if (wc_sig != 0) {
+        printf("FAIL  sync fault wc %s: signal %d\n", what, wc_sig);
+        failures++;
+        return;
+    }
+    float f;
+    double d1, d2, d3, d4, d5;
+    int64_t i;
+    uint64_t m80;
+    uint16_t e80;
+    memcpy(&f, got, 4);
+    memcpy(&d1, got + 8, 8);
+    memcpy(&m80, got + 16, 8);
+    memcpy(&e80, got + 24, 2);
+    memcpy(&i, got + 32, 8);
+    memcpy(&d2, got + 40, 8);
+    memcpy(&d3, got + 48, 8);
+    memcpy(&d4, got + 56, 8);
+    memcpy(&d5, got + 64, 8);
+    if (f != 1.0f || d1 != 1.0 || m80 != 0x8000000000000000ULL || e80 != 0x3fff || i != 1 ||
+        d2 != 2.0 || d3 != 1.0 || d4 != 1.0 || d5 != 2.0) {
+        printf("FAIL  sync fault wc %s: stored values differ (%g %g %016llx/%04x %lld %g %g %g "
+               "%g)\n",
+               what, f, d1, (unsigned long long)m80, e80, (long long)i, d2, d3, d4, d5);
+        failures++;
+        return;
+    }
+    printf("PASS  sync fault wc %s\n", what);
 }
 
 int main(void) {
@@ -566,15 +919,11 @@ int main(void) {
     if (getenv("SYNC_FAULT_LIST")) {
         for (size_t i = 0; i < n; i++)
             printf("%s %s\n", cases[i].name, cases[i].group == PRECISE ? "precise" : "in-run");
+        printf("wc precise\n");
         return 0;
     }
-    pages = mmap(NULL, 8192, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
-    scratch = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
-    if (pages == MAP_FAILED || scratch == MAP_FAILED) {
-        printf("FAIL  sync fault: mmap\n");
-        return 1;
-    }
-    page = pages + 4096;
+    page = g_pages + 4096;
+    scratch = scratch_area;
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
     sa.sa_sigaction = handler;
@@ -584,6 +933,15 @@ int main(void) {
         printf("FAIL  sync fault: sigaction\n");
         return 1;
     }
+    sel_cs32 = alloc_ldt_seg(3, 1);
+    sel_ds32 = alloc_ldt_seg(4, 0);
+    __asm__ volatile("mov %%cs, %0" : "=r"(sel_cs64));
+    if (!find_gs_base()) {
+        printf("FAIL  sync fault: the %%gs base was not found\n");
+        failures++;
+    }
+    if (failures)
+        return 1;
     static struct io io;
     prepare(&io, &cases[0]);
     make_images(images, &io);
@@ -596,6 +954,11 @@ int main(void) {
         if (only ? strcmp(only, cases[i].name) != 0 : !all && cases[i].group != PRECISE)
             continue;
         run_case(&cases[i]);
+        ran++;
+    }
+    if (!only || strcmp(only, "wc") == 0) {
+        wc_case("write-combined IOSurface", 0x400);  // kIOMapWriteCombineCache
+        wc_case("uncached IOSurface", 0x100);        // kIOMapInhibitCache
         ran++;
     }
     if (!ran) {
