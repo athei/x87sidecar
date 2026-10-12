@@ -346,9 +346,11 @@ its reply. The sidecar probes the memory operand of each reply's first x87
 instruction before the reply changes any state, and answers runs of integer
 loads and stores one instruction per reply, so a fault there reaches the
 program's SIGSEGV or SIGBUS handler with the same context stock Rosetta
-gives it. A fault in a later instruction of a floating-point run still
-aborts the process, and one in the store of an adjacent
-`fild m64; fistp m64` copy is reported at the `fild`; [docs/internals.md](docs/internals.md#memory-faults-inside-emitted-code)
+gives it, except that a probed store into a `PROT_NONE` page is reported
+as a read fault. A fault in a later instruction of a floating-point run
+still aborts the process, and one in the store of an adjacent
+`fild m64; fistp m64` copy is reported at the `fild`;
+[docs/internals.md](docs/internals.md#memory-faults-inside-emitted-code)
 explains why.
 
 Two encodings real hardware runs are missing from Rosetta's decode tables,
