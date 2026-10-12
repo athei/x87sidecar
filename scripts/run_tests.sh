@@ -63,7 +63,11 @@
 # every one of its faults aborts the process.  Even with the knob it runs
 # only the faults the sidecar recovers precisely; the ones inside longer
 # floating-point runs still abort, and SYNC_FAULT_IN_RUN=1 adds them for a
-# manual run.
+# manual run.  Naming it, `run_tests.sh test_x87_sync_fault`, runs it through
+# the per-test phases without the knob, where it reports CRASH from phase 2
+# on, and skips phase 17.  Run it as
+# `X87_PRECISE_FAULTS=1 bash scripts/run_tests.sh test_x87_sync_fault`, or run
+# the full suite.
 #
 # Every phase runs with X87_STRICT_ALLOC=1, so a register allocation that
 # fails asserts and crashes the test instead of being declined to stock.

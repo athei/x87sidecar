@@ -357,8 +357,8 @@ probed store into a `PROT_NONE` page is reported as a read fault. It is off
 by default because of what it costs: an x87 store at the start of a reply
 into write-combined memory, as when a game fills a mapped vertex buffer,
 becomes 23 to 40 times slower, loops of x87 arithmetic on memory operands
-lose up to 7 percent, and back-to-back `fild m64; fistp m64` copies take 4.5
-times as long. Even with it on, a fault in a later instruction of a
+lose up to 7 percent, and nested `fild m64; fistp m64` copies
+(`fild; fild; fistp; fistp`) take 4.5 times as long. Even with it on, a fault in a later instruction of a
 floating-point run still aborts the process, and one in the store of an
 adjacent `fild m64; fistp m64` copy is reported at the `fild`;
 [docs/internals.md](docs/internals.md#memory-faults-inside-emitted-code)
