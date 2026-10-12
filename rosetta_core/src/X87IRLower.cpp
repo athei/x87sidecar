@@ -1545,6 +1545,7 @@ void lower(Context& ctx, TranslationResult* result) {
 //
 // Per-node transient GPR demand (mirrors the lowering code exactly):
 //   - ReadSt, Const*, FAdd/FSub/FMul/FDiv, FMA*, FNeg/FAbs/FSqrt, FCSel: 0
+//   - FMAdd FMA-reduce head: 1 (load address inside lower_fma_reduce)
 //   - LoadF64, LoadF32, StoreF64, StoreF32: 1 (addr from compute_operand_address)
 //   - LoadI16/I32/I64: 2 (addr + Wd_val)
 //   - StoreI16/I32/I64: 2 (Wd_int + the indefinite guard's Xt, then Wd_int + addr)
@@ -1641,13 +1642,21 @@ int peak_live_gprs(const Context& ctx, int budget, int* first_over_node, bool fa
             case Op::FSub:
             case Op::FMul:
             case Op::FDiv:
-            case Op::FMAdd:
             case Op::FMSub:
             case Op::FNMSub:
             case Op::FNeg:
             case Op::FAbs:
             case Op::FSqrt:
             case Op::FCSel:
+                break;
+
+            // FMAdd: 0, except an FMA-reduce head, whose lower_fma_reduce
+            // body forms each load address with compute_operand_address
+            // (one at a time, freed after its load) = 1.
+            case Op::FMAdd:
+                if (n.flags & kFmaReduceHead) {
+                    transient = 1;
+                }
                 break;
 
             // Transcendentals — peak GPR demand inside emit_inline_<op>_core
