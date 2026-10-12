@@ -815,7 +815,10 @@ if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then
             shift 2
             TOTAL=$((TOTAL + 1))
             local out exit_code=0
-            out=$("$@" 2>/dev/null | filter_runtime_lines) || exit_code=$?
+            # The test's override that forces its non-FEAT_AFP tolerance must
+            # not leak in from the calling shell and soften the strict path.
+            out=$(env -u X87_TEST_ASSUME_APPLE_FLUSH_REGISTER "$@" 2>/dev/null |
+                filter_runtime_lines) || exit_code=$?
             # A run that ends any other way (a signal, an abort, no summary
             # line) is a crash, never the expected failure.
             local got="crash (exit=$exit_code)"
@@ -830,6 +833,8 @@ if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then
             if [[ "$got" == "$want" ]]; then
                 echo -e "${GREEN}PASS${NC}  $label  ($verb as expected)"
                 PASSED=$((PASSED + 1))
+                # A noted known limitation still shows in the log.
+                awk '/^NOTE/ { print "      " $0 }' <<<"$out"
             else
                 echo -e "${RED}FAIL${NC}  $label  (wanted $want, got $got)"
                 FAILED=$((FAILED + 1))

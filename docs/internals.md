@@ -478,17 +478,20 @@ depending on the configuration and the run.
 
 On Macs without FEAT_AFP, a signal that lands inside an x87 reply can make
 the rest of that reply flush denormals even with the knob on. The macos-26
-CI runners show it: in the same storm, 8 to 17 percent of the iterations
-returned flushed results, one for every three or four signals, while MXCSR
-after every iteration was still correct and every check without signals
-passed. `test_x87_ftz_daz` reports that count as a NOTE on such a runtime. The cause was not verified
-on that hardware. The likely one is that the runtime's signal handling
-puts the guest's FTZ and DAZ back into `S3_6_C15_C2_5` before the rest of
-the reply runs: its context-restore path rewrites that register from the
-saved MXCSR, and the code that steps a translation forward to the next
-instruction-map entry treats that register's encoding as a special case,
-so a step through the reply may not keep the value the reply wrote. On
-FEAT_AFP hardware the same storm returns no flushed results.
+CI runners show wrong results in the same storm: 8 to 17 percent of the
+iterations, one for every three or four signals, while MXCSR after every
+iteration was still correct and every check without signals passed. That
+the wrong results are flushes is inferred, not yet confirmed: the test now
+prints the first wrong result, and on such a runtime it tolerates an
+iteration only when every output is either its expected value or +0,
+reporting the count as a NOTE; any other value still fails. The cause was
+not verified on that hardware either. The likely one is that the runtime's
+signal handling puts the guest's FTZ and DAZ back into `S3_6_C15_C2_5`
+before the rest of the reply runs: its context-restore path rewrites that
+register from the saved MXCSR, and the code that steps a translation
+forward to the next instruction-map entry treats that register's encoding
+as a special case, so a step through the reply may not keep the value the
+reply wrote. On FEAT_AFP hardware the same storm returns no wrong results.
 
 The knob keeps the original FZ and FIZ bits in the halfword at +6 of the x87
 state. That halfword belongs to native slot 0, and is free only because the

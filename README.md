@@ -442,7 +442,7 @@ knowing. Bracketed values are defaults.
 | variable | effect |
 |---|---|
 | `X87_ENABLE_FMA_CONTRACT=1` | fold `fmul` + `fadd`/`fsub` into one FMA [off, see above] |
-| `X87_IGNORE_FTZ_DAZ=1` | keep x87 denormals when the program sets MXCSR FTZ or DAZ, as real x87 does; costs 6 to 13 instructions per x87 run (plus up to two taken branches when the x87 stack is not empty), and about 20 ns per run while FTZ or DAZ is set. On Macs without FEAT_AFP, a signal that lands inside an x87 run can make the rest of that run flush denormals anyway [off, see [docs/internals.md](docs/internals.md#precision-and-the-floating-point-environment)] |
+| `X87_IGNORE_FTZ_DAZ=1` | keep x87 denormals when the program sets MXCSR FTZ or DAZ, as real x87 does; costs 6 to 13 instructions per x87 run (plus up to two taken branches when the x87 stack is not empty), and about 20 ns per run while FTZ or DAZ is set. On Macs without FEAT_AFP, a signal that lands inside an x87 run can make the rest of that run give wrong results, most likely flushed denormals [off, see [docs/internals.md](docs/internals.md#precision-and-the-floating-point-environment)] |
 | `X87_FAST_ROUND=1` | skip rounding-mode dispatch; unsafe for code that uses `fldcw`. `=2` skips it only in blocks with no control-word writer, still speculative [off] |
 | `X87_ENABLE_BRIDGE=0` | disable carrying one IR run across short `mov`/`lea` gaps between x87 segments [on] |
 | `X87_BRIDGE_V2=0` | disable bridging across flag-writing ALU whose flags Rosetta's liveness proves dead [on] |

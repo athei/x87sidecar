@@ -22,8 +22,10 @@
  * On Macs without FEAT_AFP the runtime keeps FTZ/DAZ in the Apple register
  * S3_6_C15_C2_5, and there a signal that lands inside an x87 reply can make
  * the rest of that reply flush denormals even with X87_IGNORE_FTZ_DAZ=1.
- * The storm's bad-result count is printed as a NOTE on that runtime instead
- * of failing; its MXCSR check, and every other check, stays strict.
+ * On that runtime a storm iteration whose outputs are each either expected
+ * or +0 (the flushed value) is counted and printed as a NOTE instead of a
+ * failure; any other wrong value, the storm's MXCSR check, and every other
+ * check stay strict.
  *
  * The sidecar only keeps x87 denormals under FTZ/DAZ with X87_IGNORE_FTZ_DAZ=1,
  * which is off by default, so this test is not in ALL_TESTS: run_tests.sh
@@ -312,15 +314,31 @@ static void run_storm(void) {
     pthread_t th;
     const int have = pthread_create(&th, NULL, storm, NULL) == 0;
 
-    unsigned long iters = 0, bad = 0, bad_mx = 0;
+    /* Every input is a denormal or depends on one, so a flushed run leaves
+     * each output +0.  A mismatch counts as flushed only if every output is
+     * either its expected value or +0; anything else is some other error. */
+    unsigned long iters = 0, bad = 0, bad_other = 0, bad_mx = 0;
+    uint32_t first32[2] = {0, 0};
+    uint64_t first64 = 0;
     const double deadline = now_s() + 0.2;
     while (now_s() < deadline) {
         for (int k = 0; k < 64; k++) {
             float o32[2] = {0, 0};
             double o64 = 0;
             storm_seq(in32, in64, o32, &o64);
-            if (u32(o32[0]) != want32[0] || u32(o32[1]) != want32[1] || u64(o64) != want64)
+            const uint32_t g0 = u32(o32[0]), g1 = u32(o32[1]);
+            const uint64_t g64 = u64(o64);
+            if (g0 != want32[0] || g1 != want32[1] || g64 != want64) {
+                if (bad == 0) {
+                    first32[0] = g0;
+                    first32[1] = g1;
+                    first64 = g64;
+                }
                 bad++;
+                if ((g0 != want32[0] && g0 != 0) || (g1 != want32[1] && g1 != 0) ||
+                    (g64 != want64 && g64 != 0))
+                    bad_other++;
+            }
             if ((get_mxcsr() & ~0x3Fu) != 0x9FC0)
                 bad_mx++;
             g_iters = ++iters;
@@ -330,18 +348,24 @@ static void run_storm(void) {
     if (have)
         pthread_join(th, NULL);
     set_mxcsr(0x1F80);
-    if (bad && !bad_mx && runtime_uses_apple_flush_register()) {
-        /* Known limitation, see the header: noted, not failed.  The MXCSR
-         * check above stays strict. */
+    char first[128] = "";
+    if (bad)
+        snprintf(first, sizeof(first), "; first got %08x %08x %016llx want %08x %08x %016llx",
+                 first32[0], first32[1], (unsigned long long)first64, want32[0], want32[1],
+                 (unsigned long long)want64);
+    if (bad && !bad_other && !bad_mx && runtime_uses_apple_flush_register()) {
+        /* Known limitation, see the header: noted, not failed.  Results that
+         * are not a flush to +0, and the MXCSR check, stay strict. */
         printf(
-            "NOTE  [storm] FTZ|DAZ x87 run under SIGUSR1: %lu bad results of %lu (signals=%d); "
-            "known limitation where the runtime keeps FTZ/DAZ in S3_6_C15_C2_5\n",
-            bad, iters, (int)g_signals);
+            "NOTE  [storm] FTZ|DAZ x87 run under SIGUSR1: %lu flushed results of %lu "
+            "(signals=%d)%s; known limitation where the runtime keeps FTZ/DAZ in "
+            "S3_6_C15_C2_5\n",
+            bad, iters, (int)g_signals, first);
     } else if (bad || bad_mx) {
         printf(
-            "FAIL  [storm] FTZ|DAZ x87 run under SIGUSR1: %lu bad results, %lu bad mxcsr of %lu "
-            "(signals=%d)\n",
-            bad, bad_mx, iters, (int)g_signals);
+            "FAIL  [storm] FTZ|DAZ x87 run under SIGUSR1: %lu bad results (%lu not a flush), "
+            "%lu bad mxcsr of %lu (signals=%d)%s\n",
+            bad, bad_other, bad_mx, iters, (int)g_signals, first);
         failures++;
     } else {
         printf("PASS  [storm] FTZ|DAZ x87 run under SIGUSR1 (iters=%lu signals=%d)\n", iters,
