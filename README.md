@@ -357,15 +357,23 @@ python3 scripts/test_unhooked_fallback.py  # unhooked fallback, no privileges
 bash scripts/run_benchmarks.sh           # build + benchmark table
 ```
 
-The harness runs 90 self-checking x86-64 test binaries under stock Rosetta
+The harness runs 93 self-checking x86-64 test binaries under stock Rosetta
 and then under the sidecar in ten configurations (default, IR off, fusions
 off, hook bypassed, FMA contraction on, clamped register pool, pressure
 relief off, fast rounding, bridging off, bridging v2 off), plus a
-cooperative-attach smoke test, the two decoder tests three ways and an IR
-replay phase. The stock run is the baseline: a case that fails there is
-reported XFAIL in later phases rather than gating, and the stock run itself
-may only fail for tests listed in `KNOWN_STOCK_DIVERGENCE`. The harness uses
-the default attach path, so it needs `x87sidecar_entitled` or root.
+cooperative-attach smoke test, the two decoder tests three ways, an
+allocation fault-injection phase and an IR replay phase. The stock run is
+the baseline: a case that fails there is reported XFAIL in later phases
+rather than gating, and the stock run itself may only fail for tests listed
+in `KNOWN_STOCK_DIVERGENCE`. The harness uses the default attach path, so it
+needs `x87sidecar_entitled` or root.
+
+When the translator runs out of scratch registers it declines the request
+and stock Rosetta translates that instruction, which keeps a program running
+on a register-pressure bug. The harness sets `X87_STRICT_ALLOC=1` so that
+the same bug fails a test instead, and its fault-injection phase runs a set
+of tests with `X87_FAIL_ALLOC_EVERY=N`, which fails every Nth allocation, to
+check that the declined requests leave every result unchanged.
 
 | tool | purpose |
 |---|---|
