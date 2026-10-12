@@ -202,7 +202,8 @@ struct NativeLayoutScope {
 //                   and the single-op fast path, which read binary64, are
 //                   skipped for this request.
 //   push_read_hard  with first_push_native, the value the first instruction
-//                   pushes would be read as binary64 later in the window.
+//                   pushes would be read as binary64 later in the window,
+//                   by arithmetic or by an fst or fstp to m32 or m64.
 //
 // A deferred FXCH permutes depths; flushing it (at every push, pop, fincstp,
 // fdecstp and fsave, and at the end of a run when to_run_end) moves the
@@ -227,17 +228,19 @@ static SlotPlan plan_slots(const X87Cache& c, const IRInstr* instrs, int64_t num
         fmt[i] = c.slot_fmt[i];
     }
     int pushed = -1;  // the slot first_push_native follows
-    const auto read = [&](int phys, bool soft) {
+    // to_f64: the read converts the value to binary64 even though it leaves
+    // the slot as it is (fst and fstp to m32 or m64).
+    const auto read = [&](int phys, bool soft, bool to_f64) {
         const int r = (top + phys) & 7;
         if (fmt[r] != kSlotNative) {
             return;
         }
+        if (r == pushed && (!soft || to_f64)) {
+            plan.push_read_hard = true;
+        }
         if (soft) {
             plan.soft_f80 = true;
             return;
-        }
-        if (r == pushed) {
-            plan.push_read_hard = true;
         }
         plan.convert = static_cast<uint8_t>(plan.convert | (1U << r));
         fmt[r] = kSlotF64;
@@ -264,9 +267,15 @@ static SlotPlan plan_slots(const X87Cache& c, const IRInstr* instrs, int64_t num
         const IRInstr& insn = instrs[idx + k];
         const auto e = X87Cache::slot_effect(insn);
         const uint8_t soft = e.soft;
+        const uint16_t op = insn.opcode();
+        const bool to_f64 = (op == kOpcodeName_fst || op == kOpcodeName_fstp) &&
+                            insn.num_operands > 0 &&
+                            insn.operands[0].kind != IROperandKind::Register &&
+                            (insn.operands[0].mem.size == IROperandSize::S32 ||
+                             insn.operands[0].mem.size == IROperandSize::S64);
         for (int d = 0; d < 8; d++) {
             if ((e.reads >> d) & 1U) {
-                read(perm[d], ((soft >> d) & 1U) != 0);
+                read(perm[d], ((soft >> d) & 1U) != 0, to_f64);
             }
             if ((e.writes >> d) & 1U) {
                 fmt[(top + perm[d]) & 7] = kSlotF64;
@@ -1447,9 +1456,10 @@ static auto translate_instruction_impl(TranslationResult* translation_result, IR
         soft_f80 = plan.soft_f80;
         // fild m64 writes the exact 80-bit value when nothing later in the
         // run reads it as binary64; then a value of 2^53 or more held into a
-        // later reply, or stored by fistp m64, keeps all its bits.  When
-        // something does read it as binary64, SCVTF is cheaper than the
-        // exact load and a conversion later.
+        // later reply, or stored by fistp m64 or fstp m80, keeps all its
+        // bits.  When something does read it as binary64, arithmetic or an
+        // fst or fstp to m32 or m64, SCVTF is cheaper than the exact load
+        // and a conversion later.
         if (opcode == Opcode::kOpcodeName_fild &&
             cur_instr->operands[0].kind != IROperandKind::Register &&
             cur_instr->operands[0].mem.size == IROperandSize::S64) {
