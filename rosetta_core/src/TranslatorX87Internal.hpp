@@ -41,7 +41,7 @@ inline auto x87_begin(TranslationResult& a1, AssemblerBuffer& buf) -> std::pair<
         if (!a1.x87_cache.st_base_valid && !a1.x87_cache.native_transport) {
             const int Xst_base = alloc_gpr(a1, 6);
             emit_add_imm(buf, /*is_64bit=*/1, /*is_sub=*/0, /*is_set_flags=*/0,
-                         /*shift=*/0, kX87RegFileOff, a1.x87_cache.base_gpr, Xst_base);
+                         /*shift=*/0, x87_st_base_off(), a1.x87_cache.base_gpr, Xst_base);
             a1.x87_cache.st_base_gpr = static_cast<int8_t>(Xst_base);
             a1.x87_cache.st_base_valid = 1;
         }
@@ -61,7 +61,7 @@ inline auto x87_begin(TranslationResult& a1, AssemblerBuffer& buf) -> std::pair<
         if (!a1.x87_cache.native_transport) {
             const int Xst_base = alloc_gpr(a1, 6);
             emit_add_imm(buf, /*is_64bit=*/1, /*is_sub=*/0, /*is_set_flags=*/0,
-                         /*shift=*/0, kX87RegFileOff, Xbase, Xst_base);
+                         /*shift=*/0, x87_st_base_off(), Xbase, Xst_base);
             a1.x87_cache.st_base_gpr = static_cast<int8_t>(Xst_base);
             a1.x87_cache.st_base_valid = 1;
         }

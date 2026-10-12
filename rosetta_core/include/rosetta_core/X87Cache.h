@@ -5,6 +5,13 @@
 struct IRBlock;
 struct IRInstr;
 
+// The format of one x87 slot under X87_NATIVE_SLOTS (X87Cache::slot_fmt).
+enum X87SlotFmt : uint8_t {
+    kSlotNative = 0,  // Rosetta's 80-bit value, as at the start of the reply
+    kSlotF64 = 1,     // the binary64 working value in the slot's first 8 bytes
+    kSlotDead = 2,    // popped or freed in this reply; nothing to keep
+};
+
 // OPT-1: Cross-instruction x87 base/TOP register cache.
 //
 // When consecutive x87 instructions appear in a block, the base address
@@ -44,6 +51,17 @@ struct X87Cache {
     // Set and cleared by Translator::translate_instruction around one
     // reply; invalidate() and tick() leave it alone.
     int8_t native_transport = 0;
+    // 1 while the current reply keeps its working binary64 values inside
+    // Rosetta's native slots (+6, stride 10, X87_NATIVE_SLOTS) instead of
+    // the compact layout.  Set and cleared around one reply like
+    // native_transport.
+    int8_t native_slots = 0;
+    // What each physical slot holds, indexed by its position relative to
+    // TOP at the start of the reply, (top_rel + depth) & 7, where top_rel
+    // is the static change of TOP since then.  Every TOP change inside a
+    // reply is a constant except frstor, which starts the count again.
+    int8_t top_rel = 0;
+    uint8_t slot_fmt[8] = {};  // X87SlotFmt
 
     // OPT-G: Deferred FXCH — compile-time register renaming.
     // perm[i] maps logical stack depth i to physical depth offset.

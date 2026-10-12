@@ -149,6 +149,9 @@ RosettaConfig load_config_from_env() {
     // rollback and bisect switch that restores the binary64 round trip.
     cfg.native_transport = env_default_on("X87_NATIVE_TRANSPORT");
     cfg.precise_faults = env_truthy("X87_PRECISE_FAULTS") ? 1 : 0;
+    // X87_IGNORE_FTZ_DAZ keeps its stash in the halfword at +6, which is
+    // native slot 0, so the two cannot be on together yet.
+    cfg.native_slots = env_truthy("X87_NATIVE_SLOTS") && cfg.ignore_ftz_daz == 0 ? 1 : 0;
 
     // Test-only gate pool clamps: make register-pressure splits
     // deterministically reproducible regardless of stock's dynamic FPR
@@ -472,6 +475,12 @@ void print_env_help(std::FILE* out) {
         "                                write-combined memory 23 to 40 times slower;\n"
         "                                faults later in a floating-point run still\n"
         "                                abort.\n"
+        "  X87_NATIVE_SLOTS=1            keep each x87 register's working binary64\n"
+        "                                value inside its native 80-bit slot and\n"
+        "                                convert slots one at a time, so registers a\n"
+        "                                reply does not use keep their 80-bit values.\n"
+        "                                Default OFF while it is being completed;\n"
+        "                                ignored under X87_IGNORE_FTZ_DAZ=1.\n"
         "  X87_ENABLE_FMA_CONTRACT=1     fold fmul+fadd/fsub into a single FMA (IR pass,\n"
         "                                fld_arith_arithp fusion, arith_faddp peephole).\n"
         "                                Off by default: real x87 rounds the product\n"

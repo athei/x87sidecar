@@ -4173,11 +4173,11 @@ auto translate_frstor(TranslationResult* a1, IRInstr* a2) -> void {
     free_gpr(*a1, Xaddr);
 
     if (cached) {
-        // Re-derive Xst_base = Xbase + kX87RegFileOff and put it back in
+        // Re-derive Xst_base = Xbase + x87_st_base_off() and put it back in
         // the cached slot (slot 6 = x28 by convention).
         const int Xst_base_new = alloc_gpr(*a1, 6);
         emit_add_imm(buf, /*is_64bit=*/1, /*is_sub=*/0, /*is_set_flags=*/0,
-                     /*shift=*/0, kX87RegFileOff, Xbase, Xst_base_new);
+                     /*shift=*/0, x87_st_base_off(), Xbase, Xst_base_new);
         a1->x87_cache.st_base_gpr = static_cast<int8_t>(Xst_base_new);
     }
 

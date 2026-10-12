@@ -143,8 +143,50 @@ void emit_phys_index(AssemblerBuffer& buf, int Wd_top, int stack_depth, int Wd_o
 //   Wd_tmp contains a byte offset for reuse by emit_store_st_at_offset.
 // =============================================================================
 
+void emit_native_slot_key(AssemblerBuffer& buf, int Wd_top, int stack_depth, int Wd_key) {
+    int Wsrc = Wd_top;
+    if (stack_depth != 0) {
+        emit_add_imm(buf, /*is_64bit=*/0, /*is_sub=*/0, /*is_set_flags=*/0,
+                     /*shift=*/0, stack_depth, Wd_top, Wd_key);
+        Wsrc = Wd_key;
+    }
+    // UBFIZ Wd_key, Wsrc, #1, #3: (phys & 7) * 2
+    emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/2 /*UBFM*/, /*N=*/0, /*immr=*/31, /*imms=*/2, Wsrc,
+                  Wd_key);
+    // ADD Wd_key, Wd_key, Wd_key, LSL #2: * 5
+    emit_add_sub_shifted_reg(buf, /*is_64bit=*/0, /*is_sub=*/0, /*is_set_flags=*/0,
+                             /*shift_type=*/0, Wd_key, 2, Wd_key, Wd_key);
+}
+
+void emit_native_slot_offset(AssemblerBuffer& buf, int Wphys, int Wd) {
+    emit_native_slot_key(buf, Wphys, 0, Wd);
+    emit_add_imm(buf, /*is_64bit=*/0, /*is_sub=*/0, /*is_set_flags=*/0,
+                 /*shift=*/0, kX87NativeSlotOff, Wd, Wd);
+}
+
+// Native layout (g_x87_native_layout): the key is always Wd_tmp, holding the
+// slot's offset from native slot 0 when Xbase_st (= Xbase + 6) is pinned and
+// from Xbase otherwise, and the access is [Xbase_st or Xbase, Xkey]:
+//   cached:   key (2 insns at depth 0, 3 otherwise) + LDR/STR
+//   uncached: key + ADD #6 + LDR/STR
+static int emit_native_st_key(AssemblerBuffer& buf, int Wd_top, int stack_depth, int Wd_tmp,
+                              int Xbase_st) {
+    emit_native_slot_key(buf, Wd_top, stack_depth, Wd_tmp);
+    if (Xbase_st < 0) {
+        emit_add_imm(buf, /*is_64bit=*/0, /*is_sub=*/0, /*is_set_flags=*/0,
+                     /*shift=*/0, kX87NativeSlotOff, Wd_tmp, Wd_tmp);
+    }
+    return Wd_tmp;
+}
+
 int emit_load_st(AssemblerBuffer& buf, int Xbase, int Wd_top, int stack_depth, int Wd_tmp, int Dd,
                  int Xbase_st) {
+    if (g_x87_native_layout) {
+        emit_native_st_key(buf, Wd_top, stack_depth, Wd_tmp, Xbase_st);
+        emit_ldr_str_reg(buf, /*size=*/3, /*is_fp=*/1, /*opc=*/1, Wd_tmp, /*shift=*/0,
+                         Xbase_st >= 0 ? Xbase_st : Xbase, Dd);
+        return Wd_tmp;
+    }
     if (Xbase_st >= 0) {
         if (stack_depth == 0) {
             // Depth-0 fast path: use Wd_top directly as the scaled index.
@@ -180,6 +222,12 @@ int emit_load_st(AssemblerBuffer& buf, int Xbase, int Wd_top, int stack_depth, i
 
 void emit_store_st(AssemblerBuffer& buf, int Xbase, int Wd_top, int stack_depth, int Wd_tmp, int Dd,
                    int Xbase_st) {
+    if (g_x87_native_layout) {
+        emit_native_st_key(buf, Wd_top, stack_depth, Wd_tmp, Xbase_st);
+        emit_ldr_str_reg(buf, /*size=*/3, /*is_fp=*/1, /*opc=*/0, Wd_tmp, /*shift=*/0,
+                         Xbase_st >= 0 ? Xbase_st : Xbase, Dd);
+        return;
+    }
     if (Xbase_st >= 0) {
         if (stack_depth == 0) {
             // Depth-0 fast path: use Wd_top directly as scaled index.
@@ -210,6 +258,11 @@ void emit_store_st(AssemblerBuffer& buf, int Xbase, int Wd_top, int stack_depth,
 // =============================================================================
 
 void emit_store_st_at_offset(AssemblerBuffer& buf, int Xbase, int Wd_key, int Dd, int Xbase_st) {
+    if (g_x87_native_layout) {
+        emit_ldr_str_reg(buf, /*size=*/3, /*is_fp=*/1, /*opc=*/0, Wd_key, /*shift=*/0,
+                         Xbase_st >= 0 ? Xbase_st : Xbase, Dd);
+        return;
+    }
     if (Xbase_st >= 0) {
         emit_ldr_str_reg(buf, /*size=*/3, /*is_fp=*/1, /*opc=*/0, Wd_key, /*shift=*/1, Xbase_st,
                          Dd);

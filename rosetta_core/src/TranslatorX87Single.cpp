@@ -131,16 +131,22 @@ void translate_fld_single(TranslationResult& a1, IRInstr* a2) {
     }
 
     const int Widx = alloc_free_gpr(a1);  // newTop + 1 folds the st[] base
-    emit_add_imm(buf, /*is_64bit=*/0, /*is_sub=*/0, /*is_set_flags=*/0,
-                 /*shift=*/0, 1, Wtop, Widx);
+    if (g_x87_native_layout) {
+        emit_native_slot_offset(buf, Wtop, Widx);
+    } else {
+        emit_add_imm(buf, /*is_64bit=*/0, /*is_sub=*/0, /*is_set_flags=*/0,
+                     /*shift=*/0, 1, Wtop, Widx);
+    }
     const int Wsh = alloc_free_gpr(a1);  // tag bit position = 2 * newTop
     emit_lsl1(buf, Wsh, Wtop);
 
     emit_bfi_top(buf, Wsw, Wtop);    // status half: TOP <- newTop
     emit_lslv(buf, 0, Wsh, Wm, Wm);  // mask = 0x30000 << (2 * newTop)
 
-    // STR Dd, [Xbase, Widx, LSL #3] — st[newTop] at (newTop + 1) * 8.
-    emit_ldr_str_reg(buf, /*size=*/3, /*is_fp=*/1, /*opc=*/0 /*STR*/, Widx, /*shift=*/1, Xbase, Dd);
+    // STR Dd, [Xbase, Widx, LSL #3] — st[newTop] at (newTop + 1) * 8, or
+    // [Xbase, Widx] with Widx = 6 + 10 * newTop in the native layout.
+    emit_ldr_str_reg(buf, /*size=*/3, /*is_fp=*/1, /*opc=*/0 /*STR*/, Widx,
+                     /*shift=*/g_x87_native_layout ? 0 : 1, Xbase, Dd);
 
     // BIC Wsw, Wsw, Wm — tag half: mark newTop kValid (bits = 00).
     emit_logical_shifted_reg(buf, /*is_64bit=*/0, /*opc=*/0 /*AND*/, /*N=invert*/ 1,
@@ -172,11 +178,16 @@ void translate_fst_single(TranslationResult& a1, IRInstr* a2, bool is_fstp) {
         // Non-popping fst: no state change at all — TOP read only.
         emit_load_top(buf, a1, Xbase, Wtop);  // LDRH + UBFX (Opt-6 X18-direct)
         const int Widx = alloc_free_gpr(a1);
-        emit_add_imm(buf, /*is_64bit=*/0, /*is_sub=*/0, /*is_set_flags=*/0,
-                     /*shift=*/0, 1, Wtop, Widx);
-        // LDR Dd, [Xbase, Widx, LSL #3] — st[TOP] at (TOP + 1) * 8.
-        emit_ldr_str_reg(buf, /*size=*/3, /*is_fp=*/1, /*opc=*/1 /*LDR*/, Widx, /*shift=*/1, Xbase,
-                         Dd);
+        if (g_x87_native_layout) {
+            emit_native_slot_offset(buf, Wtop, Widx);
+        } else {
+            emit_add_imm(buf, /*is_64bit=*/0, /*is_sub=*/0, /*is_set_flags=*/0,
+                         /*shift=*/0, 1, Wtop, Widx);
+        }
+        // LDR Dd, [Xbase, Widx, LSL #3] — st[TOP] at (TOP + 1) * 8, or
+        // [Xbase, Widx] in the native layout.
+        emit_ldr_str_reg(buf, /*size=*/3, /*is_fp=*/1, /*opc=*/1 /*LDR*/, Widx,
+                         /*shift=*/g_x87_native_layout ? 0 : 1, Xbase, Dd);
         free_gpr(a1, Widx);
         // Address convention matches translate_fst (hardcoded 64-bit).
         const int Xaddr =
@@ -209,10 +220,19 @@ void translate_fst_single(TranslationResult& a1, IRInstr* a2, bool is_fstp) {
     emit_add_imm(buf, /*is_64bit=*/0, /*is_sub=*/0, /*is_set_flags=*/0,
                  /*shift=*/0, 1, Wtop, Widx);
     const int Wsh = alloc_free_gpr(a1);  // tag bit position = 2 * oldTop
-    emit_lsl1(buf, Wsh, Wtop);
-
-    // LDR Dd, [Xbase, Widx, LSL #3] — st[oldTop] at (oldTop + 1) * 8.
-    emit_ldr_str_reg(buf, /*size=*/3, /*is_fp=*/1, /*opc=*/1 /*LDR*/, Widx, /*shift=*/1, Xbase, Dd);
+    if (g_x87_native_layout) {
+        // Widx cannot double as the index here: the slot is at
+        // 6 + 10 * oldTop.  Wsh holds that offset until the load.
+        emit_native_slot_offset(buf, Wtop, Wsh);
+        emit_ldr_str_reg(buf, /*size=*/3, /*is_fp=*/1, /*opc=*/1 /*LDR*/, Wsh, /*shift=*/0, Xbase,
+                         Dd);
+        emit_lsl1(buf, Wsh, Wtop);
+    } else {
+        emit_lsl1(buf, Wsh, Wtop);
+        // LDR Dd, [Xbase, Widx, LSL #3] — st[oldTop] at (oldTop + 1) * 8.
+        emit_ldr_str_reg(buf, /*size=*/3, /*is_fp=*/1, /*opc=*/1 /*LDR*/, Widx, /*shift=*/1, Xbase,
+                         Dd);
+    }
 
     emit_lslv(buf, 0, Wsh, Wm, Wm);  // mask = 0x30000 << (2 * oldTop)
     // ORR Wsw, Wsw, Wm — tag half: mark oldTop kEmpty (bits = 11).

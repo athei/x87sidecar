@@ -164,6 +164,14 @@ static void decline_after_alloc_failure(TranslationResult& tr, const RequestEntr
     }
 }
 
+// Sets g_x87_native_layout for one reply and clears it on every way out.
+struct NativeLayoutScope {
+    explicit NativeLayoutScope(bool on) { g_x87_native_layout = on; }
+    ~NativeLayoutScope() { g_x87_native_layout = false; }
+    NativeLayoutScope(const NativeLayoutScope&) = delete;
+    NativeLayoutScope& operator=(const NativeLayoutScope&) = delete;
+};
+
 // Flush every deferred piece of x87 state to memory and release the run.
 // Only for the path that must not happen: an instruction inside a run the
 // lookahead counted as handled came back declined.  The ops already emitted
@@ -338,10 +346,17 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
         native_boundary &&
         (g_rosetta_config == nullptr || g_rosetta_config->native_transport != 0) &&
         X87Cache::is_native_transport_run(instr_array, num_instrs, insn_idx);
-    // Captured before native_transport is set, so a declined request leaves
-    // the flag clear, as every request that ends does.
+    // X87_NATIVE_SLOTS: the reply keeps its working binary64 values inside
+    // the native slots (+6, stride 10).  A native transport reply needs no
+    // binary64 values at all and keeps its own emitters.
+    const bool slots = native_boundary && !transport && g_rosetta_config != nullptr &&
+                       g_rosetta_config->native_slots != 0;
+    // Captured before native_transport and native_slots are set, so a
+    // declined request leaves both clear, as every request that ends does.
     const RequestEntry entry = capture_request_entry(*translation_result);
     cache.native_transport = transport ? 1 : 0;
+    cache.native_slots = slots ? 1 : 0;
+    const NativeLayoutScope layout(slots);
     // The probe has to stay the first thing in the reply: before the entry
     // conversion, before any NZCV save or FPCR write, before anything an op
     // emitter does.  A native transport reply needs none: it is one
@@ -358,7 +373,9 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
     const uint64_t trace_site = uint64_t(instr_array[insn_idx].pc) << 32;
     if (traced)
         x87trace::emit_boundary(*translation_result, trace_site | (uint64_t(insn_idx) << 1));
-    if (native_boundary && !transport)
+    if (slots)
+        TranslatorX87::emit_native_slots_boundary(*translation_result, true);
+    else if (native_boundary && !transport)
         TranslatorX87::emit_native_state_boundary(*translation_result, true);
     auto ret = translation_result->alloc_failure != nullptr
                    ? std::nullopt
@@ -399,9 +416,12 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
         ret = more;
     }
     cache.native_transport = 0;
+    cache.native_slots = 0;
     if (native_boundary && translation_result->alloc_failure == nullptr) {
         if (ret) {
-            if (!transport)
+            if (slots)
+                TranslatorX87::emit_native_slots_boundary(*translation_result, false);
+            else if (!transport)
                 TranslatorX87::emit_native_state_boundary(*translation_result, false);
             if (traced)
                 x87trace::emit_boundary(*translation_result, trace_site | (uint64_t(*ret) << 1) | 1,

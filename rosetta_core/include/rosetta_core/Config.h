@@ -159,6 +159,14 @@ struct RosettaConfig {
                                       //                           aborting the process.  Off, the
                                       //                           emitted code is the same as
                                       //                           without the feature.
+    uint8_t native_slots;             // X87_NATIVE_SLOTS          (default OFF) =1 keeps the
+                                      //                           working binary64 value of each
+                                      //                           x87 register inside its native
+                                      //                           80-bit slot (+6, stride 10)
+                                      //                           instead of the compact layout,
+                                      //                           and converts per slot.  Forced
+                                      //                           off under X87_IGNORE_FTZ_DAZ,
+                                      //                           whose stash uses slot 0.
 
     // X87_BRIDGE_HASH_LIST / X87_NO_BRIDGE_HASH_LIST — per-block bridging
     // bisect, same semantics and hash key as the rollback lists above:

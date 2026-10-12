@@ -60,6 +60,22 @@ static_assert(kX87TagWordOff == 0x04, "Invalid offset for tag_word");
 static_assert(kX87RegFileOff == 0x08, "Invalid offset for st[] base");
 static_assert(kX87RegStride == 0x08, "Invalid stride for st[] registers");
 
+// X87_NATIVE_SLOTS keeps the working binary64 value of each register in the
+// first 8 bytes of its native 80-bit slot, at +6 + 10 * phys, so converting
+// one slot leaves its neighbours alone.  While g_x87_native_layout is set,
+// the slot helpers below (emit_load_st, emit_store_st,
+// emit_store_st_at_offset, emit_x87_perm_flush) and the Xst_base the run
+// cache pins use that layout.  Translator::translate_instruction sets it for
+// one reply at a time.
+static constexpr int16_t kX87NativeSlotOff = 6;
+static constexpr int kX87NativeSlotStride = 10;
+inline thread_local bool g_x87_native_layout = false;
+
+// What Xst_base points at: the compact st[] array, or native slot 0.
+inline int16_t x87_st_base_off() {
+    return g_x87_native_layout ? kX87NativeSlotOff : kX87RegFileOff;
+}
+
 static constexpr int kX87TopShift = 11;  // TOP LSB position in status_word
 static constexpr int kX87TopMask = 0x7;
 // x87 condition code bit positions in status_word
@@ -131,6 +147,14 @@ auto emit_store_top(AssemblerBuffer& buf, int Xbase, int Wd_new_top, int Wd_tmp)
 // =============================================================================
 
 auto emit_phys_index(AssemblerBuffer& buf, int Wd_top, int stack_depth, int Wd_out) -> void;
+
+// Native layout: Wd_key = 10 * ((Wd_top + stack_depth) & 7), the byte offset
+// of the slot from native slot 0.  UBFIZ (and an ADD before it for a nonzero
+// depth), then ADD Wd_key, Wd_key, Wd_key, LSL #2.
+void emit_native_slot_key(AssemblerBuffer& buf, int Wd_top, int stack_depth, int Wd_key);
+
+// Native layout: Wd = 6 + 10 * (Wphys & 7), the slot's offset from Xbase.
+void emit_native_slot_offset(AssemblerBuffer& buf, int Wphys, int Wd);
 
 // =============================================================================
 // 2f — Load ST(i) mantissa into a D register

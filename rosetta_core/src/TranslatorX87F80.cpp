@@ -737,6 +737,47 @@ void emit_f64_bits_to_f80(AssemblerBuffer& buf, int Xaddr, int Xb, int We, int W
     bind_imm26(buf, done_zero);
 }
 
+// X87_NATIVE_SLOTS keeps each working binary64 value inside its own native
+// slot, so the boundary converts every valid slot in place, f80 to binary64
+// on entry and back on exit, and leaves empty ones alone.  A slot is empty
+// when both of its tag bits are set; the test is TBZ on the low bit and TBNZ
+// on the high one.  Nothing here writes NZCV.
+void emit_native_slots_boundary(TranslationResult& tr, bool entering) {
+    const auto saved_mask = tr.free_gpr_mask;
+    tr.free_gpr_mask &= kGprScratchMask;
+    auto& buf = tr.insn_buf;
+    const int base = alloc_free_gpr(tr);
+    const int tags = alloc_free_gpr(tr);
+    const int a = alloc_free_gpr(tr);
+    const int b = alloc_free_gpr(tr);
+    const int c = alloc_free_gpr(tr);
+    const int d = alloc_free_gpr(tr);
+    emit_x87_base(buf, tr, base);
+    emit_ldr_str_imm(buf, 1, 0, /*LDR*/ 1, kX87TagWordOff / 2, base, tags);
+    // Every tag empty (0xFFFF): adding one carries into bit 16.
+    emit_add_imm(buf, 0, 0, 0, 0, 1, tags, a);
+    const auto all_empty = emit_tbz_fwd(buf, 1, a, 16);
+    for (int i = 0; i < 8; ++i) {
+        const int off = kX87NativeSlotOff + kX87NativeSlotStride * i;
+        const auto valid = emit_tbz_fwd(buf, 0, tags, 2 * i);
+        const auto empty = emit_tbz_fwd(buf, 1, tags, 2 * i + 1);
+        bind_imm14(buf, valid);
+        if (entering) {
+            emit_ldur_stur(buf, 3, /*LDUR*/ 1, static_cast<int16_t>(off), base, a);
+            emit_ldr_str_imm(buf, 1, 0, /*LDRH*/ 1, static_cast<int16_t>((off + 8) / 2), base, b);
+            emit_f80_bits_to_f64(buf, a, b, c, d);
+            emit_ldur_stur(buf, 3, /*STUR*/ 0, static_cast<int16_t>(off), base, a);
+        } else {
+            emit_ldur_stur(buf, 3, /*LDUR*/ 1, static_cast<int16_t>(off), base, b);
+            emit_add_imm(buf, 1, 0, 0, 0, off, base, a);
+            emit_f64_bits_to_f80(buf, a, b, c, d);
+        }
+        bind_imm14(buf, empty);
+    }
+    bind_imm14(buf, all_empty);
+    tr.free_gpr_mask = saved_mask;
+}
+
 void emit_copy_f80(AssemblerBuffer& buf, int Xdst, int dst_off, int Xsrc, int src_off, int Xt1,
                    int Xt2) {
     emit_ldur_stur(buf, 3, /*LDUR*/ 1, static_cast<int16_t>(src_off), Xsrc, Xt1);

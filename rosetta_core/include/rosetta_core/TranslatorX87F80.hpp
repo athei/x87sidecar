@@ -65,6 +65,11 @@ void emit_copy_f80(AssemblerBuffer& buf, int Xdst, int dst_off, int Xsrc, int sr
 // allocator masks. Must run outside an active x87 register-cache run.
 void emit_native_state_boundary(TranslationResult& tr, bool entering);
 
+// The boundary for X87_NATIVE_SLOTS: converts each valid slot in place,
+// keeping the binary64 value in the slot's first 8 bytes inside the reply.
+// Preserves NZCV and allocator masks.
+void emit_native_slots_boundary(TranslationResult& tr, bool entering);
+
 // Where Rosetta keeps the guest's MXCSR.FTZ/DAZ on this machine, which is
 // what X87_IGNORE_FTZ_DAZ clears and restores.  Chosen the way the runtime
 // chooses it, from the commpage CPU capabilities.
