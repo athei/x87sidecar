@@ -260,6 +260,9 @@ before it. The straddling halfword is an unaligned access, which device
 memory (an uncached mapping) does not allow, so a 10- or 108-byte x87 store
 that crosses a page of such a mapping faults in the probe; the store itself
 would be unaligned there too unless its address is a multiple of 8.
+`test_x87_sync_fault`'s `wc_cross` case pins this: an `fstpt` 8 bytes below
+a page end of an uncached IOSurface is stored natively and without the
+knob, and takes SIGBUS with it.
 
 The write-back has a window: a write by another thread to the same bytes
 between the probe's load and its store is undone. The real store then
@@ -639,11 +642,13 @@ knobs on.
 
 `test_x87_ftz_daz` covers loads, stores, arithmetic and compares under each
 bit, the guest's FTZ and DAZ still applying to SSE code later in the same
-block, and a signal storm while the bits are set. The SSE checks report a
-skip on a runtime that does not apply the bit to SSE at all; the x87 checks
-never do. `run_tests.sh` runs it in a phase of its own: natively and with
-the knob it must pass, and without the knob it must fail with its failure
-count rather than crash, each with `X87_NATIVE_SLOTS` off and on.
+block, a signal storm while the bits are set, and a storm whose handler
+sets both bits in the signal context, so the interrupted code resumes under
+them. The SSE checks report a skip on a runtime that does not apply the bit
+to SSE at all; the x87 checks never do. `run_tests.sh` runs it in a phase
+of its own: natively and with the knob it must pass, and without the knob it
+must fail with its failure count rather than crash, each with
+`X87_NATIVE_SLOTS` off and on.
 
 The knob does not cover rounding control: x87 arithmetic rounds by MXCSR.RC
 rather than by the RC field of the control word. The control word's RC is

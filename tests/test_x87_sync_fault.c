@@ -41,7 +41,8 @@
  * before each later memory access when X87_PRECISE_FAULTS=1.
  *
  * SYNC_FAULT_CASE=<name> runs one case of either group (wc for the
- * IOSurface group); SYNC_FAULT_LIST=1 prints every name with its group.
+ * IOSurface group, wc_cross for the page-crossing uncached store, which
+ * runs only when named); SYNC_FAULT_LIST=1 prints every name with its group.
  */
 #include <IOSurface/IOSurface.h>
 #include <architecture/i386/desc.h>
@@ -913,6 +914,58 @@ static void wc_case(const char* what, int cache_mode) {
     printf("PASS  sync fault wc %s\n", what);
 }
 
+/* An fstpt at an 8-aligned address 8 bytes below the end of a 4 KB page of
+ * an uncached IOSurface.  The store is two aligned accesses, one on each
+ * side of the boundary, which uncached memory allows.  With
+ * X87_PRECISE_FAULTS=1 the sidecar's probe writes back the halfword that
+ * straddles the boundary, an unaligned access that uncached memory refuses,
+ * so the documented outcome there is a SIGBUS in the probe.  The case runs
+ * only when named (SYNC_FAULT_CASE=wc_cross), since the right outcome
+ * depends on the knob; it prints the signal it took and whether the bytes
+ * were stored, and run_tests.sh checks both. */
+__asm__(".text\n.p2align 4\n_wc_cross_x87:\n"
+        "fninit\nfld1\nlfence\nfstpt (%rdi)\nlfence\nret\n");
+extern void wc_cross_x87(void* p);
+
+static void wc_cross_case(void) {
+    CFMutableDictionaryRef d = CFDictionaryCreateMutable(
+        NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    const int values[] = {256, 256, 4, 0x42475241, 0x100};  // kIOMapInhibitCache
+    const CFStringRef keys[] = {kIOSurfaceWidth, kIOSurfaceHeight, kIOSurfaceBytesPerElement,
+                                kIOSurfacePixelFormat, kIOSurfaceCacheMode};
+    for (int i = 0; i < 5; i++) {
+        CFNumberRef n = CFNumberCreate(NULL, kCFNumberIntType, &values[i]);
+        CFDictionarySetValue(d, keys[i], n);
+        CFRelease(n);
+    }
+    IOSurfaceRef s = IOSurfaceCreate(d);
+    CFRelease(d);
+    if (s == NULL) {
+        printf("SKIP  sync fault wc_cross: IOSurfaceCreate failed\n");
+        return;
+    }
+    IOSurfaceLock(s, 0, NULL);
+    volatile unsigned char* base = IOSurfaceGetBaseAddress(s);
+    volatile unsigned char* p = base + 4096 - 8;
+    for (int i = 0; i < 16; i++)
+        p[i] = 0;
+    wc_sig = 0;
+    mode = MODE_WC;
+    if (sigsetjmp(wc_jmp, 1) == 0)
+        wc_cross_x87((void*)p);
+    mode = MODE_NONE;
+    uint64_t m80 = 0;
+    uint16_t e80 = 0;
+    for (int i = 0; i < 8; i++)
+        m80 |= (uint64_t)p[i] << (8 * i);
+    e80 = (uint16_t)(p[8] | (p[9] << 8));
+    IOSurfaceUnlock(s, 0, NULL);
+    CFRelease(s);
+    const int stored = m80 == 0x8000000000000000ULL && e80 == 0x3fff;
+    printf("RESULT  sync fault wc_cross: signal %d, %s\n", wc_sig,
+           stored ? "stored" : "not stored");
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IOLBF, 0);
     const size_t n = sizeof(cases) / sizeof(cases[0]);
@@ -955,6 +1008,10 @@ int main(void) {
             continue;
         run_case(&cases[i]);
         ran++;
+    }
+    if (only && strcmp(only, "wc_cross") == 0) {
+        wc_cross_case();
+        return 0;
     }
     if (!only || strcmp(only, "wc") == 0) {
         wc_case("write-combined IOSurface", 0x400);  // kIOMapWriteCombineCache

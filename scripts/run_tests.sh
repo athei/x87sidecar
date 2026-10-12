@@ -52,7 +52,9 @@
 #      X87_FAIL_ALLOC_EVERY=N), with its in-run group too under
 #      X87_NATIVE_SLOTS=1, and one of its faults must still abort the
 #      process without the knob, under both the cooperative and the default
-#      attach
+#      attach.  Its wc_cross case, an fstpt across a page boundary of
+#      uncached memory, must store without a signal natively and without
+#      the knob, and take the probe's SIGBUS with it
 #  18. test_crash_after_release: a target that is no longer traced after
 #      the release and then dies (abort, SIGSEGV, SIGKILL, SIGILL, exit(3))
 #      must end with its own exit status natively and under both attaches
@@ -957,7 +959,8 @@ if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then
         expect_ftz "flags_handoff  knob on"              pass env X87_IGNORE_FTZ_DAZ=1 \
             "$LOADER" "$TESTS_BIN/test_flags_handoff"
         # X87_NATIVE_SLOTS replies have no conversion boundary and keep the
-        # stash at +86 instead of +6, so they run the same checks.
+        # stash at +86 instead of +6, so they run the same checks, including
+        # the storm whose handler sets FTZ|DAZ in the signal context.
         expect_ftz "ftz_daz  knob on, native slots"      pass env X87_IGNORE_FTZ_DAZ=1 \
             X87_NATIVE_SLOTS=1 "$LOADER" "$FTZ_BIN"
         expect_ftz "ftz_daz  knob on, native slots, IR off" pass env X87_IGNORE_FTZ_DAZ=1 \
@@ -1078,6 +1081,38 @@ if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then
                 EXIT=$?
             check_output "test_x87_sync_fault" "$OUT" "$EXIT"
         done
+        # An fstpt across a page boundary of uncached memory: stored without a
+        # signal natively and without the knob; with it the probe's
+        # straddling halfword is unaligned there and takes SIGBUS, as
+        # docs/internals.md describes.  $1 = label, $2 = expected RESULT
+        # text, $3.. = command.
+        expect_wc_cross() {
+            local label="$1" want="$2"
+            shift 2
+            TOTAL=$((TOTAL + 1))
+            local out exit_code=0
+            out=$(run_bounded "$TEST_TIMEOUT" env SYNC_FAULT_CASE=wc_cross "$@" 2>/dev/null) ||
+                exit_code=$?
+            local got
+            got=$(grep -E '^(RESULT|SKIP)' <<<"$out" | head -1)
+            if [[ $exit_code -eq 0 && "$got" == *"$want"* ]]; then
+                echo -e "${GREEN}PASS${NC}  sync_fault wc_cross  $label  ($want)"
+                PASSED=$((PASSED + 1))
+            elif [[ $exit_code -eq 0 && "$got" == SKIP* ]]; then
+                echo -e "${YELLOW}SKIP${NC}  sync_fault wc_cross  $label  ($got)"
+                ERRORS=$((ERRORS + 1))
+            else
+                local reason="got exit=$exit_code ${got:-no result}"
+                echo -e "${RED}FAIL${NC}  sync_fault wc_cross  $label  (wanted $want, $reason)"
+                FAILED=$((FAILED + 1))
+            fi
+        }
+        expect_wc_cross "native Rosetta" "signal 0, stored" "$SF_BIN"
+        expect_wc_cross "knob off" "signal 0, stored" "$LOADER" "$SF_BIN"
+        expect_wc_cross "X87_PRECISE_FAULTS=1" "signal 10, not stored" \
+            X87_PRECISE_FAULTS=1 "$LOADER" "$SF_BIN"
+        expect_wc_cross "X87_PRECISE_FAULTS=1 X87_NATIVE_SLOTS=1" "signal 10, not stored" \
+            X87_PRECISE_FAULTS=1 X87_NATIVE_SLOTS=1 "$LOADER" "$SF_BIN"
         for n in "${ALLOC_FAIL_EVERY[@]}"; do
             echo "      X87_PRECISE_FAULTS=1 X87_FAIL_ALLOC_EVERY=$n"
             EXIT=0
