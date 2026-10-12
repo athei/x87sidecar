@@ -55,6 +55,14 @@
 #  18. test_crash_after_release: a target that is no longer traced after
 #      the release and then dies (abort, SIGSEGV, SIGKILL, SIGILL, exit(3))
 #      must end with its own exit status natively and under both attaches
+#  19. test_x87_cross_reply_exact with X87_NATIVE_SLOTS=1 (default, IR off,
+#      fusions off, run cache off, single-op fast path off, clamped
+#      register pool, bridging off, X87_PRECISE_FAULTS=1, and
+#      X87_FAIL_ALLOC_EVERY=N), then the tests that read or replace the
+#      native x87 state with it.  Without the knob, which is off by
+#      default, test_x87_cross_reply_exact has to fail in every phase that
+#      translates it; exporting X87_NATIVE_SLOTS=1 for the whole run makes
+#      every phase run with the knob instead
 #   R. replay tests/data/geom_block_874c40.ir under --fpr-pool 8 and
 #      assert the pressure splits keep it on the IR path (fpr_fail=0), then
 #      replay tests/data/fist_pressure.ir the same way and assert it exits 0
@@ -211,6 +219,7 @@ ALL_TESTS=(
     test_x87_signal_context
     test_x87_native_state
     test_m80_copy
+    test_x87_cross_reply_exact
     test_bcd_exact
     test_alloc_decline
 )
@@ -311,6 +320,24 @@ trap 'rm -rf "$STOCK_DIR"' EXIT
 # 1 only while Phase 1 runs; every later phase reads what it recorded.
 BASELINE_PHASE=0
 
+# Tests whose exact results need X87_NATIVE_SLOTS=1, which is off by
+# default.  Run without it, every phase in which the sidecar translates them
+# has to see them fail with a failure count: a pass would mean the test no
+# longer reaches what the knob fixes.  Phase 19 runs them with it.
+NATIVE_SLOTS_TESTS=(
+    test_x87_cross_reply_exact
+)
+# 1 while Phase 5 runs the tests with the sidecar's translation hook off.
+STOCK_EMIT_PHASE=0
+
+needs_native_slots() {
+    local t
+    for t in "${NATIVE_SLOTS_TESTS[@]}"; do
+        [[ "$t" == "$1" ]] && return 0
+    done
+    return 1
+}
+
 fail_lines() {
     grep -E 'FAIL' <<<"$1" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'
 }
@@ -332,6 +359,19 @@ check_output() {
         echo -e "${RED}FAIL${NC}  $name  (timed out after $TEST_TIMEOUT s)"
         FAILED=$((FAILED + 1))
         tail -5 <<<"$out" | sed 's/^/      /'
+        return 0
+    fi
+    if [[ $BASELINE_PHASE -eq 0 && $STOCK_EMIT_PHASE -eq 0 && "${X87_NATIVE_SLOTS:-0}" != 1 ]] &&
+        needs_native_slots "$name"; then
+        if [[ "$exit_code" -eq 1 ]] && grep -qE '^[1-9][0-9]* failure' <<<"$out"; then
+            echo -e "${GREEN}PASS${NC}  $name  (fails without X87_NATIVE_SLOTS, as expected)"
+            PASSED=$((PASSED + 1))
+        else
+            local wanted="failures without X87_NATIVE_SLOTS"
+            echo -e "${RED}FAIL${NC}  $name  (wanted $wanted, got exit=$exit_code)"
+            FAILED=$((FAILED + 1))
+            tail -3 <<<"$out" | sed 's/^/      /'
+        fi
         return 0
     fi
     # Herestrings, not `echo "$out" | grep`: when $out exceeds the pipe
@@ -535,6 +575,7 @@ if [[ $NATIVE_ONLY -eq 0 ]]; then
     echo ""
     echo -e "${BOLD}=== Phase 5: x87sidecar X87_DISABLE_HOOK=1 (stock emit) ===${NC}"
 
+    STOCK_EMIT_PHASE=1
     for t in "${TESTS[@]}"; do
         BINARY="$TESTS_BIN/$t"
         if [[ ! -x "$BINARY" ]]; then
@@ -547,6 +588,7 @@ if [[ $NATIVE_ONLY -eq 0 ]]; then
             2>/dev/null | filter_runtime_lines) || EXIT=$?
         check_output "$t" "$OUT" "$EXIT"
     done
+    STOCK_EMIT_PHASE=0
 fi
 
 # ── Phase 6: x87sidecar X87_ENABLE_FMA_CONTRACT=1 ────────────────────────
@@ -1105,6 +1147,99 @@ if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then
                 fi
             done
         done
+    fi
+fi
+
+# ── Phase 19: X87_NATIVE_SLOTS=1 (x87 registers kept in their native slots) ─
+# The knob is off by default, so the per-test phases run without it unless
+# the whole run exports it, and there test_x87_cross_reply_exact has to fail.
+# Here it runs with the knob in the configurations that change which
+# translator emits a reply, with precise faults, and with allocation
+# failures declined to stock, followed by the tests that read or replace the
+# native x87 state, so a run that does not export the knob covers it too.
+# Naming any of these tests on the command line runs this phase for them.
+NATIVE_SLOTS_CONFIGS=(
+    ""
+    "X87_DISABLE_X87_IR=1"
+    "X87_DISABLE_X87_IR=1 X87_DISABLE_ALL_FUSIONS=1"
+    "X87_DISABLE_CACHE=1"
+    "X87_DISABLE_SINGLE_FAST=1"
+    "X87_FPR_POOL_LIMIT=5"
+    "X87_ENABLE_BRIDGE=0"
+    "X87_PRECISE_FAULTS=1"
+    "X87_STRICT_ALLOC=0 X87_FAIL_ALLOC_EVERY=3"
+    "X87_STRICT_ALLOC=0 X87_FAIL_ALLOC_EVERY=17"
+    "X87_STRICT_ALLOC=0 X87_FAIL_ALLOC_EVERY=97"
+)
+NATIVE_SLOTS_STATE_TESTS=(
+    test_x87_native_state
+    test_x87_signal_context
+    test_x87_signal_storm
+    test_delphi_move
+    test_flags_handoff
+    test_frstor
+    test_fsave
+    test_fxch
+    test_m80_copy
+    test_fild_fistp_copy
+)
+# Whether phase 19 runs test $1: always in a full run, otherwise only when
+# it was named.
+native_slots_phase_runs() {
+    local t
+    [[ ${#SELECTED_TESTS[@]} -eq 0 ]] && return 0
+    for t in "${SELECTED_TESTS[@]}"; do
+        [[ "$t" == "$1" ]] && return 0
+    done
+    return 1
+}
+if [[ $NATIVE_ONLY -eq 0 ]]; then
+    PHASE19_TESTS=()
+    for t in "${NATIVE_SLOTS_TESTS[@]}" "${NATIVE_SLOTS_STATE_TESTS[@]}"; do
+        native_slots_phase_runs "$t" && PHASE19_TESTS+=("$t")
+    done
+fi
+if [[ $NATIVE_ONLY -eq 0 && ${#PHASE19_TESTS[@]} -gt 0 ]]; then
+    echo ""
+    echo -e "${BOLD}=== Phase 19: X87_NATIVE_SLOTS=1 (x87 registers in their native slots) ===${NC}"
+
+    SAVED_NATIVE_SLOTS="${X87_NATIVE_SLOTS-unset}"
+    export X87_NATIVE_SLOTS=1
+    for cfg in "${NATIVE_SLOTS_CONFIGS[@]}"; do
+        for t in "${NATIVE_SLOTS_TESTS[@]}"; do
+            native_slots_phase_runs "$t" || continue
+            echo "      X87_NATIVE_SLOTS=1 $cfg"
+            BINARY="$TESTS_BIN/$t"
+            if [[ ! -x "$BINARY" ]]; then
+                echo -e "${YELLOW}SKIP${NC}  $t  (binary not found)"
+                ERRORS=$((ERRORS + 1))
+                continue
+            fi
+            EXIT=0
+            # shellcheck disable=SC2086
+            OUT=$(run_bounded "$TEST_TIMEOUT" env $cfg "$LOADER" "$BINARY" 2>/dev/null |
+                filter_runtime_lines) || EXIT=$?
+            check_output "$t" "$OUT" "$EXIT"
+        done
+    done
+    echo "      X87_NATIVE_SLOTS=1"
+    for t in "${NATIVE_SLOTS_STATE_TESTS[@]}"; do
+        native_slots_phase_runs "$t" || continue
+        BINARY="$TESTS_BIN/$t"
+        if [[ ! -x "$BINARY" ]]; then
+            echo -e "${YELLOW}SKIP${NC}  $t  (binary not found)"
+            ERRORS=$((ERRORS + 1))
+            continue
+        fi
+        EXIT=0
+        OUT=$(run_bounded "$TEST_TIMEOUT" "$LOADER" "$BINARY" 2>/dev/null | filter_runtime_lines) ||
+            EXIT=$?
+        check_output "$t" "$OUT" "$EXIT"
+    done
+    if [[ "$SAVED_NATIVE_SLOTS" == unset ]]; then
+        unset X87_NATIVE_SLOTS
+    else
+        export X87_NATIVE_SLOTS="$SAVED_NATIVE_SLOTS"
     fi
 fi
 

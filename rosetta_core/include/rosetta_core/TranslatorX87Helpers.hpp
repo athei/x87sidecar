@@ -76,6 +76,35 @@ inline int16_t x87_st_base_off() {
     return g_x87_native_layout ? kX87NativeSlotOff : kX87RegFileOff;
 }
 
+// The slot tracker (X87Cache::slot_fmt, top_rel) of the reply being
+// translated in the native layout, or nullptr.  Every change the emitters
+// make to the TOP register is noted below, and every slot access goes
+// through emit_load_st and emit_store_st, which note the read or write with
+// the depth relative to the TOP register at that point.  A read of a slot
+// still holding Rosetta's 80-bit value means a conversion was missed: it is
+// recorded like an allocation failure, so the request is declined to stock,
+// and asserts under X87_STRICT_ALLOC.  All of these do nothing while the
+// tracker is unset.
+inline thread_local TranslationResult* g_x87_slot_tracker = nullptr;
+void x87_slot_note_read(int stack_depth);
+void x87_slot_note_write(int stack_depth);
+// n pushes; the new slots will hold binary64 values.
+void x87_slot_note_push(int n);
+// n pops from the current TOP; the popped slots become dead.
+void x87_slot_note_pop(int n);
+// fincstp (+1) and fdecstp (-1): TOP moves, every slot keeps its format.
+void x87_slot_note_rotate(int delta);
+// ffree: the slot at depth stack_depth becomes dead.
+void x87_slot_note_free(int stack_depth);
+// fsave and frstor set TOP from somewhere the reply cannot know statically;
+// the tracker restarts at that TOP with every slot in format `fmt`.
+void x87_slot_note_reanchor(uint8_t fmt);
+// True when the tracker is set and the slot at depth stack_depth still holds
+// an 80-bit value, which fld m80 and fstp m80 copy as ten bytes.
+bool x87_slot_is_native(int stack_depth);
+// The slot at depth stack_depth now holds an 80-bit value (fld m80).
+void x87_slot_note_native(int stack_depth);
+
 static constexpr int kX87TopShift = 11;  // TOP LSB position in status_word
 static constexpr int kX87TopMask = 0x7;
 // x87 condition code bit positions in status_word
@@ -155,6 +184,11 @@ void emit_native_slot_key(AssemblerBuffer& buf, int Wd_top, int stack_depth, int
 
 // Native layout: Wd = 6 + 10 * (Wphys & 7), the slot's offset from Xbase.
 void emit_native_slot_offset(AssemblerBuffer& buf, int Wphys, int Wd);
+
+// Native layout: Xd = the address of the slot at stack_depth, from Xbase_st
+// (= Xbase + 6) when pinned, otherwise from Xbase.  Wd_top is read only.
+void emit_native_st_addr(AssemblerBuffer& buf, int Xbase, int Wd_top, int stack_depth, int Xd,
+                         int Xbase_st);
 
 // =============================================================================
 // 2f — Load ST(i) mantissa into a D register

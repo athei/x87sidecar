@@ -1,12 +1,15 @@
 #include "rosetta_core/TranslatorX87Helpers.hpp"
 
+#include <cassert>
 #include <cstdint>
 
 #include "rosetta_core/AssemblerBuffer.h"
 #include "rosetta_core/AssemblerHelpers.hpp"
+#include "rosetta_core/Config.h"
 #include "rosetta_core/Register.h"
 #include "rosetta_core/TranslationResult.h"
 #include "rosetta_core/TranslatorHelpers.hpp"
+#include "rosetta_core/X87Cache.h"
 #include "rosetta_core/X87IR.h"
 
 // emit_ldr_str_imm with size=1 (LDRH/STRH) uses a halfword-scaled imm12:
@@ -158,6 +161,86 @@ void emit_native_slot_key(AssemblerBuffer& buf, int Wd_top, int stack_depth, int
                              /*shift_type=*/0, Wd_key, 2, Wd_key, Wd_key);
 }
 
+// =============================================================================
+// X87_NATIVE_SLOTS slot tracker (see TranslatorX87Helpers.hpp)
+// =============================================================================
+
+static int tracked_slot(const X87Cache& c, int stack_depth) {
+    return (c.top_rel + stack_depth) & 7;
+}
+
+void x87_slot_note_read(int stack_depth) {
+    TranslationResult* tr = g_x87_slot_tracker;
+    if (tr == nullptr || tr->x87_cache.slot_fmt[tracked_slot(tr->x87_cache, stack_depth)] !=
+                             kSlotNative) {
+        return;
+    }
+    if (tr->alloc_failure == nullptr) {
+        tr->alloc_failure = "native_slot_read";
+    }
+    assert((g_rosetta_config == nullptr || g_rosetta_config->strict_alloc == 0) &&
+           "an x87 slot was read as binary64 before it was converted");
+}
+
+void x87_slot_note_write(int stack_depth) {
+    if (TranslationResult* tr = g_x87_slot_tracker) {
+        tr->x87_cache.slot_fmt[tracked_slot(tr->x87_cache, stack_depth)] = kSlotF64;
+    }
+}
+
+void x87_slot_note_push(int n) {
+    if (TranslationResult* tr = g_x87_slot_tracker) {
+        auto& c = tr->x87_cache;
+        for (int i = 0; i < n; i++) {
+            c.top_rel = static_cast<int8_t>((c.top_rel - 1) & 7);
+            c.slot_fmt[c.top_rel] = kSlotF64;
+        }
+    }
+}
+
+void x87_slot_note_pop(int n) {
+    if (TranslationResult* tr = g_x87_slot_tracker) {
+        auto& c = tr->x87_cache;
+        for (int i = 0; i < n; i++) {
+            c.slot_fmt[c.top_rel] = kSlotDead;
+            c.top_rel = static_cast<int8_t>((c.top_rel + 1) & 7);
+        }
+    }
+}
+
+void x87_slot_note_rotate(int delta) {
+    if (TranslationResult* tr = g_x87_slot_tracker) {
+        tr->x87_cache.top_rel = static_cast<int8_t>((tr->x87_cache.top_rel + delta) & 7);
+    }
+}
+
+void x87_slot_note_free(int stack_depth) {
+    if (TranslationResult* tr = g_x87_slot_tracker) {
+        tr->x87_cache.slot_fmt[tracked_slot(tr->x87_cache, stack_depth)] = kSlotDead;
+    }
+}
+
+bool x87_slot_is_native(int stack_depth) {
+    const TranslationResult* tr = g_x87_slot_tracker;
+    return tr != nullptr &&
+           tr->x87_cache.slot_fmt[tracked_slot(tr->x87_cache, stack_depth)] == kSlotNative;
+}
+
+void x87_slot_note_native(int stack_depth) {
+    if (TranslationResult* tr = g_x87_slot_tracker) {
+        tr->x87_cache.slot_fmt[tracked_slot(tr->x87_cache, stack_depth)] = kSlotNative;
+    }
+}
+
+void x87_slot_note_reanchor(uint8_t fmt) {
+    if (TranslationResult* tr = g_x87_slot_tracker) {
+        tr->x87_cache.top_rel = 0;
+        for (auto& f : tr->x87_cache.slot_fmt) {
+            f = fmt;
+        }
+    }
+}
+
 void emit_native_slot_offset(AssemblerBuffer& buf, int Wphys, int Wd) {
     emit_native_slot_key(buf, Wphys, 0, Wd);
     emit_add_imm(buf, /*is_64bit=*/0, /*is_sub=*/0, /*is_set_flags=*/0,
@@ -179,9 +262,17 @@ static int emit_native_st_key(AssemblerBuffer& buf, int Wd_top, int stack_depth,
     return Wd_tmp;
 }
 
+void emit_native_st_addr(AssemblerBuffer& buf, int Xbase, int Wd_top, int stack_depth, int Xd,
+                         int Xbase_st) {
+    emit_native_st_key(buf, Wd_top, stack_depth, Xd, Xbase_st);
+    emit_add_sub_shifted_reg(buf, /*is_64bit=*/1, /*is_sub=*/0, /*is_set_flags=*/0,
+                             /*shift_type=*/0, Xd, 0, Xbase_st >= 0 ? Xbase_st : Xbase, Xd);
+}
+
 int emit_load_st(AssemblerBuffer& buf, int Xbase, int Wd_top, int stack_depth, int Wd_tmp, int Dd,
                  int Xbase_st) {
     if (g_x87_native_layout) {
+        x87_slot_note_read(stack_depth);
         emit_native_st_key(buf, Wd_top, stack_depth, Wd_tmp, Xbase_st);
         emit_ldr_str_reg(buf, /*size=*/3, /*is_fp=*/1, /*opc=*/1, Wd_tmp, /*shift=*/0,
                          Xbase_st >= 0 ? Xbase_st : Xbase, Dd);
@@ -223,6 +314,7 @@ int emit_load_st(AssemblerBuffer& buf, int Xbase, int Wd_top, int stack_depth, i
 void emit_store_st(AssemblerBuffer& buf, int Xbase, int Wd_top, int stack_depth, int Wd_tmp, int Dd,
                    int Xbase_st) {
     if (g_x87_native_layout) {
+        x87_slot_note_write(stack_depth);
         emit_native_st_key(buf, Wd_top, stack_depth, Wd_tmp, Xbase_st);
         emit_ldr_str_reg(buf, /*size=*/3, /*is_fp=*/1, /*opc=*/0, Wd_tmp, /*shift=*/0,
                          Xbase_st >= 0 ? Xbase_st : Xbase, Dd);

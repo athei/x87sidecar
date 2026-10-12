@@ -53,10 +53,12 @@ void emit_f80_bits_to_f64(AssemblerBuffer& buf, int Xm, int Wx, int Xt1, int Xt2
 // clobbered; Xaddr is not.
 void emit_f64_bits_to_f80(AssemblerBuffer& buf, int Xaddr, int Xb, int We, int Wt);
 
-// Copies the ten bytes at [Xsrc, #src_off] to [Xdst, #dst_off] with two
-// overlapping 8-byte LDUR/STUR pairs (bytes 0-7 and 2-9).  Both loads come
-// before the stores.  Offsets must keep src_off + 2 and dst_off + 2 within
-// the signed 9-bit range.  Xt1 and Xt2 are clobbered.
+// Copies the ten bytes at [Xsrc, #src_off] to [Xdst, #dst_off] as an 8-byte
+// and a 2-byte access on each side, both loads before the stores.  A guest
+// operand that is naturally aligned stays so for both accesses, which
+// uncached memory requires; two overlapping 8-byte accesses would not.
+// Offsets must keep src_off + 8 and dst_off + 8 within the signed 9-bit
+// range.  Xt1 and Xt2 are clobbered.
 void emit_copy_f80(AssemblerBuffer& buf, int Xdst, int dst_off, int Xsrc, int src_off, int Xt1,
                    int Xt2);
 
@@ -65,10 +67,11 @@ void emit_copy_f80(AssemblerBuffer& buf, int Xdst, int dst_off, int Xsrc, int sr
 // allocator masks. Must run outside an active x87 register-cache run.
 void emit_native_state_boundary(TranslationResult& tr, bool entering);
 
-// The boundary for X87_NATIVE_SLOTS: converts each valid slot in place,
-// keeping the binary64 value in the slot's first 8 bytes inside the reply.
-// Preserves NZCV and allocator masks.
-void emit_native_slots_boundary(TranslationResult& tr, bool entering);
+// The end of an X87_NATIVE_SLOTS reply: converts each slot the slot tracker
+// has in binary64 back to the native 80-bit format, in place.  Emits nothing
+// when there is none.  Preserves NZCV and allocator masks.  Must run outside
+// an active x87 register-cache run.
+void emit_native_slots_export(TranslationResult& tr);
 
 // Where Rosetta keeps the guest's MXCSR.FTZ/DAZ on this machine, which is
 // what X87_IGNORE_FTZ_DAZ clears and restores.  Chosen the way the runtime

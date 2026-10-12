@@ -1,0 +1,294 @@
+/*
+ * test_x87_cross_reply_exact.c: an 80-bit value held on the x87 stack while
+ * other blocks do x87 arithmetic must come out bit for bit.
+ *
+ * Each case loads a value in one block (fld m80 or fild m64), runs a second
+ * block of x87 work that never touches it, and stores it in a third block
+ * (fstp m80 or fistp m64).  Real x87 and stock Rosetta keep every 80-bit
+ * register as it is, so the stored bytes equal the loaded ones: 64-bit
+ * integers of 2^53 or more, exponents outside binary64's range, all NaN
+ * payload bits, unnormals and denormals.  A translator that converts every
+ * register to binary64 at each reply rounds them, which is what
+ * X87_NATIVE_SLOTS avoids: there each register is converted only where a
+ * reply reads it.
+ *
+ * The middle block takes the shapes the translator emits differently: an
+ * IR run (direct emitters and fusions when the harness turns the IR off),
+ * single-instruction replies, two- and three-instruction fusions, a
+ * transcendental, fcmov, deferred FXCH, and pushes that leave the held value
+ * at every depth from 1 to 7.  Every case also runs with TOP rotated by
+ * fdecstp before the load, so the held value sits in each of the eight
+ * physical registers and the middle block's pushes wrap TOP past 0.
+ * Blocks are separated by `jmp 1f; 1:`, which ends a translation block.
+ *
+ * Expected: passes under stock Rosetta and under x87sidecar with
+ * X87_NATIVE_SLOTS=1, fails without it (run_tests.sh checks both).
+ */
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+
+static int failures = 0;
+
+typedef struct {
+    uint64_t mant;
+    uint16_t sexp;
+} __attribute__((packed)) f80;
+
+typedef struct {
+    f80 v;
+    uint8_t pad[6];
+} __attribute__((aligned(16))) f80_slot;
+
+static const double kConst[] = {3.0, 2.0, 0.25, 1.0, 0.5};
+
+#define SEP "jmp 1f\n1:\n\t"
+#define CLOBBERS "memory", "cc", "st", "st(1)", "st(2)", "st(3)", "st(4)", "st(5)", "st(6)", "st(7)"
+
+/* ── Middle blocks ───────────────────────────────────────────────────────── */
+/* Each pushes and pops only its own values, writing results to out[]. */
+
+#define MID_IR                                                                   \
+    "fldl 0(%[c])\n\tfmull 8(%[c])\n\tfaddl 16(%[c])\n\tfsqrt\n\tfstpl 0(%[out])\n\t"
+#define MID_SINGLE "fldl 0(%[c])\n\t" SEP "fstpl 0(%[out])\n\t"
+#define MID_FUSE2 "fldl 0(%[c])\n\tfstpl 0(%[out])\n\t"
+#define MID_FUSE3 "fldl 0(%[c])\n\tfmull 8(%[c])\n\tfstpl 0(%[out])\n\t"
+#define MID_FSIN "fldl 32(%[c])\n\tfsin\n\tfstpl 0(%[out])\n\t"
+#define MID_FYL2X "fld1\n\tfldl 8(%[c])\n\tfyl2x\n\tfstpl 0(%[out])\n\t"
+#define MID_FCMOV                                                                       \
+    "cmpl %k[z], %k[z]\n\tfldl 0(%[c])\n\tfldl 8(%[c])\n\tfcmove %%st(1), %%st\n\t"     \
+    "fstpl 0(%[out])\n\tfstpl 8(%[out])\n\t"
+#define MID_FXCH1                                                                       \
+    "fldl 0(%[c])\n\tfldl 8(%[c])\n\tfxch %%st(1)\n\tfstpl 0(%[out])\n\tfstpl 8(%[out])\n\t"
+#define MID_FXCH2                                                                       \
+    "fldl 0(%[c])\n\tfldl 8(%[c])\n\tfldl 16(%[c])\n\tfxch %%st(2)\n\tfstpl 0(%[out])\n\t" \
+    "fstpl 8(%[out])\n\tfstpl 16(%[out])\n\t"
+#define PUSH1 "fldl 24(%[c])\n\t"
+#define ADDP "faddp\n\t"
+#define MID_D1 PUSH1 "fstpl 0(%[out])\n\t"
+#define MID_D2 PUSH1 PUSH1 ADDP "fstpl 0(%[out])\n\t"
+#define MID_D3 PUSH1 PUSH1 PUSH1 ADDP ADDP "fstpl 0(%[out])\n\t"
+#define MID_D4 PUSH1 PUSH1 PUSH1 PUSH1 ADDP ADDP ADDP "fstpl 0(%[out])\n\t"
+#define MID_D5 PUSH1 PUSH1 PUSH1 PUSH1 PUSH1 ADDP ADDP ADDP ADDP "fstpl 0(%[out])\n\t"
+#define MID_D6 PUSH1 PUSH1 PUSH1 PUSH1 PUSH1 PUSH1 ADDP ADDP ADDP ADDP ADDP "fstpl 0(%[out])\n\t"
+#define MID_D7                                                                    \
+    PUSH1 PUSH1 PUSH1 PUSH1 PUSH1 PUSH1 PUSH1 ADDP ADDP ADDP ADDP ADDP ADDP \
+    "fstpl 0(%[out])\n\t"
+
+/* ── Load and store forms ────────────────────────────────────────────────── */
+
+enum { kM80, kI64, kI64ToM80 };
+#define LOAD_M80 "fldt (%[src])\n\t"
+#define STORE_M80 "fstpt (%[dst])\n"
+#define LOAD_I64 "fildll (%[src])\n\t"
+#define STORE_I64 "fistpll (%[dst])\n"
+
+typedef void (*case_fn)(const void* src, void* dst, double* out);
+
+#define DEFINE_CASE(name, LOAD, MID, STORE)                                                  \
+    static void name(const void* src, void* dst, double* out) {                              \
+        __asm__ volatile(LOAD SEP MID SEP STORE                                              \
+                         :                                                                   \
+                         : [src] "r"(src), [dst] "r"(dst), [out] "r"(out), [c] "r"(kConst), \
+                           [z] "r"(0)                                                        \
+                         : CLOBBERS);                                                        \
+    }
+
+#define DEFINE_FORMS(mid)                                    \
+    DEFINE_CASE(m80_##mid, LOAD_M80, MID_##mid, STORE_M80)   \
+    DEFINE_CASE(i64_##mid, LOAD_I64, MID_##mid, STORE_I64)   \
+    DEFINE_CASE(i64m80_##mid, LOAD_I64, MID_##mid, STORE_M80)
+
+DEFINE_FORMS(IR)
+DEFINE_FORMS(SINGLE)
+DEFINE_FORMS(FUSE2)
+DEFINE_FORMS(FUSE3)
+DEFINE_FORMS(FSIN)
+DEFINE_FORMS(FYL2X)
+DEFINE_FORMS(FCMOV)
+DEFINE_FORMS(FXCH1)
+DEFINE_FORMS(FXCH2)
+DEFINE_FORMS(D1)
+DEFINE_FORMS(D2)
+DEFINE_FORMS(D3)
+DEFINE_FORMS(D4)
+DEFINE_FORMS(D5)
+DEFINE_FORMS(D6)
+DEFINE_FORMS(D7)
+
+typedef struct {
+    const char* name;
+    case_fn fn[3];   /* indexed by kM80, kI64, kI64ToM80 */
+    int nout;        /* results to check */
+    double want[3];  /* exact results, NAN-free; a 0 count skips the check */
+} middle;
+
+#define FORMS(mid) {m80_##mid, i64_##mid, i64m80_##mid}
+
+static const middle kMiddles[] = {
+    {"ir", FORMS(IR), 1, {2.5}},
+    {"single-op", FORMS(SINGLE), 1, {3.0}},
+    {"fusion2", FORMS(FUSE2), 1, {3.0}},
+    {"fusion3", FORMS(FUSE3), 1, {6.0}},
+    {"fsin", FORMS(FSIN), 0, {0}},
+    {"fyl2x", FORMS(FYL2X), 0, {0}},
+    {"fcmove", FORMS(FCMOV), 2, {3.0, 3.0}},
+    {"fxch st1", FORMS(FXCH1), 2, {3.0, 2.0}},
+    {"fxch st2", FORMS(FXCH2), 3, {3.0, 2.0, 0.25}},
+    {"depth1", FORMS(D1), 1, {1.0}},
+    {"depth2", FORMS(D2), 1, {2.0}},
+    {"depth3", FORMS(D3), 1, {3.0}},
+    {"depth4", FORMS(D4), 1, {4.0}},
+    {"depth5", FORMS(D5), 1, {5.0}},
+    {"depth6", FORMS(D6), 1, {6.0}},
+    {"depth7", FORMS(D7), 1, {7.0}},
+};
+
+/* ── TOP rotation ────────────────────────────────────────────────────────── */
+
+static void rotate_down(int n) {
+    for (int i = 0; i < n; i++) {
+        __asm__ volatile("fdecstp" ::: "memory");
+    }
+}
+
+static void rotate_up(int n) {
+    for (int i = 0; i < n; i++) {
+        __asm__ volatile("fincstp" ::: "memory");
+    }
+}
+
+static uint16_t status_word(void) {
+    uint16_t sw;
+    __asm__ volatile("fnstsw %0" : "=m"(sw));
+    return sw;
+}
+
+/* ── Values ──────────────────────────────────────────────────────────────── */
+
+typedef struct {
+    const char* name;
+    f80 v;
+} f80_value;
+
+static const f80_value kF80Values[] = {
+    {"2^62+3", {0x8000000000000006ULL, 0x403D}},
+    {"INT64_MIN", {0x8000000000000000ULL, 0xC03E}},
+    {"NaN with low payload bits", {0xC000000000000801ULL, 0x7FFF}},
+    {"about 1e4000", {0xDE3A1BB4C0F8A971ULL, 0x73E6}},
+    {"unnormal", {0x4000000000000C01ULL, 0x4005}},
+    {"denormal", {0x0000000000123457ULL, 0x0000}},
+    {"negative 1 + 2^-63", {0x8000000000000001ULL, 0xBFFF}},
+};
+
+typedef struct {
+    const char* name;
+    int64_t v;
+    f80 as_f80;
+} i64_value;
+
+static const i64_value kI64Values[] = {
+    {"2^62+3", 4611686018427387907LL, {0x8000000000000006ULL, 0x403D}},
+    {"INT64_MIN", INT64_MIN, {0x8000000000000000ULL, 0xC03E}},
+    {"2^53+1", 9007199254740993LL, {0x8000000000000400ULL, 0x4034}},
+    {"-(2^63-1)", -INT64_MAX, {0xFFFFFFFFFFFFFFFEULL, 0xC03D}},
+};
+
+/* ── Runner ──────────────────────────────────────────────────────────────── */
+
+static int reported = 0;
+
+static void report(const char* what, const char* mid, int rot, const char* val, const void* got,
+                   const void* want, size_t n) {
+    failures++;
+    if (++reported > 40) {
+        return;
+    }
+    const uint8_t* g = got;
+    const uint8_t* w = want;
+    printf("FAIL  %s, middle %s, TOP rotated %d, %s: got ", what, mid, rot, val);
+    for (size_t i = n; i-- > 0;) {
+        printf("%02x", g[i]);
+    }
+    printf(" want ");
+    for (size_t i = n; i-- > 0;) {
+        printf("%02x", w[i]);
+    }
+    printf("\n");
+}
+
+static void check_middle(const middle* m, int rot, const double* out) {
+    for (int i = 0; i < m->nout; i++) {
+        if (memcmp(&out[i], &m->want[i], sizeof(double)) != 0) {
+            report("middle result", m->name, rot, "-", &out[i], &m->want[i], sizeof(double));
+        }
+    }
+}
+
+static void check_balanced(const middle* m, int rot) {
+    const uint16_t sw = status_word();
+    const uint16_t top = (sw >> 11) & 7;
+    if (top != 0) {
+        const uint16_t zero = 0;
+        report("TOP after the case", m->name, rot, "-", &top, &zero, sizeof(top));
+    }
+}
+
+int main(void) {
+    int cases = 0;
+    for (size_t mi = 0; mi < sizeof(kMiddles) / sizeof(kMiddles[0]); mi++) {
+        const middle* m = &kMiddles[mi];
+        for (int rot = 0; rot < 8; rot++) {
+            for (size_t vi = 0; vi < sizeof(kF80Values) / sizeof(kF80Values[0]); vi++) {
+                f80_slot src;
+                f80_slot dst;
+                double out[3] = {0, 0, 0};
+                memset(&src, 0, sizeof(src));
+                memset(&dst, 0xA5, sizeof(dst));
+                src.v = kF80Values[vi].v;
+                rotate_down(rot);
+                m->fn[kM80](&src, &dst, out);
+                rotate_up(rot);
+                cases++;
+                if (memcmp(&dst.v, &src.v, sizeof(f80)) != 0) {
+                    report("fld m80 to fstp m80", m->name, rot, kF80Values[vi].name, &dst.v,
+                           &src.v, sizeof(f80));
+                }
+                check_middle(m, rot, out);
+                check_balanced(m, rot);
+            }
+            for (size_t vi = 0; vi < sizeof(kI64Values) / sizeof(kI64Values[0]); vi++) {
+                const int64_t src = kI64Values[vi].v;
+                int64_t dst = 0x5A5A5A5A5A5A5A5ALL;
+                double out[3] = {0, 0, 0};
+                rotate_down(rot);
+                m->fn[kI64](&src, &dst, out);
+                rotate_up(rot);
+                cases++;
+                if (dst != src) {
+                    report("fild m64 to fistp m64", m->name, rot, kI64Values[vi].name, &dst, &src,
+                           sizeof(dst));
+                }
+                check_middle(m, rot, out);
+                check_balanced(m, rot);
+
+                f80_slot d80;
+                memset(&d80, 0xA5, sizeof(d80));
+                rotate_down(rot);
+                m->fn[kI64ToM80](&src, &d80, out);
+                rotate_up(rot);
+                cases++;
+                if (memcmp(&d80.v, &kI64Values[vi].as_f80, sizeof(f80)) != 0) {
+                    report("fild m64 to fstp m80", m->name, rot, kI64Values[vi].name, &d80.v,
+                           &kI64Values[vi].as_f80, sizeof(f80));
+                }
+                check_balanced(m, rot);
+            }
+        }
+    }
+    if (failures == 0) {
+        printf("PASS  %d cases: values held across replies come out bit for bit\n", cases);
+    }
+    printf("%d failures\n", failures);
+    return failures != 0;
+}

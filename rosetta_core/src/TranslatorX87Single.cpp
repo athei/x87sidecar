@@ -143,7 +143,7 @@ void translate_fld_single(TranslationResult& a1, IRInstr* a2) {
     emit_bfi_top(buf, Wsw, Wtop);    // status half: TOP <- newTop
     emit_lslv(buf, 0, Wsh, Wm, Wm);  // mask = 0x30000 << (2 * newTop)
 
-    // STR Dd, [Xbase, Widx, LSL #3] — st[newTop] at (newTop + 1) * 8, or
+    // STR Dd, [Xbase, Widx, LSL #3]: st[newTop] at (newTop + 1) * 8, or
     // [Xbase, Widx] with Widx = 6 + 10 * newTop in the native layout.
     emit_ldr_str_reg(buf, /*size=*/3, /*is_fp=*/1, /*opc=*/0 /*STR*/, Widx,
                      /*shift=*/g_x87_native_layout ? 0 : 1, Xbase, Dd);
@@ -153,6 +153,7 @@ void translate_fld_single(TranslationResult& a1, IRInstr* a2) {
                              /*shift_type=*/0, Wm, /*shift_amt=*/0, Wsw, Wsw);
     // STUR Wsw, [Xbase, #2] — single combined status+tag write-back.
     emit_ldur_stur(buf, /*size=*/2, /*opc=*/0 /*STUR*/, kX87StatusWordOff, Xbase, Wsw);
+    x87_slot_note_push(1);
 
     free_fpr(a1, Dd);
     free_gpr(a1, Wsh);
@@ -171,6 +172,7 @@ void translate_fst_single(TranslationResult& a1, IRInstr* a2, bool is_fstp) {
     const int Xbase = alloc_gpr(a1, 0);
     const int Wtop = alloc_gpr(a1, 2);
     const int Dd = alloc_free_fpr(a1);
+    x87_slot_note_read(0);
 
     emit_x87_base(buf, a1, Xbase);
 
@@ -184,7 +186,7 @@ void translate_fst_single(TranslationResult& a1, IRInstr* a2, bool is_fstp) {
             emit_add_imm(buf, /*is_64bit=*/0, /*is_sub=*/0, /*is_set_flags=*/0,
                          /*shift=*/0, 1, Wtop, Widx);
         }
-        // LDR Dd, [Xbase, Widx, LSL #3] — st[TOP] at (TOP + 1) * 8, or
+        // LDR Dd, [Xbase, Widx, LSL #3]: st[TOP] at (TOP + 1) * 8, or
         // [Xbase, Widx] in the native layout.
         emit_ldr_str_reg(buf, /*size=*/3, /*is_fp=*/1, /*opc=*/1 /*LDR*/, Widx,
                          /*shift=*/g_x87_native_layout ? 0 : 1, Xbase, Dd);
@@ -229,7 +231,7 @@ void translate_fst_single(TranslationResult& a1, IRInstr* a2, bool is_fstp) {
         emit_lsl1(buf, Wsh, Wtop);
     } else {
         emit_lsl1(buf, Wsh, Wtop);
-        // LDR Dd, [Xbase, Widx, LSL #3] — st[oldTop] at (oldTop + 1) * 8.
+        // LDR Dd, [Xbase, Widx, LSL #3]: st[oldTop] at (oldTop + 1) * 8.
         emit_ldr_str_reg(buf, /*size=*/3, /*is_fp=*/1, /*opc=*/1 /*LDR*/, Widx, /*shift=*/1, Xbase,
                          Dd);
     }
@@ -250,6 +252,7 @@ void translate_fst_single(TranslationResult& a1, IRInstr* a2, bool is_fstp) {
 
     // STUR Wsw, [Xbase, #2] — single combined status+tag write-back.
     emit_ldur_stur(buf, /*size=*/2, /*opc=*/0 /*STUR*/, kX87StatusWordOff, Xbase, Wsw);
+    x87_slot_note_pop(1);
 
     free_fpr(a1, Dd);
     free_gpr(a1, Wsh);

@@ -241,6 +241,23 @@ auto translate_fld(TranslationResult* a1, IRInstr* a2) -> void {
         const bool addr_is_64 = (a2->operands[0].mem.addr_size == IROperandSize::S64);
         const int Xaddr = compute_operand_address(*a1, addr_is_64, &a2->operands[0], GPR::XZR);
 
+        if (g_x87_slot_tracker != nullptr) {
+            // X87_NATIVE_SLOTS: the new register takes the ten bytes as they
+            // are and stays in the 80-bit format until something reads it.
+            emit_native_st_addr(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Xst_base);
+            const int Xt1 = alloc_free_gpr(*a1);
+            const int Xt2 = alloc_free_gpr(*a1);
+            emit_copy_f80(buf, Wd_tmp, 0, Xaddr, 0, Xt1, Xt2);
+            free_gpr(*a1, Xt2);
+            free_gpr(*a1, Xt1);
+            free_gpr(*a1, Xaddr);
+            x87_slot_note_native(resolve_depth(*a1, 0));
+            free_fpr(*a1, Dd_val);
+            x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp);
+            free_gpr(*a1, Wd_tmp);
+            return;
+        }
+
         // Load 8-byte mantissa + 2-byte sign+exp word into caller-allocated
         // scratch, then free Xaddr early so the bit-math stage doesn't
         // exhaust the 8-slot GPR scratch pool.
@@ -1358,6 +1375,27 @@ auto translate_fst(TranslationResult* a1, IRInstr* a2) -> void {
         auto [Xbase, Wd_top] = x87_begin(*a1, buf);
         const int Xst_base = x87_get_st_base(*a1);
         const int Wd_tmp = alloc_gpr(*a1, 2);  // sign scratch, then pop scratch
+
+        if (x87_slot_is_native(resolve_depth(*a1, 0))) {
+            // X87_NATIVE_SLOTS: ST(0) still holds its 80-bit value; store
+            // the ten bytes as they are.
+            emit_native_st_addr(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Xst_base);
+            const int Xaddr =
+                compute_operand_address(*a1, /*is_64bit=*/true, &a2->operands[0], GPR::XZR);
+            const int Xt1 = alloc_free_gpr(*a1);
+            const int Xt2 = alloc_free_gpr(*a1);
+            emit_copy_f80(buf, Xaddr, 0, Wd_tmp, 0, Xt1, Xt2);
+            free_gpr(*a1, Xt2);
+            free_gpr(*a1, Xt1);
+            free_gpr(*a1, Xaddr);
+            if (is_fstp) {
+                x87_pop(buf, *a1, Xbase, Wd_top, Wd_tmp);
+            }
+            x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp);
+            free_gpr(*a1, Wd_tmp);
+            return;
+        }
+
         const int Dd_src = alloc_free_fpr(*a1);
 
         // Load ST(0) as double
@@ -3641,6 +3679,7 @@ auto translate_fdecstp(TranslationResult* a1, IRInstr* /*a2*/) -> void {
     // AND  Wd_top, Wd_top, #7  (N=0, immr=0, imms=2 → 3-bit mask)
     emit_and_imm(buf, /*is_64bit=*/0, /*Rd=*/Wd_top,
                  /*N=*/0, /*immr=*/0, /*imms=*/2, /*Rn=*/Wd_top);
+    x87_slot_note_rotate(-1);
 
     a1->x87_cache.top_dirty = 1;
 
@@ -3669,6 +3708,7 @@ auto translate_fincstp(TranslationResult* a1, IRInstr* /*a2*/) -> void {
     // AND  Wd_top, Wd_top, #7
     emit_and_imm(buf, /*is_64bit=*/0, /*Rd=*/Wd_top,
                  /*N=*/0, /*immr=*/0, /*imms=*/2, /*Rn=*/Wd_top);
+    x87_slot_note_rotate(1);
 
     a1->x87_cache.top_dirty = 1;
 
@@ -3756,6 +3796,7 @@ auto translate_ffree(TranslationResult* a1, IRInstr* a2) -> void {
 
     free_gpr(*a1, Wd_mask);
     free_gpr(*a1, Wd_bitpos);
+    x87_slot_note_free(depth);
 
     x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp);
     free_gpr(*a1, Wd_tmp);
@@ -4106,6 +4147,9 @@ auto translate_frstor(TranslationResult* a1, IRInstr* a2) -> void {
     // UBFX Wd_top, Wd_tmp, #11, #3
     emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/2 /*UBFM*/, /*N=*/0, /*immr=*/11, /*imms=*/13,
                   Wd_tmp, Wd_top);
+    // The slot tracker counts from this TOP; the stores below mark all eight
+    // slots binary64.
+    x87_slot_note_reanchor(kSlotDead);
 
     // TW: [Xaddr, #8] -> [Xbase, #4]
     emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/1 /*LDR*/, kSrcTwImm12, Xaddr, Wd_tmp);
@@ -4315,6 +4359,8 @@ auto translate_fsave(TranslationResult* a1, IRInstr* a2) -> void {
                      Wd_tmp);
     // Reset cached Wd_top to 0 (matches new SW.TOP=0).
     emit_movn(buf, /*is_64bit=*/0, /*opc=*/2 /*MOVZ*/, /*hw=*/0, /*imm16=*/0, Wd_top);
+    // Every slot is empty now; the slot tracker counts from TOP 0.
+    x87_slot_note_reanchor(kSlotDead);
     // Cache flags are already zero (we flushed top/tags/perm earlier; deferred_pop_count is 0).
     a1->x87_cache.top_dirty = 0;
 

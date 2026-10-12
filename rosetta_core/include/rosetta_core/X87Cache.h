@@ -212,4 +212,27 @@ struct X87Cache {
     };
     static BridgedRun lookahead_bridged(IRInstr* instr_array, int64_t num_instrs, int64_t insn_idx,
                                         int max_gap, int max_total_bridges, bool allow_v2 = false);
+
+    // What one instruction does to the register stack, for the
+    // X87_NATIVE_SLOTS slot tracker.  Depths are logical (before the
+    // permutation of deferred FXCH) and taken before the instruction's own
+    // pushes and pops.  A non-x87 instruction (a bridge) has no effect.
+    enum EffectKind : uint8_t {
+        kEffectPlain = 0,
+        kEffectFxch,     // swaps logical depths 0 and arg
+        kEffectFree,     // ffree: depth arg becomes empty
+        kEffectTopInc,   // fincstp
+        kEffectTopDec,   // fdecstp
+        kEffectSave,     // fsave: reads all eight, then an empty stack at TOP 0
+        kEffectRestore,  // frstor: all eight replaced, TOP from memory
+    };
+    struct SlotEffect {
+        uint8_t reads = 0;   // depths read as binary64
+        uint8_t writes = 0;  // depths written without being read
+        int8_t pushes = 0;   // the pushed value is written as binary64
+        int8_t pops = 0;
+        EffectKind kind = kEffectPlain;
+        int8_t arg = 0;
+    };
+    static SlotEffect slot_effect(const IRInstr& insn);
 };

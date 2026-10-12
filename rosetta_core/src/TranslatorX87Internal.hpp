@@ -229,6 +229,7 @@ inline void x87_push(AssemblerBuffer& buf, TranslationResult& a1, int Xbase, int
     } else {
         emit_x87_push(buf, Xbase, Wd_top, Wd_tmp, Wd_tmp2);
     }
+    x87_slot_note_push(1);
 }
 
 inline void x87_pop(AssemblerBuffer& buf, TranslationResult& a1, int Xbase, int Wd_top,
@@ -262,6 +263,7 @@ inline void x87_pop(AssemblerBuffer& buf, TranslationResult& a1, int Xbase, int 
         free_gpr(a1, Wd_tmp2);
         a1.x87_cache.top_dirty = 0;
     }
+    x87_slot_note_pop(1);
 }
 
 inline void x87_pop_n(AssemblerBuffer& buf, TranslationResult& a1, int Xbase, int Wd_top,
@@ -280,6 +282,7 @@ inline void x87_pop_n(AssemblerBuffer& buf, TranslationResult& a1, int Xbase, in
         a1.x87_cache.top_dirty = 0;
     }
     free_gpr(a1, Wd_tmp2);
+    x87_slot_note_pop(n);
 }
 
 }  // namespace TranslatorX87

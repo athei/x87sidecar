@@ -1415,6 +1415,11 @@ void lower(Context& ctx, TranslationResult* result) {
             emit_add_imm(buf, 0, /*is_sub=*/0, 0, 0, ctx.top_delta, Wd_top, Wd_top);
         }
         emit_and_imm(buf, 0, Wd_top, 0, 0, 2, Wd_top);
+        if (ctx.top_delta > 0) {
+            x87_slot_note_pop(ctx.top_delta);
+        } else {
+            x87_slot_note_push(-ctx.top_delta);
+        }
     }
 
     // 2. Store modified stack values.
