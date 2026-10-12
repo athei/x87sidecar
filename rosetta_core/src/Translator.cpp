@@ -230,18 +230,33 @@ static bool x87_writes_memory(uint16_t opcode) {
 // the faulting instruction in that entry changed state: no store, no NZCV
 // or FPCR write, no write to a register that holds guest state, and no
 // floating-point arithmetic.  Otherwise it aborts the process with
-// "unexpectedly need to EmulateForward on a synchronous exception".  Every
-// reply changes state before its first guest access (the entry conversion
-// alone does), so the access of the reply's first instruction is probed
-// here, before anything else: the first and last byte are read, and a store
-// target also gets an atomic add of zero to one byte, which leaves memory
-// unchanged and faults exactly where the store would.  The atomic changes
-// state as far as the runtime is concerned, so a reply has room for one,
-// and it comes last.  Once the probes pass, the real access later in the
-// reply cannot fault, and a fault in a probe reaches the guest handler with
-// the reply's first instruction as rip and the state from before it.
-// Accesses further into a reply are not probed: rolling back to the reply
-// start would report the wrong instruction.
+// "unexpectedly need to EmulateForward on a synchronous exception".  A reply
+// that converts the register file changes state before its first guest
+// access (the entry conversion alone does), so the access of the reply's
+// first instruction is probed here, before anything else.
+//
+// A load is probed with a load of the access width into the zero register,
+// or of its first and last byte for 10 and 108 bytes; one load also covers
+// an unaligned access that crosses a page.  A store is probed by loading
+// those bytes and writing them back unchanged: the full access width for 2,
+// 4 and 8 bytes, otherwise the first byte after a load of the last.  The
+// write-back is the reply's only state change before the probe completes,
+// so a fault in it still rolls back, and it faults where the store would,
+// including on a read-only page.  An atomic would leave no window, but LSE
+// atomics take a bus error on write-combined and uncached mappings (Metal
+// buffers, IOSurfaces), where plain loads and stores work.  The window: a
+// write by another thread to those bytes between the load and the
+// write-back is undone, and the real store then overwrites the same bytes,
+// so only that transient value is lost, which is an order the x86 store
+// could have produced.
+//
+// Once the probes pass, the real access later in the reply cannot fault,
+// and a fault in a probe reaches the guest handler with the reply's first
+// instruction as rip and the state from before it.  A store into a
+// PROT_NONE page faults in the probe's load, so the handler sees a read
+// fault where stock reports a write.  Accesses further into a reply are
+// not probed: rolling back to the reply start would report the wrong
+// instruction.
 static void emit_fault_probe(TranslationResult& tr, IRInstr& insn) {
     IROperand* mem = nullptr;
     for (int i = 0; i < insn.num_operands && i < 4; i++) {
@@ -259,19 +274,25 @@ static void emit_fault_probe(TranslationResult& tr, IRInstr& insn) {
     AssemblerBuffer& buf = tr.insn_buf;
     const int bytes = x87_access_bytes(insn, *mem);
     const int Xaddr = compute_operand_address(tr, /*is_64bit=*/1, mem, GPR::XZR);
+    const bool store = x87_writes_memory(insn.opcode());
+    const int Xval = store ? alloc_free_gpr(tr) : GPR::XZR;
     if (bytes == 2 || bytes == 4 || bytes == 8) {
-        // One load of the access width covers both pages of an unaligned
-        // access that crosses a page.
         const int size = bytes == 2 ? 1 : bytes == 4 ? 2 : 3;
-        emit_ldr_str_imm(buf, size, /*is_fp=*/0, /*LDR*/ 1, /*imm12=*/0, Xaddr, GPR::XZR);
+        emit_ldr_str_imm(buf, size, /*is_fp=*/0, /*LDR*/ 1, /*imm12=*/0, Xaddr, Xval);
+        if (store) {
+            emit_ldr_str_imm(buf, size, 0, /*STR*/ 0, 0, Xaddr, Xval);
+        }
     } else {
-        emit_ldr_str_imm(buf, /*size=*/0, 0, /*LDR*/ 1, /*imm12=*/0, Xaddr, GPR::XZR);
         if (bytes > 1) {
-            emit_ldr_str_imm(buf, 0, 0, /*LDR*/ 1, bytes - 1, Xaddr, GPR::XZR);
+            emit_ldr_str_imm(buf, /*size=*/0, 0, /*LDR*/ 1, bytes - 1, Xaddr, GPR::XZR);
+        }
+        emit_ldr_str_imm(buf, 0, 0, /*LDR*/ 1, /*imm12=*/0, Xaddr, Xval);
+        if (store) {
+            emit_ldr_str_imm(buf, 0, 0, /*STR*/ 0, 0, Xaddr, Xval);
         }
     }
-    if (x87_writes_memory(insn.opcode())) {
-        buf.emit(0x383f001fU | (static_cast<uint32_t>(Xaddr) << 5));  // STADDB WZR, [Xaddr]
+    if (store) {
+        free_gpr(tr, Xval);
     }
     free_gpr(tr, Xaddr);
     tr.free_gpr_mask = saved_mask;
@@ -319,6 +340,9 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
     // the flag clear, as every request that ends does.
     const RequestEntry entry = capture_request_entry(*translation_result);
     cache.native_transport = transport ? 1 : 0;
+    // The probe has to stay the first thing in the reply: before the entry
+    // conversion, before any NZCV save or FPCR write, before anything an op
+    // emitter does.
     if (native_boundary && precise_faults_enabled())
         emit_fault_probe(*translation_result, instr_array[insn_idx]);
     const bool traced =
