@@ -378,6 +378,29 @@ private:
         }
     }
 
+    // Wait for a synthetic stop signal sent during release to come back as
+    // EXC_SOFT_SIGNAL and leave it held. Suppress any other soft signal and
+    // forward genuine faults, mirroring debugserver's bundle handling. Gives
+    // up after 8 events or a 3 second gap between them.
+    bool catchSoftSignal(int expected) {
+        for (int attempts = 0; attempts < 8; ++attempts) {
+            lastEvent_ = exc_.waitForEvent(3000);
+            if (!lastEvent_.valid) {
+                return false;
+            }
+            const int sig = lastEvent_.softSignal();
+            if (sig == expected) {
+                return true;
+            }
+            if (sig != 0) {
+                exc_.reply(0);
+            } else {
+                exc_.forward();
+            }
+        }
+        return false;
+    }
+
 public:
     ~MuhDebugger() {
         if (taskPort_ != MACH_PORT_NULL) {
@@ -603,7 +626,7 @@ public:
     }
 
     bool detachReplyFirst() {
-        // Exact 1:1 port of lldb debugserver's MachProcess::Detach()
+        // Follows lldb debugserver's MachProcess::Detach()
         // (llvm lldb/tools/debugserver/source/MacOSX/MachProcess.mm). Order:
         //
         //   DoSIGSTOP(clear_bps, allow_running=true)   // run, then SIGSTOP-stop
@@ -615,6 +638,11 @@ public:
         //   ShutDownExceptionThread()                  // restore ports
         //   ::ptrace(PT_DETACH)                        // best-effort
         //   m_task.Resume()                            // balance the suspend
+        //
+        // with one change: PT_DETACH at that point fails with EBUSY and leaves
+        // the target traced, so this balances the suspend first, stops the
+        // target once more on SIGCONT (step 4 below) and detaches from that
+        // stop.
         //
         // The two invariants that make this work, both verified against XNU
         // (bsd/kern) and the debugserver source:
@@ -643,34 +671,16 @@ public:
         exc_.reply(0);
 
         // 2. Signal(SIGSTOP) on the RUNNING task, then wait for the SIGSTOP to
-        //    come back as EXC_SOFT_SIGNAL. Suppress any other soft signal and
-        //    forward genuine faults, mirroring debugserver's bundle handling.
+        //    come back as EXC_SOFT_SIGNAL.
         kill(childPid_, SIGSTOP);
-
-        bool gotSigstop = false;
-        for (int attempts = 0; attempts < 8 && !gotSigstop; ++attempts) {
-            lastEvent_ = exc_.waitForEvent(3000);
-            if (!lastEvent_.valid) {
-                break;
-            }
-            int sig = lastEvent_.softSignal();
-            if (sig == SIGSTOP) {
-                gotSigstop = true;
-            } else if (sig != 0) {
-                exc_.reply(0);
-            } else {
-                exc_.forward();
-            }
-        }
-
-        if (!gotSigstop) {
+        if (!catchSoftSignal(SIGSTOP)) {
             fprintf(stdout, "detach: SIGSTOP not received\n");
         }
 
         // 2b. task_suspend paired with the SIGSTOP catch (debugserver:
         //     ExceptionMessageReceived -> m_task.Suspend on the first exception
-        //     of the bundle). This is the balanced counterpart to m_task.Resume()
-        //     at the end. It freezes the task at Mach level while we tear down.
+        //     of the bundle). Step 4 balances it. It freezes the task at Mach
+        //     level while the SIGSTOP is replied to.
         task_suspend(taskPort_);
 
         // 3. ReplyToAllExceptions: reply to the SIGSTOP exception WHILE STILL
@@ -681,25 +691,55 @@ public:
         //    wedge on. (The task stays frozen by the Mach suspend from 2b.)
         exc_.reply(0);
 
-        // 4. ShutDownExceptionThread: restore original exception ports, drop ours.
-        exc_.restoreAndTearDown();
-
-        // 5. PT_DETACH, best-effort, exactly as debugserver treats it (it logs
-        //    the return but never requires success). Because step 3 SRUN'd the
-        //    proc, this returns EBUSY and does not clear P_LTRACED; that is safe:
-        //    the original exception ports are already restored, so any future
-        //    signal takes its default (non-debugger) disposition rather than
-        //    routing to our torn-down port (verified upstream: a post-detach
-        //    SIGUSR1 terminates the tracee normally instead of wedging it).
-        errno = 0;
-        if (ptrace(PT_DETACH, childPid_, reinterpret_cast<caddr_t>(1), 0) < 0 && errno != EBUSY) {
-            fprintf(stdout, "ptrace(PT_DETACH): %s\n", strerror(errno));
+        // 4. Stop once more, on SIGCONT, so that PT_DETACH can succeed.
+        //    PT_THUPDATE in step 3 set p_stat to SRUN, and PT_DETACH returns
+        //    EBUSY unless p_stat is SSTOP, which only a soft-signal stop of a
+        //    traced process sets. A detach that fails leaves P_LTRACED set
+        //    for the rest of the target's life, and XNU then routes every
+        //    signal through its traced path: a fatal signal that the sending
+        //    thread blocks is handed to another thread with
+        //    thread_abort_safely() instead of thread_abort(), which does not
+        //    interrupt a thread waiting for a Mach exception reply. Rosetta's
+        //    own abort is exactly that case (its exception server thread calls
+        //    abort_with_payload while the faulting thread waits for that
+        //    server's reply), and the target then sleeps forever instead of
+        //    exiting with SIGABRT. The stop uses SIGCONT rather than another
+        //    SIGSTOP: replying to a SIGSTOP stop after a successful detach
+        //    leaves the target stopped (state T) on the kernels that take this
+        //    path, while SIGCONT's default action is to ignore it. Releasing
+        //    the Mach suspend from 2b here lets the task run into the signal.
+        //    It also keeps the suspend from overlapping PT_DETACH, which
+        //    calls task_resume on the target itself after clearing
+        //    P_LSIGEXC.
+        kill(childPid_, SIGCONT);
+        task_resume(taskPort_);
+        const bool gotSigcont = catchSoftSignal(SIGCONT);
+        if (!gotSigcont) {
+            fprintf(stdout, "detach: SIGCONT not received\n");
         }
 
-        // 6. m_task.Resume(): balance the task_suspend from 2b. This is what
-        //    actually runs the process; no SIGCONT is needed because the SSTOP was
-        //    already lifted by the reply-while-traced in step 3.
-        task_resume(taskPort_);
+        // 5. ShutDownExceptionThread: restore original exception ports, drop ours.
+        exc_.restoreAndTearDown();
+
+        // 6. PT_DETACH from the held SIGCONT stop, which clears P_LTRACED and
+        //    P_LSIGEXC and discards the signal (data 0). Then release the held
+        //    exception with a plain reply, since ptrace no longer applies. If
+        //    the detach fails anyway, suppress SIGCONT while still traced as
+        //    in step 3; the target then runs traced, as before this stop was
+        //    added.
+        errno = 0;
+        const int detached = ptrace(PT_DETACH, childPid_, reinterpret_cast<caddr_t>(1), 0);
+        const int detachErr = detached < 0 ? errno : 0;
+        if (detached < 0 && (gotSigcont || detachErr != EBUSY)) {
+            fprintf(stdout, "ptrace(PT_DETACH): %s\n", strerror(detachErr));
+        }
+        VERBOSE_LOG("ptrace(PT_DETACH): %d (%s)\n", detached,
+                    detached < 0 ? strerror(detachErr) : "ok");
+        if (detached == 0) {
+            exc_.release();
+        } else {
+            exc_.reply(0);
+        }
 
         VERBOSE_LOG("Debugger detached (reply-first path).\n");
         return true;
