@@ -125,6 +125,11 @@ enum { kAreaQwords = 18, kAreaBytes = kAreaQwords * 8, kOutBytes = 64 };
 #define RC_PAIR_CW(op, M, M4, M8, B)                                                     \
     "fldl (%%rsi)\n\t" "fldl 8(%%rsi)\n\t" "fnstcw " M8 "\n\t" "fistpl " M "\n\t"         \
     "fistpl " M4 "\n\t"
+// Integer loads and stores only: a native transport reply with the run
+// cache live.  The 32-bit operands keep the m64-only fild_fistp fusions out
+// of the way.
+#define TR_R(op, M, M4, M8, B)                                                           \
+    "fildl " M "\n\t" "fildl " M4 "\n\t" "fistpl " M8 "\n\t" "fistpl 32(%%rdi)\n\t"
 
 // Peephole fusion shapes.
 #define F_FILD_ARITH(op, M, M4, M8, B) "fildl " M "\n\t" "fmull 8(%%rsi)\n\t" SEP "fstpl (%%rdi)\n\t"
@@ -299,6 +304,7 @@ enum InitKind { K_NONE, K_F32, K_F64, K_F80, K_I16, K_I32, K_I64, K_BCD, K_CW };
     X(fnstenv_fldenv_S, K_NONE, ENV_S, "")                                               \
     X(fistpl_pair_rc, K_NONE, RC_PAIR, "")                                               \
     X(fnstcw_fistpl_pair_rc, K_NONE, RC_PAIR_CW, "")                                     \
+    X(fildl_transport_R, K_I32, TR_R, "")                                                \
     X(fild_arith, K_I32, F_FILD_ARITH, "")                                               \
     X(fild_arith_fstp, K_I32, F_FILD_ARITH_FSTP, "")                                     \
     X(fld_fild_arith, K_I32, F_FLD_FILD_ARITH, "")                                       \
@@ -407,6 +413,9 @@ static const Expect kExpect[] = {
     {"fcoml_S", 0, 48, E_U16, 0.0, 0x3100},
     {"fistpl_pair_rc", 1, 0, E_I32, 0.0, -4},
     {"fistpl_pair_rc", 1, 4, E_I32, 0.0, 2},
+    // fildl 3, fildl -4, then -4 to area+8 and 3 to out+32.
+    {"fildl_transport_R", 1, 8, E_I32, 0.0, -4},
+    {"fildl_transport_R", 0, 32, E_I32, 0.0, 3},
     {"fild_arith", 0, 0, E_F64, -10.5, 0},
     {"fnsave_frstor_R", 0, 0, E_F64, -3.5, 0},
     {"fnsave_frstor_R", 0, 8, E_F64, 1.75, 0},
