@@ -738,11 +738,12 @@ static auto try_fuse_fld_fstp_m80(TranslationResult* a1, IRInstr* fld_instr, IRI
 // (k+1-n)-th load.  Every load happens before every store, as on x87, so
 // overlapping source and destination behave the same.  The values are held
 // in GPRs: base, TOP, Xst_base, Wd_tmp, three values and one address
-// scratch fill the eight-register pool exactly.  The pool can be smaller
-// (stock may hold scratch registers, and this shape is reached when the IR
-// refused the run, possibly for GPR pressure), so the fusion counts what
-// it needs against the free mask before it emits anything and declines
-// when the mask is short.
+// scratch fill the eight-register pool exactly, and an Immediate operand
+// with a runtime addend needs a second address scratch.  The pool can be
+// smaller (stock may hold scratch registers, and this shape is reached when
+// the IR refused the run, possibly for GPR pressure), so the fusion counts
+// what it needs against the free mask before it emits anything and
+// declines when the mask is short.
 //
 // Returns 2k (instructions consumed) if fused, std::nullopt otherwise.
 // =============================================================================
@@ -776,10 +777,18 @@ static auto try_fuse_fild_fistp_nested(TranslationResult* a1, IRInstr* instrs, i
     if (k < 2) {
         return std::nullopt;
     }
-    // x87_begin's registers, Wd_tmp, the k values, and one address scratch
-    // (compute_operand_address takes at most one for a non-segment operand,
-    // and each is freed before the next).
-    const int need = x87_begin_gpr_need(*a1) + 1 + k + 1;
+    // x87_begin's registers, Wd_tmp, the k values, and the address scratch.
+    // compute_operand_address holds one register for a non-segment operand,
+    // except an Immediate whose runtime addend is loaded into a second one
+    // (mem_flags bit 0 clear); each address is freed before the next.
+    int addr_need = 1;
+    for (int j = 0; j < 2 * k; ++j) {
+        const IROperand* op = &instrs[idx + j].operands[0];
+        if (op->kind == IROperandKind::Immediate && (op->imm.mem_flags & 1) == 0) {
+            addr_need = 2;
+        }
+    }
+    const int need = x87_begin_gpr_need(*a1) + 1 + k + addr_need;
     if (__builtin_popcount(a1->free_gpr_mask) < need) {
         return std::nullopt;
     }
