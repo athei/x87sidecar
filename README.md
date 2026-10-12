@@ -75,6 +75,9 @@ are tight loops of x87 instructions and measure the translator, not a
 program: a game spends most of its time elsewhere, and the gain it sees
 depends on how much of it is x87. The state-management instructions are not
 the target and some are slower on their own, `frstor` above among them.
+The `fbstp` row measures the sidecar's own translation, which now runs only
+with `X87_STOCK_BCD=0`: by default a block containing `fbld` or `fbstp`
+goes to stock, so it runs at the stock figure.
 
 ## How it works
 
@@ -357,15 +360,16 @@ python3 scripts/test_unhooked_fallback.py  # unhooked fallback, no privileges
 bash scripts/run_benchmarks.sh           # build + benchmark table
 ```
 
-The harness runs 90 self-checking x86-64 test binaries under stock Rosetta
+The harness runs 94 self-checking x86-64 test binaries under stock Rosetta
 and then under the sidecar in ten configurations (default, IR off, fusions
 off, hook bypassed, FMA contraction on, clamped register pool, pressure
 relief off, fast rounding, bridging off, bridging v2 off), plus a
-cooperative-attach smoke test, the two decoder tests three ways and an IR
-replay phase. The stock run is the baseline: a case that fails there is
-reported XFAIL in later phases rather than gating, and the stock run itself
-may only fail for tests listed in `KNOWN_STOCK_DIVERGENCE`. The harness uses
-the default attach path, so it needs `x87sidecar_entitled` or root.
+cooperative-attach smoke test, the two decoder tests three ways, the inline
+BCD translators with `X87_STOCK_BCD=0` and an IR replay phase. The stock
+run is the baseline: a case that fails there is reported XFAIL in later
+phases rather than gating, and the stock run itself may only fail for tests
+listed in `KNOWN_STOCK_DIVERGENCE`. The harness uses the default attach
+path, so it needs `x87sidecar_entitled` or root.
 
 | tool | purpose |
 |---|---|
@@ -401,6 +405,7 @@ no steady-state cost:
 |---|---|
 | `X87_STOCK_HASH_LIST=0xH,...` | hand the listed blocks to stock Rosetta entirely |
 | `X87_STOCK_OPS=f2xm1,...` | hand every block containing one of the opcodes to stock |
+| `X87_STOCK_BCD=0` | translate blocks containing `fbld` or `fbstp` in the sidecar; by default they go to stock, whose 80-bit registers keep all 18 BCD digits |
 | `X87_LOG_HASH_LIST=0xH,...` | log every translate request of the listed blocks with an uptime stamp |
 | `X87_DIAG_DIR=<dir>` | mirror those logs to `<dir>/x87diag.<pid>.log`, for hosts that lose stdout |
 | `X87_ALWAYS_NONE=1` | the sidecar declines every request; separates a JIT bug from an IPC one |

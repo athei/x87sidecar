@@ -237,6 +237,7 @@ struct IRCacheEntry {
     uint64_t next_idx = 0;  // where the previous reply told stock to continue
     uint64_t hash = 0;      // profile::hash_ir_stream of ir, when hash_valid
     bool hash_valid = false;
+    bool has_bcd = false;  // ir contains FBLD or FBSTP; set on every fill
     std::vector<IRInstr> ir;
 };
 std::unordered_map<uint64_t, IRCacheEntry> g_irCache;
@@ -2301,6 +2302,9 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask, const Translate
             irc.instr_array = req.instr_array;
             irc.num_instrs = req.num_instrs;
             irc.hash_valid = false;
+            irc.has_bcd = std::ranges::any_of(irc.ir, [](const IRInstr& ins) {
+                return ins.opcode() == kOpcodeName_fbld || ins.opcode() == kOpcodeName_fbstp;
+            });
             g_statIrMisses.fetch_add(1, std::memory_order_relaxed);
         }
         // Conservative until the reply is known; the Some path below moves it.
@@ -2456,11 +2460,24 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask, const Translate
         }
     }
 
+    // A block containing FBLD or FBSTP goes to stock whole, unless
+    // X87_STOCK_BCD=0.  An 18-digit BCD integer needs up to 60 significand
+    // bits, which stock's 80-bit registers hold and the binary64 register
+    // file does not, and the value usually reaches FBSTP through other
+    // instructions of the same block (FILD m64 in Delphi's CurrToStr, the
+    // power-of-ten scaling in FloatToDecimal) that have to stay in 80 bits
+    // as well.  Such blocks are rare, and the inline FBSTP measured only
+    // about 1.7x faster than stock's.  This is the default rather than a
+    // diagnostic, so unlike the lists above it logs nothing.  The scan is
+    // done once per IR-cache fill (irc.has_bcd).
+    const bool stock_bcd_hit = !stock_hash_hit && g_rosetta_config != nullptr &&
+                               g_rosetta_config->x87_stock_bcd != 0U && irc.has_bcd;
+
     // On a stock hit ran_translator stays false and the bypass guard
     // invalidates the persisted X87Cache, which is what a None reply that
     // skipped the translator needs.
     std::optional<int64_t> result;
-    if (!stock_hash_hit) {
+    if (!stock_hash_hit && !stock_bcd_hit) {
         _bypass_guard.ran_translator = true;
         result = Translator::translate_instruction(
             &tr, reinterpret_cast<IRBlock*>(req.block), localIR,
@@ -2655,9 +2672,9 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask, const Translate
             kOpcodeName_fxrstor,  // SSE-era extended
         };
         const uint16_t op = localIR[req.insn_idx].opcode();
-        // stock_hash_hit: the None reply is a deliberate whole-block
-        // exclusion, not a missing handler.
-        const bool deliberate = stock_hash_hit ||
+        // stock_hash_hit, stock_bcd_hit: the None reply is a deliberate
+        // whole-block exclusion, not a missing handler.
+        const bool deliberate = stock_hash_hit || stock_bcd_hit ||
                                 std::ranges::find(kKnownFallThrough, op) != kKnownFallThrough.end();
         if (!deliberate) {
             const char* name = (op < kOpcodeNames.size()) ? kOpcodeNames[op] : "?";

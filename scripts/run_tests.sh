@@ -28,6 +28,9 @@
 #      must trap under native Rosetta, pass under x87sidecar (the
 #      decode_opcode hook substitutes a decodable encoding), and trap again
 #      under X87_NO_DECODE_HOOK=1
+#  13. x87sidecar with X87_STOCK_BCD=0 on test_fbld and test_fbstp, the only
+#      phase that reaches the inline FBLD/FBSTP translators (blocks
+#      containing them go to stock by default)
 #   R. replay tests/data/geom_block_874c40.ir under --fpr-pool 8 and
 #      assert the pressure splits keep it on the IR path (fpr_fail=0)
 #
@@ -151,6 +154,7 @@ ALL_TESTS=(
     test_x87_signal_context
     test_x87_native_state
     test_m80_copy
+    test_bcd_exact
 )
 
 RED='\033[0;31m'
@@ -628,6 +632,32 @@ if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then
         expect_decode "ARPL   X87_NO_DECODE_HOOK=1" trap env X87_NO_DECODE_HOOK=1 "$LOADER" \
             "$ARPL_BIN"
     fi
+fi
+
+# ── Phase 13: x87sidecar X87_STOCK_BCD=0 (inline FBLD/FBSTP, curated set) ─
+# Blocks containing FBLD or FBSTP go to stock by default, so no other phase
+# reaches the sidecar's own BCD translators.  This phase keeps them under
+# test on the cases they get right; test_bcd_exact needs all 18 digits and
+# only passes through stock.
+STOCK_BCD_OFF_TESTS=(
+    test_fbld
+    test_fbstp
+)
+if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then
+    echo ""
+    echo -e "${BOLD}=== Phase 13: x87sidecar X87_STOCK_BCD=0 (inline fbld/fbstp) ===${NC}"
+
+    for t in "${STOCK_BCD_OFF_TESTS[@]}"; do
+        BINARY="$TESTS_BIN/$t"
+        if [[ ! -x "$BINARY" ]]; then
+            echo -e "${YELLOW}SKIP${NC}  $t  (binary not found)"
+            ERRORS=$((ERRORS + 1))
+            continue
+        fi
+        EXIT=0
+        OUT=$(X87_STOCK_BCD=0 "$LOADER" "$BINARY" 2>/dev/null | filter_runtime_lines) || EXIT=$?
+        check_output "$t" "$OUT" "$EXIT"
+    done
 fi
 
 # ── Replay: captured WoW geom block through the clamped pressure gate ────
