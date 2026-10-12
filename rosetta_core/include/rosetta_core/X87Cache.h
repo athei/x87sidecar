@@ -7,10 +7,21 @@ struct IRInstr;
 
 // The format of one x87 slot under X87_NATIVE_SLOTS (X87Cache::slot_fmt).
 enum X87SlotFmt : uint8_t {
-    kSlotNative = 0,  // Rosetta's 80-bit value, as at the start of the reply
-    kSlotF64 = 1,     // the binary64 working value in the slot's first 8 bytes
-    kSlotDead = 2,    // popped or freed in this reply; nothing to keep
+    kSlotNative = 0,      // an 80-bit value: Rosetta's, or copied as ten bytes
+    kSlotF64 = 1,         // the binary64 working value in the slot's first 8 bytes
+    kSlotDead = 2,        // popped or freed in this reply, holding binary64 bits
+    kSlotDeadNative = 3,  // popped or freed in this reply, holding 80-bit bits
 };
+
+// The slot's bytes are an 80-bit image, live or not.
+inline bool x87_slot_holds_f80(uint8_t fmt) {
+    return fmt == kSlotNative || fmt == kSlotDeadNative;
+}
+
+// The format a slot takes when it is popped or freed.
+inline uint8_t x87_slot_killed(uint8_t fmt) {
+    return x87_slot_holds_f80(fmt) ? kSlotDeadNative : kSlotDead;
+}
 
 // OPT-1: Cross-instruction x87 base/TOP register cache.
 //
@@ -227,7 +238,9 @@ struct X87Cache {
         kEffectRestore,  // frstor: all eight replaced, TOP from memory
     };
     struct SlotEffect {
-        uint8_t reads = 0;   // depths read as binary64
+        uint8_t reads = 0;   // depths read
+        uint8_t soft = 0;    // of those, the ones the direct emitter reads
+                             // exactly from an 80-bit slot (no conversion)
         uint8_t writes = 0;  // depths written without being read
         int8_t pushes = 0;   // the pushed value is written as binary64
         int8_t pops = 0;

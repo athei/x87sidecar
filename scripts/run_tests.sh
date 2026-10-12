@@ -9,7 +9,7 @@
 #   3. x87sidecar with X87_DISABLE_X87_IR=1 (direct translator only).
 #      Skips EXACT_I64_COPY_SKIP: without the IR, a fild m64 to fistp m64
 #      copy in a run that also holds a float op such as fstpl rounds
-#      through binary64.
+#      through binary64.  Nothing is skipped with X87_NATIVE_SLOTS=1.
 #   4. x87sidecar with X87_DISABLE_X87_IR=1 + X87_DISABLE_ALL_FUSIONS=1.
 #      Skips EXACT_I64_COPY_SKIP, as phase 3, and the tests in
 #      NO_FUSION_SKIP, whose exact results need a fusion.
@@ -495,12 +495,15 @@ fi
 # (pass_exact_i64_copy) for longer runs mixing in other ops, and by the
 # fild_fistp peephole for a lone pair.  With the IR off (phases 3 and 4) a
 # run that also holds an fstpl goes through binary64 and rounds every
-# |v| >= 2^53 by design, so the exact-copy test is skipped there.
+# |v| >= 2^53 by design, so the exact-copy test is skipped there.  With
+# X87_NATIVE_SLOTS=1 the fild writes an exact 80-bit slot and the copy is
+# exact without the IR, so nothing is skipped.
 EXACT_I64_COPY_SKIP=(
     test_fild_fistp_copy
 )
 exact_i64_copy_skipped() {
     local s
+    [[ "${X87_NATIVE_SLOTS:-0}" == 1 ]] && return 1
     for s in "${EXACT_I64_COPY_SKIP[@]}"; do
         [[ "$1" == "$s" ]] && return 0
     done

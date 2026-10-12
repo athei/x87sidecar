@@ -103,17 +103,32 @@ inline int writable_addr_reg(TranslationResult& a1, int addr_reg) {
 // OPT-G: Flush deferred permutation before push/pop.
 // Push/pop change TOP, which invalidates the perm map (it maps depths relative
 // to TOP). Rather than trying to adjust the map, flush it and reset to identity.
+// Materialise the deferred FXCH permutation and reset it.  Under
+// X87_NATIVE_SLOTS a permutation that moves an 80-bit slot moves ten-byte
+// images, which takes two more FPRs (emit_x87_perm_flush).
+inline void x87_emit_perm_flush(AssemblerBuffer& buf, TranslationResult& a1, int Xbase, int Wd_top,
+                                int Wd_tmp) {
+    const int Xst_base = x87_get_st_base(a1);
+    const bool images = x87_perm_moves_f80(a1.x87_cache.perm);
+    const int Dd_save = alloc_free_fpr(a1);
+    const int Dd_chain = alloc_free_fpr(a1);
+    const int Hd_save = images ? alloc_free_fpr(a1) : -1;
+    const int Hd_chain = images ? alloc_free_fpr(a1) : -1;
+    emit_x87_perm_flush(buf, Xbase, Wd_top, Wd_tmp, a1.x87_cache.perm, Xst_base, Dd_save, Dd_chain,
+                        Hd_save, Hd_chain);
+    if (images) {
+        free_fpr(a1, Hd_chain);
+        free_fpr(a1, Hd_save);
+    }
+    free_fpr(a1, Dd_chain);
+    free_fpr(a1, Dd_save);
+    a1.x87_cache.reset_perm();
+}
+
 inline void perm_flush_before_stack_change(AssemblerBuffer& buf, TranslationResult& a1, int Xbase,
                                            int Wd_top, int Wd_tmp) {
     if (a1.x87_cache.perm_dirty) {
-        const int Xst_base = x87_get_st_base(a1);
-        const int Dd_save = alloc_free_fpr(a1);
-        const int Dd_chain = alloc_free_fpr(a1);
-        emit_x87_perm_flush(buf, Xbase, Wd_top, Wd_tmp, a1.x87_cache.perm, Xst_base, Dd_save,
-                            Dd_chain);
-        free_fpr(a1, Dd_chain);
-        free_fpr(a1, Dd_save);
-        a1.x87_cache.reset_perm();
+        x87_emit_perm_flush(buf, a1, Xbase, Wd_top, Wd_tmp);
     }
 }
 
@@ -121,14 +136,7 @@ inline void x87_end(TranslationResult& a1, AssemblerBuffer& buf, int Xbase, int 
                     int consumed = 1) {
     // OPT-G: flush deferred permutation at end of run.
     if (a1.x87_cache.perm_dirty && a1.x87_cache.run_remaining <= consumed) {
-        const int Xst_base = x87_get_st_base(a1);
-        const int Dd_save = alloc_free_fpr(a1);
-        const int Dd_chain = alloc_free_fpr(a1);
-        emit_x87_perm_flush(buf, Xbase, Wd_top, Wd_tmp, a1.x87_cache.perm, Xst_base, Dd_save,
-                            Dd_chain);
-        free_fpr(a1, Dd_chain);
-        free_fpr(a1, Dd_save);
-        a1.x87_cache.reset_perm();
+        x87_emit_perm_flush(buf, a1, Xbase, Wd_top, Wd_tmp);
     }
 
     // OPT-D2: flush deferred pop tag updates at end of run.

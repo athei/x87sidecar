@@ -232,6 +232,12 @@ struct Context {
     // the loop stopped at an unsupported opcode at position N.
     uint16_t fail_opcode;
 
+    // X87_NATIVE_SLOTS: bit d set when the initial slot at depth d still
+    // holds Rosetta's 80-bit value.  A ReadSt of such a slot converts it
+    // into its FPR and leaves memory as it is; peak_live_gprs charges the
+    // conversion's scratch registers.  Set by compile_run after build().
+    uint8_t native_depths;
+
     void init() {
         num_nodes = 0;
         top_delta = 0;
@@ -239,6 +245,7 @@ struct Context {
         last_fcmp = -1;
         last_fcomi = -1;
         fail_opcode = 0xFFFFU;
+        native_depths = 0;
         for (int i = 0; i < 8; i++) {
             slot_val[i] = static_cast<int16_t>(-(i + 1));
             initial_read[i] = -1;

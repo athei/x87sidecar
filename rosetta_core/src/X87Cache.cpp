@@ -182,6 +182,7 @@ X87Cache::SlotEffect X87Cache::slot_effect(const IRInstr& insn) {
             const int src = st_operand(insn, 1);
             if (st_operand(insn, 0) >= 0 && src >= 0) {
                 e.reads = static_cast<uint8_t>(1U << src);
+                e.soft = e.reads;  // an 80-bit ST(i) is copied as ten bytes
             }
             e.pushes = 1;
             break;
@@ -198,7 +199,10 @@ X87Cache::SlotEffect X87Cache::slot_effect(const IRInstr& insn) {
             const bool m80 = dst < 0 && insn.num_operands > 0 &&
                              insn.operands[0].mem.size == IROperandSize::S80;
             if (!m80) {
+                // An 80-bit ST(0) is copied to a register as ten bytes, and
+                // converted into an FPR for m32/m64.
                 e.reads = 1;
+                e.soft = 1;
             }
             if (dst > 0) {
                 e.writes = static_cast<uint8_t>(1U << dst);
@@ -246,6 +250,18 @@ X87Cache::SlotEffect X87Cache::slot_effect(const IRInstr& insn) {
             e.reads = 0x3;
             e.pops = 2;
             break;
+        case kOpcodeName_fist:
+            // The integer stores convert an 80-bit ST(0) exactly
+            // (emit_f80_slot_to_int) when the GPRs allow.
+            e.reads = 1;
+            e.soft = 1;
+            break;
+        case kOpcodeName_fistp:
+        case kOpcodeName_fisttp:
+            e.reads = 1;
+            e.soft = 1;
+            e.pops = 1;
+            break;
         case kOpcodeName_fiadd:
         case kOpcodeName_fisub:
         case kOpcodeName_fisubr:
@@ -253,7 +269,6 @@ X87Cache::SlotEffect X87Cache::slot_effect(const IRInstr& insn) {
         case kOpcodeName_fidiv:
         case kOpcodeName_fidivr:
         case kOpcodeName_ficom:
-        case kOpcodeName_fist:
         case kOpcodeName_ftst:
         case kOpcodeName_fxam:
         case kOpcodeName_fchs:
@@ -266,8 +281,6 @@ X87Cache::SlotEffect X87Cache::slot_effect(const IRInstr& insn) {
             e.reads = 1;
             break;
         case kOpcodeName_ficomp:
-        case kOpcodeName_fistp:
-        case kOpcodeName_fisttp:
         case kOpcodeName_fbstp:
             e.reads = 1;
             e.pops = 1;
@@ -292,7 +305,10 @@ X87Cache::SlotEffect X87Cache::slot_effect(const IRInstr& insn) {
         case kOpcodeName_fxch: {
             const int d = st_operand(insn, 1);
             if (d > 0) {
+                // A deferred FXCH reads nothing; a swap in memory moves
+                // ten-byte images when an 80-bit slot takes part.
                 e.reads = static_cast<uint8_t>(1U | (1U << d));
+                e.soft = e.reads;
                 e.kind = kEffectFxch;
                 e.arg = static_cast<int8_t>(d);
             }
@@ -309,7 +325,9 @@ X87Cache::SlotEffect X87Cache::slot_effect(const IRInstr& insn) {
             e.kind = kEffectTopDec;
             break;
         case kOpcodeName_fsave:
+            // 80-bit slots go into the save area as their ten bytes.
             e.reads = 0xFF;
+            e.soft = 0xFF;
             e.kind = kEffectSave;
             break;
         case kOpcodeName_frstor:

@@ -2,6 +2,7 @@
 
 #include <cassert>
 #include <cstdint>
+#include <utility>
 
 #include "rosetta_core/AssemblerBuffer.h"
 #include "rosetta_core/AssemblerHelpers.hpp"
@@ -202,7 +203,7 @@ void x87_slot_note_pop(int n) {
     if (TranslationResult* tr = g_x87_slot_tracker) {
         auto& c = tr->x87_cache;
         for (int i = 0; i < n; i++) {
-            c.slot_fmt[c.top_rel] = kSlotDead;
+            c.slot_fmt[c.top_rel] = x87_slot_killed(c.slot_fmt[c.top_rel]);
             c.top_rel = static_cast<int8_t>((c.top_rel + 1) & 7);
         }
     }
@@ -216,7 +217,8 @@ void x87_slot_note_rotate(int delta) {
 
 void x87_slot_note_free(int stack_depth) {
     if (TranslationResult* tr = g_x87_slot_tracker) {
-        tr->x87_cache.slot_fmt[tracked_slot(tr->x87_cache, stack_depth)] = kSlotDead;
+        auto& f = tr->x87_cache.slot_fmt[tracked_slot(tr->x87_cache, stack_depth)];
+        f = x87_slot_killed(f);
     }
 }
 
@@ -230,6 +232,28 @@ void x87_slot_note_native(int stack_depth) {
     if (TranslationResult* tr = g_x87_slot_tracker) {
         tr->x87_cache.slot_fmt[tracked_slot(tr->x87_cache, stack_depth)] = kSlotNative;
     }
+}
+
+void x87_slot_note_swap(int depth_a, int depth_b) {
+    if (TranslationResult* tr = g_x87_slot_tracker) {
+        auto& c = tr->x87_cache;
+        std::swap(c.slot_fmt[tracked_slot(c, depth_a)], c.slot_fmt[tracked_slot(c, depth_b)]);
+    }
+}
+
+bool x87_slot_holds_f80_at(int stack_depth) {
+    const TranslationResult* tr = g_x87_slot_tracker;
+    return tr != nullptr &&
+           x87_slot_holds_f80(tr->x87_cache.slot_fmt[tracked_slot(tr->x87_cache, stack_depth)]);
+}
+
+bool x87_perm_moves_f80(const int8_t perm[8]) {
+    for (int i = 0; i < 8; i++) {
+        if (perm[i] != i && x87_slot_holds_f80_at(i)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void x87_slot_note_reanchor(uint8_t fmt) {
@@ -894,8 +918,59 @@ void emit_fcom_flags_to_sw(AssemblerBuffer& buf, int Xbase, int Wd_tmp1, int Wd_
 // Dd_save and Dd_chain are temp FPRs provided by the caller (already allocated).
 // Wd_tmp is scratch for phys_index computation (clobbered by emit_load/store_st).
 // =============================================================================
+// The ten bytes of the slot at stack_depth into Dd (bytes 0-7) and Hd (bytes
+// 8-9), or from them back to the slot.  Native layout only.
+void emit_native_slot_image(AssemblerBuffer& buf, int Xbase, int Wd_top, int stack_depth,
+                            int Wd_tmp, int Dd, int Hd, int Xbase_st, bool store) {
+    const int base = Xbase_st >= 0 ? Xbase_st : Xbase;
+    const int opc = store ? 0 : 1;
+    emit_native_st_key(buf, Wd_top, stack_depth, Wd_tmp, Xbase_st);
+    emit_ldr_str_reg(buf, /*size=*/3, /*is_fp=*/1, opc, Wd_tmp, /*shift=*/0, base, Dd);
+    emit_add_imm(buf, /*is_64bit=*/0, /*is_sub=*/0, /*is_set_flags=*/0, /*shift=*/0, 8, Wd_tmp,
+                 Wd_tmp);
+    emit_ldr_str_reg(buf, /*size=*/1, /*is_fp=*/1, opc, Wd_tmp, /*shift=*/0, base, Hd);
+}
+
 void emit_x87_perm_flush(AssemblerBuffer& buf, int Xbase, int Wd_top, int Wd_tmp,
-                         const int8_t perm[8], int Xst_base, int Dd_save, int Dd_chain) {
+                         const int8_t perm[8], int Xst_base, int Dd_save, int Dd_chain, int Hd_save,
+                         int Hd_chain) {
+    if (Hd_save >= 0) {
+        // X87_NATIVE_SLOTS with an 80-bit slot among the permuted ones: move
+        // every permuted slot as its ten-byte image, whatever it holds, and
+        // let each slot's format travel with it.
+        bool visited[8] = {};
+        for (int i = 0; i < 8; i++) {
+            if (visited[i] || perm[i] == i) {
+                continue;
+            }
+            emit_native_slot_image(buf, Xbase, Wd_top, i, Wd_tmp, Dd_save, Hd_save, Xst_base,
+                                   false);
+            visited[i] = true;
+            int j = i;
+            int next = static_cast<unsigned char>(perm[j]);
+            while (next != i) {
+                emit_native_slot_image(buf, Xbase, Wd_top, next, Wd_tmp, Dd_chain, Hd_chain,
+                                       Xst_base, false);
+                emit_native_slot_image(buf, Xbase, Wd_top, j, Wd_tmp, Dd_chain, Hd_chain,
+                                       Xst_base, true);
+                visited[next] = true;
+                j = next;
+                next = static_cast<unsigned char>(perm[j]);
+            }
+            emit_native_slot_image(buf, Xbase, Wd_top, j, Wd_tmp, Dd_save, Hd_save, Xst_base, true);
+        }
+        if (TranslationResult* tr = g_x87_slot_tracker) {
+            auto& c = tr->x87_cache;
+            uint8_t moved[8];
+            for (int d = 0; d < 8; d++) {
+                moved[tracked_slot(c, d)] = c.slot_fmt[tracked_slot(c, perm[d])];
+            }
+            for (int r = 0; r < 8; r++) {
+                c.slot_fmt[r] = moved[r];
+            }
+        }
+        return;
+    }
     bool visited[8] = {};
 
     for (int i = 0; i < 8; i++) {

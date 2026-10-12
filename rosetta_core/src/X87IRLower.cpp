@@ -15,6 +15,7 @@
 #include "rosetta_core/TranslationResult.h"
 #include "rosetta_core/TranslatorHelpers.hpp"
 #include "rosetta_core/TranslatorX87.h"
+#include "rosetta_core/TranslatorX87F80.hpp"
 #include "rosetta_core/TranslatorX87Helpers.hpp"
 #include "rosetta_core/TranslatorX87Transcendental.hpp"
 #include "rosetta_core/X87Cache.h"
@@ -73,10 +74,17 @@ inline void perm_flush_before_stack_change(AssemblerBuffer& buf, TranslationResu
                                            int Wd_top, int Wd_tmp) {
     if (a1.x87_cache.perm_dirty) {
         const int Xst_base = x87_get_st_base(a1);
+        const bool images = x87_perm_moves_f80(a1.x87_cache.perm);
         const int Dd_save = alloc_free_fpr(a1);
         const int Dd_chain = alloc_free_fpr(a1);
+        const int Hd_save = images ? alloc_free_fpr(a1) : -1;
+        const int Hd_chain = images ? alloc_free_fpr(a1) : -1;
         emit_x87_perm_flush(buf, Xbase, Wd_top, Wd_tmp, a1.x87_cache.perm, Xst_base, Dd_save,
-                            Dd_chain);
+                            Dd_chain, Hd_save, Hd_chain);
+        if (images) {
+            free_fpr(a1, Hd_chain);
+            free_fpr(a1, Hd_save);
+        }
         free_fpr(a1, Dd_chain);
         free_fpr(a1, Dd_save);
         a1.x87_cache.reset_perm();
@@ -640,7 +648,25 @@ void lower(Context& ctx, TranslationResult* result) {
             case Op::ReadSt: {
                 int Dd = alloc_free_fpr(*result);
                 fprs.node_fpr[i] = static_cast<int8_t>(Dd);
-                emit_load_st(buf, Xbase, Wd_top, n.initial_depth, Wd_tmp, Dd, Xst_base);
+                if ((ctx.native_depths >> n.initial_depth) & 1U) {
+                    // X87_NATIVE_SLOTS: convert the 80-bit value into Dd and
+                    // leave the slot as it is, so a slot the run only reads
+                    // keeps every bit.  Wd_tmp holds the address until both
+                    // halves are loaded, then serves the conversion.
+                    emit_native_st_addr(buf, Xbase, Wd_top, n.initial_depth, Wd_tmp, Xst_base);
+                    const int Xm = alloc_free_gpr(*result);
+                    const int Wx = alloc_free_gpr(*result);
+                    const int Xt2 = alloc_free_gpr(*result);
+                    emit_ldr_str_imm(buf, 3, 0, /*LDR*/ 1, 0, Wd_tmp, Xm);
+                    emit_ldr_str_imm(buf, 1, 0, /*LDRH*/ 1, 4, Wd_tmp, Wx);
+                    TranslatorX87::emit_f80_bits_to_f64(buf, Xm, Wx, Wd_tmp, Xt2);
+                    emit_fmov_x_to_d(buf, Dd, Xm);
+                    free_gpr(*result, Xt2);
+                    free_gpr(*result, Wx);
+                    free_gpr(*result, Xm);
+                } else {
+                    emit_load_st(buf, Xbase, Wd_top, n.initial_depth, Wd_tmp, Dd, Xst_base);
+                }
                 break;
             }
             case Op::LoadF64: {
@@ -1530,6 +1556,8 @@ void lower(Context& ctx, TranslationResult* result) {
 //
 // Per-node transient GPR demand (mirrors the lowering code exactly):
 //   - ReadSt, Const*, FAdd/FSub/FMul/FDiv, FMA*, FNeg/FAbs/FSqrt: 0
+//   - ReadSt of an 80-bit slot (ctx.native_depths): 3 (Xm, Wx, Xt2 of the
+//     conversion; Wd_tmp is permanent)
 //   - FCSel: 0, or 1 for FCMOVU/FCMOVNU (the MRS that reads PF)
 //   - FMAdd FMA-reduce head: 1 (load address inside lower_fma_reduce)
 //   - LoadF64, LoadF32, StoreF64, StoreF32: 1 (addr from compute_operand_address)
@@ -1619,8 +1647,14 @@ int peak_live_gprs(const Context& ctx, int budget, int* first_over_node, bool fa
         int transient = 0;  // per-node transient GPR demand
 
         switch (n.op) {
-            // No transient GPRs
+            // ReadSt of an 80-bit slot (X87_NATIVE_SLOTS): the conversion
+            // takes three registers besides Wd_tmp.
             case Op::ReadSt:
+                if ((ctx.native_depths >> n.initial_depth) & 1U) {
+                    transient = 3;
+                }
+                break;
+            // No transient GPRs
             case Op::ConstZero:
             case Op::ConstOne:
             case Op::ConstF64:
@@ -2431,6 +2465,17 @@ int compile_run(TranslationResult* result, IRInstr* instr_array, int64_t num_ins
         }
 
         optimize(ctx);
+        // The dispatcher converted the slots lower()'s prologue moves through
+        // a leftover FXCH permutation, so after that flush the slot at depth
+        // d is the tracker's slot top_rel + d either way.
+        if (result->x87_cache.native_slots) {
+            const auto& c = result->x87_cache;
+            for (int d = 0; d < 8; d++) {
+                if (c.slot_fmt[(c.top_rel + d) & 7] == kSlotNative) {
+                    ctx.native_depths = static_cast<uint8_t>(ctx.native_depths | (1U << d));
+                }
+            }
+        }
 
         // Gate lowering on actual FPR pressure vs. available pool.  Before
         // splitting, try the cheaper relief: sink/clone long-lived consts

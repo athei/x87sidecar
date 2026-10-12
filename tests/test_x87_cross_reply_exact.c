@@ -17,9 +17,17 @@
  * single-instruction replies, two- and three-instruction fusions, an IR run
  * bridged across a mov, transcendentals including the pushing fxtract,
  * fsincos and fptan, fcmov, deferred FXCH, ffree, fincstp and fdecstp inside
- * a run, and pushes that leave the held value at every depth from 1 to 7.  Every case also runs with TOP rotated by
- * fdecstp before the load, so the held value sits in each of the eight
- * physical registers and the middle block's pushes wrap TOP past 0.
+ * a run, and pushes that leave the held value at every depth from 1 to 7.
+ * Further middles read the held value without changing it, which the
+ * translator does from the 80-bit image (fld st(i), fst and fstp to a
+ * register, m64 and m32, fist and fistp, fnsave and frstor), and move it
+ * between physical registers through a deferred FXCH.  What they read must
+ * equal the same read done in the loading block, and fnsave must save the
+ * held value's ten bytes; --dump prints those reads so a run under stock
+ * Rosetta can be compared with one under x87sidecar.  Every case also runs
+ * with TOP rotated by fdecstp before the load, so the held value sits in
+ * each of the eight physical registers and the middle block's pushes wrap
+ * TOP past 0.
  * Blocks are separated by `jmp 1f; 1:`, which ends a translation block.
  *
  * Expected: passes under stock Rosetta and under x87sidecar with
@@ -74,6 +82,18 @@ static const double kConst[] = {3.0, 2.0, 0.25, 1.0, 0.5};
 #define MID_TOPMOVE                                                                      \
     "fldl 0(%[c])\n\tfldl 8(%[c])\n\tffree %%st(0)\n\tfincstp\n\tfdecstp\n\tfincstp\n\t" \
     "fstpl 0(%[out])\n\t"
+/* Middles that read the held value, or move it, and leave it as it was. */
+#define MID_RD_FLDCOPY "fld %%st(0)\n\tfmull 8(%[c])\n\tfstpl 0(%[out])\n\t"
+#define MID_RD_FST64 "fstl 0(%[out])\n\t"
+#define MID_RD_FST32 "fsts 0(%[out])\n\t"
+#define MID_RD_FSTST "fldz\n\tfld %%st(1)\n\tfstp %%st(1)\n\tfstpl 0(%[out])\n\t"
+#define MID_RD_FIST "fistl 0(%[out])\n\t"
+#define MID_RD_FISTP "fld %%st(0)\n\tfistpll 0(%[out])\n\t"
+#define MID_RD_FSAVE "fnsave 0(%[out])\n\tfrstor 0(%[out])\n\t"
+/* The held value changes physical register twice through a deferred FXCH
+ * flushed at a push and at a pop. */
+#define MID_RD_FXCH                                                              \
+    "fld1\n\tfxch %%st(1)\n\tfldz\n\tfstp %%st(0)\n\tfxch %%st(1)\n\tfstpl 0(%[out])\n\t"
 #define PUSH1 "fldl 24(%[c])\n\t"
 #define ADDP "faddp\n\t"
 #define MID_D1 PUSH1 "fstpl 0(%[out])\n\t"
@@ -110,6 +130,36 @@ typedef void (*case_fn)(const void* src, void* dst, double* out);
     DEFINE_CASE(i64_##mid, LOAD_I64, MID_##mid, STORE_I64)   \
     DEFINE_CASE(i64m80_##mid, LOAD_I64, MID_##mid, STORE_M80)
 
+/* References for the read-only middles: the same read in the block that
+ * loads the value, so no reply boundary lies between them. */
+typedef void (*ref_fn)(const void* src, double* out);
+
+#define REF_RD_FLDCOPY "fld %%st(0)\n\tfmull 8(%[c])\n\tfstpl 0(%[out])\n\tfstp %%st(0)\n\t"
+#define REF_RD_FST64 "fstl 0(%[out])\n\tfstp %%st(0)\n\t"
+#define REF_RD_FST32 "fsts 0(%[out])\n\tfstp %%st(0)\n\t"
+#define REF_RD_FSTST "fstpl 0(%[out])\n\t"
+#define REF_RD_FIST "fistl 0(%[out])\n\tfstp %%st(0)\n\t"
+#define REF_RD_FISTP "fistpll 0(%[out])\n\t"
+
+#define DEFINE_REF(name, LOAD, BODY)                                                       \
+    static void name(const void* src, double* out) {                                       \
+        __asm__ volatile(LOAD BODY                                                         \
+                         :                                                                 \
+                         : [src] "r"(src), [out] "r"(out), [c] "r"(kConst)                 \
+                         : CLOBBERS);                                                      \
+    }
+
+#define DEFINE_REFS(mid)                                \
+    DEFINE_REF(ref_m80_##mid, LOAD_M80, REF_##mid)      \
+    DEFINE_REF(ref_i64_##mid, LOAD_I64, REF_##mid)
+
+DEFINE_REFS(RD_FLDCOPY)
+DEFINE_REFS(RD_FST64)
+DEFINE_REFS(RD_FST32)
+DEFINE_REFS(RD_FSTST)
+DEFINE_REFS(RD_FIST)
+DEFINE_REFS(RD_FISTP)
+
 DEFINE_FORMS(IR)
 DEFINE_FORMS(SINGLE)
 DEFINE_FORMS(FUSE2)
@@ -119,6 +169,14 @@ DEFINE_FORMS(FYL2X)
 DEFINE_FORMS(FCMOV)
 DEFINE_FORMS(FXCH1)
 DEFINE_FORMS(FXCH2)
+DEFINE_FORMS(RD_FLDCOPY)
+DEFINE_FORMS(RD_FST64)
+DEFINE_FORMS(RD_FST32)
+DEFINE_FORMS(RD_FSTST)
+DEFINE_FORMS(RD_FIST)
+DEFINE_FORMS(RD_FISTP)
+DEFINE_FORMS(RD_FSAVE)
+DEFINE_FORMS(RD_FXCH)
 DEFINE_FORMS(BRIDGE)
 DEFINE_FORMS(FXTRACT)
 DEFINE_FORMS(FSINCOS)
@@ -137,9 +195,16 @@ typedef struct {
     case_fn fn[3];   /* indexed by kM80, kI64, kI64ToM80 */
     int nout;        /* results to check */
     double want[3];  /* exact results, NAN-free; a 0 count skips the check */
+    /* Read-only middles: out[] bytes [read_off, read_off + read_len) must
+     * equal what ref (indexed by kM80, kI64) writes there, or with no ref,
+     * the held value's ten bytes (fnsave's ST(0)). */
+    ref_fn ref[2];
+    int read_off;
+    int read_len;
 } middle;
 
 #define FORMS(mid) {m80_##mid, i64_##mid, i64m80_##mid}
+#define REFS(mid) {ref_m80_##mid, ref_i64_##mid}
 
 static const middle kMiddles[] = {
     {"ir", FORMS(IR), 1, {2.5}},
@@ -151,6 +216,14 @@ static const middle kMiddles[] = {
     {"fcmove", FORMS(FCMOV), 2, {3.0, 3.0}},
     {"fxch st1", FORMS(FXCH1), 2, {3.0, 2.0}},
     {"fxch st2", FORMS(FXCH2), 3, {3.0, 2.0, 0.25}},
+    {"reads: fld st(0) copy", FORMS(RD_FLDCOPY), 0, {0}, REFS(RD_FLDCOPY), 0, 8},
+    {"reads: fst m64", FORMS(RD_FST64), 0, {0}, REFS(RD_FST64), 0, 8},
+    {"reads: fst m32", FORMS(RD_FST32), 0, {0}, REFS(RD_FST32), 0, 4},
+    {"reads: fld st(1), fstp st(1)", FORMS(RD_FSTST), 0, {0}, REFS(RD_FSTST), 0, 8},
+    {"reads: fist m32", FORMS(RD_FIST), 0, {0}, REFS(RD_FIST), 0, 4},
+    {"reads: fld st(0), fistp m64", FORMS(RD_FISTP), 0, {0}, REFS(RD_FISTP), 0, 8},
+    {"reads: fnsave, frstor", FORMS(RD_FSAVE), 0, {0}, {0, 0}, 28, 10},
+    {"moves: fxch across a push and a pop", FORMS(RD_FXCH), 1, {1.0}},
     {"bridged", FORMS(BRIDGE), 1, {6.0}},
     {"fxtract", FORMS(FXTRACT), 1, {2.5}},
     {"fsincos", FORMS(FSINCOS), 0, {0}},
@@ -246,6 +319,32 @@ static void check_middle(const middle* m, int rot, const double* out) {
     }
 }
 
+static int dump = 0;
+
+static void check_read(const middle* m, int form, int rot, const char* val, const void* src,
+                       const f80* held, const double* out) {
+    if (m->read_len == 0) {
+        return;
+    }
+    double ref[16] = {0};
+    const uint8_t* want = (const uint8_t*)held;
+    if (m->ref[form] != NULL) {
+        m->ref[form](src, ref);
+        want = (const uint8_t*)ref + m->read_off;
+    }
+    const uint8_t* got = (const uint8_t*)out + m->read_off;
+    if (memcmp(got, want, (size_t)m->read_len) != 0) {
+        report("read of the held value", m->name, rot, val, got, want, (size_t)m->read_len);
+    }
+    if (dump && rot == 0) {
+        printf("DUMP  %s | %s | %s | ", m->name, form == kM80 ? "m80" : "i64", val);
+        for (int i = m->read_len; i-- > 0;) {
+            printf("%02x", got[i]);
+        }
+        printf("\n");
+    }
+}
+
 static void check_balanced(const middle* m, int rot) {
     const uint16_t sw = status_word();
     const uint16_t top = (sw >> 11) & 7;
@@ -255,7 +354,9 @@ static void check_balanced(const middle* m, int rot) {
     }
 }
 
-int main(void) {
+int main(int argc, char** argv) {
+    /* --dump prints what the read-only middles read, to compare runs. */
+    dump = argc > 1 && strcmp(argv[1], "--dump") == 0;
     int cases = 0;
     for (size_t mi = 0; mi < sizeof(kMiddles) / sizeof(kMiddles[0]); mi++) {
         const middle* m = &kMiddles[mi];
@@ -263,7 +364,7 @@ int main(void) {
             for (size_t vi = 0; vi < sizeof(kF80Values) / sizeof(kF80Values[0]); vi++) {
                 f80_slot src;
                 f80_slot dst;
-                double out[3] = {0, 0, 0};
+                double out[16] = {0};  /* fnsave writes 108 bytes */
                 memset(&src, 0, sizeof(src));
                 memset(&dst, 0xA5, sizeof(dst));
                 src.v = kF80Values[vi].v;
@@ -276,12 +377,13 @@ int main(void) {
                            &src.v, sizeof(f80));
                 }
                 check_middle(m, rot, out);
+                check_read(m, kM80, rot, kF80Values[vi].name, &src, &src.v, out);
                 check_balanced(m, rot);
             }
             for (size_t vi = 0; vi < sizeof(kI64Values) / sizeof(kI64Values[0]); vi++) {
                 const int64_t src = kI64Values[vi].v;
                 int64_t dst = 0x5A5A5A5A5A5A5A5ALL;
-                double out[3] = {0, 0, 0};
+                double out[16] = {0};  /* fnsave writes 108 bytes */
                 rotate_down(rot);
                 m->fn[kI64](&src, &dst, out);
                 rotate_up(rot);
@@ -291,6 +393,7 @@ int main(void) {
                            sizeof(dst));
                 }
                 check_middle(m, rot, out);
+                check_read(m, kI64, rot, kI64Values[vi].name, &src, &kI64Values[vi].as_f80, out);
                 check_balanced(m, rot);
 
                 f80_slot d80;
