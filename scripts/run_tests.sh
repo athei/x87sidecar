@@ -28,7 +28,9 @@
 #      decode_opcode hook substitutes a decodable encoding), and trap again
 #      under X87_NO_DECODE_HOOK=1
 #   R. replay tests/data/geom_block_874c40.ir under --fpr-pool 8 and
-#      assert the pressure splits keep it on the IR path (fpr_fail=0)
+#      assert the pressure splits keep it on the IR path (fpr_fail=0), then
+#      replay tests/data/fist_pressure.ir the same way and assert it exits 0
+#      with one split per block
 #
 # Phase 1 doubles as the baseline the other phases are read against.  A
 # case that fails there fails with the sidecar nowhere in the picture, so
@@ -105,6 +107,7 @@ ALL_TESTS=(
     test_frndint
     test_fistp_multi
     test_fist_indefinite
+    test_fist_pressure
     test_fcmov
     test_ficom
     test_rc_recache
@@ -636,6 +639,32 @@ if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then
             PASSED=$((PASSED + 1))
         else
             echo -e "${RED}FAIL${NC}  geom_replay"
+            echo "$ROUT" | sed 's/^/      /'
+            FAILED=$((FAILED + 1))
+        fi
+    fi
+
+    # tests/data/fist_pressure.ir is test_fist_pressure's five blocks: eight
+    # values live at an integer store, whose indefinite guard takes one more
+    # FPR.  On the 8-slot pool the gate has to see that register and split,
+    # or the lowering runs out of FPRs and asserts.  Exactly one split per
+    # block shows that every block still reaches its stores.
+    echo ""
+    echo -e "${BOLD}=== Replay: fist_pressure.ir under --fpr-pool 8 ===${NC}"
+    TOTAL=$((TOTAL + 1))
+    FIST_IR="$ROOT_DIR/tests/data/fist_pressure.ir"
+    if [[ ! -x "$REPLAY_BIN" || ! -f "$FIST_IR" ]]; then
+        echo -e "${YELLOW}SKIP${NC}  fist_pressure_replay  (tool or blob not found)"
+        ERRORS=$((ERRORS + 1))
+    else
+        REXIT=0
+        ROUT=$("$REPLAY_BIN" "$FIST_IR" --fpr-pool 8 2>&1) || REXIT=$?
+        if [[ $REXIT -eq 0 ]] && grep -q '^ir_fpr_fail,0$' <<<"$ROUT" && \
+           grep -q '^ir_split,5$' <<<"$ROUT"; then
+            echo -e "${GREEN}PASS${NC}  fist_pressure_replay (fpr_fail=0, splits fired)"
+            PASSED=$((PASSED + 1))
+        else
+            echo -e "${RED}FAIL${NC}  fist_pressure_replay  (exit=$REXIT)"
             echo "$ROUT" | sed 's/^/      /'
             FAILED=$((FAILED + 1))
         fi

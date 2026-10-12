@@ -333,8 +333,9 @@ void fma_reduce_print_stats();
 
 // Compute the peak number of simultaneously live FPR-bearing nodes that the
 // lowering pass will require, accounting for transient temporaries (e.g. the
-// +1/+2 FPR spike during StoreF32 narrowing).  Used to gate lowering against
-// the available scratch FPR pool.
+// +1/+2 FPR spike during StoreF32 narrowing, the +1 for the StoreI
+// indefinite guard's scratch).  Used to gate lowering against the available
+// scratch FPR pool.
 //
 // budget / first_over_node: when first_over_node is non-null, it is set to
 // the index of the first node whose modeled demand exceeds `budget` (-1 if

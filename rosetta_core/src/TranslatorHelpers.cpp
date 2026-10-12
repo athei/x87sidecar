@@ -881,7 +881,9 @@ auto read_operand_to_gpr(TranslationResult& result, bool is_64bit, IROperand* op
 //   [8] MOVZ Xd_int, #indef                  ; NaN → indefinite
 //   [9] done
 //
-// Allocates one scratch GPR and one scratch FPR (both transient).
+// Allocates one scratch GPR and one scratch FPR (both transient).  The IR
+// pressure model counts both: peak_live_gprs and peak_live_fprs in
+// X87IRLower.cpp.
 // =============================================================================
 auto emit_fist_indefinite_guard(TranslationResult& result, AssemblerBuffer& buf, int Xd_int,
                                 int Dd_val, IROperandSize size) -> void {

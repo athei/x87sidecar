@@ -1119,6 +1119,7 @@ void lower(Context& ctx, TranslationResult* result) {
                 }
 
                 // NaN / out-of-range → integer indefinite (x86 semantics).
+                // The guard's scratch FPR is counted in peak_live_fprs.
                 emit_fist_indefinite_guard(*result, buf, Wd_int, Dd_val, int_size);
 
                 int addr = compute_operand_address(*result, true, n.mem_operand, GPR::XZR);
@@ -1537,7 +1538,7 @@ void lower(Context& ctx, TranslationResult* result) {
 //   - ReadSt, Const*, FAdd/FSub/FMul/FDiv, FMA*, FNeg/FAbs/FSqrt, FCSel: 0
 //   - LoadF64, LoadF32, StoreF64, StoreF32: 1 (addr from compute_operand_address)
 //   - LoadI16/I32/I64: 2 (addr + Wd_val)
-//   - StoreI16/I32/I64: 2 (Wd_int + addr)
+//   - StoreI16/I32/I64: 2 (Wd_int + the indefinite guard's Xt, then Wd_int + addr)
 //   - FRndInt without RC cache: 1 (Wd_rc via alloc_gpr(3))
 //   - FCmp/FTst: 4 peak inside emit_fcom_cc_pack (Wd_save + Wd_packed + Wd_cc + Wd_vs)
 //     If kFcomFused, Wd_packed stays alive until consumed by FStsw.
@@ -1785,9 +1786,11 @@ int peak_live_gprs(const Context& ctx, int budget, int* first_over_node, bool fa
 //     *during* a node is: (currently live) + 1 for the new output, before dead
 //     inputs are freed.  try_reuse_input() can avoid the +1 by recycling a
 //     dying input's FPR, but we conservatively ignore reuse here.
-//   - StoreF32 allocates one extra transient FPR (Ds_tmp) that is freed before
-//     the node ends.  Model as a +1 spike.
-//   - StoreI*, FCmp, FTst, FStsw produce no FPR output and need no extra FPRs.
+//   - StoreF32 allocates Ds_narrow, plus Vq_broadcast for a STR Q group, and
+//     frees them before the node ends.  Model as a +1 or +2 spike.
+//   - StoreI* allocates one transient FPR (Dscr in the indefinite guard)
+//     while its input is held.  Model as a +1 spike.
+//   - FCmp, FTst, FStsw produce no FPR output and need no extra FPRs.
 //   - Dead (kDead) nodes are skipped.
 int peak_live_fprs(const Context& ctx, int budget, int* first_over_node) {
     if (first_over_node) {
@@ -1951,6 +1954,13 @@ int peak_live_fprs(const Context& ctx, int budget, int* first_over_node) {
                 k += 1;
             }
             raise_peak(live + spike, i);
+        }
+
+        // StoreI16/32/64: emit_fist_indefinite_guard allocates Dscr for its
+        // NaN check while the input is still held (free_dead_inputs runs
+        // after the node).  A +1 spike, the same as a lone StoreF32.
+        if (n.op == Op::StoreI16 || n.op == Op::StoreI32 || n.op == Op::StoreI64) {
+            raise_peak(live + 1, i);
         }
 
         // Transcendentals: the lowering copies each input into a freshly
