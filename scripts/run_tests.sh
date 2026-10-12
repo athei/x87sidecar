@@ -222,7 +222,9 @@ fi
 
 # Strip runtime-internal noise lines before checking output
 filter_runtime_lines() {
-    grep -v -E 'RosettaRuntimex87 built|Installing JIT|JIT Translation Hook|try_fuse_|CORE_LOG'
+    # The sidecar announces X87_FAIL_ALLOC_EVERY on stdout, and the knob's
+    # name would otherwise read as a FAIL line in check_output.
+    grep -v -E 'RosettaRuntimex87 built|Installing JIT|JIT Translation Hook|try_fuse_|CORE_LOG|\] X87_FAIL_ALLOC_EVERY='
 }
 
 TOTAL=0
