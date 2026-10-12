@@ -342,8 +342,14 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
     cache.native_transport = transport ? 1 : 0;
     // The probe has to stay the first thing in the reply: before the entry
     // conversion, before any NZCV save or FPCR write, before anything an op
-    // emitter does.
-    if (native_boundary && precise_faults_enabled())
+    // emitter does.  A native transport reply needs none: it is one
+    // instruction (or a fused fild m64 / fistp m64 pair), and its emitters
+    // touch guest memory before they change any state, so its own access
+    // rolls back and reports the fault kind stock does.  X87_PROFILE's block
+    // counter and X87_TRACE_BLOCK's records are stores emitted ahead of the
+    // op, so with either on a fault in a transport reply that carries them
+    // aborts.
+    if (native_boundary && !transport && precise_faults_enabled())
         emit_fault_probe(*translation_result, instr_array[insn_idx]);
     const bool traced =
         native_boundary && x87trace::matches(instr_array, static_cast<size_t>(num_instrs));
@@ -562,8 +568,9 @@ static auto translate_instruction_impl(TranslationResult* translation_result, IR
             if (!cache_disabled) {
                 // A native transport run is answered one instruction per
                 // reply, so every integer load and store is the first
-                // instruction of its reply and gets the fault probe (see
-                // emit_fault_probe).  Transport replies have no entry or
+                // instruction of its reply, and its own access, which comes
+                // before any state change, faults precisely (see the probe
+                // call in translate_instruction).  Transport replies have no entry or
                 // exit conversion, so the extra replies cost little.  An
                 // adjacent fild m64 / fistp m64 pair stays one reply (see
                 // try_fuse_fld_group).
