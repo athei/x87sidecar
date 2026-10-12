@@ -955,6 +955,19 @@ if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then
         # still come through it.
         expect_ftz "flags_handoff  knob on"              pass env X87_IGNORE_FTZ_DAZ=1 \
             "$LOADER" "$TESTS_BIN/test_flags_handoff"
+        # X87_NATIVE_SLOTS replies have no conversion boundary and keep the
+        # stash at +86 instead of +6, so they run the same checks.
+        expect_ftz "ftz_daz  knob on, native slots"      pass env X87_IGNORE_FTZ_DAZ=1 \
+            X87_NATIVE_SLOTS=1 "$LOADER" "$FTZ_BIN"
+        expect_ftz "ftz_daz  knob on, native slots, IR off" pass env X87_IGNORE_FTZ_DAZ=1 \
+            X87_NATIVE_SLOTS=1 X87_DISABLE_X87_IR=1 "$LOADER" "$FTZ_BIN"
+        expect_ftz "ftz_daz  knob on, native slots, IR + fusions off" pass \
+            env X87_IGNORE_FTZ_DAZ=1 X87_NATIVE_SLOTS=1 X87_DISABLE_X87_IR=1 \
+            X87_DISABLE_ALL_FUSIONS=1 "$LOADER" "$FTZ_BIN"
+        expect_ftz "ftz_daz  knob off, native slots (flushes)" fail env X87_NATIVE_SLOTS=1 \
+            "$LOADER" "$FTZ_BIN"
+        expect_ftz "flags_handoff  knob on, native slots" pass env X87_IGNORE_FTZ_DAZ=1 \
+            X87_NATIVE_SLOTS=1 "$LOADER" "$TESTS_BIN/test_flags_handoff"
     fi
 fi
 

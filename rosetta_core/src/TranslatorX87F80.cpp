@@ -297,9 +297,9 @@ void emit_f64_to_f80(AssemblerBuffer& buf, int Xaddr_slot, int Dd_src, int Xbits
 // (+6, stride 10), and are still safe: they skip this boundary, so they
 // neither write nor read the stash, and their integer conversions and
 // LDR D / STR D copies do no floating-point arithmetic, so FZ and FIZ do not
-// affect them. Any other reply that kept values inside the native slots
-// would find this halfword holding slot 0's data, and the stash would have
-// to move somewhere else.
+// affect them. X87_NATIVE_SLOTS replies keep values inside the native slots,
+// where this halfword holds slot 0's data, so they stash at +86 instead
+// (emit_native_slots_fpcr_enter).
 //
 // Nothing here touches NZCV and every branch goes forward.
 static constexpr int16_t kFpcrStashHalfword = 3;  // +6, in halfwords
@@ -393,8 +393,9 @@ static void emit_quiet_entry_test(AssemblerBuffer& buf, int Wtags1, int Wfpcr, i
 // register again, since the conversion reused the registers. With neither
 // bit set it branches to `to_quiet`; otherwise it stores the stash, clears
 // both bits and branches to `to_done`. The caller patches both branches.
+// `stash` is the stash's offset from base in halfwords.
 static void emit_fpcr_enter_slow(AssemblerBuffer& buf, int base, int Xfpcr, int Wbits,
-                                 size_t& to_quiet, size_t& to_done) {
+                                 int16_t stash, size_t& to_quiet, size_t& to_done) {
     const FlushReg& r = flush_reg();
     emit_mrs_flush(buf, Xfpcr);
     emit_bitfield(buf, 0, /*UBFM*/ 2, 0, r.ftz, r.ftz, Xfpcr, Wbits);            // FTZ -> bit 0
@@ -405,7 +406,7 @@ static void emit_fpcr_enter_slow(AssemblerBuffer& buf, int base, int Xfpcr, int 
     LogicalImmEncoding one;
     is_bitmask_immediate(false, 1, one);
     emit_orr_imm(buf, 0, Wbits, Wbits, one.N, one.immr, one.imms);
-    emit_ldr_str_imm(buf, 1, 0, /*STR*/ 0, kFpcrStashHalfword, base, Wbits);
+    emit_ldr_str_imm(buf, 1, 0, /*STR*/ 0, stash, base, Wbits);
     LogicalImmEncoding no_fz;
     LogicalImmEncoding no_fiz;
     is_bitmask_immediate(false, ~(uint64_t(1) << r.ftz) & 0xFFFFFFFFULL, no_fz);
@@ -505,7 +506,7 @@ void emit_native_state_boundary(TranslationResult& tr, bool entering) {
         patch_forward(buf, empty);
         size_t to_quiet = 0;
         size_t to_done = 0;
-        emit_fpcr_enter_slow(buf, base, mant, sign, to_quiet, to_done);
+        emit_fpcr_enter_slow(buf, base, mant, sign, kFpcrStashHalfword, to_quiet, to_done);
         // .quiet: nothing to restore on exit.
         patch_forward(buf, to_quiet);
         patch_forward(buf, quiet);
@@ -805,6 +806,58 @@ void emit_native_slots_export(TranslationResult& tr) {
         emit_ldr_str_imm(buf, 3, 0, /*LDR*/ 1, 0, addr, bits);
         emit_f64_bits_to_f80(buf, addr, bits, exp, tmp);
     }
+    tr.free_gpr_mask = saved_mask;
+}
+
+// X87_IGNORE_FTZ_DAZ with X87_NATIVE_SLOTS.  The 80-bit values fill all ten
+// bytes of every slot, so the stash cannot use +6 as the boundary does; it
+// is the halfword right after slot 7, +86.  Rosetta's x87 register file and
+// its exchanges with the signal context and the thread state
+// (x86_FLOAT_STATE64) cover bytes +0 to +85.  The stash lives only from a
+// reply's entry to its exit, so it needs no value between replies.  Entry
+// and exit are the boundary's FPCR handling without the conversions: the
+// exit restores FZ and FIZ when the entry cleared them.  Nothing here
+// touches NZCV and every branch goes forward.
+static constexpr int16_t kNativeSlotsStashHalfword = 43;  // +86, in halfwords
+
+void emit_native_slots_fpcr_enter(TranslationResult& tr) {
+    if (!ignore_ftz_daz()) {
+        return;
+    }
+    const auto saved_mask = tr.free_gpr_mask;
+    tr.free_gpr_mask &= kGprScratchMask;
+    auto& buf = tr.insn_buf;
+    const int base = alloc_free_gpr(tr);
+    const int fpcr = alloc_free_gpr(tr);
+    const int bits = alloc_free_gpr(tr);
+    emit_x87_base(buf, tr, base);
+    size_t to_quiet = 0;
+    size_t to_done = 0;
+    emit_fpcr_enter_slow(buf, base, fpcr, bits, kNativeSlotsStashHalfword, to_quiet, to_done);
+    // .quiet: neither bit set, nothing to restore on exit.
+    patch_forward(buf, to_quiet);
+    emit_ldr_str_imm(buf, 1, 0, /*STR*/ 0, kNativeSlotsStashHalfword, base, GPR::XZR);
+    // .done
+    buf.data[to_done / 4] |= static_cast<uint32_t>((buf.end - to_done) / 4) & 0x3FFFFFFU;
+    tr.free_gpr_mask = saved_mask;
+}
+
+void emit_native_slots_fpcr_exit(TranslationResult& tr) {
+    if (!ignore_ftz_daz()) {
+        return;
+    }
+    const auto saved_mask = tr.free_gpr_mask;
+    tr.free_gpr_mask &= kGprScratchMask;
+    auto& buf = tr.insn_buf;
+    const int base = alloc_free_gpr(tr);
+    const int fpcr = alloc_free_gpr(tr);
+    const int stash = alloc_free_gpr(tr);
+    emit_x87_base(buf, tr, base);
+    emit_ldr_str_imm(buf, 1, 0, /*LDR*/ 1, kNativeSlotsStashHalfword, base, stash);
+    const auto keep = buf.end;
+    emit_cbz(buf, 0, 0, stash, 0);  // CBZ Wstash, .done
+    emit_fpcr_restore(buf, fpcr, stash);
+    patch_forward(buf, keep);
     tr.free_gpr_mask = saved_mask;
 }
 

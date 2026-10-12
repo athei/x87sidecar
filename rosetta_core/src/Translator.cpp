@@ -581,8 +581,11 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
         x87trace::emit_boundary(*translation_result, trace_site | (uint64_t(insn_idx) << 1));
     // With X87_NATIVE_SLOTS nothing is converted on entry: each slot is
     // converted where the reply first reads it (emit_slot_conversions).
+    // Only X87_IGNORE_FTZ_DAZ's FPCR handling remains.
     if (native_boundary && !transport && !slots)
         TranslatorX87::emit_native_state_boundary(*translation_result, true);
+    else if (native_boundary && slots)
+        TranslatorX87::emit_native_slots_fpcr_enter(*translation_result);
     auto ret = translation_result->alloc_failure != nullptr
                    ? std::nullopt
                    : translate_instruction_impl(translation_result, block, instr_array,
@@ -625,9 +628,10 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
     cache.native_slots = 0;
     if (native_boundary && translation_result->alloc_failure == nullptr) {
         if (ret) {
-            if (slots)
+            if (slots) {
                 TranslatorX87::emit_native_slots_export(*translation_result);
-            else if (!transport)
+                TranslatorX87::emit_native_slots_fpcr_exit(*translation_result);
+            } else if (!transport)
                 TranslatorX87::emit_native_state_boundary(*translation_result, false);
             if (traced)
                 x87trace::emit_boundary(*translation_result, trace_site | (uint64_t(*ret) << 1) | 1,

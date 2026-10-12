@@ -167,9 +167,7 @@ struct RosettaConfig {
                                       //                           x87 register inside its native
                                       //                           80-bit slot (+6, stride 10)
                                       //                           instead of the compact layout,
-                                      //                           and converts per slot.  Forced
-                                      //                           off under X87_IGNORE_FTZ_DAZ,
-                                      //                           whose stash uses slot 0.
+                                      //                           and converts per slot.
 
     // X87_BRIDGE_HASH_LIST / X87_NO_BRIDGE_HASH_LIST — per-block bridging
     // bisect, same semantics and hash key as the rollback lists above:

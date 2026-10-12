@@ -81,6 +81,13 @@ void emit_native_state_boundary(TranslationResult& tr, bool entering);
 // an active x87 register-cache run.
 void emit_native_slots_export(TranslationResult& tr);
 
+// X87_IGNORE_FTZ_DAZ for an X87_NATIVE_SLOTS reply: the entry clears FPCR's
+// flush bits (or the Apple register's) when the guest set them, keeping the
+// originals in a stash at +86, and the exit puts them back.  Both emit
+// nothing without X87_IGNORE_FTZ_DAZ.  Preserve NZCV and allocator masks.
+void emit_native_slots_fpcr_enter(TranslationResult& tr);
+void emit_native_slots_fpcr_exit(TranslationResult& tr);
+
 // Where Rosetta keeps the guest's MXCSR.FTZ/DAZ on this machine, which is
 // what X87_IGNORE_FTZ_DAZ clears and restores.  Chosen the way the runtime
 // chooses it, from the commpage CPU capabilities.
