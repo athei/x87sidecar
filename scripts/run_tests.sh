@@ -110,6 +110,7 @@ ALL_TESTS=(
     test_rc_recache
     test_fstpt_gs
     test_mem_bare_reg
+    test_x87_gs_operand
     test_ir_gate_tag_push
     test_fma_reduce
     test_fma_reduce_strided
