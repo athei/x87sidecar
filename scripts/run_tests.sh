@@ -730,6 +730,7 @@ ALLOC_FAIL_TESTS=(
     test_ir_split
     test_bridge_alu
     test_fistp_multi
+    test_fist_pressure
     test_fsincos
     test_fxch
     test_x87_native_state
