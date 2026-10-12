@@ -44,6 +44,17 @@ void emit_f64_to_f80(AssemblerBuffer& buf, int Xaddr_slot, int Dd_src, int Xbits
 // allocator masks. Must run outside an active x87 register-cache run.
 void emit_native_state_boundary(TranslationResult& tr, bool entering);
 
+// Where Rosetta keeps the guest's MXCSR.FTZ/DAZ on this machine, which is
+// what X87_IGNORE_FTZ_DAZ clears and restores.  Chosen the way the runtime
+// chooses it, from the commpage CPU capabilities.
+enum class FlushControl {
+    kFpcr,   // FEAT_AFP: FPCR.FZ (FTZ) and FPCR.FIZ (DAZ)
+    kAfpcr,  // no FEAT_AFP: the Apple register S3_6_C15_C2_5, bit 1 FTZ, bit 0 DAZ
+    kNone,   // neither capability; the knob emits nothing
+};
+FlushControl flush_control();
+const char* flush_control_name(FlushControl fc);
+
 // -----------------------------------------------------------------------------
 // Native transport (X87Cache::is_native_transport_run).  These work on
 // Rosetta's packed f80 slots directly and leave NZCV untouched: control flow

@@ -775,6 +775,10 @@ fi
 if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then
     echo ""
     echo -e "${BOLD}=== Phase 15: X87_IGNORE_FTZ_DAZ (x87 denormals under FTZ/DAZ) ===${NC}"
+    # Which register holds MXCSR.FTZ/DAZ depends on FEAT_AFP; print it so a
+    # failure here can be read against the hardware it ran on.
+    echo "      hw.optional.arm.FEAT_AFP=$(sysctl -n hw.optional.arm.FEAT_AFP 2>/dev/null || echo unknown)"
+    "$BIN/x87sidecar" --probe 2>/dev/null | grep 'MXCSR FTZ/DAZ' || true
 
     FTZ_BIN="$TESTS_BIN/test_x87_ftz_daz"
     if [[ ! -x "$FTZ_BIN" ]]; then

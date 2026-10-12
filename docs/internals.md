@@ -258,16 +258,26 @@ a fused lowering of the whole sequence and a `log2` accurate to about 2^-62,
 and it cannot help when the steps are spread over separate translations, for
 example across a call.
 
-Rosetta maps MXCSR.RC to FPCR.RMode, MXCSR.FTZ to FPCR.FZ and MXCSR.DAZ to
-FPCR.FIZ, and the emitted x87 code runs under that FPCR. Real x87 ignores all
-three. So by default a program that sets FTZ or DAZ for its SSE code also
+Rosetta maps MXCSR.RC to FPCR.RMode, and on hardware with FEAT_AFP MXCSR.FTZ
+to FPCR.FZ and MXCSR.DAZ to FPCR.FIZ. Older Apple hardware has no FPCR.FIZ,
+and its FPCR.FZ flushes inputs as well as outputs, so there Rosetta leaves
+FPCR.FZ clear and puts FTZ and DAZ in bits 1 and 0 of the Apple register
+`S3_6_C15_C2_5` instead. The runtime chooses from the commpage CPU
+capabilities: bit 34 (FEAT_AFP) selects FPCR, bit 38 the Apple register. The
+emitted x87 code runs under either. Real x87 ignores all three. So by default a program that sets FTZ or DAZ for its SSE code also
 gets its x87 denormals flushed to zero, down to a plain `fld m32; fstp m32`
 copy of a denormal float, which MSVC `/arch:IA32` code uses for float
 copies, and, under DAZ, a denormal compares equal to zero. Stock Rosetta
 keeps them.
 
-`X87_IGNORE_FTZ_DAZ=1` makes each translation reply clear FZ and FIZ on
-entry and restore them on exit (see `emit_native_state_boundary`). It is off
+`X87_IGNORE_FTZ_DAZ=1` makes each translation reply clear the two bits on
+entry and restore them on exit (see `emit_native_state_boundary`), in FPCR
+or in the Apple register, chosen the same way as the runtime chooses;
+`x87sidecar --probe` prints which. The Apple register traps at EL0 on
+FEAT_AFP hardware, so the choice cannot be made at run time by trying, and
+the Apple-register path cannot run on the M5 Max where the rest of this
+section was measured; phase 15 of `run_tests.sh` covers it on hardware
+without FEAT_AFP, such as the CI runners. It is off
 by default because it has a cost for every program, not only for the ones
 that set FTZ or DAZ. With neither bit set and an empty x87 stack at both
 ends of the reply, a reply gains six instructions and no taken branch. With

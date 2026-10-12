@@ -265,13 +265,15 @@ void emit_f64_to_f80(AssemblerBuffer& buf, int Xaddr_slot, int Dd_src, int Xbits
 }
 
 // X87_IGNORE_FTZ_DAZ=1. Real x87 has no flush-to-zero: MXCSR.FTZ and DAZ only
-// apply to SSE. Rosetta maps them to FPCR.FZ (bit 24) and FPCR.FIZ (bit 0),
-// and the emitted x87 code does its arithmetic and f32/f64 conversions under
-// the guest's FPCR, so with either bit set a denormal input or result becomes
-// zero, down to a plain `fld m32; fstp m32` copy. With the knob set, the reply
-// clears both bits on entry and puts them back on exit. With it unset (the
-// default) the boundary emits exactly what it emits without this code, so
-// programs that never set FTZ or DAZ pay nothing.
+// apply to SSE. On FEAT_AFP hardware Rosetta maps them to FPCR.FZ (bit 24)
+// and FPCR.FIZ (bit 0); without FEAT_AFP to bits 1 and 0 of the Apple register
+// S3_6_C15_C2_5 (see flush_control below). The emitted x87 code does its
+// arithmetic and f32/f64 conversions under those settings, so with either bit
+// set a denormal input or result becomes zero, down to a plain
+// `fld m32; fstp m32` copy. With the knob set, the reply clears both bits in
+// whichever register holds them on entry and puts them back on exit. With it
+// unset (the default) the boundary emits exactly what it emits without this
+// code, so programs that never set FTZ or DAZ pay nothing.
 //
 // FPCR is only written when a bit has to change. On an M5 Max a MSR to FPCR
 // costs about 3.5 ns even when it writes the value already there, and about
@@ -281,9 +283,9 @@ void emit_f64_to_f80(AssemblerBuffer& buf, int Xaddr_slot, int Dd_src, int Xbits
 // empty-stack test and the boundary still takes one branch. With values on
 // the stack, entry and exit each take one more branch.
 //
-// A signal handler that interrupts a run starts with the FPCR the run set,
-// so it reads FTZ and DAZ as clear; the MXCSR in its signal context is
-// correct, and the interrupted code gets both bits back when it returns.
+// A signal handler that interrupts a run starts with the flush bits the run
+// cleared, so it reads FTZ and DAZ as clear; the MXCSR in its signal context
+// is correct, and the interrupted code gets both bits back when it returns.
 //
 // Stash, the halfword at +6: bit 0 set when the exit has to restore, bit 1
 // the original FZ, bit 2 the original FIZ. Every entry writes it, after the
@@ -300,11 +302,67 @@ void emit_f64_to_f80(AssemblerBuffer& buf, int Xaddr_slot, int Dd_src, int Xbits
 //
 // Nothing here touches NZCV and every branch goes forward.
 static constexpr int16_t kFpcrStashHalfword = 3;  // +6, in halfwords
-static constexpr int kFpcrFz = 24;
-static constexpr int kFpcrFiz = 0;
+
+// Older Apple hardware without FEAT_AFP has no FPCR.FIZ, and FPCR.FZ
+// there flushes inputs as well as outputs, so Rosetta does not use FPCR for
+// MXCSR.FTZ/DAZ at all: it keeps FPCR.FZ clear and sets the Apple register
+// S3_6_C15_C2_5 instead, DAZ in bit 0 and FTZ in bit 1. The runtime picks
+// between the two from the commpage CPU capabilities (bit 34, FEAT_AFP; else
+// bit 38, the Apple register), and so does flush_control(). The register is
+// not accessible at EL0 on FEAT_AFP hardware, so the choice has to be right.
+FlushControl flush_control() {
+    static const FlushControl fc = [] {
+        // _COMM_PAGE_CPU_CAPABILITIES64 in the arm64 commpage.
+        const uint64_t caps = *reinterpret_cast<const volatile uint64_t*>(0x0000000FFFFFC010ULL);
+        if ((caps >> 34) & 1U)
+            return FlushControl::kFpcr;
+        if ((caps >> 38) & 1U)
+            return FlushControl::kAfpcr;
+        return FlushControl::kNone;
+    }();
+    return fc;
+}
+
+const char* flush_control_name(FlushControl fc) {
+    switch (fc) {
+        case FlushControl::kFpcr:
+            return "FPCR.FZ/FIZ (FEAT_AFP)";
+        case FlushControl::kAfpcr:
+            return "S3_6_C15_C2_5 bits 1/0 (no FEAT_AFP)";
+        default:
+            return "none";
+    }
+}
+
+namespace {
+// The register holding the flush bits, and their positions in it. DAZ is
+// bit 0 in both registers.
+struct FlushReg {
+    uint32_t mrs;  // MRS X0, <reg>
+    uint32_t msr;  // MSR <reg>, X0
+    int ftz;
+    int daz;
+};
+constexpr FlushReg kFpcrReg{0xD53B4400U, 0xD51B4400U, 24, 0};
+constexpr FlushReg kAfpcrReg{0xD53EF2A0U, 0xD51EF2A0U, 1, 0};
+static_assert(kFpcrReg.daz == 0 && kAfpcrReg.daz == 0, "the stash code assumes DAZ in bit 0");
+
+const FlushReg& flush_reg() {
+    return flush_control() == FlushControl::kAfpcr ? kAfpcrReg : kFpcrReg;
+}
+
+void emit_mrs_flush(AssemblerBuffer& buf, int Xd) {
+    buf.emit(flush_reg().mrs | static_cast<uint32_t>(Xd & 0x1F));
+}
+
+void emit_msr_flush(AssemblerBuffer& buf, int Xd) {
+    buf.emit(flush_reg().msr | static_cast<uint32_t>(Xd & 0x1F));
+}
+}  // namespace
 
 static bool ignore_ftz_daz() {
-    return g_rosetta_config != nullptr && g_rosetta_config->ignore_ftz_daz != 0;
+    return g_rosetta_config != nullptr && g_rosetta_config->ignore_ftz_daz != 0 &&
+           flush_control() != FlushControl::kNone;
 }
 
 static void patch_forward(AssemblerBuffer& buf, size_t at) {
@@ -316,24 +374,30 @@ static void emit_tbnz(AssemblerBuffer& buf, int Wt, int bit) {
 }
 
 // Wquiet = Wtags1 with bit 16 kept only when no flush bit is set in Wfpcr:
-//   BIC Wquiet, Wtags1, Wfpcr, LSL #16   (FIZ, bit 0)
-//   BIC Wquiet, Wquiet, Wfpcr, LSR #8    (FZ, bit 24)
+//   BIC Wquiet, Wtags1, Wfpcr, LSL #16        (DAZ, bit 0)
+//   BIC Wquiet, Wquiet, Wfpcr, LSR #8 / LSL #15  (FTZ, bit 24 / bit 1)
 static void emit_quiet_entry_test(AssemblerBuffer& buf, int Wtags1, int Wfpcr, int Wquiet) {
-    emit_logical_shifted_reg(buf, 0, /*AND*/ 0, /*n=*/1, /*LSL*/ 0, Wfpcr, 16 - kFpcrFiz, Wtags1,
+    const FlushReg& r = flush_reg();
+    emit_logical_shifted_reg(buf, 0, /*AND*/ 0, /*n=*/1, /*LSL*/ 0, Wfpcr, 16 - r.daz, Wtags1,
                              Wquiet);
-    emit_logical_shifted_reg(buf, 0, /*AND*/ 0, /*n=*/1, /*LSR*/ 1, Wfpcr, kFpcrFz - 16, Wquiet,
-                             Wquiet);
+    if (r.ftz > 16)
+        emit_logical_shifted_reg(buf, 0, /*AND*/ 0, /*n=*/1, /*LSR*/ 1, Wfpcr, r.ftz - 16, Wquiet,
+                                 Wquiet);
+    else
+        emit_logical_shifted_reg(buf, 0, /*AND*/ 0, /*n=*/1, /*LSL*/ 0, Wfpcr, 16 - r.ftz, Wquiet,
+                                 Wquiet);
 }
 
-// Entry path for a non-empty stack or a set flush bit. Reads FPCR again, since
-// the conversion reused the registers. With neither bit set it branches to
-// `to_quiet`; otherwise it stores the stash, clears both bits and branches to
-// `to_done`. The caller patches both branches.
+// Entry path for a non-empty stack or a set flush bit. Reads the flush
+// register again, since the conversion reused the registers. With neither
+// bit set it branches to `to_quiet`; otherwise it stores the stash, clears
+// both bits and branches to `to_done`. The caller patches both branches.
 static void emit_fpcr_enter_slow(AssemblerBuffer& buf, int base, int Xfpcr, int Wbits,
                                  size_t& to_quiet, size_t& to_done) {
-    emit_mrs_fpcr(buf, Xfpcr);
-    emit_bitfield(buf, 0, /*UBFM*/ 2, 0, kFpcrFz, kFpcrFz, Xfpcr, Wbits);        // FZ -> bit 0
-    emit_bitfield(buf, 0, /*BFM*/ 1, 0, /*immr=*/31, /*imms=*/0, Xfpcr, Wbits);  // FIZ -> bit 1
+    const FlushReg& r = flush_reg();
+    emit_mrs_flush(buf, Xfpcr);
+    emit_bitfield(buf, 0, /*UBFM*/ 2, 0, r.ftz, r.ftz, Xfpcr, Wbits);            // FTZ -> bit 0
+    emit_bitfield(buf, 0, /*BFM*/ 1, 0, /*immr=*/31, /*imms=*/0, Xfpcr, Wbits);  // DAZ -> bit 1
     to_quiet = buf.end;
     emit_cbz(buf, 0, 0, Wbits, 0);
     emit_bitfield(buf, 0, /*UBFM*/ 2, 0, 31, 30, Wbits, Wbits);  // LSL #1
@@ -343,23 +407,25 @@ static void emit_fpcr_enter_slow(AssemblerBuffer& buf, int base, int Xfpcr, int 
     emit_ldr_str_imm(buf, 1, 0, /*STR*/ 0, kFpcrStashHalfword, base, Wbits);
     LogicalImmEncoding no_fz;
     LogicalImmEncoding no_fiz;
-    is_bitmask_immediate(false, ~(uint64_t(1) << kFpcrFz) & 0xFFFFFFFFULL, no_fz);
-    is_bitmask_immediate(false, ~(uint64_t(1) << kFpcrFiz) & 0xFFFFFFFFULL, no_fiz);
+    is_bitmask_immediate(false, ~(uint64_t(1) << r.ftz) & 0xFFFFFFFFULL, no_fz);
+    is_bitmask_immediate(false, ~(uint64_t(1) << r.daz) & 0xFFFFFFFFULL, no_fiz);
     emit_and_imm(buf, 0, Xfpcr, no_fz.N, no_fz.immr, no_fz.imms, Xfpcr);
     emit_and_imm(buf, 0, Xfpcr, no_fiz.N, no_fiz.immr, no_fiz.imms, Xfpcr);
-    emit_msr_fpcr(buf, Xfpcr);
+    emit_msr_flush(buf, Xfpcr);
     to_done = buf.end;
     buf.emit(0x14000000U);  // B .done
 }
 
 // Exit restore, entered with the stash in Wstash (bit 0 known set).
 static void emit_fpcr_restore(AssemblerBuffer& buf, int Xfpcr, int Wstash) {
-    emit_mrs_fpcr(buf, Xfpcr);
-    emit_bitfield(buf, 0, /*UBFM*/ 2, 0, 1, 31, Wstash, Wstash);                   // LSR #1
-    emit_bitfield(buf, 0, /*BFM*/ 1, 0, /*immr=*/32 - kFpcrFz, 0, Wstash, Xfpcr);  // BFI #24, #1
-    emit_bitfield(buf, 0, /*UBFM*/ 2, 0, 1, 31, Wstash, Wstash);                   // LSR #1
-    emit_bitfield(buf, 0, /*BFM*/ 1, 0, kFpcrFiz, 0, Wstash, Xfpcr);               // BFXIL #0, #1
-    emit_msr_fpcr(buf, Xfpcr);
+    const FlushReg& r = flush_reg();
+    emit_mrs_flush(buf, Xfpcr);
+    emit_bitfield(buf, 0, /*UBFM*/ 2, 0, 1, 31, Wstash, Wstash);  // LSR #1
+    emit_bitfield(buf, 0, /*BFM*/ 1, 0, static_cast<int8_t>((32 - r.ftz) & 31), 0, Wstash,
+                  Xfpcr);                                          // BFI #ftz, #1
+    emit_bitfield(buf, 0, /*UBFM*/ 2, 0, 1, 31, Wstash, Wstash);   // LSR #1
+    emit_bitfield(buf, 0, /*BFM*/ 1, 0, r.daz, 0, Wstash, Xfpcr);  // BFXIL #0, #1
+    emit_msr_flush(buf, Xfpcr);
 }
 
 // Rosetta imports/exports physical x87 slots as packed f80 at +6, stride 10.
@@ -383,9 +449,9 @@ void emit_native_state_boundary(TranslationResult& tr, bool entering) {
     // Without X87_IGNORE_FTZ_DAZ the boundary is the plain conversion: no
     // FPCR access, no stash, and `quiet` is never emitted.
     const bool fpcr = ignore_ftz_daz();
-    // Entry: Xmant = FPCR. Exit: Wsign = stash.
+    // Entry: Xmant = the flush register. Exit: Wsign = stash.
     if (fpcr && entering)
-        emit_mrs_fpcr(buf, mant);
+        emit_mrs_flush(buf, mant);
     else if (fpcr)
         emit_ldr_str_imm(buf, 1, 0, /*LDR*/ 1, kFpcrStashHalfword, base, sign);
     emit_ldr_str_imm(buf, 1, 0, 1, 2, base, exp);
