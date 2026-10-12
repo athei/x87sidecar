@@ -1420,7 +1420,8 @@ static auto try_fuse_fld_fcomp_fstsw(TranslationResult* a1, IRInstr* fld_instr,
         const int Wd_sw = alloc_free_gpr(*a1);
 
         // OPT-D: net-zero-stack fusion — skip flush to preserve full cancellation.
-        if (!(a1->x87_cache.tag_push_pending && a1->x87_cache.top_dirty)) {
+        const bool keep_pending = a1->x87_cache.tag_push_pending && a1->x87_cache.top_dirty;
+        if (!keep_pending) {
             x87_flush_top(buf, *a1, Xbase, Wd_top, Wd_sw);
         }
 
@@ -1437,6 +1438,14 @@ static auto try_fuse_fld_fcomp_fstsw(TranslationResult* a1, IRInstr* fld_instr,
         // OPT-F6: BFI directly into W_AX
         emit_bitfield(buf, 0, 1, 0, /*immr=*/0, /*imms=*/15, Wd_sw, W_ax);
 
+        // A push earlier in the run is still pending and the flush above was
+        // skipped, so status_word holds the TOP from before that push.  AX
+        // must report the live TOP: patch it in from Wd_top.
+        // BFI W_ax, Wd_top, #11, #3  →  BFM immr=21, imms=2
+        if (keep_pending) {
+            emit_bitfield(buf, 0, 1, 0, /*immr=*/21, /*imms=*/2, Wd_top, W_ax);
+        }
+
         // STRH Wd_sw → status_word
         emit_ldr_str_imm(buf, 1, 0, 0, kX87StatusWordImm12, Xbase, Wd_sw);
 
@@ -1444,10 +1453,9 @@ static auto try_fuse_fld_fcomp_fstsw(TranslationResult* a1, IRInstr* fld_instr,
     }
 
     // ── 4e: No push/pop — they cancel ───────────────────────────────────────
-    // But we still need the TOP bits in AX to reflect the post-pop state,
-    // even though net TOP is unchanged.  Since FCOMP pops after FLD push,
-    // the net TOP is the same as before.  The status_word already has the
-    // correct TOP (we flushed above), so AX is correct.
+    // Net TOP is unchanged, so the TOP bits in AX are the TOP at entry to
+    // the fusion: either flushed to status_word above, or patched in from
+    // Wd_top when the flush was skipped.
 
     x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp, /*consumed=*/3);
     free_gpr(*a1, Wd_tmp);
@@ -1777,7 +1785,8 @@ static auto try_fuse_fld_fld_fucompp(TranslationResult* a1, IRInstr* fld1_instr,
         const int Wd_sw = alloc_free_gpr(*a1);
 
         // OPT-D: net-zero-stack fusion — skip flush to preserve full cancellation.
-        if (!(a1->x87_cache.tag_push_pending && a1->x87_cache.top_dirty)) {
+        const bool keep_pending = a1->x87_cache.tag_push_pending && a1->x87_cache.top_dirty;
+        if (!keep_pending) {
             x87_flush_top(buf, *a1, Xbase, Wd_top, Wd_sw);
         }
 
@@ -1795,6 +1804,13 @@ static auto try_fuse_fld_fld_fucompp(TranslationResult* a1, IRInstr* fld1_instr,
             // OPT-F6: BFI directly into W_AX
             const int W_ax = fstsw_instr->operands[0].reg.reg.index();
             emit_bitfield(buf, 0, 1, 0, /*immr=*/0, /*imms=*/15, Wd_sw, W_ax);
+
+            // Flush skipped for a pending push: status_word holds the TOP
+            // from before that push, so patch the live TOP into AX.
+            // BFI W_ax, Wd_top, #11, #3  →  BFM immr=21, imms=2
+            if (keep_pending) {
+                emit_bitfield(buf, 0, 1, 0, /*immr=*/21, /*imms=*/2, Wd_top, W_ax);
+            }
         }
 
         // STRH Wd_sw → status_word
@@ -1804,7 +1820,8 @@ static auto try_fuse_fld_fld_fucompp(TranslationResult* a1, IRInstr* fld1_instr,
     }
 
     // ── 4d: No push or pop (2 pushes + 2 pops = net zero) ───────────────────
-    // TOP is unchanged; memory already has correct TOP (OPT-D or flushed above).
+    // TOP is unchanged.  Either it was flushed above, or a pending push keeps
+    // top_dirty set and the run's end (or the cancelling pop) settles it.
 
     const int consumed = has_fstsw ? 4 : 3;
     x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp, consumed);

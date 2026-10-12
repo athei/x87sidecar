@@ -110,6 +110,7 @@ ALL_TESTS=(
     test_rc_recache
     test_fstpt_gs
     test_ir_gate_tag_push
+    test_fstsw_pending_top
     test_fma_reduce
     test_fma_reduce_strided
     test_fma_pc53
