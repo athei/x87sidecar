@@ -335,13 +335,15 @@ X87_SEQ(seq_fdisi_feni, "fld " D "\n\t.byte 0xdb, 0xe1\n\t.byte 0xdb, 0xe0\n\t")
 
 /* Native transport replies: runs of integer loads and stores only, which the
  * sidecar emits against the native 80-bit slots.  The jmp ends the run
- * before the macro's fnstsw and fstp. */
+ * before the macro's fnstsw and fstp.  transport_round reloads the control
+ * word it just stored, so the run has an fldcw without changing the control
+ * word the later cases run under. */
 X87_SEQ(seq_transport_int,
         "fild " I64 "\n\tfild " I32 "\n\tfistp " S32 "\n\tfistp " S64 "\n\tfild " S64
         "\n\tjmp 1f\n1:\n\t")
 X87_SEQ(seq_transport_round,
-        "fld " D "\n\tfld " D "\n\tjmp 1f\n1:\n\tfist " S32 "\n\tfisttp " S16 "\n\tfldcw " CW
-        "\n\tfistp " S64 "\n\tfild " S64 "\n\tjmp 2f\n2:\n\t")
+        "fld " D "\n\tfld " D "\n\tjmp 1f\n1:\n\tfist " S32 "\n\tfisttp " S16 "\n\tfnstcw " S16
+        "\n\tfldcw " S16 "\n\tfistp " S64 "\n\tfild " S64 "\n\tjmp 2f\n2:\n\t")
 
 /* A long run: many consecutive x87 ops, which the IR path translates as one
  * unit.  A signal inside it makes the runtime step the whole rest of the run. */
