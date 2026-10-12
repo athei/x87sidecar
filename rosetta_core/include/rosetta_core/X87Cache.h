@@ -67,6 +67,15 @@ struct X87Cache {
     // the compact layout.  Set and cleared around one reply like
     // native_transport.
     int8_t native_slots = 0;
+    // With X87_NATIVE_SLOTS, 1 when the run started at the current request
+    // holds only fldcw and fnstcw, which never use TOP, so x87_begin does not
+    // load it.  A native-slot reply is often short, and the status-word load
+    // would read part of the status and tag word that the reply before may
+    // have just stored as one 32-bit word (the single-op fast path), which
+    // stalls: a lone fld m64 followed by Delphi's Trunc sequence (fnstcw;
+    // fnstcw; fldcw; fistp; fldcw) ran 6 percent longer with the load.
+    // Recomputed at every run start.
+    int8_t top_unused = 0;
     // What each physical slot holds, indexed by its position relative to
     // TOP at the start of the reply, (top_rel + depth) & 7, where top_rel
     // is the static change of TOP since then.  Every TOP change inside a

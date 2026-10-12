@@ -872,6 +872,14 @@ static auto translate_instruction_impl(TranslationResult* translation_result, IR
                 int run = cache.native_transport && precise_faults_enabled()
                               ? 1
                               : X87Cache::lookahead(instr_array, num_instrs, insn_idx);
+                // X87_NATIVE_SLOTS: a run of only control-word moves skips
+                // the TOP load (X87Cache::top_unused).
+                bool only_cw = g_rosetta_config != nullptr && g_rosetta_config->native_slots;
+                for (int k = 0; k < run && only_cw; k++) {
+                    const auto o = instr_array[insn_idx + k].opcode();
+                    only_cw = o == kOpcodeName_fnstcw || o == kOpcodeName_fldcw;
+                }
+                cache.top_unused = only_cw ? 1 : 0;
                 // With X87_NATIVE_SLOTS a floating-point run ends before each
                 // later memory access, for the same reason (precise_window).
                 const bool split = cache.native_slots && precise_faults_enabled();

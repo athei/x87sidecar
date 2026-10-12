@@ -144,22 +144,42 @@ void translate_fld_single(TranslationResult& a1, IRInstr* a2) {
     emit_bfi_top(buf, Wsw, Wtop);    // status half: TOP <- newTop
     emit_lslv(buf, 0, Wsh, Wm, Wm);  // mask = 0x30000 << (2 * newTop)
 
-    // STR Dd, [Xbase, Widx, LSL #3]: st[newTop] at (newTop + 1) * 8, or
-    // [Xbase, Widx] with Widx = 6 + 10 * newTop in the native layout.
-    emit_ldr_str_reg(buf, /*size=*/3, /*is_fp=*/1, /*opc=*/0 /*STR*/, Widx,
-                     /*shift=*/a1.x87_cache.native_slots ? 0 : 1, Xbase, Dd);
+    const bool native = a1.x87_cache.native_slots != 0;
+    if (!native) {
+        // STR Dd, [Xbase, Widx, LSL #3]: st[newTop] at (newTop + 1) * 8.
+        emit_ldr_str_reg(buf, /*size=*/3, /*is_fp=*/1, /*opc=*/0 /*STR*/, Widx, /*shift=*/1,
+                         Xbase, Dd);
+    }
 
     // BIC Wsw, Wsw, Wm — tag half: mark newTop kValid (bits = 00).
     emit_logical_shifted_reg(buf, /*is_64bit=*/0, /*opc=*/0 /*AND*/, /*N=invert*/ 1,
                              /*shift_type=*/0, Wm, /*shift_amt=*/0, Wsw, Wsw);
+    free_gpr(a1, Wsh);
+    free_gpr(a1, Wm);
+    if (native) {
+        // X87_NATIVE_SLOTS: the new ST(0) gets its 80-bit value here, at
+        // Xbase + 6 + 10 * newTop, so the reply's exit has nothing left to
+        // convert.
+        const int Xb = alloc_free_gpr(a1);
+        const int We = alloc_free_gpr(a1);
+        const int Wt = alloc_free_gpr(a1);
+        emit_add_sub_shifted_reg(buf, /*is_64bit=*/1, /*sub=*/0, 0, /*LSL*/ 0, Widx, 0, Xbase,
+                                 Widx);
+        emit_fmov_d_to_x(buf, Xb, Dd);
+        emit_f64_bits_to_f80(buf, Widx, Xb, We, Wt);
+        free_gpr(a1, Wt);
+        free_gpr(a1, We);
+        free_gpr(a1, Xb);
+    }
     // STUR Wsw, [Xbase, #2] — single combined status+tag write-back.
     emit_ldur_stur(buf, /*size=*/2, /*opc=*/0 /*STUR*/, kX87StatusWordOff, Xbase, Wsw);
     x87_slot_note_push(1);
+    if (native) {
+        x87_slot_note_native(0);
+    }
 
     free_fpr(a1, Dd);
-    free_gpr(a1, Wsh);
     free_gpr(a1, Widx);
-    free_gpr(a1, Wm);
     free_gpr(a1, Wtop);
     free_gpr(a1, Wsw);
     free_gpr(a1, Xbase);

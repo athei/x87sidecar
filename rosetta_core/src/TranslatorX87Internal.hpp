@@ -52,7 +52,10 @@ inline auto x87_begin(TranslationResult& a1, AssemblerBuffer& buf) -> std::pair<
     const int Xbase = alloc_gpr(a1, 0);
     const int Wd_top = alloc_gpr(a1, 1);
     emit_x87_base(buf, a1, Xbase);
-    emit_load_top(buf, a1, Xbase, Wd_top);
+    // A run of only fldcw and fnstcw never uses TOP (X87Cache::top_unused).
+    if (!(a1.x87_cache.top_unused && a1.x87_cache.run_remaining > 0)) {
+        emit_load_top(buf, a1, Xbase, Wd_top);
+    }
 
     if (a1.x87_cache.run_remaining > 0) {
         a1.x87_cache.base_gpr = static_cast<int8_t>(Xbase);
