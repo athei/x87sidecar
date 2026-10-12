@@ -15,9 +15,9 @@ for fixture in test_x87_signal_context test_x87_trace_threads test_x87_trace_fre
         for setting in "${!X87_@}"; do unset "$setting"; done
         export X87_NO_PREAUTH=1 X87_TRACE_BLOCK="$selected_hash"
         export X87_TRACE_OUTPUT="$WORK/$fixture" X87_TRACE_STOP_NEGATIVE=1
-        # SIGALRM after 300 s ends a target that never exits; the sidecar
-        # exits with it.
-        perl -e 'alarm shift; exec @ARGV' 300 \
+        # SIGALRM after 60 s, the run_tests.sh bound, ends a target that
+        # never exits; the sidecar exits with it.
+        perl -e 'alarm shift; exec @ARGV' 60 \
             "$BUILD/bin/x87sidecar_entitled" "$BUILD/bin/tests/$fixture" 2>&1
     ) || { printf '%s\n' "$output"; exit 1; }
     if grep -q 'FAIL' <<<"$output" || ! grep -q '^PASS' <<<"$output"; then

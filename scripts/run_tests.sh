@@ -52,9 +52,9 @@
 #      X87_FAIL_ALLOC_EVERY=N), and one of its faults must still abort the
 #      process without the knob, under both the cooperative and the default
 #      attach
-#  18. test_crash_after_release: a target that dies after the release
-#      (abort, SIGSEGV, SIGKILL, SIGILL, exit(3)) must end with its own exit
-#      status natively and under both attaches
+#  18. test_crash_after_release: a target that is no longer traced after
+#      the release and then dies (abort, SIGSEGV, SIGKILL, SIGILL, exit(3))
+#      must end with its own exit status natively and under both attaches
 #   R. replay tests/data/geom_block_874c40.ir under --fpr-pool 8 and
 #      assert the pressure splits keep it on the IR path (fpr_fail=0), then
 #      replay tests/data/fist_pressure.ir the same way and assert it exits 0
@@ -253,7 +253,11 @@ fi
 filter_runtime_lines() {
     # The sidecar announces X87_FAIL_ALLOC_EVERY on stdout, and the knob's
     # name would otherwise read as a FAIL line in check_output.
-    grep -v -E 'RosettaRuntimex87 built|Installing JIT|JIT Translation Hook|try_fuse_|CORE_LOG|\] X87_FAIL_ALLOC_EVERY='
+    # grep exits 1 when it prints nothing.  Report success then, so that with
+    # pipefail the pipeline carries the run's own status (124 for a timeout)
+    # instead of grep's.
+    grep -v -E 'RosettaRuntimex87 built|Installing JIT|JIT Translation Hook|try_fuse_|CORE_LOG|\] X87_FAIL_ALLOC_EVERY=' ||
+        [[ $? -eq 1 ]]
 }
 
 # run_bounded SECONDS COMMAND...: run COMMAND in a process group of its own
@@ -288,8 +292,10 @@ run_bounded() {
 }
 
 # Upper bound in seconds for one run of the loader.  The slowest test takes
-# about 6 s on an M-series Mac, so this only ever fires on a hang.
-TEST_TIMEOUT="${TEST_TIMEOUT:-120}"
+# about 6 s on an M-series Mac, so this only ever fires on a hang.  It has to
+# stay below the 90 s of silence after which scripts/diagnose_ci.py stops a
+# CI run, or a hang there is never reported against its test.
+TEST_TIMEOUT="${TEST_TIMEOUT:-60}"
 
 TOTAL=0
 PASSED=0
@@ -750,6 +756,7 @@ if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then
                 got="a timeout after $TEST_TIMEOUT s"
             elif [[ $exit_code -eq 0 ]] && ! grep -qE 'FAIL' <<<"$out"; then
                 got="pass"
+                grep -qE 'PASS' <<<"$out" || got="no output"
             fi
             local verb="traps"
             [[ "$want" == "pass" ]] && verb="passes"
@@ -1061,10 +1068,11 @@ fi
 
 # ── Phase 18: fatal signals after the default attach releases the target ─
 # test_crash_after_release is not in ALL_TESTS: it dies on purpose, in the
-# way its argument names, after one x87 instruction.  Each run must end
-# with the target's own exit status, natively and through both attaches,
-# and within the timeout: a target that stays behind, still traced, would
-# keep the sidecar waiting for it.
+# way its argument names, after one x87 instruction.  Before dying it checks
+# that it is no longer traced and prints its release line, or exits 1.  Each
+# run must print that line, end with the target's own exit status, natively
+# and through both attaches, within the timeout, and the attached runs must
+# not have fallen back to running without the hook.
 CRASH_AFTER_RELEASE_CASES=(
     "abort 134"
     "segv 139"
@@ -1094,13 +1102,22 @@ if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then
                 EXIT=0
                 OUT=$(run_bounded "$TEST_TIMEOUT" "${cmd[@]}" 2>&1) || EXIT=$?
                 label="crash_after_release  $mode, $how"
-                if [[ $EXIT -eq $want ]]; then
+                reason=""
+                if [[ $EXIT -eq 124 ]]; then
+                    reason="timed out after $TEST_TIMEOUT s"
+                elif [[ $EXIT -ne $want ]]; then
+                    reason="got exit=$EXIT"
+                elif ! grep -q '^released, x87 result 1\.0, ' <<<"$OUT"; then
+                    reason="no release line"
+                elif [[ $how != native ]] &&
+                    grep -qE 'RUNNING WITHOUT X87 ACCELERATION|x87 hook not installed' <<<"$OUT"; then
+                    reason="ran without the hook"
+                fi
+                if [[ -z "$reason" ]]; then
                     echo -e "${GREEN}PASS${NC}  $label  (exit=$EXIT)"
                     PASSED=$((PASSED + 1))
                 else
-                    reason="got exit=$EXIT"
-                    [[ $EXIT -eq 124 ]] && reason="timed out after $TEST_TIMEOUT s"
-                    echo -e "${RED}FAIL${NC}  $label  (wanted exit=$want, $reason)"
+                    echo -e "${RED}FAIL${NC}  $label  ($reason)"
                     FAILED=$((FAILED + 1))
                     tail -3 <<<"$OUT" | sed 's/^/      /'
                 fi
