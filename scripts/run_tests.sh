@@ -30,10 +30,10 @@
 #   R. replay tests/data/geom_block_874c40.ir under --fpr-pool 8 and
 #      assert the pressure splits keep it on the IR path (fpr_fail=0), then
 #      replay tests/data/fist_pressure.ir the same way and assert it exits 0
-#      with one split per block, then tests/data/ir_dup_input.ir and assert
-#      it exits 0 with every x87 instruction on the IR path, then
-#      tests/data/ir_fpatan_rc.ir and assert it exits 0 with the fpatan's
-#      GPR peak predicted
+#      with one split per block and no GPR refusals, then
+#      tests/data/ir_dup_input.ir and assert it exits 0 with every x87
+#      instruction on the IR path, then tests/data/ir_fpatan_rc.ir and
+#      assert it exits 0 with the fpatan's GPR peak predicted
 #
 # Phase 1 doubles as the baseline the other phases are read against.  A
 # case that fails there fails with the sidecar nowhere in the picture, so
@@ -653,7 +653,10 @@ if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then
     # values live at an integer store, whose indefinite guard takes one more
     # FPR.  On the 8-slot pool the gate has to see that register and split,
     # or the lowering runs out of FPRs and asserts.  Exactly one split per
-    # block shows that every block still reaches its stores.
+    # block shows that every block still reaches its stores.  The suffix
+    # after each split starts with Xbase, Wd_top and Xst_base already held
+    # by the run cache; no GPR refusals shows the GPR model does not charge
+    # those to the pool a second time.
     echo ""
     echo -e "${BOLD}=== Replay: fist_pressure.ir under --fpr-pool 8 ===${NC}"
     TOTAL=$((TOTAL + 1))
@@ -665,8 +668,8 @@ if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then
         REXIT=0
         ROUT=$("$REPLAY_BIN" "$FIST_IR" --fpr-pool 8 2>&1) || REXIT=$?
         if [[ $REXIT -eq 0 ]] && grep -q '^ir_fpr_fail,0$' <<<"$ROUT" && \
-           grep -q '^ir_split,5$' <<<"$ROUT"; then
-            echo -e "${GREEN}PASS${NC}  fist_pressure_replay (fpr_fail=0, splits fired)"
+           grep -q '^ir_gpr_fail,0$' <<<"$ROUT" && grep -q '^ir_split,5$' <<<"$ROUT"; then
+            echo -e "${GREEN}PASS${NC}  fist_pressure_replay (fpr_fail=0, gpr_fail=0, splits fired)"
             PASSED=$((PASSED + 1))
         else
             echo -e "${RED}FAIL${NC}  fist_pressure_replay  (exit=$REXIT)"

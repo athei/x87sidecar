@@ -347,8 +347,13 @@ int peak_live_fprs(const Context& ctx, int budget = 0x7FFFFFFF, int* first_over_
 // demand model; see X87IRLower.cpp for the model notes).  fast_round must
 // match the effective fast-round decision the lowering will make
 // (x87_fast_round_active) so the RC-cache pinned-GPR prediction agrees.
+// cached_gprs is how many of Xbase, Wd_top and Xst_base the run cache
+// already holds outside the free pool; lower() reuses those instead of
+// allocating them, so they are not counted against the budget.
+// preamble_gprs is the scratch lower()'s prologue takes to flush incoming
+// deferred tag state (1 for tag_push_pending, 2 for deferred pops).
 int peak_live_gprs(const Context& ctx, int budget = 0x7FFFFFFF, int* first_over_node = nullptr,
-                   bool fast_round = false);
+                   bool fast_round = false, int cached_gprs = 0, int preamble_gprs = 0);
 
 // Lower IR to AArch64 instructions, writing into result->insn_buf.
 void lower(Context& ctx, TranslationResult* result);

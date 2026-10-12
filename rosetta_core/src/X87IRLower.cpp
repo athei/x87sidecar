@@ -1533,6 +1533,15 @@ void lower(Context& ctx, TranslationResult* result) {
 // Permanent GPRs (held for the entire lower() duration):
 //   - Xbase (pool 0), Wd_top (pool 1), Wd_tmp (pool 2), Xst_base (pool 6) = 4
 //   - Wd_rc_cached (pool 3) when RC caching is active = +1
+//   - minus cached_gprs: when the run cache is active, x87_begin reuses
+//     the Xbase, Wd_top and (if still valid) Xst_base it holds.  The
+//     dispatcher keeps those out of free_gpr_mask (pinned_mask()), so the
+//     budget compile_run passes in already excludes them.  This is the
+//     usual shape for the suffix after a split prefix.
+//
+// Prologue (before any node, Wd_rc_cached not yet allocated): flushing an
+// incoming tag_push_pending takes 1 more GPR, incoming deferred pops 2
+// (Wd_tmp2 + Wd_tagw).  preamble_gprs carries that from the cache state.
 //
 // Per-node transient GPR demand (mirrors the lowering code exactly):
 //   - ReadSt, Const*, FAdd/FSub/FMul/FDiv, FMA*, FNeg/FAbs/FSqrt, FCSel: 0
@@ -1556,7 +1565,8 @@ void lower(Context& ctx, TranslationResult* result) {
 // before node_total would double-count it (predicting peak=9 instead of 8
 // for the common single-fused-FCmp+FStsw pair, gating off real WoW blocks
 // that fit in the 8-slot pool).
-int peak_live_gprs(const Context& ctx, int budget, int* first_over_node, bool fast_round) {
+int peak_live_gprs(const Context& ctx, int budget, int* first_over_node, bool fast_round,
+                   int cached_gprs, int preamble_gprs) {
     if (first_over_node) {
         *first_over_node = -1;
     }
@@ -1594,7 +1604,7 @@ int peak_live_gprs(const Context& ctx, int budget, int* first_over_node, bool fa
         rc_cache = !has_fcmp && rc_count >= 2;
     }
 
-    int pinned = 4;  // Xbase, Wd_top, Wd_tmp, Xst_base
+    int pinned = 4 - cached_gprs;  // Xbase, Wd_top, Wd_tmp, Xst_base not held by the cache
     if (rc_cache) {
         pinned++;  // Wd_rc_cached
     }
@@ -1603,6 +1613,15 @@ int peak_live_gprs(const Context& ctx, int budget, int* first_over_node, bool fa
     // "held" tracks GPRs held alive across node boundaries (fused FCmp→FStsw).
     int held = 0;
     int peak = pinned;  // at minimum, permanent GPRs
+
+    // Prologue flush of incoming deferred tag state.  No prefix of the run
+    // avoids it, so an overflow here is attributed to the first node and
+    // the split loop gives up instead of retrying shorter prefixes.
+    const int prologue_total = (4 - cached_gprs) + preamble_gprs;
+    peak = std::max(prologue_total, peak);
+    if (first_over_node && prologue_total > budget && ctx.num_nodes > 0) {
+        *first_over_node = 0;
+    }
 
     for (int i = 0; i < ctx.num_nodes; i++) {
         const auto& n = ctx.nodes[i];
@@ -1760,7 +1779,10 @@ int peak_live_gprs(const Context& ctx, int budget, int* first_over_node, bool fa
     // lower() releases Xst_base before allocating those two — the tag-batch
     // helpers don't use it — so the actual peak at the epilogue is
     // (pinned - 1) + held + 2.  Mirror that here so the gate predicts peak
-    // accurately and runs that previously hit peak=6 fit at peak=5.
+    // accurately and runs that previously hit peak=6 fit at peak=5.  When
+    // the cache held Xst_base it is not in `pinned`, but freeing it still
+    // adds one register to the pool the budget was counted from, so the
+    // same -1 applies.
     if (ctx.top_delta != 0) {
         int epilogue_total = (pinned - 1) + held + 2;
         peak = std::max(epilogue_total, peak);
@@ -2326,6 +2348,29 @@ int compile_run(TranslationResult* result, IRInstr* instr_array, int64_t num_ins
         gpr_available++;
         gpr_pool &= gpr_pool - 1;
     }
+    // With the run cache active (the suffix after a split prefix or a
+    // build early-stop), x87_begin reuses the cached Xbase, Wd_top and
+    // Xst_base, which the dispatcher has already taken out of
+    // free_gpr_mask.  Tell the GPR model so it does not charge them to
+    // gpr_available a second time.  Only registers actually missing from
+    // the free mask are counted, so the model can never drop below what
+    // lower() draws from it.
+    int cached_gprs = 0;
+    if (result->x87_cache.run_remaining > 0 && result->x87_cache.gprs_valid) {
+        uint32_t held = result->x87_cache.pinned_mask() & ~result->free_gpr_mask;
+        while (held) {
+            cached_gprs++;
+            held &= held - 1;
+        }
+    }
+    // Scratch lower()'s prologue takes to flush deferred tag state the
+    // gate cascade left behind (see the flushes at the top of lower()).
+    int preamble_gprs = 0;
+    if (result->x87_cache.deferred_pop_count > 0) {
+        preamble_gprs = 2;
+    } else if (result->x87_cache.tag_push_pending) {
+        preamble_gprs = 1;
+    }
     if (g_rosetta_config) {
         if (g_rosetta_config->fpr_pool_limit > 0 && available > g_rosetta_config->fpr_pool_limit) {
             available = g_rosetta_config->fpr_pool_limit;
@@ -2427,7 +2472,8 @@ int compile_run(TranslationResult* result, IRInstr* instr_array, int64_t num_ins
             }
             if (out_peak_gprs) {
                 *out_peak_gprs =
-                    peak_live_gprs(ctx, 0x7FFFFFFF, nullptr, x87_fast_round_active(*result));
+                    peak_live_gprs(ctx, 0x7FFFFFFF, nullptr, x87_fast_round_active(*result),
+                                   cached_gprs, preamble_gprs);
             }
             return 0;
         }
@@ -2435,7 +2481,8 @@ int compile_run(TranslationResult* result, IRInstr* instr_array, int64_t num_ins
         // Gate lowering on GPR pressure vs. available pool.
         int gpr_over_node = -1;
         const int peak_gprs =
-            peak_live_gprs(ctx, gpr_available, &gpr_over_node, x87_fast_round_active(*result));
+            peak_live_gprs(ctx, gpr_available, &gpr_over_node, x87_fast_round_active(*result),
+                           cached_gprs, preamble_gprs);
         if (out_peak_gprs) {
             *out_peak_gprs = peak_gprs;
         }
