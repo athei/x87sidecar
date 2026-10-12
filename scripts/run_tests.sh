@@ -6,8 +6,11 @@
 # Phases:
 #   1. Native Rosetta (baseline)
 #   2. x87sidecar (IR + fusions enabled, default config)
-#   3. x87sidecar with X87_DISABLE_X87_IR=1 (direct translator only)
-#   4. x87sidecar with X87_DISABLE_X87_IR=1 + X87_DISABLE_ALL_FUSIONS=1
+#   3. x87sidecar with X87_DISABLE_X87_IR=1 (direct translator only).
+#      Skips EXACT_I64_COPY_SKIP: without the IR, fild m64 to fistp m64
+#      copies longer than a lone pair round through binary64.
+#   4. x87sidecar with X87_DISABLE_X87_IR=1 + X87_DISABLE_ALL_FUSIONS=1.
+#      Skips EXACT_I64_COPY_SKIP, as phase 3.
 #   5. x87sidecar with X87_DISABLE_HOOK=1 (stock translate_insn only)
 #   6. x87sidecar with X87_ENABLE_FMA_CONTRACT=1 (FMA contraction is off by
 #      default; this phase keeps the IR FMA nodes, the FMA-reduce lowering
@@ -20,7 +23,8 @@
 #   9. x87sidecar with X87_FAST_ROUND=2 on a curated same-block-FLDCW set
 #      (cross-block RC is mis-rounded by design under =2)
 #  10. x87sidecar with X87_ENABLE_BRIDGE=0 (bridging defaults ON; this
-#      phase keeps the unbridged dispatch under regression test)
+#      phase keeps the unbridged dispatch under regression test).  Skips
+#      EXACT_I64_COPY_SKIP: copies split by a mov gap round through binary64.
 #  11. x87sidecar with X87_BRIDGE_V2=0 (v2 defaults ON; this phase keeps
 #      the v1-only bridged dispatch under regression test)
 #  12. test_decoder_fcomp_st and test_decoder_arpl, three ways each: both
@@ -28,7 +32,9 @@
 #      decode_opcode hook substitutes a decodable encoding), and trap again
 #      under X87_NO_DECODE_HOOK=1
 #   R. replay tests/data/geom_block_874c40.ir under --fpr-pool 8 and
-#      assert the pressure splits keep it on the IR path (fpr_fail=0)
+#      assert the pressure splits keep it on the IR path (fpr_fail=0), then
+#      replay tests/data/fist_pressure.ir the same way and assert it exits 0
+#      with one split per block
 #
 # Phase 1 doubles as the baseline the other phases are read against.  A
 # case that fails there fails with the sidecar nowhere in the picture, so
@@ -105,6 +111,8 @@ ALL_TESTS=(
     test_frndint
     test_fistp_multi
     test_fist_indefinite
+    test_fist_pressure
+    test_fild_fistp_copy
     test_fcmov
     test_ficom
     test_rc_recache
@@ -358,12 +366,31 @@ if [[ $NATIVE_ONLY -eq 0 ]]; then
     done
 fi
 
+# fild m64 into fistp/fisttp m64 is copied exactly by the IR pass
+# (pass_exact_i64_copy) for longer runs and by the fild_fistp peephole for a
+# lone pair.  With the IR off (phases 3 and 4) or bridging off (phase 10),
+# the longer runs and the bridged ones go through binary64 and round every
+# |v| >= 2^53 by design, so the exact-copy test is skipped there.
+EXACT_I64_COPY_SKIP=(
+    test_fild_fistp_copy
+)
+exact_i64_copy_skipped() {
+    local s
+    for s in "${EXACT_I64_COPY_SKIP[@]}"; do
+        [[ "$1" == "$s" ]] && return 0
+    done
+    return 1
+}
+
 # ── Phase 3: x87sidecar, IR disabled ─────────────────────────────────────
 if [[ $NATIVE_ONLY -eq 0 ]]; then
     echo ""
     echo -e "${BOLD}=== Phase 3: x87sidecar (IR disabled) ===${NC}"
 
     for t in "${TESTS[@]}"; do
+        if exact_i64_copy_skipped "$t"; then
+            continue
+        fi
         BINARY="$TESTS_BIN/$t"
         if [[ ! -x "$BINARY" ]]; then
             echo -e "${YELLOW}SKIP${NC}  $t  (binary not found)"
@@ -382,6 +409,9 @@ if [[ $NATIVE_ONLY -eq 0 ]]; then
     echo -e "${BOLD}=== Phase 4: x87sidecar (IR disabled, fusions disabled) ===${NC}"
 
     for t in "${TESTS[@]}"; do
+        if exact_i64_copy_skipped "$t"; then
+            continue
+        fi
         BINARY="$TESTS_BIN/$t"
         if [[ ! -x "$BINARY" ]]; then
             echo -e "${YELLOW}SKIP${NC}  $t  (binary not found)"
@@ -530,6 +560,9 @@ if [[ $NATIVE_ONLY -eq 0 ]]; then
     echo -e "${BOLD}=== Phase 10: x87sidecar X87_ENABLE_BRIDGE=0 (bridging off) ===${NC}"
 
     for t in "${TESTS[@]}"; do
+        if exact_i64_copy_skipped "$t"; then
+            continue
+        fi
         BINARY="$TESTS_BIN/$t"
         if [[ ! -x "$BINARY" ]]; then
             echo -e "${YELLOW}SKIP${NC}  $t  (binary not found)"
@@ -636,6 +669,32 @@ if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then
             PASSED=$((PASSED + 1))
         else
             echo -e "${RED}FAIL${NC}  geom_replay"
+            echo "$ROUT" | sed 's/^/      /'
+            FAILED=$((FAILED + 1))
+        fi
+    fi
+
+    # tests/data/fist_pressure.ir is test_fist_pressure's five blocks: eight
+    # values live at an integer store, whose indefinite guard takes one more
+    # FPR.  On the 8-slot pool the gate has to see that register and split,
+    # or the lowering runs out of FPRs and asserts.  Exactly one split per
+    # block shows that every block still reaches its stores.
+    echo ""
+    echo -e "${BOLD}=== Replay: fist_pressure.ir under --fpr-pool 8 ===${NC}"
+    TOTAL=$((TOTAL + 1))
+    FIST_IR="$ROOT_DIR/tests/data/fist_pressure.ir"
+    if [[ ! -x "$REPLAY_BIN" || ! -f "$FIST_IR" ]]; then
+        echo -e "${YELLOW}SKIP${NC}  fist_pressure_replay  (tool or blob not found)"
+        ERRORS=$((ERRORS + 1))
+    else
+        REXIT=0
+        ROUT=$("$REPLAY_BIN" "$FIST_IR" --fpr-pool 8 2>&1) || REXIT=$?
+        if [[ $REXIT -eq 0 ]] && grep -q '^ir_fpr_fail,0$' <<<"$ROUT" && \
+           grep -q '^ir_split,5$' <<<"$ROUT"; then
+            echo -e "${GREEN}PASS${NC}  fist_pressure_replay (fpr_fail=0, splits fired)"
+            PASSED=$((PASSED + 1))
+        else
+            echo -e "${RED}FAIL${NC}  fist_pressure_replay  (exit=$REXIT)"
             echo "$ROUT" | sed 's/^/      /'
             FAILED=$((FAILED + 1))
         fi

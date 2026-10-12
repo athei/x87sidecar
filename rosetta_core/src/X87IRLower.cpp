@@ -1119,6 +1119,7 @@ void lower(Context& ctx, TranslationResult* result) {
                 }
 
                 // NaN / out-of-range → integer indefinite (x86 semantics).
+                // The guard's scratch FPR is counted in peak_live_fprs.
                 emit_fist_indefinite_guard(*result, buf, Wd_int, Dd_val, int_size);
 
                 int addr = compute_operand_address(*result, true, n.mem_operand, GPR::XZR);
@@ -1537,7 +1538,7 @@ void lower(Context& ctx, TranslationResult* result) {
 //   - ReadSt, Const*, FAdd/FSub/FMul/FDiv, FMA*, FNeg/FAbs/FSqrt, FCSel: 0
 //   - LoadF64, LoadF32, StoreF64, StoreF32: 1 (addr from compute_operand_address)
 //   - LoadI16/I32/I64: 2 (addr + Wd_val)
-//   - StoreI16/I32/I64: 2 (Wd_int + addr)
+//   - StoreI16/I32/I64: 2 (Wd_int + the indefinite guard's Xt, then Wd_int + addr)
 //   - FRndInt without RC cache: 1 (Wd_rc via alloc_gpr(3))
 //   - FCmp/FTst: 4 peak inside emit_fcom_cc_pack (Wd_save + Wd_packed + Wd_cc + Wd_vs)
 //     If kFcomFused, Wd_packed stays alive until consumed by FStsw.
@@ -1785,9 +1786,11 @@ int peak_live_gprs(const Context& ctx, int budget, int* first_over_node, bool fa
 //     *during* a node is: (currently live) + 1 for the new output, before dead
 //     inputs are freed.  try_reuse_input() can avoid the +1 by recycling a
 //     dying input's FPR, but we conservatively ignore reuse here.
-//   - StoreF32 allocates one extra transient FPR (Ds_tmp) that is freed before
-//     the node ends.  Model as a +1 spike.
-//   - StoreI*, FCmp, FTst, FStsw produce no FPR output and need no extra FPRs.
+//   - StoreF32 allocates Ds_narrow, plus Vq_broadcast for a STR Q group, and
+//     frees them before the node ends.  Model as a +1 or +2 spike.
+//   - StoreI* allocates one transient FPR (Dscr in the indefinite guard)
+//     while its input is held.  Model as a +1 spike.
+//   - FCmp, FTst, FStsw produce no FPR output and need no extra FPRs.
 //   - Dead (kDead) nodes are skipped.
 int peak_live_fprs(const Context& ctx, int budget, int* first_over_node) {
     if (first_over_node) {
@@ -1953,6 +1956,13 @@ int peak_live_fprs(const Context& ctx, int budget, int* first_over_node) {
             raise_peak(live + spike, i);
         }
 
+        // StoreI16/32/64: emit_fist_indefinite_guard allocates Dscr for its
+        // NaN check while the input is still held (free_dead_inputs runs
+        // after the node).  A +1 spike, the same as a lone StoreF32.
+        if (n.op == Op::StoreI16 || n.op == Op::StoreI32 || n.op == Op::StoreI64) {
+            raise_peak(live + 1, i);
+        }
+
         // Transcendentals: the lowering copies each input into a freshly
         // allocated pool FPR that the *_core takes ownership of, calls
         // free_dead_inputs() mid-case, then runs the polynomial body which
@@ -2063,16 +2073,8 @@ static int split_prefix_len(const Context& ctx, int first_over_node, int attempt
 // Lives here (not X87IROptimize.cpp) because candidate legality and payoff
 // are joined at the hip with the peak_live_fprs model above.
 
-// FStsw packs payloads into its input slots (inputs[1] = destination
-// register index, inputs[2] = top_delta snapshot — see build()); only
-// inputs[0] (the fused FCmp reference) is a node id.  Every walk below
-// that interprets inputs as node references must skip the payload slots,
-// or a payload value that happens to collide with a node index gets
-// remapped/retargeted and the lowering emits garbage (observed as a WoW
-// guest SIGSEGV when remat rewrote an FStsw's register-index payload).
-static inline int node_ref_input_count(const Node& n) {
-    return n.op == Op::FStsw ? 1 : 3;
-}
+// Every walk below that interprets inputs as node references skips FStsw's
+// payload slots via node_ref_input_count (X87IR.h).
 
 // Insert a copy of nodes[src] at index `pos` (shifting [pos..) up one) and
 // return false if the node budget is exhausted.  All node references —
@@ -2200,6 +2202,7 @@ static bool remat_relieve_fpr_pressure(Context& ctx, int budget) {
             const int use = last_use[h];
             // A load may not cross a memory write or FStsw (writes AX or
             // memory) between its original position and the sunk position.
+            // LoadCW is fnstcw, a 16-bit memory write.
             if (is_load) {
                 bool barrier = false;
                 for (int j = h + 1; j < use && !barrier; j++) {
@@ -2214,6 +2217,7 @@ static bool remat_relieve_fpr_pressure(Context& ctx, int budget) {
                         case Op::StoreI32:
                         case Op::StoreI64:
                         case Op::StoreCW:
+                        case Op::LoadCW:
                         case Op::FStsw:
                         // Bridge nodes: a bridge store may alias the load,
                         // and any bridge register write may redefine the

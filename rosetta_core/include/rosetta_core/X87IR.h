@@ -179,6 +179,17 @@ struct Node {
 };
 static_assert(sizeof(Node) == 16, "X87IR::Node should be 16 bytes");
 
+// FStsw packs payloads into its input slots (inputs[1] = destination
+// register index, inputs[2] = top_delta snapshot; see build()); only
+// inputs[0] (the fused FCmp reference) is a node id.  Every walk that
+// interprets inputs as node references must skip the payload slots, or a
+// payload value that happens to collide with a node index gets
+// remapped/retargeted and the lowering emits garbage (observed as a WoW
+// guest SIGSEGV when remat rewrote an FStsw's register-index payload).
+inline int node_ref_input_count(const Node& n) {
+    return n.op == Op::FStsw ? 1 : 3;
+}
+
 // ── IR context (all state for one run, lives on the stack) ──────────────────
 
 struct Context {
@@ -299,7 +310,8 @@ struct Context {
 bool build(Context& ctx, IRInstr* instr_array, int64_t num_instrs, int64_t start_idx,
            int run_length, bool allow_bridges = false, bool bridges_v2 = false);
 
-// Run optimization passes on the IR (DSE, FMA detection, FCOM+FSTSW fusion).
+// Run optimization passes on the IR (DSE, FMA detection, FCOM+FSTSW fusion,
+// exact int64 copy).
 void optimize(Context& ctx);
 
 // pass_fma_reduce diagnostics.  Atomic counters incremented as the pass
@@ -333,8 +345,9 @@ void fma_reduce_print_stats();
 
 // Compute the peak number of simultaneously live FPR-bearing nodes that the
 // lowering pass will require, accounting for transient temporaries (e.g. the
-// +1/+2 FPR spike during StoreF32 narrowing).  Used to gate lowering against
-// the available scratch FPR pool.
+// +1/+2 FPR spike during StoreF32 narrowing, the +1 for the StoreI
+// indefinite guard's scratch).  Used to gate lowering against the available
+// scratch FPR pool.
 //
 // budget / first_over_node: when first_over_node is non-null, it is set to
 // the index of the first node whose modeled demand exceeds `budget` (-1 if
