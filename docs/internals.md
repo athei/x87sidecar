@@ -676,9 +676,14 @@ rounds the stored value through binary64, as described above. Reading an
 80-bit value as binary64 (for arithmetic, or for `fst m64`) always rounds to
 nearest even, where the hardware's `fst m64` follows the control word's RC;
 `fst m32` rounds by MXCSR.RC, like the arithmetic, and a finite value beyond
-binary64's range becomes infinity whatever the rounding mode. Without the
-knob, `fld m80` reads an unnormal as if its integer bit were set, where
-stock and the knob give the default NaN.
+binary64's range becomes infinity whatever the rounding mode.
+
+An unnormal, pseudo-infinity or pseudo-NaN (integer bit clear, exponent not
+zero) reads as the default NaN with the native slots and without them, as
+in stock Rosetta. With `X87_NATIVE_SLOTS=0`, though, such a register held
+from one reply to the next is converted at the reply boundary like any
+other, so `fnsave` then stores the default NaN in its place, where stock
+and the native slots keep the ten bytes.
 
 ## Encodings Rosetta's decoder rejects
 

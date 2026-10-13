@@ -197,6 +197,80 @@ static uint64_t test_fld_m80fp_round_overflow(void) {
 #endif
 
 // ---------------------------------------------------------------------------
+// Invalid encodings: the integer bit clear under a nonzero exponent.  An
+// unnormal, a pseudo-infinity and a pseudo-NaN are invalid operands; the x87
+// and stock Rosetta read them as the default NaN in a float read or in
+// arithmetic, and as the integer indefinite in an integer store.  Each
+// reader loads the image with fldt in the same block.
+// ---------------------------------------------------------------------------
+
+static const unsigned char k_invalid[][10] = {
+    // unnormal: exponent 0x4005, integer bit clear
+    {0x01, 0x0C, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x05, 0x40},
+    // pseudo-infinity: exponent 0x7FFF, significand 0
+    {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x7F},
+    // pseudo-NaN: exponent 0x7FFF, integer bit clear, payload set
+    {0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0xFF, 0xFF},
+};
+static const char* const k_invalid_name[] = {"unnormal", "pseudo-inf", "pseudo-NaN"};
+
+static uint64_t read_fstp64(const unsigned char* src) {
+    double r;
+    __asm__ volatile("fldt %1\n\tfstpl %0\n" : "=m"(r) : "m"(*(const long double*)src));
+    return as_u64(r);
+}
+
+static uint64_t read_fstp32(const unsigned char* src) {
+    uint32_t r;
+    __asm__ volatile("fldt %1\n\tfstps %0\n" : "=m"(r) : "m"(*(const long double*)src));
+    return r;
+}
+
+static uint64_t read_fistp64(const unsigned char* src) {
+    int64_t r;
+    __asm__ volatile("fldt %1\n\tfistpll %0\n" : "=m"(r) : "m"(*(const long double*)src));
+    return (uint64_t)r;
+}
+
+static uint64_t read_fistp32(const unsigned char* src) {
+    uint32_t r;
+    __asm__ volatile("fldt %1\n\tfistpl %0\n" : "=m"(r) : "m"(*(const long double*)src));
+    return r;
+}
+
+static uint64_t read_fadd(const unsigned char* src) {
+    static const double one = 1.0;
+    double r;
+    __asm__ volatile("fldt %1\n\tfaddl %2\n\tfstpl %0\n"
+                     : "=m"(r)
+                     : "m"(*(const long double*)src), "m"(one));
+    return as_u64(r);
+}
+
+static const struct {
+    const char* name;
+    uint64_t (*fn)(const unsigned char*);
+    uint64_t expected;
+} k_invalid_readers[] = {
+    {"fstp m64", read_fstp64, 0xFFF8000000000000ULL},
+    {"fstp m32", read_fstp32, 0xFFC00000ULL},
+    {"fistp m64", read_fistp64, 0x8000000000000000ULL},
+    {"fistp m32", read_fistp32, 0x80000000ULL},
+    {"fadd m64", read_fadd, 0xFFF8000000000000ULL},
+};
+
+// A pseudo-denormal (exponent 0, integer bit set) is a valid value: the x87
+// reads it with the exponent of a denormal, 2^-16382, so here it is
+// 2^-16382 * (1 + 2^-63), far below binary64's range.  The same readers must
+// give +0 for the stores and 1.0 for the fadd, as stock Rosetta does.
+static const unsigned char k_pseudo_denormal[10] = {0x01, 0x00, 0x00, 0x00, 0x00,
+                                                    0x00, 0x00, 0x80, 0x00, 0x00};
+static const uint64_t k_pseudo_denormal_expected[] = {
+    0x0000000000000000ULL, 0x00000000ULL, 0x0000000000000000ULL, 0x00000000ULL,
+    0x3FF0000000000000ULL,
+};
+
+// ---------------------------------------------------------------------------
 
 typedef struct {
     const char* name;
@@ -243,6 +317,26 @@ int main(void) {
         printf("%s  got=%016llx  expected=%016llx  %s\n", tests[i].name, (unsigned long long)got,
                (unsigned long long)tests[i].expected, ok ? "PASS" : "FAIL");
         ok ? pass++ : fail++;
+    }
+    for (size_t v = 0; v < sizeof(k_invalid) / sizeof(k_invalid[0]); v++) {
+        for (size_t r = 0; r < sizeof(k_invalid_readers) / sizeof(k_invalid_readers[0]); r++) {
+            const uint64_t got = k_invalid_readers[r].fn(k_invalid[v]);
+            const int ok = got == k_invalid_readers[r].expected;
+            printf("fld m80fp  %-10s %-9s  got=%016llx  expected=%016llx  %s\n", k_invalid_name[v],
+                   k_invalid_readers[r].name, (unsigned long long)got,
+                   (unsigned long long)k_invalid_readers[r].expected, ok ? "PASS" : "FAIL");
+            ok ? pass++ : fail++;
+            n++;
+        }
+    }
+    for (size_t r = 0; r < sizeof(k_invalid_readers) / sizeof(k_invalid_readers[0]); r++) {
+        const uint64_t got = k_invalid_readers[r].fn(k_pseudo_denormal);
+        const int ok = got == k_pseudo_denormal_expected[r];
+        printf("fld m80fp  %-10s %-9s  got=%016llx  expected=%016llx  %s\n", "pseudo-den",
+               k_invalid_readers[r].name, (unsigned long long)got,
+               (unsigned long long)k_pseudo_denormal_expected[r], ok ? "PASS" : "FAIL");
+        ok ? pass++ : fail++;
+        n++;
     }
 
     printf("\n%d/%d passed\n", pass, n);

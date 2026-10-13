@@ -53,6 +53,22 @@ void emit_f80_to_f64_convert(AssemblerBuffer& buf, int Xmant_inout, int Wexp, in
     is_bitmask_immediate(/*is_64bit=*/false, 0x7FFFU, enc_15bits);
     emit_and_imm(buf, /*is_64bit=*/0, Wexp, enc_15bits.N, enc_15bits.immr, enc_15bits.imms, Wexp);
 
+    // The integer bit clear under a nonzero exponent (an unnormal,
+    // pseudo-infinity or pseudo-NaN) is an invalid operand, which the x87
+    // and stock Rosetta read as the default NaN.  A pseudo-denormal
+    // (exponent 0, integer bit set) is a valid value and goes on.
+    const auto integer_bit = buf.end;
+    emit_tbz(buf, /*TBNZ*/ 1, Xmant_inout, 63, 0);
+    const auto exponent_zero = buf.end;
+    emit_cbz(buf, /*is_64bit=*/0, /*CBZ*/ 0, Wexp, 0);
+    emit_movn(buf, 1, /*MOVZ*/ 2, 3, 0xfff8, Xmant_inout);  // 0xFFF8000000000000
+    const auto invalid_done = buf.end;
+    emit_b(buf, 0);
+    buf.data[integer_bit / 4] |= static_cast<uint32_t>(((buf.end - integer_bit) / 4) & 0x3FFF)
+                                 << 5;
+    buf.data[exponent_zero / 4] |=
+        static_cast<uint32_t>(((buf.end - exponent_zero) / 4) & 0x7FFFF) << 5;
+
     // Small extended exponents produce binary64 subnormals. Handle them
     // separately so native state can cross a reply boundary losslessly.
     emit_movn(buf, 0, 2, 0, 0x3c00, Wd_aux);
@@ -165,6 +181,8 @@ void emit_f80_to_f64_convert(AssemblerBuffer& buf, int Xmant_inout, int Wexp, in
     emit_bitfield(buf, 1, 1, 1, 1, 0, Xsign, Xmant_inout);
     buf.data[small_done / 4] = 0x14000000U | static_cast<uint32_t>((buf.end - small_done) / 4);
     buf.data[normal_done / 4] = 0x14000000U | static_cast<uint32_t>((buf.end - normal_done) / 4);
+    buf.data[invalid_done / 4] =
+        0x14000000U | static_cast<uint32_t>((buf.end - invalid_done) / 4);
 }
 
 // =============================================================================
@@ -578,11 +596,10 @@ static void orr_mask(AssemblerBuffer& buf, int is_64bit, int Rd, int Rn, uint64_
 
 // ── Flag-free f80 <-> binary64 ──────────────────────────────────────────────
 //
-// The results of emit_f80_to_f64_convert (but see the unnormals below) and
-// emit_f64_to_f80, written for code that holds the x87 registers in the
-// native layout and converts one slot at a time inside a run: four GPRs, no
-// NZCV write, and control flow through CBZ/CBNZ/TBZ/TBNZ and B only, all
-// forward.
+// The results of emit_f80_to_f64_convert and emit_f64_to_f80, written for
+// code that holds the x87 registers in the native layout and converts one
+// slot at a time inside a run: four GPRs, no NZCV write, and control flow
+// through CBZ/CBNZ/TBZ/TBNZ and B only, all forward.
 
 // With e the biased exponent and m the significand, a normal result is
 // built as (hi << 52) + r, where hi = sign << 11 | (e - 15361) and r is m
@@ -592,12 +609,9 @@ static void orr_mask(AssemblerBuffer& buf, int is_64bit, int Rd, int Rn, uint64_
 // case of its own.  e - 15361 >= 0x7FE overflows before rounding and goes
 // to the path that also takes infinities and NaNs.
 //
-// One difference from emit_f80_to_f64_convert: an encoding with the integer
-// bit clear under a nonzero exponent (unnormal, pseudo-infinity, pseudo-NaN)
-// becomes the default NaN, as on the x87 and in stock Rosetta, where the
-// flag-based version reads an unnormal as if the bit were set.  Its callers
-// hold Rosetta's own 80-bit registers, so they meet these encodings as
-// stock does.
+// An encoding with the integer bit clear under a nonzero exponent
+// (unnormal, pseudo-infinity, pseudo-NaN) becomes the default NaN, as on the
+// x87 and in stock Rosetta, and as in emit_f80_to_f64_convert.
 void emit_f80_bits_to_f64(AssemblerBuffer& buf, int Xm, int Wx, int Xt1, int Xt2,
                           bool round_to_odd) {
     // Integer bit clear under a nonzero exponent: an unnormal, pseudo-

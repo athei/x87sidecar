@@ -27,6 +27,10 @@ namespace TranslatorX87 {
 //
 // All scratch is caller-allocated; NZCV is clobbered.
 //
+// An unnormal, pseudo-infinity or pseudo-NaN (integer bit clear, exponent
+// nonzero) gives the default NaN, as in stock Rosetta; a pseudo-denormal
+// (exponent 0, integer bit set) keeps its value.
+//
 // Wd_aux plays two roles sequentially: first it captures the rounding-carry
 // flag, then (after the carry is consumed) it holds the 0x7FFF/0x7FF
 // constants for the inf/nan exponent override.  Caller passes one register
@@ -44,8 +48,8 @@ void emit_f64_to_f80(AssemblerBuffer& buf, int Xaddr_slot, int Dd_src, int Xbits
 //
 // emit_f80_bits_to_f64: Xm holds the 64-bit significand and Wx the sign and
 // exponent halfword (bits 31:16 zero, as LDRH leaves them).  Xm receives the
-// binary64 bits emit_f80_to_f64_convert would produce, except that an
-// unnormal, pseudo-infinity or pseudo-NaN gives the default NaN, as in stock
+// binary64 bits emit_f80_to_f64_convert would produce: an unnormal,
+// pseudo-infinity or pseudo-NaN gives the default NaN in both, as in stock
 // Rosetta.  Wx, Xt1 and Xt2 are clobbered.
 //
 // round_to_odd truncates instead and sets the lowest result bit when any
