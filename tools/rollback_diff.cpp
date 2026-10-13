@@ -4,7 +4,7 @@
 // WoW geometry when re-enabled for the top_dirty / deferred_pop branches.
 //
 // Usage:
-//   rollback_diff <ir_blob> [--determinism] [--native-slots]
+//   rollback_diff <ir_blob> [--determinism] [--no-native-slots]
 //
 // <ir_blob> is a raw IRInstr[] file, no header.  Produced by
 //   profile_analyze --dump-ir-binary 0xH out.ir <profile.prof>
@@ -164,7 +164,7 @@ void printContext(const char* label, const std::vector<uint32_t>& arm, size_t at
 
 int main(int argc, char** argv) try {
     bool determinism = false;
-    bool native_slots = false;
+    bool native_slots = true;
     bool bad_args = argc < 2;
     for (int i = 2; i < argc; ++i) {
         const std::string a = argv[i];
@@ -172,19 +172,23 @@ int main(int argc, char** argv) try {
             determinism = true;
         } else if (a == "--native-slots") {
             native_slots = true;
+        } else if (a == "--no-native-slots") {
+            native_slots = false;
         } else {
             bad_args = true;
         }
     }
     if (bad_args) {
-        std::fprintf(stderr, "usage: %s <ir_blob> [--determinism] [--native-slots]\n", argv[0]);
+        std::fprintf(stderr, "usage: %s <ir_blob> [--determinism] [--no-native-slots]\n",
+                     argv[0]);
         std::fprintf(stderr,
                      "  default mode: rollback-OFF vs rollback-ON for top_dirty + deferred_pop\n"
                      "                (the bug branches).\n"
                      "  --determinism: run rollback-OFF twice; should produce zero divergence\n"
                      "                 (sanity-checks harness setup/teardown).\n"
-                     "  --native-slots: both runs with X87_NATIVE_SLOTS=1; the per-op cache\n"
-                     "                  comparison includes the slot tracker.\n");
+                     "  Both runs use X87_NATIVE_SLOTS as the sidecar does by default, and the\n"
+                     "  per-op cache comparison includes the slot tracker.\n"
+                     "  --no-native-slots: both runs with X87_NATIVE_SLOTS=0.\n");
         return 2;
     }
     const char* path = argv[1];

@@ -4,7 +4,7 @@
 //
 // Usage:
 //   ir_pressure_replay <ir_blob> [--fpr-pool N] [--gpr-pool N] [--no-split] [--log]
-//                      [--native-slots]
+//                      [--no-native-slots]
 //
 // --fpr-pool N narrows only the gate (X87_FPR_POOL_LIMIT); the FPR mask the
 // lowering draws from is always the default eight.  --gpr-pool N (5-8)
@@ -12,9 +12,11 @@
 // model undercount asserts here.  The direct and fusion translators have
 // no pressure gate and expect most of the eight scratch GPRs, so below 8
 // a blob can also assert outside the IR path (on the shipped blobs, the
-// same pools assert with X87_DISABLE_X87_IR set).  --native-slots replays
-// with X87_NATIVE_SLOTS=1, where an IR read of a register still in its
-// 80-bit format costs three more GPRs (peak_live_gprs).
+// same pools assert with X87_DISABLE_X87_IR set).  The replay runs with
+// X87_NATIVE_SLOTS on, as the sidecar does by default, where an IR read of
+// a register still in its 80-bit format costs three more GPRs
+// (peak_live_gprs); --no-native-slots replays with X87_NATIVE_SLOTS=0.
+// --native-slots is accepted and changes nothing.
 //
 // <ir_blob> is a raw IRInstr[] file, no header.  Produced by
 //   profile_analyze --dump-ir-binary 0xH out.ir <profile.prof>
@@ -154,7 +156,7 @@ int main(int argc, char** argv) try {
     bool no_split = false;
     bool no_remat = false;
     bool log_split = false;
-    bool native_slots = false;
+    bool native_slots = true;
     uint64_t runtime_version_arg = 0;
     bool runtime_version_arg_set = false;
 
@@ -175,12 +177,14 @@ int main(int argc, char** argv) try {
             log_split = true;
         } else if (a == "--native-slots") {
             native_slots = true;
+        } else if (a == "--no-native-slots") {
+            native_slots = false;
         } else if (path == nullptr) {
             path = argv[i];
         } else {
             std::fprintf(stderr,
                          "usage: %s <ir_blob> [--fpr-pool N] [--gpr-pool N] [--no-split] [--log] "
-                         "[--native-slots]\n",
+                         "[--no-native-slots]\n",
                          argv[0]);
             return 2;
         }
@@ -188,7 +192,7 @@ int main(int argc, char** argv) try {
     if (path == nullptr) {
         std::fprintf(stderr,
                      "usage: %s <ir_blob> [--fpr-pool N] [--gpr-pool N] [--no-split] [--log] "
-                     "[--native-slots]\n",
+                     "[--no-native-slots]\n",
                      argv[0]);
         return 2;
     }

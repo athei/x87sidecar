@@ -148,7 +148,9 @@ RosettaConfig load_config_from_env() {
     // Native transport replies (Translator.cpp).  Default ON; =0 is the
     // rollback and bisect switch that restores the binary64 round trip.
     cfg.native_transport = env_default_on("X87_NATIVE_TRANSPORT");
-    cfg.native_slots = env_truthy("X87_NATIVE_SLOTS") ? 1 : 0;
+    // Native slots (X87Cache::native_slots).  Default ON; =0 is the kill
+    // switch that restores the compact binary64 register file.
+    cfg.native_slots = env_default_on("X87_NATIVE_SLOTS");
     // X87_PRECISE_FAULTS: 1 probes the first access of each reply; 2 also
     // ends a run before each later access, which needs the native slots.
     {
@@ -494,11 +496,13 @@ void print_env_help(std::FILE* out) {
         "                                loops up to 63 times slower (3.7 times as a\n"
         "                                geometric mean over the benchmarks).  Without\n"
         "                                X87_NATIVE_SLOTS it acts as =1 and says so.\n"
-        "  X87_NATIVE_SLOTS=1            keep each x87 register's working binary64\n"
-        "                                value inside its native 80-bit slot and\n"
-        "                                convert slots one at a time, so registers a\n"
-        "                                reply does not use keep their 80-bit values.\n"
-        "                                Default OFF while it is being completed.\n"
+        "  X87_NATIVE_SLOTS=0            convert all eight x87 registers to binary64\n"
+        "                                and back in every reply with floating-point\n"
+        "                                work, which rounds values only held, copied\n"
+        "                                or stored; for bisecting.  Default ON: the\n"
+        "                                registers stay in their native 80-bit slots\n"
+        "                                and are converted one at a time where\n"
+        "                                arithmetic reads them.\n"
         "  X87_ENABLE_FMA_CONTRACT=1     fold fmul+fadd/fsub into a single FMA (IR pass,\n"
         "                                fld_arith_arithp fusion, arith_faddp peephole).\n"
         "                                Off by default: real x87 rounds the product\n"

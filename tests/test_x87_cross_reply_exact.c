@@ -33,8 +33,8 @@
  * TOP past 0.
  * Blocks are separated by `jmp 1f; 1:`, which ends a translation block.
  *
- * Expected: passes under stock Rosetta and under x87sidecar with
- * X87_NATIVE_SLOTS=1, fails without it (run_tests.sh checks both).
+ * Expected: passes under stock Rosetta and under x87sidecar, fails with
+ * X87_NATIVE_SLOTS=0 (run_tests.sh checks both).
  */
 #include <stdint.h>
 #include <stdio.h>

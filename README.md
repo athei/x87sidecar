@@ -315,18 +315,19 @@ has to get right too. FMA contraction is opt-in (`X87_ENABLE_FMA_CONTRACT=1`) be
 before the add, and at the 53-bit precision Windows processes run at the
 unfused form is the exact one.
 
-The sidecar holds x87 values as binary64 rather than the 80-bit extended
-format. At the 53-bit precision control Windows uses, arithmetic results
-match the hardware as long as intermediate values stay inside the binary64
-exponent range; at 64-bit or 24-bit precision control, for 64-bit
+The sidecar does x87 arithmetic in binary64 rather than the 80-bit
+extended format. At the 53-bit precision control Windows uses, arithmetic
+results match the hardware as long as intermediate values stay inside the
+binary64 exponent range; at 64-bit or 24-bit precision control, for 64-bit
 integers above 2^53 that meet arithmetic and for sequences that carry extra
 precision from one instruction to the next, such as the `fyl2x`-based
-`pow`, they do not. A `fild m64; fistp m64` copy moves its eight bytes
-unchanged, within a block or across blocks, unless the value is still on
-the stack while a reply with floating-point work runs, or sits inside a
-mixed run that the fusion does not match with the IR off; then a value
-above 2^53 is rounded. An adjacent `fld m80; fstp m80` pair is copied
-unchanged.
+`pow`, they do not. The registers themselves stay in Rosetta's 80-bit
+format, and a register is converted to binary64 only where arithmetic reads
+it, so a value that is only loaded, held on the stack, copied, exchanged or
+stored keeps all its bits, across blocks too: a `fild m64; fistp m64` copy
+moves its eight bytes unchanged and an `fld m80; fstp m80` copy its ten.
+`X87_NATIVE_SLOTS=0` goes back to converting every register to binary64 in
+each reply with floating-point work.
 [docs/internals.md](docs/internals.md#precision-and-the-floating-point-environment)
 lists the measured differences, including how x87 code interacts with MXCSR.
 
@@ -334,11 +335,9 @@ When an asynchronous signal lands inside a translated run, Rosetta steps to the 
 the guest state from there, so every instruction the sidecar emits is one
 the runtime's decoder knows, control flow only goes forward, and a run is
 answered with one reply so the map has entries only where the state is
-complete. The private binary64 register file is converted to Rosetta's native
-80-bit layout at those boundaries, except in replies that only move
-integers, which work on the 80-bit registers directly so an int64 held on
-the stack across branches stays exact. The signal tests check both arithmetic
-under a SIGUSR1 storm and reading or replacing the saved x87 context in
+complete. At those boundaries every register is in Rosetta's native 80-bit
+layout, and a register the reply computed with is converted back to it. The
+signal tests check both arithmetic under a SIGUSR1 storm and reading or replacing the saved x87 context in
 64-bit and 32-bit compatibility mode.
 
 A memory fault in translated code can only be rolled back to the start of
@@ -358,9 +357,11 @@ by default because of what it costs: an x87 store at the start of a reply
 into write-combined memory, as when a game fills a mapped vertex buffer,
 becomes 23 to 40 times slower, loops of x87 arithmetic on memory operands
 lose up to 7 percent, and nested `fild m64; fistp m64` copies
-(`fild; fild; fistp; fistp`) take 4.5 times as long. Even with it on, a fault in a later instruction of a
-floating-point run still aborts the process, and one in the store of an
-adjacent `fild m64; fistp m64` copy is reported at the `fild`;
+(`fild; fild; fistp; fistp`) take 4.5 times as long. Even with it on, a
+fault in a later instruction of a floating-point run still aborts the
+process, and one in the store of an adjacent `fild m64; fistp m64` copy is
+reported at the `fild`. `X87_PRECISE_FAULTS=2` makes those precise too, at a
+much higher cost;
 [docs/internals.md](docs/internals.md#memory-faults-inside-emitted-code)
 explains why.
 
@@ -447,12 +448,12 @@ knowing. Bracketed values are defaults.
 | `X87_ENABLE_BRIDGE=0` | disable carrying one IR run across short `mov`/`lea` gaps between x87 segments [on] |
 | `X87_BRIDGE_V2=0` | disable bridging across flag-writing ALU whose flags Rosetta's liveness proves dead [on] |
 | `X87_ENABLE_IR_SPLIT=0`, `X87_ENABLE_IR_REMAT=0` | disable register-pressure relief: splitting over-pressure runs, sinking long-lived values [on] |
-| `X87_NATIVE_TRANSPORT=0` | put replies made only of integer loads and stores (`fild`, `fistp`, ...) back through the binary64 register file, which rounds int64 values of 2^53 or more held on the stack; for bisecting [on] |
-| `X87_NATIVE_SLOTS=1` | keep the x87 registers in their native 80-bit slots and convert a register to binary64 only where arithmetic reads it, so values held on the stack, copied, exchanged, stored with `fst`/`fistp` or saved with `fsave` keep all 80 bits as on real x87; with `X87_PRECISE_FAULTS=2` it also makes faults later in a floating-point run reach the program's handler. Its cost has not been measured yet [off: every reply with floating-point work converts all eight registers to binary64 and back, see [docs/internals.md](docs/internals.md#asynchronous-signals-inside-emitted-code)] |
+| `X87_NATIVE_TRANSPORT=0` | put replies made only of integer loads and stores (`fild`, `fistp`, ...) back through the ordinary replies, which with `X87_NATIVE_SLOTS=0` round int64 values of 2^53 or more held on the stack; for bisecting [on] |
+| `X87_NATIVE_SLOTS=0` | go back to converting all eight x87 registers to binary64 and back in every reply with floating-point work, which rounds values held on the stack, copied, exchanged, stored with `fst`/`fistp` or saved with `fsave`; for bisecting. By default the registers stay in their native 80-bit slots and a register is converted to binary64 only where arithmetic reads it, so those values keep all 80 bits as on real x87 [on, see [docs/internals.md](docs/internals.md#asynchronous-signals-inside-emitted-code)] |
 | `X87_PRECISE_FAULTS=1` | for a program that aborts with "unexpectedly need to EmulateForward on a synchronous exception": probe the memory operand of each reply's first x87 instruction and answer runs of integer loads and stores one instruction per reply, so a memory fault there reaches the program's handler; costs up to 7 percent on x87 loops, makes an x87 store into write-combined memory 23 to 40 times slower, and faults later in a floating-point run still abort. `=2` also ends each x87 run before every later memory access, so every fault reaches the handler, and makes x87 loops up to 63 times slower (3.7 times as a geometric mean); it needs `X87_NATIVE_SLOTS` and acts as `=1` without it [off: any memory fault in translated x87 code aborts] |
 | `X87_DISABLE_X87_IR=1` | direct translator only, no IR pipeline |
 | `X87_DISABLE_ALL_FUSIONS=1`, `X87_DISABLE_FUSIONS=f1,f2` | disable every fusion, or the named ones (`--help` lists the names) |
-| `X87_DISABLE_FUSIONS=fild_fistp,fld_fstp_m80` | send adjacent `fld m80; fstp m80` pairs, and `fild m64; fistp m64` pairs in runs with other x87 work, through binary64 instead of copying the bytes exactly; replies of only integer loads and stores stay exact through native transport [both on] |
+| `X87_DISABLE_FUSIONS=fild_fistp,fld_fstp_m80` | send adjacent `fld m80; fstp m80` pairs, and `fild m64; fistp m64` pairs in runs with other x87 work, through binary64 instead of copying the bytes exactly when `X87_NATIVE_SLOTS=0`; with the native slots the bytes are copied exactly anyway, and replies of only integer loads and stores stay exact through native transport [both on] |
 | `X87_DISABLE_SINGLE_FAST=1`, `X87_DISABLE_CACHE=1` | disable the single-op fast path, the cross-instruction register cache |
 | `X87_STRICT_ALLOC=1` | assert when the translator runs out of scratch registers, instead of declining the request to stock with one `failed in block hash=0xH` line [off; the test harness sets it] |
 

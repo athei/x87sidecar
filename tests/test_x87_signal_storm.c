@@ -25,9 +25,10 @@
  *           pages in a loop (translation invalidation)
  * argv[2] is the time budget per case in seconds.  STORM_CASE=<name> runs one
  * case only.  Under the chain cases run in every variant; the per-opcode
- * cases run in "plain" only.  With X87_NATIVE_SLOTS=1 in the environment the
- * held_f80 case runs in "plain" and "modctx" as well: an 80-bit value held
- * across replies, which the modctx handler replaces in the saved context.
+ * cases run in "plain" only.  Unless X87_NATIVE_SLOTS=0 is in the environment
+ * the held_f80 case runs in "plain" and "modctx" as well: an 80-bit value
+ * held across replies, which the modctx handler replaces in the saved
+ * context.
  */
 #include <math.h>
 #include <pthread.h>
@@ -750,10 +751,10 @@ int main(int argc, char** argv) {
                 run_case(k_op_cases[k].name, k_op_cases[k].fn, 0.75, v, g_budget_op, NAN);
             }
         }
-        /* Under the sidecar an 80-bit value only survives a reply with
-         * X87_NATIVE_SLOTS=1, so the case runs where that is set. */
+        /* Under the sidecar an 80-bit value only survives a reply with the
+         * native slots, so the case is left out with X87_NATIVE_SLOTS=0. */
         const char* slots = getenv("X87_NATIVE_SLOTS");
-        if ((v == V_PLAIN || v == V_MODCTX) && slots != NULL && strcmp(slots, "1") == 0) {
+        if ((v == V_PLAIN || v == V_MODCTX) && (slots == NULL || strcmp(slots, "0") != 0)) {
             run_held_case(v, g_budget_chain);
         }
     }
