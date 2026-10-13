@@ -161,7 +161,11 @@ struct RosettaConfig {
                                       //                           a precise context instead of
                                       //                           aborting the process.  Off, the
                                       //                           emitted code is the same as
-                                      //                           without the feature.
+                                      //                           without the feature.  =2 also
+                                      //                           ends a run before each later
+                                      //                           memory access, so every fault
+                                      //                           is precise; it needs
+                                      //                           native_slots and is 1 without.
     uint8_t native_slots;             // X87_NATIVE_SLOTS          (default OFF) =1 keeps the
                                       //                           working binary64 value of each
                                       //                           x87 register inside its native

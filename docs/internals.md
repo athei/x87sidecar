@@ -319,30 +319,32 @@ percent (dot products, `fyl2x`), and a loop of two nested
 split. With the knob off the emitted code is the same as without the
 feature.
 
-Without `X87_NATIVE_SLOTS`, a fault in a later instruction of a
-floating-point run still aborts even with the knob on. That instruction has
-no map entry of its own, and giving it one would mean writing the x87 state
-back to memory in the native layout before every memory access of the run,
-which with the compact layout means converting all eight slots each time.
-Probing the later accesses at the start of the reply as well would not
-help: the rollback would report the run's first instruction as rip, so a
-handler that skips the faulting instruction would skip the wrong one, and a
-second store probe would itself change state before the faulting one.
-With `X87_NATIVE_TRANSPORT=0` an integer-only run is an ordinary
-floating-point run again.
+With `X87_PRECISE_FAULTS=1`, a fault in a later instruction of a
+floating-point run still aborts. That instruction has no map entry of its
+own, and giving it one means writing the x87 state back to memory in the
+native layout before every memory access of the run. Probing the later
+accesses at the start of the reply as well would not help: the rollback
+would report the run's first instruction as rip, so a handler that skips the
+faulting instruction would skip the wrong one, and a second store probe
+would itself change state before the faulting one. With
+`X87_NATIVE_TRANSPORT=0` an integer-only run is an ordinary floating-point
+run again.
 
-With `X87_NATIVE_SLOTS=1` the x87 state is in the native layout at the end
-of every reply, and ending a reply costs only the conversion of the slots it
-left in binary64. So with both knobs on, a run ends before each instruction
-after its first that accesses guest memory: the run is cut there, bridging
-is off, and a fusion does not take such an instruction, and this also holds
-with the run cache off. Every access is then the first of its reply, the
-probe covers it, and a fault reports that instruction as rip with the state
-from before it. The adjacent `fild m64; fistp m64` pair of a native
-transport run is split too, so its store faults precisely instead of rolling
-back to the `fild`. Runs get shorter, so the IR sees fewer long runs and
-arithmetic on memory operands costs more replies; that has not been
-measured yet.
+`X87_PRECISE_FAULTS=2` pays for that. With `X87_NATIVE_SLOTS` on, the x87
+state is in the native layout at the end of every reply, and ending a reply
+costs only the conversion of the slots it left in binary64, so a run ends
+before each instruction after its first that accesses guest memory: the run
+is cut there, bridging is off, and a fusion does not take such an
+instruction, and this also holds with the run cache off. Every access is
+then the first of its reply, the probe covers it, and a fault reports that
+instruction as rip with the state from before it. The adjacent
+`fild m64; fistp m64` pair of a native transport run is split too, so its
+store faults precisely instead of rolling back to the `fild`. Runs get much
+shorter: against `X87_PRECISE_FAULTS=1` without the native slots, the
+benchmark loops take up to 63 times as long, 3.7 times as a geometric mean
+over 143 rows, and Delphi's `System.Move` loops 5 to 7 times. With `X87_NATIVE_SLOTS=0` the value 2 acts as 1,
+and the sidecar prints a line saying so, since without the native layout
+every cut would convert all eight registers.
 
 `tests/test_x87_sync_fault.c` checks rip, fault address and kind, control
 word, status word, tags and stack contents in the handler against a
@@ -357,7 +359,7 @@ runs it in a phase of its own with `X87_PRECISE_FAULTS=1`, and once
 without, where a store at the start of a reply must abort with the
 runtime's message. `SYNC_FAULT_IN_RUN=1` adds the cases inside runs and the
 transport pair's store, which pass under stock Rosetta and under the sidecar
-with `X87_NATIVE_SLOTS=1`; the phase runs them that way too.
+with `X87_PRECISE_FAULTS=2`; the phase runs them that way too.
 
 ## Guest flags in NZCV
 

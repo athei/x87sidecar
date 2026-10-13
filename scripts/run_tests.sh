@@ -50,11 +50,11 @@
 #      with X87_PRECISE_FAULTS=1 (default, IR off, fusions off, run cache
 #      off, clamped register pool, bridging off, X87_STOCK_BCD=0 and
 #      X87_FAIL_ALLOC_EVERY=N), with its in-run group too under
-#      X87_NATIVE_SLOTS=1, and one of its faults must still abort the
-#      process without the knob, under both the cooperative and the default
-#      attach.  Its wc_cross case, an fstpt across a page boundary of
-#      uncached memory, must store without a signal natively and without
-#      the knob, and take the probe's SIGBUS with it
+#      X87_PRECISE_FAULTS=2 X87_NATIVE_SLOTS=1, and one of its faults must
+#      still abort the process without the knob, under both the cooperative
+#      and the default attach.  Its wc_cross case, an fstpt across a page
+#      boundary of uncached memory, must store without a signal natively
+#      and without the knob, and take the probe's SIGBUS with it
 #  18. test_crash_after_release: a target that is no longer traced after
 #      the release and then dies (abort, SIGSEGV, SIGKILL, SIGILL, exit(3))
 #      must end with its own exit status natively and under both attaches
@@ -78,10 +78,11 @@
 # test_x87_sync_fault runs only in phase 17, since without X87_PRECISE_FAULTS
 # every one of its faults aborts the process.  Even with the knob it runs
 # only the faults the sidecar recovers precisely; the ones inside longer
-# floating-point runs still abort, and SYNC_FAULT_IN_RUN=1 adds them for a
-# manual run.  Naming it, `run_tests.sh test_x87_sync_fault`, runs it through
-# the per-test phases without the knob, where it reports CRASH from phase 2
-# on, and skips phase 17.  Run it as
+# floating-point runs still abort, and SYNC_FAULT_IN_RUN=1 adds them; phase
+# 17 runs them with X87_PRECISE_FAULTS=2, where they pass.  Naming it,
+# `run_tests.sh test_x87_sync_fault`, runs it through the per-test phases
+# without the knob, where it reports CRASH from phase 2 on, and skips phase
+# 17.  Run it as
 # `X87_PRECISE_FAULTS=1 bash scripts/run_tests.sh test_x87_sync_fault`, or run
 # the full suite.
 #
@@ -1069,14 +1070,15 @@ if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then
                 2>/dev/null | filter_runtime_lines) || EXIT=$?
             check_output "test_x87_sync_fault" "$OUT" "$EXIT"
         done
-        # X87_NATIVE_SLOTS ends a reply before every later memory access, so
-        # there the in-run group (SYNC_FAULT_IN_RUN=1) has to pass as well.
+        # X87_PRECISE_FAULTS=2 with X87_NATIVE_SLOTS ends a reply before every
+        # later memory access, so there the in-run group (SYNC_FAULT_IN_RUN=1)
+        # has to pass as well.
         for cfg in "" "X87_DISABLE_X87_IR=1 X87_DISABLE_ALL_FUSIONS=1" "X87_DISABLE_CACHE=1" \
             "X87_IGNORE_FTZ_DAZ=1"; do
-            echo "      X87_PRECISE_FAULTS=1 X87_NATIVE_SLOTS=1 SYNC_FAULT_IN_RUN=1 $cfg"
+            echo "      X87_PRECISE_FAULTS=2 X87_NATIVE_SLOTS=1 SYNC_FAULT_IN_RUN=1 $cfg"
             EXIT=0
             # shellcheck disable=SC2086
-            OUT=$(run_bounded "$TEST_TIMEOUT" env X87_PRECISE_FAULTS=1 X87_NATIVE_SLOTS=1 \
+            OUT=$(run_bounded "$TEST_TIMEOUT" env X87_PRECISE_FAULTS=2 X87_NATIVE_SLOTS=1 \
                 SYNC_FAULT_IN_RUN=1 $cfg "$LOADER" "$SF_BIN" 2>/dev/null | filter_runtime_lines) ||
                 EXIT=$?
             check_output "test_x87_sync_fault" "$OUT" "$EXIT"

@@ -457,7 +457,7 @@ static bool x87_accesses_memory(const IRInstr& insn) {
     return false;
 }
 
-// X87_PRECISE_FAULTS with X87_NATIVE_SLOTS: every reply ends in the native
+// X87_PRECISE_FAULTS=2 with X87_NATIVE_SLOTS: every reply ends in the native
 // layout with nothing deferred, so a reply may stop before any instruction.
 // Stopping before each one that accesses guest memory makes that access the
 // first of its reply, where emit_fault_probe covers it and a fault rolls
@@ -507,8 +507,8 @@ static int precise_window(const IRInstr* instrs, int64_t num, int64_t idx, int l
 // PROT_NONE page faults in the probe's load, so the handler sees a read
 // fault where stock reports a write.  Accesses further into a reply are
 // not probed: rolling back to the reply start would report the wrong
-// instruction.  With X87_NATIVE_SLOTS there are none: a reply ends before
-// every later access (precise_window).
+// instruction.  With X87_PRECISE_FAULTS=2 there are none: a reply ends
+// before every later access (precise_window).
 static void emit_fault_probe(TranslationResult& tr, IRInstr& insn) {
     IROperand* mem = nullptr;
     for (int i = 0; i < insn.num_operands && i < 4; i++) {
@@ -880,9 +880,10 @@ static auto translate_instruction_impl(TranslationResult* translation_result, IR
                     only_cw = o == kOpcodeName_fnstcw || o == kOpcodeName_fldcw;
                 }
                 cache.top_unused = only_cw ? 1 : 0;
-                // With X87_NATIVE_SLOTS a floating-point run ends before each
-                // later memory access, for the same reason (precise_window).
-                const bool split = cache.native_slots && precise_faults_enabled();
+                // With X87_PRECISE_FAULTS=2 and X87_NATIVE_SLOTS a
+                // floating-point run ends before each later memory access,
+                // for the same reason (precise_window).
+                const bool split = cache.native_slots && precise_split_enabled();
                 if (split) {
                     run = precise_window(instr_array, num_instrs, insn_idx, run);
                 }
@@ -1487,10 +1488,10 @@ static auto translate_instruction_impl(TranslationResult* translation_result, IR
     if (cache.native_transport || soft_f80 || exact_fild) {
         fusions_mask |= ~(1ULL << static_cast<int>(FusionId::fild_fistp));
     }
-    // With X87_PRECISE_FAULTS and native slots a fusion must not take an
+    // With X87_PRECISE_FAULTS=2 and native slots a fusion must not take an
     // instruction that accesses memory after the first (precise_window),
     // also when the run cache is off and a reply is not a run.
-    const int64_t fusion_num = cache.native_slots && precise_faults_enabled()
+    const int64_t fusion_num = cache.native_slots && precise_split_enabled()
                                    ? insn_idx + precise_window(instr_array, num_instrs, insn_idx, 8)
                                    : num_instrs;
     const auto fused = TranslatorX87::try_peephole(translation_result, instr_array, fusion_num,

@@ -37,8 +37,8 @@
  * emitted code"), and the store of a fused fild m64 / fistp m64 pair is
  * rolled back to the fild instead.  Those cases are in a second group that
  * runs only with SYNC_FAULT_IN_RUN=1.  They pass under stock Rosetta, and
- * under x87sidecar with X87_NATIVE_SLOTS=1 as well, which ends a reply
- * before each later memory access when X87_PRECISE_FAULTS=1.
+ * under x87sidecar with X87_PRECISE_FAULTS=2 and X87_NATIVE_SLOTS on, which
+ * ends a reply before each later memory access.
  *
  * SYNC_FAULT_CASE=<name> runs one case of either group (wc for the
  * IOSurface group, wc_cross for the page-crossing uncached store, which
@@ -134,7 +134,7 @@ static char scratch_area[4096] __attribute__((aligned(4096)));
 enum init { M_NONE, M_F32, M_F64, M_F80, M_I16, M_I32, M_I64, M_BCD, M_CW, M_ENV, M_SAVE };
 
 /* Groups: PRECISE must pass everywhere; IN_RUN is precise under the sidecar
- * only with X87_NATIVE_SLOTS=1 and runs only on request. */
+ * only with X87_PRECISE_FAULTS=2 and runs only on request. */
 enum group { PRECISE, IN_RUN };
 
 /* Protection of the target page while the case runs. */
@@ -288,7 +288,7 @@ enum err { E_RD, E_WR, E_WP };
     X(PRECISE, a_gs_fld64, M_F64, IN, P_NONE, E_RD, GS_PRE, "fldl %gs:(%rcx)", "")                \
     X(PRECISE, a_gs_fstp64, M_NONE, IN, P_NONE, E_WP, GS_PRE, "fstpl %gs:(%rcx)", "")             \
     X(PRECISE, a_gs_fstp64_ro, M_NONE, IN, P_RO, E_WR, GS_PRE, "fstpl %gs:(%rcx)", "")            \
-    /* later in a floating-point run: precise only with X87_NATIVE_SLOTS=1 */                     \
+    /* later in a floating-point run: precise only with X87_PRECISE_FAULTS=2 */                   \
     X(IN_RUN, r_fld32, M_F32, IN, P_NONE, E_RD, RUN_PRE, "flds (%rsi)", RUN_POST)                 \
     X(IN_RUN, r_fld64, M_F64, IN, P_NONE, E_RD, RUN_PRE, "fldl (%rsi)", RUN_POST)                 \
     X(IN_RUN, r_fld80, M_F80, IN, P_NONE, E_RD, RUN_PRE, "fldt (%rsi)", RUN_POST)                 \

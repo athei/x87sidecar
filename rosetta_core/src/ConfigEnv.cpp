@@ -148,8 +148,23 @@ RosettaConfig load_config_from_env() {
     // Native transport replies (Translator.cpp).  Default ON; =0 is the
     // rollback and bisect switch that restores the binary64 round trip.
     cfg.native_transport = env_default_on("X87_NATIVE_TRANSPORT");
-    cfg.precise_faults = env_truthy("X87_PRECISE_FAULTS") ? 1 : 0;
     cfg.native_slots = env_truthy("X87_NATIVE_SLOTS") ? 1 : 0;
+    // X87_PRECISE_FAULTS: 1 probes the first access of each reply; 2 also
+    // ends a run before each later access, which needs the native slots.
+    {
+        const char* t = std::getenv("X87_PRECISE_FAULTS");
+        cfg.precise_faults = env_truthy("X87_PRECISE_FAULTS") ? 1 : 0;
+        if (t != nullptr && std::strcmp(t, "2") == 0) {
+            cfg.precise_faults = 2;
+            if (cfg.native_slots == 0) {
+                cfg.precise_faults = 1;
+                std::fprintf(stderr,
+                             "X87_PRECISE_FAULTS=2 needs X87_NATIVE_SLOTS; using "
+                             "X87_PRECISE_FAULTS=1 (faults later in a floating-point run "
+                             "abort)\n");
+            }
+        }
+    }
 
     // Test-only gate pool clamps: make register-pressure splits
     // deterministically reproducible regardless of stock's dynamic FPR
@@ -473,6 +488,12 @@ void print_env_help(std::FILE* out) {
         "                                write-combined memory 23 to 40 times slower;\n"
         "                                faults later in a floating-point run still\n"
         "                                abort.\n"
+        "  X87_PRECISE_FAULTS=2          as =1, and with X87_NATIVE_SLOTS on ends each\n"
+        "                                x87 run before every later memory access, so\n"
+        "                                every fault reaches the handler.  Makes x87\n"
+        "                                loops up to 63 times slower (3.7 times as a\n"
+        "                                geometric mean over the benchmarks).  Without\n"
+        "                                X87_NATIVE_SLOTS it acts as =1 and says so.\n"
         "  X87_NATIVE_SLOTS=1            keep each x87 register's working binary64\n"
         "                                value inside its native 80-bit slot and\n"
         "                                convert slots one at a time, so registers a\n"
