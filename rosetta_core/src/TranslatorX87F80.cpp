@@ -1,5 +1,6 @@
 #include "rosetta_core/TranslatorX87F80.hpp"
 
+#include <cassert>
 #include <cstdint>
 
 #include "rosetta_core/AssemblerBuffer.h"
@@ -51,6 +52,22 @@ void emit_f80_to_f64_convert(AssemblerBuffer& buf, int Xmant_inout, int Wexp, in
     LogicalImmEncoding enc_15bits;
     is_bitmask_immediate(/*is_64bit=*/false, 0x7FFFU, enc_15bits);
     emit_and_imm(buf, /*is_64bit=*/0, Wexp, enc_15bits.N, enc_15bits.immr, enc_15bits.imms, Wexp);
+
+    // The integer bit clear under a nonzero exponent (an unnormal,
+    // pseudo-infinity or pseudo-NaN) is an invalid operand, which the x87
+    // and stock Rosetta read as the default NaN.  A pseudo-denormal
+    // (exponent 0, integer bit set) is a valid value and goes on.
+    const auto integer_bit = buf.end;
+    emit_tbz(buf, /*TBNZ*/ 1, Xmant_inout, 63, 0);
+    const auto exponent_zero = buf.end;
+    emit_cbz(buf, /*is_64bit=*/0, /*CBZ*/ 0, Wexp, 0);
+    emit_movn(buf, 1, /*MOVZ*/ 2, 3, 0xfff8, Xmant_inout);  // 0xFFF8000000000000
+    const auto invalid_done = buf.end;
+    emit_b(buf, 0);
+    buf.data[integer_bit / 4] |= static_cast<uint32_t>(((buf.end - integer_bit) / 4) & 0x3FFF)
+                                 << 5;
+    buf.data[exponent_zero / 4] |=
+        static_cast<uint32_t>(((buf.end - exponent_zero) / 4) & 0x7FFFF) << 5;
 
     // Small extended exponents produce binary64 subnormals. Handle them
     // separately so native state can cross a reply boundary losslessly.
@@ -164,6 +181,8 @@ void emit_f80_to_f64_convert(AssemblerBuffer& buf, int Xmant_inout, int Wexp, in
     emit_bitfield(buf, 1, 1, 1, 1, 0, Xsign, Xmant_inout);
     buf.data[small_done / 4] = 0x14000000U | static_cast<uint32_t>((buf.end - small_done) / 4);
     buf.data[normal_done / 4] = 0x14000000U | static_cast<uint32_t>((buf.end - normal_done) / 4);
+    buf.data[invalid_done / 4] =
+        0x14000000U | static_cast<uint32_t>((buf.end - invalid_done) / 4);
 }
 
 // =============================================================================
@@ -296,9 +315,9 @@ void emit_f64_to_f80(AssemblerBuffer& buf, int Xaddr_slot, int Dd_src, int Xbits
 // (+6, stride 10), and are still safe: they skip this boundary, so they
 // neither write nor read the stash, and their integer conversions and
 // LDR D / STR D copies do no floating-point arithmetic, so FZ and FIZ do not
-// affect them. Any other reply that kept values inside the native slots
-// would find this halfword holding slot 0's data, and the stash would have
-// to move somewhere else.
+// affect them. X87_NATIVE_SLOTS replies keep values inside the native slots,
+// where this halfword holds slot 0's data, so they stash at +86 instead
+// (emit_native_slots_fpcr_enter).
 //
 // Nothing here touches NZCV and every branch goes forward.
 static constexpr int16_t kFpcrStashHalfword = 3;  // +6, in halfwords
@@ -392,8 +411,9 @@ static void emit_quiet_entry_test(AssemblerBuffer& buf, int Wtags1, int Wfpcr, i
 // register again, since the conversion reused the registers. With neither
 // bit set it branches to `to_quiet`; otherwise it stores the stash, clears
 // both bits and branches to `to_done`. The caller patches both branches.
+// `stash` is the stash's offset from base in halfwords.
 static void emit_fpcr_enter_slow(AssemblerBuffer& buf, int base, int Xfpcr, int Wbits,
-                                 size_t& to_quiet, size_t& to_done) {
+                                 int16_t stash, size_t& to_quiet, size_t& to_done) {
     const FlushReg& r = flush_reg();
     emit_mrs_flush(buf, Xfpcr);
     emit_bitfield(buf, 0, /*UBFM*/ 2, 0, r.ftz, r.ftz, Xfpcr, Wbits);            // FTZ -> bit 0
@@ -404,7 +424,7 @@ static void emit_fpcr_enter_slow(AssemblerBuffer& buf, int base, int Xfpcr, int 
     LogicalImmEncoding one;
     is_bitmask_immediate(false, 1, one);
     emit_orr_imm(buf, 0, Wbits, Wbits, one.N, one.immr, one.imms);
-    emit_ldr_str_imm(buf, 1, 0, /*STR*/ 0, kFpcrStashHalfword, base, Wbits);
+    emit_ldr_str_imm(buf, 1, 0, /*STR*/ 0, stash, base, Wbits);
     LogicalImmEncoding no_fz;
     LogicalImmEncoding no_fiz;
     is_bitmask_immediate(false, ~(uint64_t(1) << r.ftz) & 0xFFFFFFFFULL, no_fz);
@@ -504,7 +524,7 @@ void emit_native_state_boundary(TranslationResult& tr, bool entering) {
         patch_forward(buf, empty);
         size_t to_quiet = 0;
         size_t to_done = 0;
-        emit_fpcr_enter_slow(buf, base, mant, sign, to_quiet, to_done);
+        emit_fpcr_enter_slow(buf, base, mant, sign, kFpcrStashHalfword, to_quiet, to_done);
         // .quiet: nothing to restore on exit.
         patch_forward(buf, to_quiet);
         patch_forward(buf, quiet);
@@ -556,6 +576,311 @@ static void bind_imm19(AssemblerBuffer& buf, uint64_t at) {
 
 static void bind_imm26(AssemblerBuffer& buf, uint64_t at) {
     buf.data[at / 4] |= static_cast<uint32_t>((buf.end - at) / 4) & 0x3FFFFFFU;
+}
+
+static void and_mask(AssemblerBuffer& buf, int is_64bit, int Rd, int Rn, uint64_t mask) {
+    LogicalImmEncoding enc;
+    const bool ok = is_bitmask_immediate(is_64bit != 0, mask, enc);
+    assert(ok);
+    (void)ok;
+    emit_and_imm(buf, is_64bit, Rd, enc.N, enc.immr, enc.imms, Rn);
+}
+
+static void orr_mask(AssemblerBuffer& buf, int is_64bit, int Rd, int Rn, uint64_t mask) {
+    LogicalImmEncoding enc;
+    const bool ok = is_bitmask_immediate(is_64bit != 0, mask, enc);
+    assert(ok);
+    (void)ok;
+    emit_orr_imm(buf, is_64bit, Rd, Rn, enc.N, enc.immr, enc.imms);
+}
+
+// ── Flag-free f80 <-> binary64 ──────────────────────────────────────────────
+//
+// The results of emit_f80_to_f64_convert and emit_f64_to_f80, written for
+// code that holds the x87 registers in the native layout and converts one
+// slot at a time inside a run: four GPRs, no NZCV write, and control flow
+// through CBZ/CBNZ/TBZ/TBNZ and B only, all forward.
+
+// With e the biased exponent and m the significand, a normal result is
+// built as (hi << 52) + r, where hi = sign << 11 | (e - 15361) and r is m
+// rounded to its top 53 bits, the integer bit included.  r = 2^53 after a
+// rounding carry adds one more to the exponent field, and an exponent field
+// of 0x7FF that way is infinity with a zero fraction, so neither needs a
+// case of its own.  e - 15361 >= 0x7FE overflows before rounding and goes
+// to the path that also takes infinities and NaNs.
+//
+// An encoding with the integer bit clear under a nonzero exponent
+// (unnormal, pseudo-infinity, pseudo-NaN) becomes the default NaN, as on the
+// x87 and in stock Rosetta, and as in emit_f80_to_f64_convert.
+void emit_f80_bits_to_f64(AssemblerBuffer& buf, int Xm, int Wx, int Xt1, int Xt2,
+                          bool round_to_odd) {
+    // Integer bit clear under a nonzero exponent: an unnormal, pseudo-
+    // infinity or pseudo-NaN, which the x87 and stock Rosetta read as the
+    // default NaN.
+    const auto integer_bit = emit_tbz_fwd(buf, 1, Xm, 63);
+    and_mask(buf, 0, Xt1, Wx, 0x7fff);
+    const auto exponent_zero = emit_cbz_fwd(buf, 0, 0, Xt1);
+    emit_movn(buf, 1, /*MOVZ*/ 2, 3, 0xfff8, Xm);  // 0xFFF8000000000000
+    const auto done_invalid = emit_b_fwd(buf);
+    bind_imm14(buf, integer_bit);
+    bind_imm19(buf, exponent_zero);
+
+    and_mask(buf, 0, Xt1, Wx, 0x7fff);
+    emit_add_imm(buf, 0, /*sub*/ 1, 0, /*LSL 12*/ 1, 4, Xt1, Xt1);  // e - 16384
+    emit_add_imm(buf, 0, 0, 0, 0, 1023, Xt1, Xt1);                 // e - 15361
+    const auto small = emit_tbz_fwd(buf, 1, Xt1, 31);
+    emit_add_imm(buf, 0, /*sub*/ 1, 0, 0, 0x7fe, Xt1, Xt2);
+    const auto big = emit_tbz_fwd(buf, 0, Xt2, 31);
+
+    emit_bitfield(buf, 0, /*UBFM*/ 2, 0, 15, 15, Wx, Xt2);                 // sign
+    emit_add_sub_shifted_reg(buf, 0, 0, 0, /*LSL*/ 0, Xt2, 11, Xt1, Xt1);  // hi
+    if (round_to_odd) {
+        // Truncate at bit 11 and set the result's lowest bit when any of the
+        // low 11 bits is set: (low 11 bits + 0x7FF) reaches bit 11 then.
+        and_mask(buf, 0, Wx, Xm, 0x7ff);
+        emit_add_imm(buf, 0, 0, 0, 0, 0x7ff, Wx, Xt2);
+        emit_bitfield(buf, 1, /*UBFM*/ 2, 1, 11, 63, Xm, Xm);                // LSR #11
+        emit_logical_shifted_reg(buf, 1, /*ORR*/ 1, 0, /*LSR*/ 1, Xt2, 11, Xm, Xm);
+    } else {
+        // Round to nearest even at bit 11: the carry of (bit 11 + 0x3FF +
+        // the low 11 bits) out of bit 11 is the increment.
+        emit_bitfield(buf, 1, /*UBFM*/ 2, 1, 11, 11, Xm, Xt2);
+        emit_add_imm(buf, 0, 0, 0, 0, 0x3ff, Xt2, Xt2);
+        and_mask(buf, 0, Wx, Xm, 0x7ff);
+        emit_add_sub_shifted_reg(buf, 0, 0, 0, 0, Wx, 0, Xt2, Xt2);
+        emit_bitfield(buf, 1, /*UBFM*/ 2, 1, 11, 63, Xm, Xm);                // LSR #11
+        emit_add_sub_shifted_reg(buf, 1, 0, 0, /*LSR*/ 1, Xt2, 11, Xm, Xm);  // r
+    }
+    emit_add_sub_shifted_reg(buf, 1, 0, 0, /*LSL*/ 0, Xt1, 52, Xm, Xm);   // + hi << 52
+    const auto done_normal = emit_b_fwd(buf);
+
+    // e <= 15360: a subnormal or zero result, m >> (15372 - e) rounded to
+    // nearest even.  The bits shifted out, aligned at bit 63 in Wx, round
+    // up when the top one is set and either another one is or the result is
+    // odd.
+    bind_imm14(buf, small);
+    emit_add_sub_shifted_reg(buf, 0, /*sub*/ 1, 0, 0, Xt1, 0, 31, Xt2);  // 15361 - e
+    emit_add_imm(buf, 0, 0, 0, 0, 11, Xt2, Xt2);                       // shift
+    emit_bitfield(buf, 0, 2, 0, 15, 15, Wx, Xt1);                      // sign
+    emit_add_imm(buf, 0, /*sub*/ 1, 0, 0, 64, Xt2, Wx);
+    const auto tiny = emit_tbz_fwd(buf, 0, Wx, 31);
+    emit_add_sub_shifted_reg(buf, 0, 1, 0, 0, Xt2, 0, 31, Wx);  // 64 - shift, modulo 64
+    emit_lslv(buf, 1, Wx, Xm, Wx);
+    buf.emit(0x9ac02400U | (static_cast<uint32_t>(Xt2) << 16) | (static_cast<uint32_t>(Xm) << 5) |
+             static_cast<uint32_t>(Xm));  // LSRV Xm, Xm, Xt2
+    if (round_to_odd) {
+        const auto exact = emit_cbz_fwd(buf, 1, 0, Wx);
+        orr_mask(buf, 1, Xm, Xm, 1);
+        bind_imm19(buf, exact);
+    } else {
+        const auto below_half = emit_tbz_fwd(buf, 0, Wx, 63);
+        emit_bitfield(buf, 1, 2, 1, 63, 62, Wx, Wx);  // LSL #1
+        emit_bitfield(buf, 1, /*BFM*/ 1, 1, 0, 0, Xm, Wx);  // BFXIL Wx, Xm, #0, #1
+        const auto even_half = emit_cbz_fwd(buf, 1, 0, Wx);
+        emit_add_imm(buf, 1, 0, 0, 0, 1, Xm, Xm);
+        bind_imm14(buf, below_half);
+        bind_imm19(buf, even_half);
+    }
+    emit_logical_shifted_reg(buf, 1, /*ORR*/ 1, 0, 0, Xt1, 63, Xm, Xm);
+    const auto done_small = emit_b_fwd(buf);
+
+    // shift >= 64: half the smallest subnormal or less.  Only shift == 64
+    // with m above 2^63 rounds up, to that subnormal.
+    bind_imm14(buf, tiny);
+    if (round_to_odd) {
+        // Any nonzero m truncates to zero with a sticky bit: the smallest
+        // subnormal.
+        const auto zero = emit_cbz_fwd(buf, 1, 0, Xm);
+        emit_movn(buf, 1, /*MOVZ*/ 2, 0, 1, Xm);
+        bind_imm19(buf, zero);
+    } else {
+        const auto zero_far = emit_cbz_fwd(buf, 0, 1, Wx);
+        const auto zero_low = emit_tbz_fwd(buf, 0, Xm, 63);
+        emit_bitfield(buf, 1, 2, 1, 63, 62, Xm, Xm);  // LSL #1
+        const auto exact_half = emit_cbz_fwd(buf, 1, 0, Xm);
+        emit_movn(buf, 1, /*MOVZ*/ 2, 0, 1, Xm);
+        const auto to_sign = emit_b_fwd(buf);
+        bind_imm19(buf, zero_far);
+        bind_imm14(buf, zero_low);
+        emit_movn(buf, 1, /*MOVZ*/ 2, 0, 0, Xm);
+        bind_imm19(buf, exact_half);
+        bind_imm26(buf, to_sign);
+    }
+    emit_logical_shifted_reg(buf, 1, 1, 0, 0, Xt1, 63, Xm, Xm);
+    const auto done_tiny = emit_b_fwd(buf);
+
+    // e - 15361 >= 0x7FE: e == 0x7FFF is an infinity or NaN; anything else
+    // overflows binary64 and becomes infinity.  A NaN keeps the top 52
+    // fraction bits below the integer bit and is quieted.
+    bind_imm14(buf, big);
+    orr_mask(buf, 0, Xt2, Wx, 0x8000);
+    emit_add_imm(buf, 0, 0, 0, 0, 1, Xt2, Xt2);
+    const auto finite = emit_tbz_fwd(buf, 0, Xt2, 16);
+    emit_bitfield(buf, 1, 2, 1, 63, 62, Xm, Xt2);  // fraction, LSL #1
+    emit_bitfield(buf, 1, 2, 1, 11, 62, Xm, Xm);   // UBFX Xm, Xm, #11, #52
+    const auto infinity = emit_cbz_fwd(buf, 1, 0, Xt2);
+    orr_mask(buf, 1, Xm, Xm, uint64_t(1) << 51);
+    const auto nan_done = emit_b_fwd(buf);
+    bind_imm14(buf, finite);
+    emit_movn(buf, 1, 2, 0, 0, Xm);
+    bind_imm19(buf, infinity);
+    bind_imm26(buf, nan_done);
+    orr_mask(buf, 1, Xm, Xm, 0x7ff0000000000000ULL);
+    emit_bitfield(buf, 0, 2, 0, 15, 15, Wx, Xt2);
+    emit_logical_shifted_reg(buf, 1, 1, 0, 0, Xt2, 63, Xm, Xm);
+
+    bind_imm26(buf, done_normal);
+    bind_imm26(buf, done_small);
+    bind_imm26(buf, done_tiny);
+    bind_imm26(buf, done_invalid);
+}
+
+// Normal, zero, subnormal (normalised with CLZ, every bit kept) and
+// infinity or NaN (integer bit set, exponent 0x7FFF), as emit_f64_to_f80.
+// The infinity test is exponent + 1 reaching bit 11, where that version
+// compares.
+void emit_f64_bits_to_f80(AssemblerBuffer& buf, int Xaddr, int Xb, int We, int Wt) {
+    emit_bitfield(buf, 1, 2, 1, 52, 62, Xb, We);  // UBFX We, Xb, #52, #11
+    emit_bitfield(buf, 1, 2, 1, 48, 63, Xb, Wt);  // LSR Wt, Xb, #48
+    and_mask(buf, 0, Wt, Wt, 0x8000);             // sign at bit 15
+    emit_bitfield(buf, 1, 2, 1, 53, 52, Xb, Xb);  // LSL Xb, Xb, #11
+    const auto zero_sub = emit_cbz_fwd(buf, 0, 0, We);
+    emit_add_imm(buf, 0, 0, 0, 0, 1, We, We);
+    const auto inf_nan = emit_tbz_fwd(buf, 1, We, 11);
+    orr_mask(buf, 1, Xb, Xb, uint64_t(1) << 63);
+    emit_add_imm(buf, 0, 0, 0, 1, 3, We, We);      // +12288
+    emit_add_imm(buf, 0, 0, 0, 0, 0xbff, We, We);  // +3071: exp + 15360 in all
+    emit_logical_shifted_reg(buf, 0, 1, 0, 0, Wt, 0, We, We);
+    emit_str_imm(buf, 3, Xb, Xaddr, 0);
+    emit_str_imm(buf, 1, We, Xaddr, 4);
+    const auto done_normal = emit_b_fwd(buf);
+
+    bind_imm19(buf, zero_sub);
+    const auto zero = emit_cbz_fwd(buf, 1, 0, Xb);
+    buf.emit(0xdac01000U | (static_cast<uint32_t>(Xb) << 5) | static_cast<uint32_t>(We));  // CLZ
+    emit_lslv(buf, 1, We, Xb, Xb);
+    emit_add_sub_shifted_reg(buf, 0, 1, 0, 0, We, 0, 31, We);
+    emit_add_imm(buf, 0, 0, 0, 1, 3, We, We);
+    emit_add_imm(buf, 0, 0, 0, 0, 0xc01, We, We);  // 15361 - clz
+    emit_logical_shifted_reg(buf, 0, 1, 0, 0, Wt, 0, We, We);
+    emit_str_imm(buf, 3, Xb, Xaddr, 0);
+    emit_str_imm(buf, 1, We, Xaddr, 4);
+    const auto done_sub = emit_b_fwd(buf);
+    bind_imm19(buf, zero);
+    emit_str_imm(buf, 3, 31, Xaddr, 0);
+    emit_str_imm(buf, 1, Wt, Xaddr, 4);
+    const auto done_zero = emit_b_fwd(buf);
+
+    bind_imm14(buf, inf_nan);
+    orr_mask(buf, 1, Xb, Xb, uint64_t(1) << 63);
+    emit_str_imm(buf, 3, Xb, Xaddr, 0);
+    orr_mask(buf, 0, We, Wt, 0x7fff);
+    emit_str_imm(buf, 1, We, Xaddr, 4);
+
+    bind_imm26(buf, done_normal);
+    bind_imm26(buf, done_sub);
+    bind_imm26(buf, done_zero);
+}
+
+// X87_NATIVE_SLOTS keeps each working binary64 value inside its own native
+// slot, and the slot tracker knows statically which slots the reply left in
+// binary64 (X87Cache::slot_fmt).  Those are converted back in place; slots
+// the reply never read, and slots it popped or freed, are left as they are,
+// and a reply that left none in binary64 gets no code at all.  TOP is read
+// from memory, where the end of the run has put it, and the slot of tracker
+// position r is at depth r - top_rel from it.  Tags are not consulted:
+// converting an empty slot back is harmless.  Nothing here writes NZCV.
+void emit_native_slots_export(TranslationResult& tr) {
+    const auto& c = tr.x87_cache;
+    int count = 0;
+    for (const auto f : c.slot_fmt) {
+        count += f == kSlotF64 ? 1 : 0;
+    }
+    if (count == 0) {
+        return;
+    }
+    const auto saved_mask = tr.free_gpr_mask;
+    tr.free_gpr_mask &= kGprScratchMask;
+    auto& buf = tr.insn_buf;
+    const int base = alloc_free_gpr(tr);
+    const int top = alloc_free_gpr(tr);
+    const int addr = alloc_free_gpr(tr);
+    const int bits = alloc_free_gpr(tr);
+    const int exp = alloc_free_gpr(tr);
+    const int tmp = alloc_free_gpr(tr);
+    emit_x87_base(buf, tr, base);
+    emit_load_top(buf, tr, base, top);
+    for (int r = 0; r < 8; ++r) {
+        if (c.slot_fmt[r] != kSlotF64) {
+            continue;
+        }
+        emit_native_slot_key(buf, top, (r - c.top_rel) & 7, addr);
+        emit_add_imm(buf, 0, 0, 0, 0, kX87NativeSlotOff, addr, addr);
+        emit_add_sub_shifted_reg(buf, 1, 0, 0, 0, addr, 0, base, addr);
+        emit_ldr_str_imm(buf, 3, 0, /*LDR*/ 1, 0, addr, bits);
+        emit_f64_bits_to_f80(buf, addr, bits, exp, tmp);
+    }
+    tr.free_gpr_mask = saved_mask;
+}
+
+// X87_IGNORE_FTZ_DAZ with X87_NATIVE_SLOTS.  The 80-bit values fill all ten
+// bytes of every slot, so the stash cannot use +6 as the boundary does; it
+// is the halfword right after slot 7, +86.  Rosetta's x87 register file and
+// its exchanges with the signal context and the thread state
+// (x86_FLOAT_STATE64) cover bytes +0 to +85.  The stash lives only from a
+// reply's entry to its exit, so it needs no value between replies.  Entry
+// and exit are the boundary's FPCR handling without the conversions: the
+// exit restores FZ and FIZ when the entry cleared them.  Nothing here
+// touches NZCV and every branch goes forward.
+static constexpr int16_t kNativeSlotsStashHalfword = 43;  // +86, in halfwords
+
+void emit_native_slots_fpcr_enter(TranslationResult& tr) {
+    if (!ignore_ftz_daz()) {
+        return;
+    }
+    const auto saved_mask = tr.free_gpr_mask;
+    tr.free_gpr_mask &= kGprScratchMask;
+    auto& buf = tr.insn_buf;
+    const int base = alloc_free_gpr(tr);
+    const int fpcr = alloc_free_gpr(tr);
+    const int bits = alloc_free_gpr(tr);
+    emit_x87_base(buf, tr, base);
+    size_t to_quiet = 0;
+    size_t to_done = 0;
+    emit_fpcr_enter_slow(buf, base, fpcr, bits, kNativeSlotsStashHalfword, to_quiet, to_done);
+    // .quiet: neither bit set, nothing to restore on exit.
+    patch_forward(buf, to_quiet);
+    emit_ldr_str_imm(buf, 1, 0, /*STR*/ 0, kNativeSlotsStashHalfword, base, GPR::XZR);
+    // .done
+    buf.data[to_done / 4] |= static_cast<uint32_t>((buf.end - to_done) / 4) & 0x3FFFFFFU;
+    tr.free_gpr_mask = saved_mask;
+}
+
+void emit_native_slots_fpcr_exit(TranslationResult& tr) {
+    if (!ignore_ftz_daz()) {
+        return;
+    }
+    const auto saved_mask = tr.free_gpr_mask;
+    tr.free_gpr_mask &= kGprScratchMask;
+    auto& buf = tr.insn_buf;
+    const int base = alloc_free_gpr(tr);
+    const int fpcr = alloc_free_gpr(tr);
+    const int stash = alloc_free_gpr(tr);
+    emit_x87_base(buf, tr, base);
+    emit_ldr_str_imm(buf, 1, 0, /*LDR*/ 1, kNativeSlotsStashHalfword, base, stash);
+    const auto keep = buf.end;
+    emit_cbz(buf, 0, 0, stash, 0);  // CBZ Wstash, .done
+    emit_fpcr_restore(buf, fpcr, stash);
+    patch_forward(buf, keep);
+    tr.free_gpr_mask = saved_mask;
+}
+
+void emit_copy_f80(AssemblerBuffer& buf, int Xdst, int dst_off, int Xsrc, int src_off, int Xt1,
+                   int Xt2) {
+    emit_ldur_stur(buf, 3, /*LDUR*/ 1, static_cast<int16_t>(src_off), Xsrc, Xt1);
+    emit_ldur_stur(buf, 1, /*LDURH*/ 1, static_cast<int16_t>(src_off + 8), Xsrc, Xt2);
+    emit_ldur_stur(buf, 3, /*STUR*/ 0, static_cast<int16_t>(dst_off), Xdst, Xt1);
+    emit_ldur_stur(buf, 1, /*STURH*/ 0, static_cast<int16_t>(dst_off + 8), Xdst, Xt2);
 }
 
 // 6 + 10 * phys as two shifted adds and an immediate, the same address the

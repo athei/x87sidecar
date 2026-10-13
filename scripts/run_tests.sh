@@ -9,7 +9,8 @@
 #   3. x87sidecar with X87_DISABLE_X87_IR=1 (direct translator only).
 #      Skips EXACT_I64_COPY_SKIP: without the IR, a fild m64 to fistp m64
 #      copy in a run that also holds a float op such as fstpl rounds
-#      through binary64.
+#      through binary64; only with X87_NATIVE_SLOTS=0, since the native
+#      slots copy it exactly.
 #   4. x87sidecar with X87_DISABLE_X87_IR=1 + X87_DISABLE_ALL_FUSIONS=1.
 #      Skips EXACT_I64_COPY_SKIP, as phase 3, and the tests in
 #      NO_FUSION_SKIP, whose exact results need a fusion.
@@ -49,12 +50,25 @@
 #  17. test_x87_sync_fault: passes under native Rosetta and under x87sidecar
 #      with X87_PRECISE_FAULTS=1 (default, IR off, fusions off, run cache
 #      off, clamped register pool, bridging off, X87_STOCK_BCD=0 and
-#      X87_FAIL_ALLOC_EVERY=N), and one of its faults must still abort the
-#      process without the knob, under both the cooperative and the default
-#      attach
+#      X87_FAIL_ALLOC_EVERY=N), with its in-run group too under
+#      X87_PRECISE_FAULTS=2 X87_NATIVE_SLOTS=1, and one of its faults must
+#      still abort the process without the knob, under both the cooperative
+#      and the default attach.  Its wc_cross case, an fstpt across a page
+#      boundary of uncached memory, must store without a signal natively
+#      and without the knob, and take the probe's SIGBUS with it
 #  18. test_crash_after_release: a target that is no longer traced after
 #      the release and then dies (abort, SIGSEGV, SIGKILL, SIGILL, exit(3))
 #      must end with its own exit status natively and under both attaches
+#  19. test_x87_cross_reply_exact with X87_NATIVE_SLOTS=1 (default, IR off,
+#      fusions off, run cache off, single-op fast path off, clamped
+#      register pool, bridging off, X87_PRECISE_FAULTS=1,
+#      X87_FAIL_ALLOC_EVERY=N, and X87_GPR_POOL_LIMIT=4, where integer
+#      stores fall back to binary64), then the tests that read or replace the
+#      native x87 state with it.  The knob is on by default, so this covers
+#      it also in a run that exports X87_NATIVE_SLOTS=0
+#  20. every test with X87_NATIVE_SLOTS=0, the kill switch, where
+#      test_x87_cross_reply_exact has to fail; exporting X87_NATIVE_SLOTS=0
+#      for the whole run makes every phase run that way
 #   R. replay tests/data/geom_block_874c40.ir under --fpr-pool 8 and
 #      assert the pressure splits keep it on the IR path (fpr_fail=0), then
 #      replay tests/data/fist_pressure.ir the same way and assert it exits 0
@@ -66,10 +80,11 @@
 # test_x87_sync_fault runs only in phase 17, since without X87_PRECISE_FAULTS
 # every one of its faults aborts the process.  Even with the knob it runs
 # only the faults the sidecar recovers precisely; the ones inside longer
-# floating-point runs still abort, and SYNC_FAULT_IN_RUN=1 adds them for a
-# manual run.  Naming it, `run_tests.sh test_x87_sync_fault`, runs it through
-# the per-test phases without the knob, where it reports CRASH from phase 2
-# on, and skips phase 17.  Run it as
+# floating-point runs still abort, and SYNC_FAULT_IN_RUN=1 adds them; phase
+# 17 runs them with X87_PRECISE_FAULTS=2, where they pass.  Naming it,
+# `run_tests.sh test_x87_sync_fault`, runs it through the per-test phases
+# without the knob, where it reports CRASH from phase 2 on, and skips phase
+# 17.  Run it as
 # `X87_PRECISE_FAULTS=1 bash scripts/run_tests.sh test_x87_sync_fault`, or run
 # the full suite.
 #
@@ -211,6 +226,7 @@ ALL_TESTS=(
     test_x87_signal_context
     test_x87_native_state
     test_m80_copy
+    test_x87_cross_reply_exact
     test_bcd_exact
     test_alloc_decline
 )
@@ -311,6 +327,30 @@ trap 'rm -rf "$STOCK_DIR"' EXIT
 # 1 only while Phase 1 runs; every later phase reads what it recorded.
 BASELINE_PHASE=0
 
+# Tests whose exact results need X87_NATIVE_SLOTS, which is on by default.
+# With X87_NATIVE_SLOTS=0 every phase in which the sidecar translates them
+# has to see them fail with a failure count: a pass would mean the test no
+# longer reaches what the knob fixes.  Phase 20 runs them that way.
+NATIVE_SLOTS_TESTS=(
+    test_x87_cross_reply_exact
+)
+# 1 while Phase 5 runs the tests with the sidecar's translation hook off.
+STOCK_EMIT_PHASE=0
+
+# Whether this harness run has the native slots off (X87_NATIVE_SLOTS=0,
+# the kill switch; any other value or none keeps them on, as in the sidecar).
+native_slots_off() {
+    [[ "${X87_NATIVE_SLOTS-}" == 0 ]]
+}
+
+needs_native_slots() {
+    local t
+    for t in "${NATIVE_SLOTS_TESTS[@]}"; do
+        [[ "$t" == "$1" ]] && return 0
+    done
+    return 1
+}
+
 fail_lines() {
     grep -E 'FAIL' <<<"$1" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'
 }
@@ -332,6 +372,19 @@ check_output() {
         echo -e "${RED}FAIL${NC}  $name  (timed out after $TEST_TIMEOUT s)"
         FAILED=$((FAILED + 1))
         tail -5 <<<"$out" | sed 's/^/      /'
+        return 0
+    fi
+    if [[ $BASELINE_PHASE -eq 0 && $STOCK_EMIT_PHASE -eq 0 ]] && native_slots_off &&
+        needs_native_slots "$name"; then
+        if [[ "$exit_code" -eq 1 ]] && grep -qE '^[1-9][0-9]* failure' <<<"$out"; then
+            echo -e "${GREEN}PASS${NC}  $name  (fails without X87_NATIVE_SLOTS, as expected)"
+            PASSED=$((PASSED + 1))
+        else
+            local wanted="failures without X87_NATIVE_SLOTS"
+            echo -e "${RED}FAIL${NC}  $name  (wanted $wanted, got exit=$exit_code)"
+            FAILED=$((FAILED + 1))
+            tail -3 <<<"$out" | sed 's/^/      /'
+        fi
         return 0
     fi
     # Herestrings, not `echo "$out" | grep`: when $out exceeds the pipe
@@ -453,14 +506,17 @@ fi
 # fild m64 into fistp/fisttp m64 is copied exactly by a native transport
 # reply when the run holds only integer loads and stores, by the IR pass
 # (pass_exact_i64_copy) for longer runs mixing in other ops, and by the
-# fild_fistp peephole for a lone pair.  With the IR off (phases 3 and 4) a
-# run that also holds an fstpl goes through binary64 and rounds every
-# |v| >= 2^53 by design, so the exact-copy test is skipped there.
+# fild_fistp peephole for a lone pair, and with the native slots on (the
+# default) the fild writes an exact 80-bit slot, so the copy is exact
+# without the IR as well.  With X87_NATIVE_SLOTS=0 and the IR off (phases 3
+# and 4) a run that also holds an fstpl goes through binary64 and rounds
+# every |v| >= 2^53 by design, so the exact-copy test is skipped there.
 EXACT_I64_COPY_SKIP=(
     test_fild_fistp_copy
 )
 exact_i64_copy_skipped() {
     local s
+    native_slots_off || return 1
     for s in "${EXACT_I64_COPY_SKIP[@]}"; do
         [[ "$1" == "$s" ]] && return 0
     done
@@ -535,6 +591,7 @@ if [[ $NATIVE_ONLY -eq 0 ]]; then
     echo ""
     echo -e "${BOLD}=== Phase 5: x87sidecar X87_DISABLE_HOOK=1 (stock emit) ===${NC}"
 
+    STOCK_EMIT_PHASE=1
     for t in "${TESTS[@]}"; do
         BINARY="$TESTS_BIN/$t"
         if [[ ! -x "$BINARY" ]]; then
@@ -547,6 +604,7 @@ if [[ $NATIVE_ONLY -eq 0 ]]; then
             2>/dev/null | filter_runtime_lines) || EXIT=$?
         check_output "$t" "$OUT" "$EXIT"
     done
+    STOCK_EMIT_PHASE=0
 fi
 
 # ── Phase 6: x87sidecar X87_ENABLE_FMA_CONTRACT=1 ────────────────────────
@@ -898,17 +956,36 @@ if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then
         }
 
         expect_ftz "ftz_daz  native Rosetta"             pass "$FTZ_BIN"
-        expect_ftz "ftz_daz  knob on"                    pass env X87_IGNORE_FTZ_DAZ=1 \
+        # With X87_NATIVE_SLOTS=0 the knob's code sits in the conversion
+        # boundary of every reply and keeps its stash at +6.
+        expect_ftz "ftz_daz  knob on, no native slots"   pass env X87_IGNORE_FTZ_DAZ=1 \
+            X87_NATIVE_SLOTS=0 "$LOADER" "$FTZ_BIN"
+        expect_ftz "ftz_daz  knob on, no native slots, IR off" pass env X87_IGNORE_FTZ_DAZ=1 \
+            X87_NATIVE_SLOTS=0 X87_DISABLE_X87_IR=1 "$LOADER" "$FTZ_BIN"
+        expect_ftz "ftz_daz  knob on, no native slots, IR + fusions off" pass \
+            env X87_IGNORE_FTZ_DAZ=1 X87_NATIVE_SLOTS=0 X87_DISABLE_X87_IR=1 \
+            X87_DISABLE_ALL_FUSIONS=1 "$LOADER" "$FTZ_BIN"
+        expect_ftz "ftz_daz  knob off, no native slots (flushes)" fail env X87_NATIVE_SLOTS=0 \
             "$LOADER" "$FTZ_BIN"
-        expect_ftz "ftz_daz  knob on, IR off"            pass env X87_IGNORE_FTZ_DAZ=1 \
-            X87_DISABLE_X87_IR=1 "$LOADER" "$FTZ_BIN"
-        expect_ftz "ftz_daz  knob on, IR + fusions off"  pass env X87_IGNORE_FTZ_DAZ=1 \
-            X87_DISABLE_X87_IR=1 X87_DISABLE_ALL_FUSIONS=1 "$LOADER" "$FTZ_BIN"
-        expect_ftz "ftz_daz  knob off (flushes)"         fail "$LOADER" "$FTZ_BIN"
         # The knob adds code to every reply boundary; the guest flags must
         # still come through it.
-        expect_ftz "flags_handoff  knob on"              pass env X87_IGNORE_FTZ_DAZ=1 \
-            "$LOADER" "$TESTS_BIN/test_flags_handoff"
+        expect_ftz "flags_handoff  knob on, no native slots" pass env X87_IGNORE_FTZ_DAZ=1 \
+            X87_NATIVE_SLOTS=0 "$LOADER" "$TESTS_BIN/test_flags_handoff"
+        # With the native slots, the default, replies have no conversion
+        # boundary and keep the stash at +86 instead of +6, so they run the
+        # same checks, including the storm whose handler sets FTZ|DAZ in the
+        # signal context.
+        expect_ftz "ftz_daz  knob on, native slots"      pass env X87_IGNORE_FTZ_DAZ=1 \
+            X87_NATIVE_SLOTS=1 "$LOADER" "$FTZ_BIN"
+        expect_ftz "ftz_daz  knob on, native slots, IR off" pass env X87_IGNORE_FTZ_DAZ=1 \
+            X87_NATIVE_SLOTS=1 X87_DISABLE_X87_IR=1 "$LOADER" "$FTZ_BIN"
+        expect_ftz "ftz_daz  knob on, native slots, IR + fusions off" pass \
+            env X87_IGNORE_FTZ_DAZ=1 X87_NATIVE_SLOTS=1 X87_DISABLE_X87_IR=1 \
+            X87_DISABLE_ALL_FUSIONS=1 "$LOADER" "$FTZ_BIN"
+        expect_ftz "ftz_daz  knob off, native slots (flushes)" fail env X87_NATIVE_SLOTS=1 \
+            "$LOADER" "$FTZ_BIN"
+        expect_ftz "flags_handoff  knob on, native slots" pass env X87_IGNORE_FTZ_DAZ=1 \
+            X87_NATIVE_SLOTS=1 "$LOADER" "$TESTS_BIN/test_flags_handoff"
     fi
 fi
 
@@ -984,6 +1061,8 @@ SYNC_FAULT_CONFIGS=(
     "X87_FPR_POOL_LIMIT=5"
     "X87_ENABLE_BRIDGE=0"
     "X87_STOCK_BCD=0"
+    "X87_NATIVE_SLOTS=0"
+    "X87_NATIVE_SLOTS=0 X87_DISABLE_X87_IR=1"
 )
 if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then
     echo ""
@@ -1006,6 +1085,51 @@ if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then
                 2>/dev/null | filter_runtime_lines) || EXIT=$?
             check_output "test_x87_sync_fault" "$OUT" "$EXIT"
         done
+        # X87_PRECISE_FAULTS=2 with X87_NATIVE_SLOTS ends a reply before every
+        # later memory access, so there the in-run group (SYNC_FAULT_IN_RUN=1)
+        # has to pass as well.
+        for cfg in "" "X87_DISABLE_X87_IR=1 X87_DISABLE_ALL_FUSIONS=1" "X87_DISABLE_CACHE=1" \
+            "X87_IGNORE_FTZ_DAZ=1"; do
+            echo "      X87_PRECISE_FAULTS=2 X87_NATIVE_SLOTS=1 SYNC_FAULT_IN_RUN=1 $cfg"
+            EXIT=0
+            # shellcheck disable=SC2086
+            OUT=$(run_bounded "$TEST_TIMEOUT" env X87_PRECISE_FAULTS=2 X87_NATIVE_SLOTS=1 \
+                SYNC_FAULT_IN_RUN=1 $cfg "$LOADER" "$SF_BIN" 2>/dev/null | filter_runtime_lines) ||
+                EXIT=$?
+            check_output "test_x87_sync_fault" "$OUT" "$EXIT"
+        done
+        # An fstpt across a page boundary of uncached memory: stored without a
+        # signal natively and without the knob; with it the probe's
+        # straddling halfword is unaligned there and takes SIGBUS, as
+        # docs/internals.md describes.  $1 = label, $2 = expected RESULT
+        # text, $3.. = command.
+        expect_wc_cross() {
+            local label="$1" want="$2"
+            shift 2
+            TOTAL=$((TOTAL + 1))
+            local out exit_code=0
+            out=$(run_bounded "$TEST_TIMEOUT" env SYNC_FAULT_CASE=wc_cross "$@" 2>/dev/null) ||
+                exit_code=$?
+            local got
+            got=$(grep -E '^(RESULT|SKIP)' <<<"$out" | head -1)
+            if [[ $exit_code -eq 0 && "$got" == *"$want"* ]]; then
+                echo -e "${GREEN}PASS${NC}  sync_fault wc_cross  $label  ($want)"
+                PASSED=$((PASSED + 1))
+            elif [[ $exit_code -eq 0 && "$got" == SKIP* ]]; then
+                echo -e "${YELLOW}SKIP${NC}  sync_fault wc_cross  $label  ($got)"
+                ERRORS=$((ERRORS + 1))
+            else
+                local reason="got exit=$exit_code ${got:-no result}"
+                echo -e "${RED}FAIL${NC}  sync_fault wc_cross  $label  (wanted $want, $reason)"
+                FAILED=$((FAILED + 1))
+            fi
+        }
+        expect_wc_cross "native Rosetta" "signal 0, stored" "$SF_BIN"
+        expect_wc_cross "knob off" "signal 0, stored" "$LOADER" "$SF_BIN"
+        expect_wc_cross "X87_PRECISE_FAULTS=1" "signal 10, not stored" \
+            X87_PRECISE_FAULTS=1 "$LOADER" "$SF_BIN"
+        expect_wc_cross "X87_PRECISE_FAULTS=1 X87_NATIVE_SLOTS=0" "signal 10, not stored" \
+            X87_PRECISE_FAULTS=1 X87_NATIVE_SLOTS=0 "$LOADER" "$SF_BIN"
         for n in "${ALLOC_FAIL_EVERY[@]}"; do
             echo "      X87_PRECISE_FAULTS=1 X87_FAIL_ALLOC_EVERY=$n"
             EXIT=0
@@ -1105,6 +1229,142 @@ if [[ $NATIVE_ONLY -eq 0 && ${#SELECTED_TESTS[@]} -eq 0 ]]; then
                 fi
             done
         done
+    fi
+fi
+
+# ── Phase 19: X87_NATIVE_SLOTS=1 (x87 registers kept in their native slots) ─
+# The knob is on by default, so the per-test phases run with it unless the
+# whole run exports X87_NATIVE_SLOTS=0.  Here test_x87_cross_reply_exact
+# runs with it in the configurations that change which translator emits a
+# reply, with precise faults, and with allocation failures declined to
+# stock, followed by the tests that read or replace the native x87 state,
+# so a run that exports X87_NATIVE_SLOTS=0 covers the knob too.  Naming any
+# of these tests on the command line runs this phase for them.
+NATIVE_SLOTS_CONFIGS=(
+    ""
+    "X87_DISABLE_X87_IR=1"
+    "X87_DISABLE_X87_IR=1 X87_DISABLE_ALL_FUSIONS=1"
+    "X87_DISABLE_CACHE=1"
+    "X87_DISABLE_SINGLE_FAST=1"
+    "X87_FPR_POOL_LIMIT=5"
+    "X87_ENABLE_BRIDGE=0"
+    "X87_PRECISE_FAULTS=1"
+    "X87_STRICT_ALLOC=0 X87_FAIL_ALLOC_EVERY=3"
+    "X87_STRICT_ALLOC=0 X87_FAIL_ALLOC_EVERY=17"
+    "X87_STRICT_ALLOC=0 X87_FAIL_ALLOC_EVERY=97"
+)
+NATIVE_SLOTS_STATE_TESTS=(
+    test_x87_native_state
+    test_x87_signal_context
+    test_x87_signal_storm
+    test_delphi_move
+    test_flags_handoff
+    test_frstor
+    test_fsave
+    test_fxch
+    test_m80_copy
+    test_fild_fistp_copy
+)
+# Whether phase 19 runs test $1: always in a full run, otherwise only when
+# it was named.
+native_slots_phase_runs() {
+    local t
+    [[ ${#SELECTED_TESTS[@]} -eq 0 ]] && return 0
+    for t in "${SELECTED_TESTS[@]}"; do
+        [[ "$t" == "$1" ]] && return 0
+    done
+    return 1
+}
+if [[ $NATIVE_ONLY -eq 0 ]]; then
+    PHASE19_TESTS=()
+    for t in "${NATIVE_SLOTS_TESTS[@]}" "${NATIVE_SLOTS_STATE_TESTS[@]}"; do
+        native_slots_phase_runs "$t" && PHASE19_TESTS+=("$t")
+    done
+fi
+if [[ $NATIVE_ONLY -eq 0 && ${#PHASE19_TESTS[@]} -gt 0 ]]; then
+    echo ""
+    echo -e "${BOLD}=== Phase 19: X87_NATIVE_SLOTS=1 (x87 registers in their native slots) ===${NC}"
+
+    SAVED_NATIVE_SLOTS="${X87_NATIVE_SLOTS-unset}"
+    export X87_NATIVE_SLOTS=1
+    for cfg in "${NATIVE_SLOTS_CONFIGS[@]}"; do
+        for t in "${NATIVE_SLOTS_TESTS[@]}"; do
+            native_slots_phase_runs "$t" || continue
+            echo "      X87_NATIVE_SLOTS=1 $cfg"
+            BINARY="$TESTS_BIN/$t"
+            if [[ ! -x "$BINARY" ]]; then
+                echo -e "${YELLOW}SKIP${NC}  $t  (binary not found)"
+                ERRORS=$((ERRORS + 1))
+                continue
+            fi
+            EXIT=0
+            # shellcheck disable=SC2086
+            OUT=$(run_bounded "$TEST_TIMEOUT" env $cfg "$LOADER" "$BINARY" 2>/dev/null |
+                filter_runtime_lines) || EXIT=$?
+            check_output "$t" "$OUT" "$EXIT"
+        done
+    done
+    # X87_GPR_POOL_LIMIT=4 leaves too few registers for the exact integer
+    # store, so integer stores of 80-bit registers read binary64 and the
+    # test accepts 64-bit stores rounded to 53 bits.
+    for t in "${NATIVE_SLOTS_TESTS[@]}"; do
+        native_slots_phase_runs "$t" || continue
+        echo "      X87_NATIVE_SLOTS=1 X87_GPR_POOL_LIMIT=4 ($t --int-stores-may-round)"
+        BINARY="$TESTS_BIN/$t"
+        [[ -x "$BINARY" ]] || continue
+        EXIT=0
+        OUT=$(run_bounded "$TEST_TIMEOUT" env X87_GPR_POOL_LIMIT=4 "$LOADER" "$BINARY" \
+            --int-stores-may-round 2>/dev/null | filter_runtime_lines) || EXIT=$?
+        check_output "$t" "$OUT" "$EXIT"
+    done
+    echo "      X87_NATIVE_SLOTS=1"
+    for t in "${NATIVE_SLOTS_STATE_TESTS[@]}"; do
+        native_slots_phase_runs "$t" || continue
+        BINARY="$TESTS_BIN/$t"
+        if [[ ! -x "$BINARY" ]]; then
+            echo -e "${YELLOW}SKIP${NC}  $t  (binary not found)"
+            ERRORS=$((ERRORS + 1))
+            continue
+        fi
+        EXIT=0
+        OUT=$(run_bounded "$TEST_TIMEOUT" "$LOADER" "$BINARY" 2>/dev/null | filter_runtime_lines) ||
+            EXIT=$?
+        check_output "$t" "$OUT" "$EXIT"
+    done
+    if [[ "$SAVED_NATIVE_SLOTS" == unset ]]; then
+        unset X87_NATIVE_SLOTS
+    else
+        export X87_NATIVE_SLOTS="$SAVED_NATIVE_SLOTS"
+    fi
+fi
+
+# ── Phase 20: X87_NATIVE_SLOTS=0 (kill switch) ───────────────────────────
+# Every test once more with the native slots off, so the compact binary64
+# register file, its conversion boundary and the paths only it uses stay
+# covered while the knob defaults on.  test_x87_cross_reply_exact has to
+# fail here (check_output).  Skipped when the whole run already exports
+# X87_NATIVE_SLOTS=0, since phase 2 then ran the same.
+if [[ $NATIVE_ONLY -eq 0 ]] && ! native_slots_off; then
+    echo ""
+    echo -e "${BOLD}=== Phase 20: X87_NATIVE_SLOTS=0 (kill switch) ===${NC}"
+    SAVED_NATIVE_SLOTS="${X87_NATIVE_SLOTS-unset}"
+    export X87_NATIVE_SLOTS=0
+    for t in "${TESTS[@]}"; do
+        BINARY="$TESTS_BIN/$t"
+        if [[ ! -x "$BINARY" ]]; then
+            echo -e "${YELLOW}SKIP${NC}  $t  (binary not found)"
+            ERRORS=$((ERRORS + 1))
+            continue
+        fi
+        EXIT=0
+        OUT=$(run_bounded "$TEST_TIMEOUT" "$LOADER" "$BINARY" 2>/dev/null | filter_runtime_lines) ||
+            EXIT=$?
+        check_output "$t" "$OUT" "$EXIT"
+    done
+    if [[ "$SAVED_NATIVE_SLOTS" == unset ]]; then
+        unset X87_NATIVE_SLOTS
+    else
+        export X87_NATIVE_SLOTS="$SAVED_NATIVE_SLOTS"
     fi
 fi
 

@@ -136,9 +136,10 @@ so a run is answered with one reply: the map then has entries only at the
 run's start and its end, where the state is complete. This includes the
 register payload format: Rosetta stores physical x87 slots as packed 80-bit
 values at offset `0x06`, stride 10. Its signal-context import/export routines
-copy those fields directly. The sidecar's compact binary64 slots at offset
-`0x08`, stride 8 are private to a reply. The wrapper converts on entry and
-exit, after flushing deferred TOP, tags and permutations.
+copy those fields directly. With `X87_NATIVE_SLOTS=0` the sidecar works on
+compact binary64 slots at offset `0x08`, stride 8, which are private to a
+reply, and the wrapper converts on entry and exit, after flushing deferred
+TOP, tags and permutations.
 
 That conversion rounds every valid slot to binary64, which loses the low
 bits of an int64 of 2^53 or more held on the x87 stack from one reply to
@@ -156,6 +157,31 @@ boundary. `X87_NATIVE_TRANSPORT=0` turns this off for bisecting.
 `test_delphi_move` runs the routine itself, and `test_x87_native_state` and
 `test_x87_signal_context` check the payload in a save area and in a signal
 context.
+
+The native slots, on by default, extend this to replies with floating-point
+work; `X87_NATIVE_SLOTS=0` turns them off and brings back the compact slots
+and their conversion. The register file stays in the native layout for the
+whole reply, and there is no entry or exit conversion of all eight slots. A
+slot is converted to binary64 in place, inside its own ten bytes, only where
+an instruction reads it for arithmetic or a compare; an IR run, an
+`fst m32`/`fst m64`, an integer store and the single-op fast path convert it
+into a register instead and leave the slot as it is. `fld st(i)`, `fst` and
+`fstp` to a register, `fxch` and the deferred FXCH flush, `fld m80`,
+`fstp m80`, `fsave` and `frstor` move the ten bytes as they are, and an
+`fild m64` whose value nothing in the run reads as binary64 writes the exact
+80-bit value. At the exit only the slots the reply left in binary64 are
+converted back. The translator knows statically which slots those are (the
+slot tracker in `X87Cache`), so a reply that leaves none gets no exit code.
+Every register a reply does not compute with keeps all 80 bits from one
+reply to the next, as on real x87 and in stock Rosetta. The converters write
+no NZCV and branch only forward, and an 80-bit value read as binary64 is
+rounded once, to nearest even; an unnormal, pseudo-infinity or pseudo-NaN
+reads as the default NaN, as in stock Rosetta. `test_x87_cross_reply_exact`
+holds 80-bit values and int64s across every kind of reply the translator
+emits and checks that they come out bit for bit. It also reads them in the
+reply between and compares each read with the same read done in the block
+that loaded the value; `--dump` prints the reads, and a run under stock
+Rosetta prints the same ones.
 
 An opaque save/restore round trip can hide a layout mismatch: the same
 misinterpreted bytes can be copied out and back unchanged. It fails when a
@@ -194,15 +220,26 @@ is `ldr x22, [x6]` followed by a call into a runtime routine, and
 `fstps (%rsi)` is a call that returns the value, then `str w22, [x6]`, then
 the pop. The routines' own floating-point work is out of the check's sight.
 
-The sidecar's replies start with the conversion from the native register
-layout to the compact one, which compares and stores, so a fault in any
-guest access after it aborts, even in a lone `fstps`. By default nothing is
-done about it: with `X87_PRECISE_FAULTS` off, any guest memory fault inside
-sidecar-translated x87 code aborts the process with that message, where
-stock Rosetta calls the program's SIGSEGV or SIGBUS handler. Windows
-programs under wine see such faults through structured exception handling:
-guard pages, write watches, `IsBadReadPtr`, deliberate access violations.
-A program that aborts this way can be run with `X87_PRECISE_FAULTS=1`.
+With `X87_NATIVE_SLOTS=0` the sidecar's replies start with the conversion
+from the native register layout to the compact one, which compares and
+stores, so a fault in any guest access after it aborts, even in a lone
+`fstps`. The native slots, the default, have no entry conversion, so a
+reply whose first instruction reaches its guest access before it changes
+any state rolls back on its own. In `test_x87_sync_fault` that holds for a
+lone `fld m32` or `fld m64` (the single-op fast path loads the operand
+before it writes the status word), `fstp m80`, `fnsave`, `frstor` and a run
+that starts with `fld m64`, besides the native transport replies, which do
+in both modes. A lone `fst m64`, `fstp m32` or `fadd m64` still aborts:
+their binary64 work (an `fmov` or an `fcvt`, or the arithmetic) comes before
+the access.
+
+By default nothing more is done about it: with `X87_PRECISE_FAULTS` off,
+any other guest memory fault inside sidecar-translated x87 code aborts the
+process with that message, where stock Rosetta calls the program's SIGSEGV
+or SIGBUS handler. Windows programs under wine see such faults through
+structured exception handling: guard pages, write watches, `IsBadReadPtr`,
+deliberate access violations. A program that aborts this way can be run
+with `X87_PRECISE_FAULTS=1`.
 
 With the knob on, the memory operand of each reply's first x87 instruction
 is probed before anything else in the reply (`emit_fault_probe`). A load is
@@ -210,13 +247,25 @@ probed with a load of the access width into the zero register, or with
 loads of its first and last byte for the 10- and 108-byte forms; one load
 of the access width also covers an unaligned access that crosses a page. A
 store is probed by loading the bytes it will write and writing them back
-unchanged: the full access width for 2, 4 and 8 bytes, otherwise the first
-byte after a load of the last. The write-back is the probe's only state
-change and comes last, so a fault in it still rolls back, and it faults
-where the store would, on a read-only page (a wine write watch) as much as
-on a `PROT_NONE` one. Once the probes pass, the real access cannot fault,
-and a fault in a probe reaches the guest handler with that instruction as
-rip and the state from before it.
+unchanged: the full access width for 2, 4 and 8 bytes. A 10- or 108-byte
+store is written back as one halfword: the one that straddles the page
+boundary when the store crosses a page, its first two bytes otherwise, so
+the one write-back faults on whichever of the pages is not writable. The
+runtime's check reads the code before the faulting instruction in order and
+does not follow branches, so a second write-back on another path would
+count as a state change; the halfword's address is computed without a
+branch. The write-back is the probe's only state change and comes last, so
+a fault in it still rolls back, and it faults where the store would, on a
+read-only page (a wine write watch) as much as on a `PROT_NONE` one. Once
+the probes pass, the real access cannot fault, and a fault in a probe
+reaches the guest handler with that instruction as rip and the state from
+before it. The straddling halfword is an unaligned access, which device
+memory (an uncached mapping) does not allow, so a 10- or 108-byte x87 store
+that crosses a page of such a mapping faults in the probe; the store itself
+would be unaligned there too unless its address is a multiple of 8.
+`test_x87_sync_fault`'s `wc_cross` case pins this: an `fstpt` 8 bytes below
+a page end of an uncached IOSurface is stored natively and without the
+knob, and takes SIGBUS with it.
 
 The write-back has a window: a write by another thread to the same bytes
 between the probe's load and its store is undone. The real store then
@@ -254,10 +303,11 @@ reply of seven instructions, which as two replies would be 89, and it is
 the inner loop of `System.Move`. A fault in its store rolls back to the
 `fild`, with the state from before it: a handler that makes the page
 accessible and returns gets the right result, one that skips the reported
-instruction does not, but the process does not abort. The nested pairs of
-that fusion (`fild; fild; fistp; fistp`) are not used in such runs,
-because a second store behind the first would abort; split, two nested
-pairs take about a hundred instructions instead of nine. With
+instruction does not, but the process does not abort (with
+`X87_PRECISE_FAULTS=2` the pair is split as well, see below). The nested
+pairs of that fusion (`fild; fild; fistp; fistp`) are not used in such
+runs, because a second store behind the first would abort; split, two
+nested pairs take about a hundred instructions instead of nine. With
 `X87_PROFILE` or `X87_TRACE_BLOCK` on, their counter and trace stores come
 ahead of a transport reply's access, and a fault there aborts.
 
@@ -272,19 +322,33 @@ percent (dot products, `fyl2x`), and a loop of two nested
 split. With the knob off the emitted code is the same as without the
 feature.
 
-Even with the knob on, a fault in a later instruction of a floating-point
-run still aborts. That instruction has no map entry of its own, and giving
-it one would mean writing the x87 state back to memory in the native layout
-before every memory access of the run, which is the cost the run reply
-exists to avoid. Probing the later accesses at the start of the reply as
-well would not help: the rollback would report the run's first instruction
-as rip, so a handler that skips the faulting instruction would skip the
-wrong one, and a second store probe would itself change state before the
-faulting one. This needs the x87 state to stay in the native layout
-throughout. A 10- or 108-byte store that crosses from a writable page into
-a read-only one also still aborts, since only its first byte is written
-back, and with `X87_NATIVE_TRANSPORT=0` an integer-only run is an ordinary
-floating-point run again.
+With `X87_PRECISE_FAULTS=1`, a fault in a later instruction of a
+floating-point run still aborts. That instruction has no map entry of its
+own, and giving it one means writing the x87 state back to memory in the
+native layout before every memory access of the run. Probing the later
+accesses at the start of the reply as well would not help: the rollback
+would report the run's first instruction as rip, so a handler that skips the
+faulting instruction would skip the wrong one, and a second store probe
+would itself change state before the faulting one. With
+`X87_NATIVE_TRANSPORT=0` an integer-only run is an ordinary floating-point
+run again.
+
+`X87_PRECISE_FAULTS=2` pays for that. With `X87_NATIVE_SLOTS` on, the x87
+state is in the native layout at the end of every reply, and ending a reply
+costs only the conversion of the slots it left in binary64, so a run ends
+before each instruction after its first that accesses guest memory: the run
+is cut there, bridging is off, and a fusion does not take such an
+instruction, and this also holds with the run cache off. Every access is
+then the first of its reply, the probe covers it, and a fault reports that
+instruction as rip with the state from before it. The adjacent
+`fild m64; fistp m64` pair of a native transport run is split too, so its
+store faults precisely instead of rolling back to the `fild`. Runs get much
+shorter: against `X87_PRECISE_FAULTS=1` without the native slots, the
+benchmark loops take up to 63 times as long, 3.7 times as a geometric mean
+over 143 rows, and Delphi's `System.Move` loops 5 to 7 times. With
+`X87_NATIVE_SLOTS=0` the value 2 acts as 1, and the sidecar prints a line
+saying so, since without the native layout every cut would convert all
+eight registers.
 
 `tests/test_x87_sync_fault.c` checks rip, fault address and kind, control
 word, status word, tags and stack contents in the handler against a
@@ -297,8 +361,9 @@ compatibility mode through an LDT code segment, and it stores through x87
 instructions into write-combined and uncached IOSurfaces. `run_tests.sh`
 runs it in a phase of its own with `X87_PRECISE_FAULTS=1`, and once
 without, where a store at the start of a reply must abort with the
-runtime's message. `SYNC_FAULT_IN_RUN=1` adds the cases that are not
-precise yet, which pass under stock Rosetta.
+runtime's message. `SYNC_FAULT_IN_RUN=1` adds the cases inside runs and the
+transport pair's store, which pass under stock Rosetta and under the sidecar
+with `X87_PRECISE_FAULTS=2`; the phase runs them that way too.
 
 ## Guest flags in NZCV
 
@@ -444,33 +509,45 @@ word and a round trip through single precision after every arithmetic result,
 at each of the arithmetic emit sites in the direct translator, the fusions and
 the IR lowering, roughly a hundred of them. It is not done.
 
-A 64-bit integer loaded with `fild m64` is exact on real x87 for every value,
-so `fild m64; fistp m64` copies any `int64_t`. Compilers use that pair to
-move 64-bit integers atomically on 32-bit x86 without SSE2, and Delphi's
-`System.Move` copies memory with it. The sidecar copies these values
-exactly, within a block and across blocks. A reply made only of integer
-loads and stores is a native transport reply (see
-[Asynchronous signals inside emitted code](#asynchronous-signals-inside-emitted-code))
-and keeps the 80-bit value in the native slot, so an int64 held on the
-stack from one block to the next arrives intact. Inside a run that also
-holds other instructions, the `fild_fistp` fusion (a lone pair, or up to
-three nested pairs) and an IR pass copy the eight bytes as long as nothing
-else reads the value. What remains is a value that meets arithmetic, or that
-is on the stack while a reply with floating-point work runs, since that
-reply converts its slots to binary64: above 2^53 in magnitude it is rounded,
-and 2^53 + 1 comes back as 2^53 and 2^62 + 3 as 2^62. With the IR off, a
-copy inside such a mixed run is exact only where the fusion matches it.
+A 64-bit integer loaded with `fild m64` is exact on real x87 for every
+value, so `fild m64; fistp m64` copies any `int64_t`. Compilers use that
+pair to move 64-bit integers atomically on 32-bit x86 without SSE2, and
+Delphi's `System.Move` copies memory with it. The sidecar copies these
+values exactly, within a block and across blocks. A reply made only of
+integer loads and stores is a native transport reply (see [Asynchronous
+signals inside emitted code](#asynchronous-signals-inside-emitted-code)) and
+keeps the 80-bit value in the native slot, so an int64 held on the stack
+from one block to the next arrives intact. Inside a run that also holds
+other instructions, the `fild_fistp` fusion (a lone pair, or up to three
+nested pairs) and an IR pass copy the eight bytes as long as nothing else
+reads the value. With the native slots, the default, the value keeps its 80
+bits until arithmetic reads it (see [Asynchronous signals inside emitted
+code](#asynchronous-signals-inside-emitted-code)), so the copy is exact
+whatever runs in between, with the IR on or off. An integer store converts
+the 80-bit value exactly when five scratch registers are free; with fewer,
+the stored integer comes from a binary64 copy and the register keeps its
+bits. With `X87_NATIVE_SLOTS=0` what remains is a value that meets
+arithmetic, or that is on the stack while a reply with floating-point work
+runs, since that reply converts its slots to binary64: above 2^53 in
+magnitude it is rounded, and 2^53 + 1 comes back as 2^53 and 2^62 + 3 as
+2^62. With the IR off as well, a copy inside such a mixed run is exact only
+where the fusion matches it.
 
 `fld m80; fstp m80`, the code for a `long double` or Delphi `Extended`
 assignment, is copied the same way by the `fld_fstp_m80` fusion: the ten
 bytes arrive unchanged, including values outside binary64's range, all 64
-significand bits and NaN payloads. Only the adjacent pair is exact. A value
-loaded with `fld m80` that meets any other instruction first, or reaches its
-`fstp m80` in a later reply, is rounded to binary64. An 18-digit packed BCD
-integer needs up to 60 significand bits, so by default a block containing
-`fbld` or `fbstp` goes to stock Rosetta, whose 80-bit registers keep every
-digit. `X87_STOCK_BCD=0` translates such blocks in the sidecar, which rounds
-any BCD value above 2^53 in magnitude.
+significand bits and NaN payloads. With `X87_NATIVE_SLOTS=0` only the
+adjacent pair is exact: a value loaded with `fld m80` that meets any other
+instruction first, or reaches its `fstp m80` in a later reply, is rounded to
+binary64. With the native slots, the default, it is not: the ten bytes
+survive later replies, `fld st(i)`, `fxch`, `fst`/`fstp st(i)`, `fsave` and
+`frstor`, and `fst m64` and `fst m32` round the 80-bit value once, as the
+hardware does (through binary64 first, 1 + 2^-24 + 2^-60 would become the
+tie 1 + 2^-24 and round to 1.0 as a float instead of 1 + 2^-23). An 18-digit
+packed BCD integer needs up to 60 significand bits, so by default a block
+containing `fbld` or `fbstp` goes to stock Rosetta, whose 80-bit registers
+keep every digit. `X87_STOCK_BCD=0` translates such blocks in the sidecar,
+which rounds any BCD value above 2^53 in magnitude.
 
 Precision lost between instructions is not recovered later. The pow idiom of
 older C runtimes and Delphi, `fyl2x` followed by `fld st0; frndint; fsub
@@ -500,7 +577,8 @@ denormal float, which MSVC `/arch:IA32` code uses for float copies, and,
 under DAZ, a denormal compares equal to zero. Stock Rosetta keeps them.
 
 `X87_IGNORE_FTZ_DAZ=1` makes each translation reply clear the two bits on
-entry and restore them on exit (see `emit_native_state_boundary`), in FPCR
+entry and restore them on exit (see `emit_native_state_boundary`, and
+`emit_native_slots_fpcr_enter` with the native slots), in FPCR
 or in the Apple register, chosen the same way as the runtime chooses;
 `x87sidecar --probe` prints which. The Apple register traps at EL0 on
 FEAT_AFP hardware, so the choice cannot be made at run time by trying, and
@@ -558,17 +636,26 @@ conversions read and write slot 0 before and after the halfword is used.
 Native transport replies do work on the native slots (+6, stride 10), and
 are still safe: they skip the boundary, so they neither write nor read the
 saved bits, and their integer conversions and `LDR D` / `STR D` copies do no
-floating-point arithmetic, so FZ and FIZ do not affect them. Any other reply
-that kept values inside the native slots would need the saved bits moved
-somewhere else.
+floating-point arithmetic, so FZ and FIZ do not affect them.
+
+The native slots keep values in all ten bytes of every slot, so their
+replies keep the saved bits in the halfword right after slot 7, at +86, and
+have the knob's FPCR handling at entry and exit without the conversions.
+Rosetta's x87 register file and its exchanges with the signal context and
+the thread state (`x86_FLOAT_STATE64`) cover bytes +0 to +85, and the
+halfword after it is used only between a reply's entry and its exit. The
+signal storm, `fxsave`/`fxrstor` and signal-context tests pass with both
+knobs on.
 
 `test_x87_ftz_daz` covers loads, stores, arithmetic and compares under each
 bit, the guest's FTZ and DAZ still applying to SSE code later in the same
-block, and a signal storm while the bits are set. The SSE checks report a
-skip on a runtime that does not apply the bit to SSE at all; the x87 checks
-never do. `run_tests.sh` runs it in a phase of its own: natively and with
-the knob it must pass, and without the knob it must fail with its failure
-count rather than crash.
+block, a signal storm while the bits are set, and a storm whose handler
+sets both bits in the signal context, so the interrupted code resumes under
+them. The SSE checks report a skip on a runtime that does not apply the bit
+to SSE at all; the x87 checks never do. `run_tests.sh` runs it in a phase
+of its own: natively and with the knob it must pass, and without the knob it
+must fail with its failure count rather than crash, each with
+`X87_NATIVE_SLOTS` off and on.
 
 The knob does not cover rounding control: x87 arithmetic rounds by MXCSR.RC
 rather than by the RC field of the control word. The control word's RC is
@@ -578,6 +665,25 @@ program that sets the x87 RC to chop, and round up under one that sets
 MXCSR.RC up. x87 arithmetic also sets the MXCSR status flags (precision,
 underflow) and leaves the x87 status word's exception flags clear, the
 reverse of the hardware.
+
+These differences from stock Rosetta remain with the native slots.
+Arithmetic is still binary64, with the precision-control and exponent-range
+differences above. A register that arithmetic, a compare, `fxam` or `ftst`
+reads is converted to binary64 in place, so it stays rounded for the rest of
+its life, also when a later `fstp m80` stores it, where stock would keep the
+untouched source register's 80 bits. An integer store short of registers
+rounds the stored value through binary64, as described above. Reading an
+80-bit value as binary64 (for arithmetic, or for `fst m64`) always rounds to
+nearest even, where the hardware's `fst m64` follows the control word's RC;
+`fst m32` rounds by MXCSR.RC, like the arithmetic, and a finite value beyond
+binary64's range becomes infinity whatever the rounding mode.
+
+An unnormal, pseudo-infinity or pseudo-NaN (integer bit clear, exponent not
+zero) reads as the default NaN with the native slots and without them, as
+in stock Rosetta. With `X87_NATIVE_SLOTS=0`, though, such a register held
+from one reply to the next is converted at the reply boundary like any
+other, so `fnsave` then stores the default NaN in its place, where stock
+and the native slots keep the ten bytes.
 
 ## Encodings Rosetta's decoder rejects
 

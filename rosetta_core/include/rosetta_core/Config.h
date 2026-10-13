@@ -97,7 +97,10 @@ struct RosettaConfig {
                                       //                           is available (0 = off).  Makes
                                       //                           split behavior deterministic in
                                       //                           tests; allocation is unaffected.
-    uint8_t gpr_pool_limit;           // X87_GPR_POOL_LIMIT        test-only GPR-side equivalent.
+    uint8_t gpr_pool_limit;           // X87_GPR_POOL_LIMIT        test-only GPR-side equivalent;
+                                      //                           also clamps the count that lets
+                                      //                           an X87_NATIVE_SLOTS integer
+                                      //                           store convert 80 bits exactly.
     uint8_t strict_alloc;             // X87_STRICT_ALLOC          assert when a scratch register
                                       //                           allocation fails, as every
                                       //                           build did before the decline
@@ -158,7 +161,18 @@ struct RosettaConfig {
                                       //                           a precise context instead of
                                       //                           aborting the process.  Off, the
                                       //                           emitted code is the same as
-                                      //                           without the feature.
+                                      //                           without the feature.  =2 also
+                                      //                           ends a run before each later
+                                      //                           memory access, so every fault
+                                      //                           is precise; it needs
+                                      //                           native_slots and is 1 without.
+    uint8_t native_slots;             // X87_NATIVE_SLOTS          (default ON) keeps the working
+                                      //                           binary64 value of each x87
+                                      //                           register inside its native
+                                      //                           80-bit slot (+6, stride 10)
+                                      //                           instead of the compact layout,
+                                      //                           and converts per slot.  =0 is
+                                      //                           the kill switch.
 
     // X87_BRIDGE_HASH_LIST / X87_NO_BRIDGE_HASH_LIST — per-block bridging
     // bisect, same semantics and hash key as the rollback lists above:

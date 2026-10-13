@@ -60,6 +60,62 @@ static_assert(kX87TagWordOff == 0x04, "Invalid offset for tag_word");
 static_assert(kX87RegFileOff == 0x08, "Invalid offset for st[] base");
 static_assert(kX87RegStride == 0x08, "Invalid stride for st[] registers");
 
+// X87_NATIVE_SLOTS keeps the working binary64 value of each register in the
+// first 8 bytes of its native 80-bit slot, at +6 + 10 * phys, so converting
+// one slot leaves its neighbours alone.  Code that has the TranslationResult
+// reads X87Cache::native_slots; the slot helpers below (emit_load_st,
+// emit_store_st, emit_store_st_at_offset, emit_x87_perm_flush), which do not
+// have it, read g_x87_native_layout.  Translator::translate_instruction sets
+// both for one reply at a time.
+static constexpr int16_t kX87NativeSlotOff = 6;
+static constexpr int kX87NativeSlotStride = 10;
+inline thread_local bool g_x87_native_layout = false;
+
+// What Xst_base points at in the reply `c` belongs to: the compact st[]
+// array, or native slot 0.
+inline int16_t x87_st_base_off(const X87Cache& c) {
+    return c.native_slots != 0 ? kX87NativeSlotOff : kX87RegFileOff;
+}
+
+// The slot tracker (X87Cache::slot_fmt, top_rel) of the reply being
+// translated in the native layout, or nullptr.  Every change the emitters
+// make to the TOP register is noted below, and every slot access goes
+// through emit_load_st and emit_store_st, which note the read or write with
+// the depth relative to the TOP register at that point.  A read of a slot
+// still holding Rosetta's 80-bit value means a conversion was missed: it is
+// recorded like an allocation failure, so the request is declined to stock,
+// and asserts under X87_STRICT_ALLOC.  All of these do nothing while the
+// tracker is unset.
+inline thread_local TranslationResult* g_x87_slot_tracker = nullptr;
+void x87_slot_note_read(int stack_depth);
+void x87_slot_note_write(int stack_depth);
+// n pushes; the new slots will hold binary64 values.
+void x87_slot_note_push(int n);
+// n pops from the current TOP; the popped slots become dead.
+void x87_slot_note_pop(int n);
+// fincstp (+1) and fdecstp (-1): TOP moves, every slot keeps its format.
+void x87_slot_note_rotate(int delta);
+// ffree: the slot at depth stack_depth becomes dead.
+void x87_slot_note_free(int stack_depth);
+// fsave and frstor set TOP from somewhere the reply cannot know statically;
+// the tracker restarts at that TOP with every slot in format `fmt`.
+void x87_slot_note_reanchor(uint8_t fmt);
+// True when the tracker is set and the slot at depth stack_depth still holds
+// an 80-bit value, which fld m80 and fstp m80 copy as ten bytes.
+bool x87_slot_is_native(int stack_depth);
+// The slot at depth stack_depth now holds an 80-bit value (fld m80).
+void x87_slot_note_native(int stack_depth);
+// The slots at the two depths traded contents (an FXCH done in memory).
+void x87_slot_note_swap(int depth_a, int depth_b);
+// True when the tracker is set and the slot's bytes are an 80-bit image,
+// live (kSlotNative) or popped (kSlotDeadNative).  The exact paths copy such
+// a slot as ten bytes instead of reading it as binary64.
+bool x87_slot_holds_f80_at(int stack_depth);
+// True when flushing `perm` (emit_x87_perm_flush) moves a slot that holds
+// an 80-bit image; the flush then moves every slot it permutes as ten bytes
+// and its callers pass the two extra FPRs that takes.
+bool x87_perm_moves_f80(const int8_t perm[8]);
+
 static constexpr int kX87TopShift = 11;  // TOP LSB position in status_word
 static constexpr int kX87TopMask = 0x7;
 // x87 condition code bit positions in status_word
@@ -131,6 +187,25 @@ auto emit_store_top(AssemblerBuffer& buf, int Xbase, int Wd_new_top, int Wd_tmp)
 // =============================================================================
 
 auto emit_phys_index(AssemblerBuffer& buf, int Wd_top, int stack_depth, int Wd_out) -> void;
+
+// Native layout: Wd_key = 10 * ((Wd_top + stack_depth) & 7), the byte offset
+// of the slot from native slot 0.  UBFIZ (and an ADD before it for a nonzero
+// depth), then ADD Wd_key, Wd_key, Wd_key, LSL #2.
+void emit_native_slot_key(AssemblerBuffer& buf, int Wd_top, int stack_depth, int Wd_key);
+
+// Native layout: Wd = 6 + 10 * (Wphys & 7), the slot's offset from Xbase.
+void emit_native_slot_offset(AssemblerBuffer& buf, int Wphys, int Wd);
+
+// Native layout: the ten bytes of the slot at stack_depth into Dd (bytes 0-7)
+// and Hd (bytes 8-9), or from them back into the slot when `store`.  Wd_tmp
+// is clobbered.
+void emit_native_slot_image(AssemblerBuffer& buf, int Xbase, int Wd_top, int stack_depth,
+                            int Wd_tmp, int Dd, int Hd, int Xbase_st, bool store);
+
+// Native layout: Xd = the address of the slot at stack_depth, from Xbase_st
+// (= Xbase + 6) when pinned, otherwise from Xbase.  Wd_top is read only.
+void emit_native_st_addr(AssemblerBuffer& buf, int Xbase, int Wd_top, int stack_depth, int Xd,
+                         int Xbase_st);
 
 // =============================================================================
 // 2f — Load ST(i) mantissa into a D register
@@ -300,9 +375,13 @@ auto emit_fcom_flags_to_sw(AssemblerBuffer& buf, int Xbase, int Wd_tmp1, int Wd_
 // Uses cycle decomposition to emit the minimal number of swaps.
 // Dd_tmp is a temp FP register for the swap chain.
 // Wd_tmp is scratch for phys_index computation.
+// Hd_save and Hd_chain (X87_NATIVE_SLOTS, when x87_perm_moves_f80): two more
+// FPRs for bytes 8-9, so the permuted slots move as ten-byte images and
+// keep their formats.  -1 otherwise.
 // =============================================================================
 void emit_x87_perm_flush(AssemblerBuffer& buf, int Xbase, int Wd_top, int Wd_tmp,
-                         const int8_t perm[8], int Xst_base, int Dd_save, int Dd_chain);
+                         const int8_t perm[8], int Xst_base, int Dd_save, int Dd_chain,
+                         int Hd_save = -1, int Hd_chain = -1);
 
 // =============================================================================
 // OPT-L: Branchless FCMP NZCV → packed x87 CC bits.

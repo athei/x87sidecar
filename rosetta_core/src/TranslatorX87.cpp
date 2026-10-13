@@ -197,7 +197,22 @@ auto translate_fld(TranslationResult* a1, IRInstr* a2) -> void {
     const int Wd_tmp2 = alloc_gpr(*a1, 3);
     const int Dd_val = alloc_free_fpr(*a1);
 
-    if (a2->operands[0].kind == IROperandKind::Register) {
+    if (a2->operands[0].kind == IROperandKind::Register &&
+        x87_slot_holds_f80_at(resolve_depth(*a1, a2->operands[1].reg.reg.index()))) {
+        // X87_NATIVE_SLOTS: ST(i) holds an 80-bit image; the new ST(0) gets
+        // the same ten bytes.  The image waits in Dd_val and an H register
+        // across the push, which needs every GPR the plain path gives it.
+        const int depth_src = a2->operands[1].reg.reg.index();
+        const int Hd_val = alloc_free_fpr(*a1);
+        emit_native_slot_image(buf, Xbase, Wd_top, resolve_depth(*a1, depth_src), Wd_tmp, Dd_val,
+                               Hd_val, Xst_base, /*store=*/false);
+        x87_push(buf, *a1, Xbase, Wd_top, Wd_tmp, Wd_tmp2);
+        free_gpr(*a1, Wd_tmp2);
+        emit_native_slot_image(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Dd_val, Hd_val,
+                               Xst_base, /*store=*/true);
+        free_fpr(*a1, Hd_val);
+        x87_slot_note_native(resolve_depth(*a1, 0));
+    } else if (a2->operands[0].kind == IROperandKind::Register) {
         // FLD ST(i) — D9 C0+i
         const int depth_src = a2->operands[1].reg.reg.index();
         emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, depth_src), Wd_tmp, Dd_val, Xst_base);
@@ -240,6 +255,23 @@ auto translate_fld(TranslationResult* a1, IRInstr* a2) -> void {
 
         const bool addr_is_64 = (a2->operands[0].mem.addr_size == IROperandSize::S64);
         const int Xaddr = compute_operand_address(*a1, addr_is_64, &a2->operands[0], GPR::XZR);
+
+        if (a1->x87_cache.native_slots) {
+            // X87_NATIVE_SLOTS: the new register takes the ten bytes as they
+            // are and stays in the 80-bit format until something reads it.
+            emit_native_st_addr(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Xst_base);
+            const int Xt1 = alloc_free_gpr(*a1);
+            const int Xt2 = alloc_free_gpr(*a1);
+            emit_copy_f80(buf, Wd_tmp, 0, Xaddr, 0, Xt1, Xt2);
+            free_gpr(*a1, Xt2);
+            free_gpr(*a1, Xt1);
+            free_gpr(*a1, Xaddr);
+            x87_slot_note_native(resolve_depth(*a1, 0));
+            free_fpr(*a1, Dd_val);
+            x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp);
+            free_gpr(*a1, Wd_tmp);
+            return;
+        }
 
         // Load 8-byte mantissa + 2-byte sign+exp word into caller-allocated
         // scratch, then free Xaddr early so the bit-math stage doesn't
@@ -1358,6 +1390,27 @@ auto translate_fst(TranslationResult* a1, IRInstr* a2) -> void {
         auto [Xbase, Wd_top] = x87_begin(*a1, buf);
         const int Xst_base = x87_get_st_base(*a1);
         const int Wd_tmp = alloc_gpr(*a1, 2);  // sign scratch, then pop scratch
+
+        if (x87_slot_holds_f80_at(resolve_depth(*a1, 0))) {
+            // X87_NATIVE_SLOTS: ST(0) still holds an 80-bit image; store
+            // the ten bytes as they are.
+            emit_native_st_addr(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Xst_base);
+            const int Xaddr =
+                compute_operand_address(*a1, /*is_64bit=*/true, &a2->operands[0], GPR::XZR);
+            const int Xt1 = alloc_free_gpr(*a1);
+            const int Xt2 = alloc_free_gpr(*a1);
+            emit_copy_f80(buf, Xaddr, 0, Wd_tmp, 0, Xt1, Xt2);
+            free_gpr(*a1, Xt2);
+            free_gpr(*a1, Xt1);
+            free_gpr(*a1, Xaddr);
+            if (is_fstp) {
+                x87_pop(buf, *a1, Xbase, Wd_top, Wd_tmp);
+            }
+            x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp);
+            free_gpr(*a1, Wd_tmp);
+            return;
+        }
+
         const int Dd_src = alloc_free_fpr(*a1);
 
         // Load ST(0) as double
@@ -1411,7 +1464,21 @@ auto translate_fst(TranslationResult* a1, IRInstr* a2) -> void {
         // -----------------------------------------------------------------
         const int depth_dst = a2->operands[0].reg.reg.index();
 
-        if (depth_dst != 0) {
+        if (depth_dst != 0 && x87_slot_holds_f80_at(resolve_depth(*a1, 0))) {
+            // X87_NATIVE_SLOTS: copy ST(0)'s 80-bit image into ST(i).
+            const int Xt1 = alloc_free_gpr(*a1);
+            const int Xt2 = alloc_free_gpr(*a1);
+            emit_native_st_addr(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Xst_base);
+            emit_ldr_str_imm(buf, 3, 0, /*LDR*/ 1, 0, Wd_tmp, Xt1);
+            emit_ldr_str_imm(buf, 1, 0, /*LDRH*/ 1, 4, Wd_tmp, Xt2);
+            emit_native_st_addr(buf, Xbase, Wd_top, resolve_depth(*a1, depth_dst), Wd_tmp,
+                                Xst_base);
+            emit_ldr_str_imm(buf, 3, 0, /*STR*/ 0, 0, Wd_tmp, Xt1);
+            emit_ldr_str_imm(buf, 1, 0, /*STRH*/ 0, 4, Wd_tmp, Xt2);
+            free_gpr(*a1, Xt2);
+            free_gpr(*a1, Xt1);
+            x87_slot_note_native(resolve_depth(*a1, depth_dst));
+        } else if (depth_dst != 0) {
             // Load ST(0), store into ST(depth_dst).
             emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Dd_src, Xst_base);
             emit_store_st(buf, Xbase, Wd_top, resolve_depth(*a1, depth_dst), Wd_tmp, Dd_src,
@@ -1425,7 +1492,25 @@ auto translate_fst(TranslationResult* a1, IRInstr* a2) -> void {
         const bool is_f32 = (a2->operands[0].mem.size == IROperandSize::S32);
 
         // Load ST(0) as f64, then narrow to f32 if needed.
-        emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Dd_src, Xst_base);
+        if (x87_slot_holds_f80_at(resolve_depth(*a1, 0))) {
+            // X87_NATIVE_SLOTS: convert ST(0)'s 80-bit image into Dd_src and
+            // leave the slot as it is.  Wd_tmp holds the address until both
+            // halves are loaded, then serves the conversion.  For m32 the
+            // conversion rounds to odd, so the FCVT below rounds once.
+            emit_native_st_addr(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Xst_base);
+            const int Xm = alloc_free_gpr(*a1);
+            const int Wx = alloc_free_gpr(*a1);
+            const int Xt2 = alloc_free_gpr(*a1);
+            emit_ldr_str_imm(buf, 3, 0, /*LDR*/ 1, 0, Wd_tmp, Xm);
+            emit_ldr_str_imm(buf, 1, 0, /*LDRH*/ 1, 4, Wd_tmp, Wx);
+            emit_f80_bits_to_f64(buf, Xm, Wx, Wd_tmp, Xt2, /*round_to_odd=*/is_f32);
+            emit_fmov_x_to_d(buf, Dd_src, Xm);
+            free_gpr(*a1, Xt2);
+            free_gpr(*a1, Wx);
+            free_gpr(*a1, Xm);
+        } else {
+            emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Dd_src, Xst_base);
+        }
         if (is_f32) {
             emit_fcvt_d_to_s(buf, Dd_src, Dd_src);
         }
@@ -1951,6 +2036,28 @@ auto translate_fxch(TranslationResult* a1, IRInstr* a2) -> void {
         return;
     }
 
+    if (x87_slot_holds_f80_at(0) || x87_slot_holds_f80_at(depth)) {
+        // X87_NATIVE_SLOTS with an 80-bit slot involved: swap the ten-byte
+        // images, and the formats with them.
+        const int Wd_scratch = alloc_gpr(*a1, 2);
+        const int Dd_a = alloc_free_fpr(*a1);
+        const int Hd_a = alloc_free_fpr(*a1);
+        const int Dd_b = alloc_free_fpr(*a1);
+        const int Hd_b = alloc_free_fpr(*a1);
+        emit_native_slot_image(buf, Xbase, Wd_top, 0, Wd_scratch, Dd_a, Hd_a, Xst_base, false);
+        emit_native_slot_image(buf, Xbase, Wd_top, depth, Wd_scratch, Dd_b, Hd_b, Xst_base, false);
+        emit_native_slot_image(buf, Xbase, Wd_top, depth, Wd_scratch, Dd_a, Hd_a, Xst_base, true);
+        emit_native_slot_image(buf, Xbase, Wd_top, 0, Wd_scratch, Dd_b, Hd_b, Xst_base, true);
+        x87_slot_note_swap(0, depth);
+        free_fpr(*a1, Hd_b);
+        free_fpr(*a1, Dd_b);
+        free_fpr(*a1, Hd_a);
+        free_fpr(*a1, Dd_a);
+        x87_end(*a1, buf, Xbase, Wd_top, Wd_scratch);
+        free_gpr(*a1, Wd_scratch);
+        return;
+    }
+
     // OPT-E: Use two offset registers to avoid recomputing offset_0 for the
     // second store.  Saves 3 insns (15 → 12) by replacing emit_store_st
     // (which recomputes the offset via emit_st_offset) with a second
@@ -2081,6 +2188,30 @@ auto translate_fsqrt(TranslationResult* a1, IRInstr* /*a2*/) -> void {
     free_gpr(*a1, Wd_tmp);
 }
 
+// Loads ST(0) as binary64 into Dd for fist, fistp and fisttp.  Under
+// X87_NATIVE_SLOTS, an ST(0) still in its 80-bit form, which the dispatcher
+// did not send to the exact translate_*_native emitter for lack of
+// registers, is converted into Dd and left as it is in its slot: the stored
+// integer comes from the binary64 value, and the register keeps all its
+// bits.  Wd_tmp and Xm are scratch; Xm is the caller's integer register,
+// still unused at this point.
+static void load_st0_for_int_store(AssemblerBuffer& buf, TranslationResult& a1, int Xbase,
+                                   int Wd_top, int Wd_tmp, int Xm, int Dd, int Xst_base) {
+    if (!x87_slot_holds_f80_at(resolve_depth(a1, 0))) {
+        emit_load_st(buf, Xbase, Wd_top, resolve_depth(a1, 0), Wd_tmp, Dd, Xst_base);
+        return;
+    }
+    emit_native_st_addr(buf, Xbase, Wd_top, resolve_depth(a1, 0), Wd_tmp, Xst_base);
+    const int Wx = alloc_free_gpr(a1);
+    const int Xt2 = alloc_free_gpr(a1);
+    emit_ldr_str_imm(buf, 3, 0, /*LDR*/ 1, 0, Wd_tmp, Xm);
+    emit_ldr_str_imm(buf, 1, 0, /*LDRH*/ 1, 4, Wd_tmp, Wx);
+    emit_f80_bits_to_f64(buf, Xm, Wx, Wd_tmp, Xt2);
+    emit_fmov_x_to_d(buf, Dd, Xm);
+    free_gpr(a1, Xt2);
+    free_gpr(a1, Wx);
+}
+
 // =============================================================================
 // FISTP — store ST(0) as signed integer to memory, then pop
 //
@@ -2129,7 +2260,7 @@ auto translate_fistp(TranslationResult* a1, IRInstr* a2) -> void {
     const int Dd_val = alloc_free_fpr(*a1);
 
     // Step 1: load ST(0) mantissa → Dd_val
-    emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Dd_val, Xst_base);
+    load_st0_for_int_store(buf, *a1, Xbase, Wd_top, Wd_tmp, Wd_int, Dd_val, Xst_base);
 
     // Step 2: convert f64 to signed integer, respecting the rounding mode in
     // control_word bits [11:10] (RC field).
@@ -2301,7 +2432,7 @@ auto translate_fisttp(TranslationResult* a1, IRInstr* a2) -> void {
     const int Dd_val = alloc_free_fpr(*a1);
 
     // Step 1: load ST(0) mantissa → Dd_val
-    emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Dd_val, Xst_base);
+    load_st0_for_int_store(buf, *a1, Xbase, Wd_top, Wd_tmp, Wd_int, Dd_val, Xst_base);
 
     // Step 2: FISTT always truncates — single FCVTZS, no RC dispatch needed.
     // X-width conversion for every size (see translate_fistp).
@@ -2788,7 +2919,7 @@ auto translate_fist(TranslationResult* a1, IRInstr* a2) -> void {
     const int Dd_val = alloc_free_fpr(*a1);
 
     // Load ST(0)
-    emit_load_st(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Wd_tmp, Dd_val, Xst_base);
+    load_st0_for_int_store(buf, *a1, Xbase, Wd_top, Wd_tmp, Wd_int, Dd_val, Xst_base);
 
     // Rounding mode dispatch — same CBZ/SUB chain as translate_fistp.
     // X-width conversion for every size (see translate_fistp).
@@ -2901,11 +3032,18 @@ auto translate_fild_native(TranslationResult* a1, IRInstr* a2) -> void {
 
     const int Xs = alloc_free_gpr(*a1);
     const int Xe = alloc_free_gpr(*a1);
-    emit_native_slot_addr(buf, Wd_tmp, Xbase, Wd_top);
+    if (a1->x87_cache.native_slots) {
+        // X87_NATIVE_SLOTS: an exact fild in a reply with other x87 work
+        // (X87Cache::exact_fild); the push has flushed any FXCH permutation.
+        emit_native_st_addr(buf, Xbase, Wd_top, 0, Wd_tmp, x87_get_st_base(*a1));
+    } else {
+        emit_native_slot_addr(buf, Wd_tmp, Xbase, Wd_top);
+    }
     emit_i64_to_f80_slot(buf, Wd_tmp, Xint, Xs, Xe);
     free_gpr(*a1, Xe);
     free_gpr(*a1, Xs);
     free_gpr(*a1, Xint);
+    x87_slot_note_native(0);
 
     x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp);
     free_gpr(*a1, Wd_tmp);
@@ -2932,10 +3070,18 @@ static void translate_int_store_native(TranslationResult* a1, IRInstr* a2, Nativ
     const int Xm = alloc_free_gpr(*a1);
     const int Wx = alloc_free_gpr(*a1);
 
-    // ST(0) is physical slot TOP: a transport reply has no FXCH, so the
-    // permutation is always the identity here.
-    assert(!a1->x87_cache.perm_dirty && "native transport reply with a pending FXCH permutation");
-    emit_native_slot_addr(buf, Xslot, Xbase, Wd_top);
+    if (a1->x87_cache.native_slots) {
+        // X87_NATIVE_SLOTS: an 80-bit ST(0) in a reply with other x87 work,
+        // possibly under a deferred FXCH, with Xst_base pinned.
+        emit_native_st_addr(buf, Xbase, Wd_top, resolve_depth(*a1, 0), Xslot,
+                            x87_get_st_base(*a1));
+    } else {
+        // ST(0) is physical slot TOP: a transport reply has no FXCH, so the
+        // permutation is always the identity here.
+        assert(!a1->x87_cache.perm_dirty &&
+               "native transport reply with a pending FXCH permutation");
+        emit_native_slot_addr(buf, Xslot, Xbase, Wd_top);
+    }
     emit_f80_slot_to_int(buf, Xbase, Xslot, Xint, Xm, Wx, Wd_tmp, round, bits);
     free_gpr(*a1, Wx);
     free_gpr(*a1, Xm);
@@ -3641,6 +3787,7 @@ auto translate_fdecstp(TranslationResult* a1, IRInstr* /*a2*/) -> void {
     // AND  Wd_top, Wd_top, #7  (N=0, immr=0, imms=2 → 3-bit mask)
     emit_and_imm(buf, /*is_64bit=*/0, /*Rd=*/Wd_top,
                  /*N=*/0, /*immr=*/0, /*imms=*/2, /*Rn=*/Wd_top);
+    x87_slot_note_rotate(-1);
 
     a1->x87_cache.top_dirty = 1;
 
@@ -3669,6 +3816,7 @@ auto translate_fincstp(TranslationResult* a1, IRInstr* /*a2*/) -> void {
     // AND  Wd_top, Wd_top, #7
     emit_and_imm(buf, /*is_64bit=*/0, /*Rd=*/Wd_top,
                  /*N=*/0, /*immr=*/0, /*imms=*/2, /*Rn=*/Wd_top);
+    x87_slot_note_rotate(1);
 
     a1->x87_cache.top_dirty = 1;
 
@@ -3756,6 +3904,7 @@ auto translate_ffree(TranslationResult* a1, IRInstr* a2) -> void {
 
     free_gpr(*a1, Wd_mask);
     free_gpr(*a1, Wd_bitpos);
+    x87_slot_note_free(depth);
 
     x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp);
     free_gpr(*a1, Wd_tmp);
@@ -4106,6 +4255,9 @@ auto translate_frstor(TranslationResult* a1, IRInstr* a2) -> void {
     // UBFX Wd_top, Wd_tmp, #11, #3
     emit_bitfield(buf, /*is_64bit=*/0, /*opc=*/2 /*UBFM*/, /*N=*/0, /*immr=*/11, /*imms=*/13,
                   Wd_tmp, Wd_top);
+    // The slot tracker counts from this TOP; the copies below fill all eight
+    // slots with 80-bit images.
+    x87_slot_note_reanchor(kSlotNative);
 
     // TW: [Xaddr, #8] -> [Xbase, #4]
     emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/1 /*LDR*/, kSrcTwImm12, Xaddr, Wd_tmp);
@@ -4125,6 +4277,39 @@ auto translate_frstor(TranslationResult* a1, IRInstr* a2) -> void {
     // free Xst_base for the duration of the loop and re-derive it at the
     // end — emit_store_st falls back to its uncached path (3 extra insns
     // per slot, which is fine for this correctness-only opcode).
+    if (a1->x87_cache.native_slots) {
+        // X87_NATIVE_SLOTS: the registers stay 80-bit, so each slot takes
+        // the ten bytes of the image as they are.  Physical slot (TOP + i)
+        // gets ST(i).
+        const int Xst = x87_get_st_base(*a1);  // -1 in standalone
+        const int Xslot = writable_addr_reg(*a1, Xaddr);
+        const int Xmant = alloc_free_gpr(*a1);
+        const int Wexp = alloc_free_gpr(*a1);
+        for (int i = 0; i < 8; ++i) {
+            emit_add_imm(buf, /*is_64bit=*/1, /*is_sub=*/0, /*is_set_flags=*/0,
+                         /*shift=*/0, (i == 0) ? 0x1C : 10, (i == 0) ? Xaddr : Xslot, Xslot);
+            emit_ldr_imm(buf, /*size=*/3, Xmant, Xslot, /*imm12=*/0);
+            emit_ldr_str_imm(buf, /*size=*/1, /*is_fp=*/0, /*opc=*/1, /*imm12=*/4, Xslot, Wexp);
+            emit_native_st_addr(buf, Xbase, Wd_top, i, Wd_tmp, Xst);
+            emit_ldr_str_imm(buf, 3, 0, /*STR*/ 0, 0, Wd_tmp, Xmant);
+            emit_ldr_str_imm(buf, 1, 0, /*STRH*/ 0, 4, Wd_tmp, Wexp);
+        }
+        free_gpr(*a1, Wexp);
+        free_gpr(*a1, Xmant);
+        if (Xslot != Xaddr) {
+            free_gpr(*a1, Xslot);
+        }
+        free_gpr(*a1, Xaddr);
+        if (standalone) {
+            free_gpr(*a1, Wd_tmp);
+            free_gpr(*a1, Wd_top);
+            free_gpr(*a1, Xbase);
+        } else {
+            x87_end(*a1, buf, Xbase, Wd_top, Wd_tmp);
+            free_gpr(*a1, Wd_tmp);
+        }
+        return;
+    }
     int Xst_base = x87_get_st_base(*a1);  // -1 in standalone
     const bool cached = (Xst_base >= 0);
     if (cached) {
@@ -4173,11 +4358,11 @@ auto translate_frstor(TranslationResult* a1, IRInstr* a2) -> void {
     free_gpr(*a1, Xaddr);
 
     if (cached) {
-        // Re-derive Xst_base = Xbase + kX87RegFileOff and put it back in
+        // Re-derive Xst_base = Xbase + x87_st_base_off(a1->x87_cache) and put it back in
         // the cached slot (slot 6 = x28 by convention).
         const int Xst_base_new = alloc_gpr(*a1, 6);
         emit_add_imm(buf, /*is_64bit=*/1, /*is_sub=*/0, /*is_set_flags=*/0,
-                     /*shift=*/0, kX87RegFileOff, Xbase, Xst_base_new);
+                     /*shift=*/0, x87_st_base_off(a1->x87_cache), Xbase, Xst_base_new);
         a1->x87_cache.st_base_gpr = static_cast<int8_t>(Xst_base_new);
     }
 
@@ -4278,10 +4463,22 @@ auto translate_fsave(TranslationResult* a1, IRInstr* a2) -> void {
     emit_nzcv_park(buf, Dd_flags, Xbits);
 
     for (int i = 0; i < 8; ++i) {
+        const int delta = (i == 0) ? 0x1C : 10;
+        if (x87_slot_holds_f80_at(i)) {
+            // X87_NATIVE_SLOTS: an 80-bit slot goes into the image as its
+            // ten bytes.
+            emit_native_st_addr(buf, Xbase, Wd_top, i, Wd_tmp, Xst_base);
+            emit_ldr_str_imm(buf, 3, 0, /*LDR*/ 1, 0, Wd_tmp, Xbits);
+            emit_ldr_str_imm(buf, 1, 0, /*LDRH*/ 1, 4, Wd_tmp, Wexp);
+            emit_add_imm(buf, /*is_64bit=*/1, /*is_sub=*/0, /*is_set_flags=*/0,
+                         /*shift=*/0, delta, (i == 0) ? Xaddr : Xslot, Xslot);
+            emit_ldr_str_imm(buf, 3, 0, /*STR*/ 0, 0, Xslot, Xbits);
+            emit_ldr_str_imm(buf, 1, 0, /*STRH*/ 0, 4, Xslot, Wexp);
+            continue;
+        }
         // Load ST(i) (logical depth i from current TOP).
         emit_load_st(buf, Xbase, Wd_top, /*stack_depth=*/i, Wd_tmp, Dd_src, Xst_base);
         // Bump Xslot to the start of the current slot.
-        const int delta = (i == 0) ? 0x1C : 10;
         emit_add_imm(buf, /*is_64bit=*/1, /*is_sub=*/0, /*is_set_flags=*/0,
                      /*shift=*/0, delta, (i == 0) ? Xaddr : Xslot, Xslot);
         // Convert and store 10 bytes at [Xslot, #0..#9].
@@ -4315,6 +4512,8 @@ auto translate_fsave(TranslationResult* a1, IRInstr* a2) -> void {
                      Wd_tmp);
     // Reset cached Wd_top to 0 (matches new SW.TOP=0).
     emit_movn(buf, /*is_64bit=*/0, /*opc=*/2 /*MOVZ*/, /*hw=*/0, /*imm16=*/0, Wd_top);
+    // Every slot is empty now; the slot tracker counts from TOP 0.
+    x87_slot_note_reanchor(kSlotDead);
     // Cache flags are already zero (we flushed top/tags/perm earlier; deferred_pop_count is 0).
     a1->x87_cache.top_dirty = 0;
 

@@ -5,6 +5,24 @@
 struct IRBlock;
 struct IRInstr;
 
+// The format of one x87 slot under X87_NATIVE_SLOTS (X87Cache::slot_fmt).
+enum X87SlotFmt : uint8_t {
+    kSlotNative = 0,      // an 80-bit value: Rosetta's, or copied as ten bytes
+    kSlotF64 = 1,         // the binary64 working value in the slot's first 8 bytes
+    kSlotDead = 2,        // popped or freed in this reply, holding binary64 bits
+    kSlotDeadNative = 3,  // popped or freed in this reply, holding 80-bit bits
+};
+
+// The slot's bytes are an 80-bit image, live or not.
+inline bool x87_slot_holds_f80(uint8_t fmt) {
+    return fmt == kSlotNative || fmt == kSlotDeadNative;
+}
+
+// The format a slot takes when it is popped or freed.
+inline uint8_t x87_slot_killed(uint8_t fmt) {
+    return x87_slot_holds_f80(fmt) ? kSlotDeadNative : kSlotDead;
+}
+
 // OPT-1: Cross-instruction x87 base/TOP register cache.
 //
 // When consecutive x87 instructions appear in a block, the base address
@@ -44,6 +62,26 @@ struct X87Cache {
     // Set and cleared by Translator::translate_instruction around one
     // reply; invalidate() and tick() leave it alone.
     int8_t native_transport = 0;
+    // 1 while the current reply keeps its working binary64 values inside
+    // Rosetta's native slots (+6, stride 10, X87_NATIVE_SLOTS) instead of
+    // the compact layout.  Set and cleared around one reply like
+    // native_transport.
+    int8_t native_slots = 0;
+    // With X87_NATIVE_SLOTS, 1 when the run started at the current request
+    // holds only fldcw and fnstcw, which never use TOP, so x87_begin does not
+    // load it.  A native-slot reply is often short, and the status-word load
+    // would read part of the status and tag word that the reply before may
+    // have just stored as one 32-bit word (the single-op fast path), which
+    // stalls: a lone fld m64 followed by Delphi's Trunc sequence (fnstcw;
+    // fnstcw; fldcw; fistp; fldcw) ran 6 percent longer with the load.
+    // Recomputed at every run start.
+    int8_t top_unused = 0;
+    // What each physical slot holds, indexed by its position relative to
+    // TOP at the start of the reply, (top_rel + depth) & 7, where top_rel
+    // is the static change of TOP since then.  Every TOP change inside a
+    // reply is a constant except frstor, which starts the count again.
+    int8_t top_rel = 0;
+    uint8_t slot_fmt[8] = {};  // X87SlotFmt
 
     // OPT-G: Deferred FXCH — compile-time register renaming.
     // perm[i] maps logical stack depth i to physical depth offset.
@@ -194,4 +232,29 @@ struct X87Cache {
     };
     static BridgedRun lookahead_bridged(IRInstr* instr_array, int64_t num_instrs, int64_t insn_idx,
                                         int max_gap, int max_total_bridges, bool allow_v2 = false);
+
+    // What one instruction does to the register stack, for the
+    // X87_NATIVE_SLOTS slot tracker.  Depths are logical (before the
+    // permutation of deferred FXCH) and taken before the instruction's own
+    // pushes and pops.  A non-x87 instruction (a bridge) has no effect.
+    enum EffectKind : uint8_t {
+        kEffectPlain = 0,
+        kEffectFxch,     // swaps logical depths 0 and arg
+        kEffectFree,     // ffree: depth arg becomes empty
+        kEffectTopInc,   // fincstp
+        kEffectTopDec,   // fdecstp
+        kEffectSave,     // fsave: reads all eight, then an empty stack at TOP 0
+        kEffectRestore,  // frstor: all eight replaced, TOP from memory
+    };
+    struct SlotEffect {
+        uint8_t reads = 0;   // depths read
+        uint8_t soft = 0;    // of those, the ones the direct emitter reads
+                             // exactly from an 80-bit slot (no conversion)
+        uint8_t writes = 0;  // depths written without being read
+        int8_t pushes = 0;   // the pushed value is written as binary64
+        int8_t pops = 0;
+        EffectKind kind = kEffectPlain;
+        int8_t arg = 0;
+    };
+    static SlotEffect slot_effect(const IRInstr& insn);
 };

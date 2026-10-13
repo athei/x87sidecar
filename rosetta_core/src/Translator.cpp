@@ -164,6 +164,229 @@ static void decline_after_alloc_failure(TranslationResult& tr, const RequestEntr
     }
 }
 
+// X87_NATIVE_SLOTS: sets the native layout and the slot tracker for one
+// reply and clears both on every way out.  The tracker starts with TOP where
+// the reply finds it and every slot holding Rosetta's 80-bit value.
+struct NativeLayoutScope {
+    NativeLayoutScope(bool on, TranslationResult& tr) {
+        g_x87_native_layout = on;
+        g_x87_slot_tracker = on ? &tr : nullptr;
+        if (on) {
+            tr.x87_cache.top_rel = 0;
+            for (auto& f : tr.x87_cache.slot_fmt) {
+                f = kSlotNative;
+            }
+        }
+    }
+    ~NativeLayoutScope() {
+        g_x87_native_layout = false;
+        g_x87_slot_tracker = nullptr;
+    }
+    NativeLayoutScope(const NativeLayoutScope&) = delete;
+    NativeLayoutScope& operator=(const NativeLayoutScope&) = delete;
+};
+
+// X87_NATIVE_SLOTS: what the next `count` instructions from idx need done to
+// the slots before they are emitted, simulated from the tracker's current
+// state with X87Cache::slot_effect.  Slot positions are relative to TOP at the
+// start of the reply (X87Cache::slot_fmt).
+//
+//   convert         slots still holding an 80-bit value that an instruction
+//                   reads as binary64 (a hard read); the dispatcher converts
+//                   them in place first.
+//   soft_f80        a soft read finds an 80-bit slot: fld st(i), fst and fstp
+//                   to a register or to m32/m64, fist, fistp, fisttp, fxch and
+//                   fsave read such a slot in their direct emitters without
+//                   changing it (the integer stores exactly, or from a
+//                   binary64 copy when short of registers), so the fusions
+//                   and the single-op fast path, which read binary64, are
+//                   skipped for this request.
+//   push_read_hard  with first_push_native, the value the first instruction
+//                   pushes would be read as binary64 later in the window,
+//                   by arithmetic or by an fst or fstp to m32 or m64.
+//
+// A deferred FXCH permutes depths; flushing it (at every push, pop, fincstp,
+// fdecstp and fsave, and at the end of a run when to_run_end) moves the
+// slots as they are (emit_x87_perm_flush), so the formats move with them.
+// The emitters convert nothing themselves.  Converting a slot the
+// instruction ends up not reading, or an empty one, costs code but changes
+// no result.
+struct SlotPlan {
+    uint8_t convert = 0;
+    bool soft_f80 = false;
+    bool push_read_hard = false;
+};
+
+static SlotPlan plan_slots(const X87Cache& c, const IRInstr* instrs, int64_t num, int64_t idx,
+                           int count, bool to_run_end, bool first_push_native = false) {
+    SlotPlan plan;
+    int top = c.top_rel;
+    int8_t perm[8];
+    uint8_t fmt[8];
+    for (int i = 0; i < 8; i++) {
+        perm[i] = c.perm[i];
+        fmt[i] = c.slot_fmt[i];
+    }
+    int pushed = -1;  // the slot first_push_native follows
+    // to_f64: the read converts the value to binary64 even though it leaves
+    // the slot as it is (fst and fstp to m32 or m64).
+    const auto read = [&](int phys, bool soft, bool to_f64) {
+        const int r = (top + phys) & 7;
+        if (fmt[r] != kSlotNative) {
+            return;
+        }
+        if (r == pushed && (!soft || to_f64)) {
+            plan.push_read_hard = true;
+        }
+        if (soft) {
+            plan.soft_f80 = true;
+            return;
+        }
+        plan.convert = static_cast<uint8_t>(plan.convert | (1U << r));
+        fmt[r] = kSlotF64;
+    };
+    const auto flush = [&] {
+        uint8_t moved[8];
+        for (int i = 0; i < 8; i++) {
+            moved[(top + i) & 7] = fmt[(top + perm[i]) & 7];
+        }
+        if (pushed >= 0) {
+            for (int i = 0; i < 8; i++) {
+                if (((top + perm[i]) & 7) == pushed) {
+                    pushed = (top + i) & 7;
+                    break;
+                }
+            }
+        }
+        for (int i = 0; i < 8; i++) {
+            fmt[i] = moved[i];
+            perm[i] = static_cast<int8_t>(i);
+        }
+    };
+    for (int k = 0; k < count && idx + k < num; k++) {
+        const IRInstr& insn = instrs[idx + k];
+        const auto e = X87Cache::slot_effect(insn);
+        const uint8_t soft = e.soft;
+        const uint16_t op = insn.opcode();
+        const bool to_f64 = (op == kOpcodeName_fst || op == kOpcodeName_fstp) &&
+                            insn.num_operands > 0 &&
+                            insn.operands[0].kind != IROperandKind::Register &&
+                            (insn.operands[0].mem.size == IROperandSize::S32 ||
+                             insn.operands[0].mem.size == IROperandSize::S64);
+        for (int d = 0; d < 8; d++) {
+            if ((e.reads >> d) & 1U) {
+                read(perm[d], ((soft >> d) & 1U) != 0, to_f64);
+            }
+            if ((e.writes >> d) & 1U) {
+                fmt[(top + perm[d]) & 7] = kSlotF64;
+            }
+        }
+        switch (e.kind) {
+            case X87Cache::kEffectFxch:
+                std::swap(perm[0], perm[e.arg]);
+                break;
+            case X87Cache::kEffectFree: {
+                auto& f = fmt[(top + perm[e.arg]) & 7];
+                f = x87_slot_killed(f);
+                break;
+            }
+            case X87Cache::kEffectTopInc:
+            case X87Cache::kEffectTopDec:
+                flush();
+                top = (top + (e.kind == X87Cache::kEffectTopInc ? 1 : -1)) & 7;
+                break;
+            case X87Cache::kEffectSave:
+            case X87Cache::kEffectRestore:
+                for (int i = 0; i < 8; i++) {
+                    perm[i] = static_cast<int8_t>(i);
+                    fmt[i] = e.kind == X87Cache::kEffectSave ? kSlotDead : kSlotNative;
+                }
+                top = 0;
+                pushed = -1;
+                break;
+            case X87Cache::kEffectPlain:
+                break;
+        }
+        if (e.pushes != 0 || e.pops != 0) {
+            flush();
+        }
+        for (int p = 0; p < e.pops; p++) {
+            fmt[top] = x87_slot_killed(fmt[top]);
+            if (top == pushed) {
+                pushed = -1;
+            }
+            top = (top + 1) & 7;
+        }
+        for (int p = 0; p < e.pushes; p++) {
+            top = (top - 1) & 7;
+            fmt[top] = kSlotF64;
+            if (k == 0 && first_push_native) {
+                fmt[top] = kSlotNative;
+                pushed = top;
+            }
+        }
+    }
+    if (to_run_end) {
+        flush();
+    }
+    return plan;
+}
+
+// Converts each slot in `mask` (positions as in plan_slots) from its
+// 80-bit value to binary64, in place, and marks it binary64 in the tracker.
+// Uses the run cache's base, TOP and Xst_base when it holds them, otherwise
+// loads base and TOP into registers of its own; either way it leaves the
+// allocator as it found it.  Four scratch GPRs on top of those, so a run
+// leaves one register of the eight-register pool to stock; the slot address
+// is computed again after the conversion, which needs all four.  No NZCV.
+static void emit_slot_conversions(TranslationResult& tr, uint8_t mask) {
+    if (mask == 0) {
+        return;
+    }
+    auto& c = tr.x87_cache;
+    AssemblerBuffer& buf = tr.insn_buf;
+    int Xbase = c.base_gpr;
+    int Wtop = c.top_gpr;
+    int Xst = (c.gprs_valid && c.st_base_valid) ? c.st_base_gpr : -1;
+    const bool own = c.gprs_valid == 0;
+    if (own) {
+        Xbase = alloc_free_gpr(tr);
+        Wtop = alloc_free_gpr(tr);
+        emit_x87_base(buf, tr, Xbase);
+        emit_load_top(buf, tr, Xbase, Wtop);
+        Xst = -1;
+    }
+    const int Xm = alloc_free_gpr(tr);
+    const int Wx = alloc_free_gpr(tr);
+    const int Xt1 = alloc_free_gpr(tr);
+    const int Xt2 = alloc_free_gpr(tr);
+    const int Xfrom = Xst >= 0 ? Xst : Xbase;
+    const int16_t off = Xst >= 0 ? 0 : kX87NativeSlotOff;
+    for (int r = 0; r < 8; r++) {
+        if (((mask >> r) & 1U) == 0) {
+            continue;
+        }
+        const int depth = (r - c.top_rel) & 7;
+        emit_native_slot_key(buf, Wtop, depth, Xt1);
+        emit_add_sub_shifted_reg(buf, 1, 0, 0, 0, Xt1, 0, Xfrom, Xt1);
+        emit_ldur_stur(buf, 3, /*LDUR*/ 1, off, Xt1, Xm);
+        emit_ldr_str_imm(buf, 1, 0, /*LDRH*/ 1, static_cast<int16_t>((off + 8) / 2), Xt1, Wx);
+        TranslatorX87::emit_f80_bits_to_f64(buf, Xm, Wx, Xt1, Xt2);
+        emit_native_slot_key(buf, Wtop, depth, Xt1);
+        emit_add_sub_shifted_reg(buf, 1, 0, 0, 0, Xt1, 0, Xfrom, Xt1);
+        emit_ldur_stur(buf, 3, /*STUR*/ 0, off, Xt1, Xm);
+        c.slot_fmt[r] = kSlotF64;
+    }
+    free_gpr(tr, Xt2);
+    free_gpr(tr, Xt1);
+    free_gpr(tr, Wx);
+    free_gpr(tr, Xm);
+    if (own) {
+        free_gpr(tr, Wtop);
+        free_gpr(tr, Xbase);
+    }
+}
+
 // Flush every deferred piece of x87 state to memory and release the run.
 // Only for the path that must not happen: an instruction inside a run the
 // lookahead counted as handled came back declined.  The ops already emitted
@@ -224,6 +447,31 @@ static bool x87_writes_memory(uint16_t opcode) {
     }
 }
 
+static bool x87_accesses_memory(const IRInstr& insn) {
+    for (int i = 0; i < insn.num_operands && i < 4; i++) {
+        const auto kind = insn.operands[i].kind;
+        if (kind == IROperandKind::MemRef || kind == IROperandKind::AbsMem) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// X87_PRECISE_FAULTS=2 with X87_NATIVE_SLOTS: every reply ends in the native
+// layout with nothing deferred, so a reply may stop before any instruction.
+// Stopping before each one that accesses guest memory makes that access the
+// first of its reply, where emit_fault_probe covers it and a fault rolls
+// back to that instruction with the state from before it.  Returns how many
+// instructions from idx (at least one, at most limit) a reply may take so
+// that only its first accesses memory.
+static int precise_window(const IRInstr* instrs, int64_t num, int64_t idx, int limit) {
+    int k = 1;
+    while (k < limit && idx + k < num && !x87_accesses_memory(instrs[idx + k])) {
+        k++;
+    }
+    return k;
+}
+
 // A memory fault in translated code is recovered by rolling back to the
 // start of the instruction-map entry the faulting pc belongs to, and there
 // is one entry per reply.  The runtime only rolls back when nothing before
@@ -241,7 +489,8 @@ static bool x87_writes_memory(uint16_t opcode) {
 // or of its first and last byte for 10 and 108 bytes; one load also covers
 // an unaligned access that crosses a page.  A store is probed by loading
 // those bytes and writing them back unchanged: the full access width for 2,
-// 4 and 8 bytes, otherwise the first byte after a load of the last.  The
+// 4 and 8 bytes, otherwise the first byte after a load of the last, or, when
+// the store crosses a page, the halfword that straddles the boundary.  The
 // write-back is the reply's only state change before the probe completes,
 // so a fault in it still rolls back, and it faults where the store would,
 // including on a read-only page.  An atomic would leave no window, but LSE
@@ -258,7 +507,8 @@ static bool x87_writes_memory(uint16_t opcode) {
 // PROT_NONE page faults in the probe's load, so the handler sees a read
 // fault where stock reports a write.  Accesses further into a reply are
 // not probed: rolling back to the reply start would report the wrong
-// instruction.
+// instruction.  With X87_PRECISE_FAULTS=2 there are none: a reply ends
+// before every later access (precise_window).
 static void emit_fault_probe(TranslationResult& tr, IRInstr& insn) {
     IROperand* mem = nullptr;
     for (int i = 0; i < insn.num_operands && i < 4; i++) {
@@ -284,6 +534,33 @@ static void emit_fault_probe(TranslationResult& tr, IRInstr& insn) {
         if (store) {
             emit_ldr_str_imm(buf, size, 0, /*STR*/ 0, 0, Xaddr, Xval);
         }
+    } else if (store && bytes > 1) {
+        // A 10- or 108-byte store is written back as one halfword: the one
+        // that straddles the page boundary when the store crosses a page,
+        // its first two bytes otherwise, so all of it is on one page.  Both
+        // bytes are part of the store either way, and the one write-back
+        // faults on whichever page is not writable.  The runtime's check
+        // reads the code before the faulting instruction in order, ignoring
+        // branches, so there is no second write-back on another path: the
+        // address is selected without branching or flags.  With e = the
+        // last byte's address and c = page(e) - page(addr), 0 or 1:
+        //   p = addr + (((page(e) << 12) - 1 - addr) & -c)
+        const int Xend = alloc_free_gpr(tr);
+        const int Xc = alloc_free_gpr(tr);
+        emit_add_imm(buf, 1, 0, 0, 0, bytes - 1, Xaddr, Xend);
+        emit_bitfield(buf, 1, /*UBFM*/ 2, 1, 12, 63, Xend, Xend);  // page(e)
+        emit_bitfield(buf, 1, /*UBFM*/ 2, 1, 12, 63, Xaddr, Xc);   // page(addr)
+        emit_add_sub_shifted_reg(buf, 1, /*sub*/ 1, 0, 0, Xc, 0, Xend, Xc);       // c
+        emit_bitfield(buf, 1, /*UBFM*/ 2, 1, 52, 51, Xend, Xend);  // page(e) << 12
+        emit_add_sub_shifted_reg(buf, 1, /*sub*/ 1, 0, 0, Xaddr, 0, Xend, Xend);
+        emit_add_imm(buf, 1, /*sub*/ 1, 0, 0, 1, Xend, Xend);       // boundary - 1 - addr
+        emit_add_sub_shifted_reg(buf, 1, /*sub*/ 1, 0, 0, Xc, 0, GPR::XZR, Xc);  // -c
+        emit_logical_shifted_reg(buf, 1, /*AND*/ 0, 0, 0, Xc, 0, Xend, Xend);
+        emit_add_sub_shifted_reg(buf, 1, 0, 0, 0, Xend, 0, Xaddr, Xend);         // p
+        emit_ldr_str_imm(buf, /*size=*/1, 0, /*LDRH*/ 1, 0, Xend, Xval);
+        emit_ldr_str_imm(buf, 1, 0, /*STRH*/ 0, 0, Xend, Xval);
+        free_gpr(tr, Xc);
+        free_gpr(tr, Xend);
     } else {
         if (bytes > 1) {
             emit_ldr_str_imm(buf, /*size=*/0, 0, /*LDR*/ 1, bytes - 1, Xaddr, GPR::XZR);
@@ -338,10 +615,17 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
         native_boundary &&
         (g_rosetta_config == nullptr || g_rosetta_config->native_transport != 0) &&
         X87Cache::is_native_transport_run(instr_array, num_instrs, insn_idx);
-    // Captured before native_transport is set, so a declined request leaves
-    // the flag clear, as every request that ends does.
+    // X87_NATIVE_SLOTS: the reply keeps its working binary64 values inside
+    // the native slots (+6, stride 10).  A native transport reply needs no
+    // binary64 values at all and keeps its own emitters.
+    const bool slots = native_boundary && !transport && g_rosetta_config != nullptr &&
+                       g_rosetta_config->native_slots != 0;
+    // Captured before native_transport and native_slots are set, so a
+    // declined request leaves both clear, as every request that ends does.
     const RequestEntry entry = capture_request_entry(*translation_result);
     cache.native_transport = transport ? 1 : 0;
+    cache.native_slots = slots ? 1 : 0;
+    const NativeLayoutScope layout(slots, *translation_result);
     // The probe has to stay the first thing in the reply: before the entry
     // conversion, before any NZCV save or FPCR write, before anything an op
     // emitter does.  A native transport reply needs none: it is one
@@ -358,8 +642,13 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
     const uint64_t trace_site = uint64_t(instr_array[insn_idx].pc) << 32;
     if (traced)
         x87trace::emit_boundary(*translation_result, trace_site | (uint64_t(insn_idx) << 1));
-    if (native_boundary && !transport)
+    // With X87_NATIVE_SLOTS nothing is converted on entry: each slot is
+    // converted where the reply first reads it (emit_slot_conversions).
+    // Only X87_IGNORE_FTZ_DAZ's FPCR handling remains.
+    if (native_boundary && !transport && !slots)
         TranslatorX87::emit_native_state_boundary(*translation_result, true);
+    else if (native_boundary && slots)
+        TranslatorX87::emit_native_slots_fpcr_enter(*translation_result);
     auto ret = translation_result->alloc_failure != nullptr
                    ? std::nullopt
                    : translate_instruction_impl(translation_result, block, instr_array,
@@ -399,9 +688,13 @@ auto Translator::translate_instruction(TranslationResult* translation_result, IR
         ret = more;
     }
     cache.native_transport = 0;
+    cache.native_slots = 0;
     if (native_boundary && translation_result->alloc_failure == nullptr) {
         if (ret) {
-            if (!transport)
+            if (slots) {
+                TranslatorX87::emit_native_slots_export(*translation_result);
+                TranslatorX87::emit_native_slots_fpcr_exit(*translation_result);
+            } else if (!transport)
                 TranslatorX87::emit_native_state_boundary(*translation_result, false);
             if (traced)
                 x87trace::emit_boundary(*translation_result, trace_site | (uint64_t(*ret) << 1) | 1,
@@ -576,9 +869,24 @@ static auto translate_instruction_impl(TranslationResult* translation_result, IR
                 // exit conversion, so the extra replies cost little.  An
                 // adjacent fild m64 / fistp m64 pair stays one reply (see
                 // try_fuse_fld_group).
-                const int run = cache.native_transport && precise_faults_enabled()
-                                    ? 1
-                                    : X87Cache::lookahead(instr_array, num_instrs, insn_idx);
+                int run = cache.native_transport && precise_faults_enabled()
+                              ? 1
+                              : X87Cache::lookahead(instr_array, num_instrs, insn_idx);
+                // X87_NATIVE_SLOTS: a run of only control-word moves skips
+                // the TOP load (X87Cache::top_unused).
+                bool only_cw = g_rosetta_config != nullptr && g_rosetta_config->native_slots;
+                for (int k = 0; k < run && only_cw; k++) {
+                    const auto o = instr_array[insn_idx + k].opcode();
+                    only_cw = o == kOpcodeName_fnstcw || o == kOpcodeName_fldcw;
+                }
+                cache.top_unused = only_cw ? 1 : 0;
+                // With X87_PRECISE_FAULTS=2 and X87_NATIVE_SLOTS a
+                // floating-point run ends before each later memory access,
+                // for the same reason (precise_window).
+                const bool split = cache.native_slots && precise_split_enabled();
+                if (split) {
+                    run = precise_window(instr_array, num_instrs, insn_idx, run);
+                }
                 cache.set_run(run);
                 // Run bridging: at a fresh run start, check whether short v1
                 // gaps join this run to following x87 segments.  Stash the
@@ -605,8 +913,9 @@ static auto translate_instruction_impl(TranslationResult* translation_result, IR
                     }
                 }
                 // A native transport run is not bridged: the bridged region
-                // would be lowered by the IR into the compact layout.
-                if (bridge_allowed && run >= 1 && !cache.native_transport) {
+                // would be lowered by the IR into the compact layout.  Nor is
+                // a split run: the region would hold later memory accesses.
+                if (bridge_allowed && run >= 1 && !cache.native_transport && !split) {
                     const auto br = X87Cache::lookahead_bridged(
                         instr_array, num_instrs, insn_idx, g_rosetta_config->bridge_max_gap,
                         g_rosetta_config->bridge_max_total,
@@ -717,6 +1026,9 @@ static auto translate_instruction_impl(TranslationResult* translation_result, IR
             cache.bridge_pending_idx = -1;
 
             cache.set_run(total);  // pin GPRs across the whole region
+            // X87_NATIVE_SLOTS needs no conversion here: the IR converts the
+            // slots it reads into registers (X87IRLower ReadSt), and with no
+            // deferred FXCH there is no permutation to flush.
             X87IR::IRFailReason bridge_reason = X87IR::IRFailReason::kNone;
             const int consumed =
                 X87IR::compile_run(translation_result, instr_array, num_instrs, insn_idx, total,
@@ -752,7 +1064,7 @@ static auto translate_instruction_impl(TranslationResult* translation_result, IR
                 return insn_idx + total;
             }
             // Fallback: nothing emitted; restore the plain x87 run.  Direct
-            // field write — set_run() ignores lengths < 2, which would leave
+            // field write: set_run() ignores lengths < 2, which would leave
             // run_remaining at the bridged total and keep the cache active
             // across the gap's stock-translated instructions.
             cache.run_remaining = static_cast<int16_t>(plain_run >= 2 ? plain_run : 0);
@@ -819,6 +1131,10 @@ static auto translate_instruction_impl(TranslationResult* translation_result, IR
             const int8_t saved_top_dirty = cache.top_dirty;
             const int8_t saved_tag_push_pending = cache.tag_push_pending;
             const int8_t saved_deferred_pop_count = cache.deferred_pop_count;
+            // X87_NATIVE_SLOTS: the perm_dirty flush below moves slot
+            // formats with the slots; a rewind takes them back with it.
+            uint8_t saved_slot_fmt[8];
+            std::copy(std::begin(cache.slot_fmt), std::end(cache.slot_fmt), saved_slot_fmt);
             bool flushed = false;
             // Track which branch set `flushed` so the X87_LOG_ROLLBACK
             // diagnostic can name it.  kNone when no branch fired.
@@ -939,16 +1255,9 @@ static auto translate_instruction_impl(TranslationResult* translation_result, IR
                     if (cache.gprs_valid && cache.run_remaining >= kMinRunForFlush) {
                         AssemblerBuffer& buf = translation_result->insn_buf;
                         const int Wd_tmp = alloc_free_gpr(*translation_result);
-                        const int Dd_save = alloc_free_fpr(*translation_result);
-                        const int Dd_chain = alloc_free_fpr(*translation_result);
-                        const int Xst_base =
-                            (cache.gprs_valid && cache.st_base_valid) ? cache.st_base_gpr : -1;
-                        emit_x87_perm_flush(buf, cache.base_gpr, cache.top_gpr, Wd_tmp, cache.perm,
-                                            Xst_base, Dd_save, Dd_chain);
-                        free_fpr(*translation_result, Dd_chain);
-                        free_fpr(*translation_result, Dd_save);
+                        TranslatorX87::x87_emit_perm_flush(buf, *translation_result,
+                                                           cache.base_gpr, cache.top_gpr, Wd_tmp);
                         free_gpr(*translation_result, Wd_tmp);
-                        cache.reset_perm();
                         flushed = true;
                         flushed_branch = kRollbackPermDirty;
                         bump_max_run(profile::kIRGateReasonPermDirty);
@@ -971,6 +1280,9 @@ static auto translate_instruction_impl(TranslationResult* translation_result, IR
                 // compile_run skips the conditional store entirely.
                 const bool profiling_block = cache.profile_bid != profile::kOverflowId;
                 uint16_t ir_fail_opcode = profile::kNoBuildFailOpcode;
+                // X87_NATIVE_SLOTS needs no conversion before the IR: ReadSt
+                // converts an 80-bit slot into its register, and lower()'s
+                // flush of a leftover FXCH permutation moves slots as they are.
                 const int ir_consumed = X87IR::compile_run(
                     translation_result, instr_array, num_instrs, insn_idx, cache.run_remaining,
                     &ir_reason, &ir_peak_gprs, profiling_block ? &ir_fail_opcode : nullptr);
@@ -1022,6 +1334,8 @@ static auto translate_instruction_impl(TranslationResult* translation_result, IR
                         const int8_t pre_deferred_pop_count = cache.deferred_pop_count;
                         const int8_t pre_perm_dirty = cache.perm_dirty;
                         translation_result->insn_buf.end = saved_buf_end;
+                        std::copy(std::begin(saved_slot_fmt), std::end(saved_slot_fmt),
+                                  std::begin(cache.slot_fmt));
                         // perm_dirty rollback is unconditional (not gated by
                         // an opt-in enable); restores cache.perm[] + perm_dirty.
                         if (flushed_branch == kRollbackPermDirty) {
@@ -1120,21 +1434,76 @@ static auto translate_instruction_impl(TranslationResult* translation_result, IR
         }
     }
 
+    // ── X87_NATIVE_SLOTS: convert what the next emitter reads ───────────────
+    // A fusion consumes up to six instructions, also when the run cache is
+    // off, and finishes the run's deferred FXCH when it reaches the run's
+    // end, so the window covers that much.  With the cache off a reply holds
+    // one instruction unless a fusion takes more, so a slot only a later
+    // instruction reads is converted here, back at the end of this reply,
+    // and again in its own: code that a debugging knob can afford.
+    bool soft_f80 = false;
+    bool exact_fild = false;
+    bool int_store_soft = false;
+    if (cache.native_slots) {
+        const int run = cache.active() ? cache.run_remaining
+                                       : X87Cache::lookahead(instr_array, num_instrs, insn_idx);
+        const int window = std::clamp(run, 1, 6);
+        const bool to_run_end = run <= 6;
+        // emit_f80_slot_to_int takes five scratch GPRs besides what
+        // x87_begin needs; with fewer the integer store takes its usual
+        // emitter, which converts ST(0) into a register and stores from that
+        // binary64 value, leaving the slot as it is.  X87_GPR_POOL_LIMIT
+        // clamps the count here too, so tests reach that fallback.
+        int free_gprs = __builtin_popcount(translation_result->free_gpr_mask);
+        if (g_rosetta_config && g_rosetta_config->gpr_pool_limit > 0) {
+            free_gprs = std::min<int>(free_gprs, g_rosetta_config->gpr_pool_limit);
+        }
+        int_store_soft = free_gprs >= TranslatorX87::x87_begin_gpr_need(*translation_result) + 5;
+        const SlotPlan plan = plan_slots(cache, instr_array, num_instrs, insn_idx, window,
+                                         to_run_end);
+        emit_slot_conversions(*translation_result, plan.convert);
+        soft_f80 = plan.soft_f80;
+        // fild m64 writes the exact 80-bit value when nothing later in the
+        // run reads it as binary64; then a value of 2^53 or more held into a
+        // later reply, or stored by fistp m64 or fstp m80, keeps all its
+        // bits.  When something does read it as binary64, arithmetic or an
+        // fst or fstp to m32 or m64, SCVTF is cheaper than the exact load
+        // and a conversion later.
+        if (opcode == Opcode::kOpcodeName_fild &&
+            cur_instr->operands[0].kind != IROperandKind::Register &&
+            cur_instr->operands[0].mem.size == IROperandSize::S64) {
+            exact_fild = !plan_slots(cache, instr_array, num_instrs, insn_idx, std::max(run, 1),
+                                     /*to_run_end=*/true,
+                                     /*first_push_native=*/true)
+                              .push_read_hard;
+        }
+    }
+
     // ── Peephole: try 2-instruction fusion patterns ─────────────────────────
     // A native transport reply keeps only the fild m64 + fistp m64 copies,
-    // which touch no slot; every other fusion works on compact slots.
+    // which touch no slot; every other fusion works on compact slots.  So
+    // does a request whose window reads an 80-bit slot exactly (soft_f80) or
+    // starts with an exact fild: the fusions read binary64.
     uint64_t fusions_mask = g_rosetta_config ? g_rosetta_config->disabled_fusions_mask : 0;
-    if (cache.native_transport) {
+    if (cache.native_transport || soft_f80 || exact_fild) {
         fusions_mask |= ~(1ULL << static_cast<int>(FusionId::fild_fistp));
     }
-    const auto fused = TranslatorX87::try_peephole(translation_result, instr_array, num_instrs,
+    // With X87_PRECISE_FAULTS=2 and native slots a fusion must not take an
+    // instruction that accesses memory after the first (precise_window),
+    // also when the run cache is off and a reply is not a run.
+    const int64_t fusion_num = cache.native_slots && precise_split_enabled()
+                                   ? insn_idx + precise_window(instr_array, num_instrs, insn_idx, 8)
+                                   : num_instrs;
+    const auto fused = TranslatorX87::try_peephole(translation_result, instr_array, fusion_num,
                                                    insn_idx, fusions_mask);
 
     // ── Single-op fast path: fused emitters for isolated fld/fst/fstp ──────
     // Only when the cache is inactive (run==1, or cache disabled): no pinned
     // GPRs and no deferred TOP/tag/perm state can exist then — x87_end flushes
     // everything at run end.  Counts into tally_single so profile_analyze
-    // stays comparable across configs.
+    // stays comparable across configs.  Its fst and fstp read an 80-bit
+    // ST(0) without changing it, so a soft read (soft_f80) does not keep
+    // them off this path.
     bool single_fast = false;
     if (!fused && !cache.active() && !cache.native_transport &&
         !(g_rosetta_config && g_rosetta_config->disable_x87_single_fast)) {
@@ -1143,8 +1512,44 @@ static auto translate_instruction_impl(TranslationResult* translation_result, IR
 
     // Native transport: the integer loads and stores work on the native
     // slots.  fldcw, fnstcw and the no-ops touch no slot and take their
-    // usual emitters below.
+    // usual emitters below.  Under X87_NATIVE_SLOTS the same emitters take
+    // an exact fild m64 and an integer store of an 80-bit ST(0).
     bool native = false;
+    if (!fused && cache.native_slots) {
+        const bool st0_f80 =
+            int_store_soft &&
+            x87_slot_holds_f80_at(TranslatorX87::resolve_depth(*translation_result, 0));
+        native = true;
+        switch (opcode) {
+            case Opcode::kOpcodeName_fild:
+                native = exact_fild;
+                break;
+            case Opcode::kOpcodeName_fist:
+            case Opcode::kOpcodeName_fistp:
+            case Opcode::kOpcodeName_fisttp:
+                native = st0_f80;
+                break;
+            default:
+                native = false;
+                break;
+        }
+        if (native) {
+            switch (opcode) {
+                case Opcode::kOpcodeName_fild:
+                    TranslatorX87::translate_fild_native(translation_result, cur_instr);
+                    break;
+                case Opcode::kOpcodeName_fist:
+                    TranslatorX87::translate_fist_native(translation_result, cur_instr);
+                    break;
+                case Opcode::kOpcodeName_fistp:
+                    TranslatorX87::translate_fistp_native(translation_result, cur_instr);
+                    break;
+                default:
+                    TranslatorX87::translate_fisttp_native(translation_result, cur_instr);
+                    break;
+            }
+        }
+    }
     if (!fused && cache.native_transport) {
         native = true;
         switch (opcode) {

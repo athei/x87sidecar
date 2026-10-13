@@ -4,7 +4,7 @@
 // WoW geometry when re-enabled for the top_dirty / deferred_pop branches.
 //
 // Usage:
-//   rollback_diff <ir_blob>
+//   rollback_diff <ir_blob> [--determinism] [--no-native-slots]
 //
 // <ir_blob> is a raw IRInstr[] file, no header.  Produced by
 //   profile_analyze --dump-ir-binary 0xH out.ir <profile.prof>
@@ -61,6 +61,9 @@ struct CacheSnap {
     int8_t perm[8];
     int16_t run_remaining;
     int8_t cur_top;  // x87_cache.top_gpr's logical TOP value tracked separately
+    // X87_NATIVE_SLOTS slot tracker (--native-slots).
+    int8_t top_rel;
+    uint8_t slot_fmt[8];
     bool operator==(const CacheSnap&) const = default;
 };
 
@@ -126,6 +129,10 @@ RunResult runOnce(const std::vector<IRInstr>& instrs, const RosettaConfig& cfg) 
             }
             s.run_remaining = result.x87_cache.run_remaining;
             s.cur_top = -1;  // not directly tracked in cache (top_gpr is a register #)
+            s.top_rel = result.x87_cache.top_rel;
+            for (int i = 0; i < 8; ++i) {
+                s.slot_fmt[i] = result.x87_cache.slot_fmt[i];
+            }
             snaps[static_cast<size_t>(snap_idx)] = s;
         }
         idx = next.value_or(idx + 1);
@@ -156,17 +163,35 @@ void printContext(const char* label, const std::vector<uint32_t>& arm, size_t at
 }  // namespace
 
 int main(int argc, char** argv) try {
-    if (argc < 2 || argc > 3) {
-        std::fprintf(stderr, "usage: %s <ir_blob> [--determinism]\n", argv[0]);
+    bool determinism = false;
+    bool native_slots = true;
+    bool bad_args = argc < 2;
+    for (int i = 2; i < argc; ++i) {
+        const std::string a = argv[i];
+        if (a == "--determinism") {
+            determinism = true;
+        } else if (a == "--native-slots") {
+            native_slots = true;
+        } else if (a == "--no-native-slots") {
+            native_slots = false;
+        } else {
+            bad_args = true;
+        }
+    }
+    if (bad_args) {
+        std::fprintf(stderr, "usage: %s <ir_blob> [--determinism] [--no-native-slots]\n",
+                     argv[0]);
         std::fprintf(stderr,
                      "  default mode: rollback-OFF vs rollback-ON for top_dirty + deferred_pop\n"
                      "                (the bug branches).\n"
                      "  --determinism: run rollback-OFF twice; should produce zero divergence\n"
-                     "                 (sanity-checks harness setup/teardown).\n");
+                     "                 (sanity-checks harness setup/teardown).\n"
+                     "  Both runs use X87_NATIVE_SLOTS as the sidecar does by default, and the\n"
+                     "  per-op cache comparison includes the slot tracker.\n"
+                     "  --no-native-slots: both runs with X87_NATIVE_SLOTS=0.\n");
         return 2;
     }
     const char* path = argv[1];
-    const bool determinism = (argc == 3 && std::string(argv[2]) == "--determinism");
 
     std::ifstream f(path, std::ios::binary);
     if (!f) {
@@ -211,9 +236,10 @@ int main(int argc, char** argv) try {
     // keep rollback firing whenever the per-branch enable knob is set.  A
     // failed allocation asserts rather than being declined, so a pressure
     // bug cannot hide as a silent difference between the two runs.
-    const auto base_cfg = []() {
+    const auto base_cfg = [native_slots]() {
         RosettaConfig c{};
         c.strict_alloc = 1;
+        c.native_slots = native_slots ? 1 : 0;
         return c;
     };
 

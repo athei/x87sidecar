@@ -9,6 +9,7 @@
 #include "rosetta_core/TranslationResult.h"
 #include "rosetta_core/TranslatorHelpers.hpp"
 #include "rosetta_core/TranslatorX87.h"
+#include "rosetta_core/TranslatorX87F80.hpp"
 #include "rosetta_core/TranslatorX87Helpers.hpp"
 
 // =============================================================================
@@ -131,52 +132,128 @@ void translate_fld_single(TranslationResult& a1, IRInstr* a2) {
     }
 
     const int Widx = alloc_free_gpr(a1);  // newTop + 1 folds the st[] base
-    emit_add_imm(buf, /*is_64bit=*/0, /*is_sub=*/0, /*is_set_flags=*/0,
-                 /*shift=*/0, 1, Wtop, Widx);
+    if (a1.x87_cache.native_slots) {
+        emit_native_slot_offset(buf, Wtop, Widx);
+    } else {
+        emit_add_imm(buf, /*is_64bit=*/0, /*is_sub=*/0, /*is_set_flags=*/0,
+                     /*shift=*/0, 1, Wtop, Widx);
+    }
     const int Wsh = alloc_free_gpr(a1);  // tag bit position = 2 * newTop
     emit_lsl1(buf, Wsh, Wtop);
 
     emit_bfi_top(buf, Wsw, Wtop);    // status half: TOP <- newTop
     emit_lslv(buf, 0, Wsh, Wm, Wm);  // mask = 0x30000 << (2 * newTop)
 
-    // STR Dd, [Xbase, Widx, LSL #3] — st[newTop] at (newTop + 1) * 8.
-    emit_ldr_str_reg(buf, /*size=*/3, /*is_fp=*/1, /*opc=*/0 /*STR*/, Widx, /*shift=*/1, Xbase, Dd);
+    const bool native = a1.x87_cache.native_slots != 0;
+    if (!native) {
+        // STR Dd, [Xbase, Widx, LSL #3]: st[newTop] at (newTop + 1) * 8.
+        emit_ldr_str_reg(buf, /*size=*/3, /*is_fp=*/1, /*opc=*/0 /*STR*/, Widx, /*shift=*/1,
+                         Xbase, Dd);
+    }
 
     // BIC Wsw, Wsw, Wm — tag half: mark newTop kValid (bits = 00).
     emit_logical_shifted_reg(buf, /*is_64bit=*/0, /*opc=*/0 /*AND*/, /*N=invert*/ 1,
                              /*shift_type=*/0, Wm, /*shift_amt=*/0, Wsw, Wsw);
+    free_gpr(a1, Wsh);
+    free_gpr(a1, Wm);
+    if (native) {
+        // X87_NATIVE_SLOTS: the new ST(0) gets its 80-bit value here, at
+        // Xbase + 6 + 10 * newTop, so the reply's exit has nothing left to
+        // convert.
+        const int Xb = alloc_free_gpr(a1);
+        const int We = alloc_free_gpr(a1);
+        const int Wt = alloc_free_gpr(a1);
+        emit_add_sub_shifted_reg(buf, /*is_64bit=*/1, /*sub=*/0, 0, /*LSL*/ 0, Widx, 0, Xbase,
+                                 Widx);
+        emit_fmov_d_to_x(buf, Xb, Dd);
+        emit_f64_bits_to_f80(buf, Widx, Xb, We, Wt);
+        free_gpr(a1, Wt);
+        free_gpr(a1, We);
+        free_gpr(a1, Xb);
+    }
     // STUR Wsw, [Xbase, #2] — single combined status+tag write-back.
     emit_ldur_stur(buf, /*size=*/2, /*opc=*/0 /*STUR*/, kX87StatusWordOff, Xbase, Wsw);
+    x87_slot_note_push(1);
+    if (native) {
+        x87_slot_note_native(0);
+    }
 
     free_fpr(a1, Dd);
-    free_gpr(a1, Wsh);
     free_gpr(a1, Widx);
-    free_gpr(a1, Wm);
     free_gpr(a1, Wtop);
     free_gpr(a1, Wsw);
     free_gpr(a1, Xbase);
+}
+
+// X87_NATIVE_SLOTS: Dd <- the 80-bit ST(0) in physical slot Wtop, converted
+// to binary64 (rounded to odd for an m32 store, so the FCVT after it rounds
+// once) and left as it is in its slot.  Takes four scratch GPRs and frees
+// them again.
+void load_f80_st0_single(AssemblerBuffer& buf, TranslationResult& a1, int Xbase, int Wtop, int Dd,
+                         bool is_f32) {
+    const int Xt1 = alloc_free_gpr(a1);
+    const int Xm = alloc_free_gpr(a1);
+    const int Wx = alloc_free_gpr(a1);
+    const int Xt2 = alloc_free_gpr(a1);
+    emit_native_slot_offset(buf, Wtop, Xt1);
+    emit_add_sub_shifted_reg(buf, /*is_64bit=*/1, /*sub=*/0, 0, /*LSL*/ 0, Xt1, 0, Xbase, Xt1);
+    emit_ldr_str_imm(buf, 3, 0, /*LDR*/ 1, 0, Xt1, Xm);
+    emit_ldr_str_imm(buf, 1, 0, /*LDRH*/ 1, 4, Xt1, Wx);
+    emit_f80_bits_to_f64(buf, Xm, Wx, Xt1, Xt2, /*round_to_odd=*/is_f32);
+    emit_fmov_x_to_d(buf, Dd, Xm);
+    free_gpr(a1, Xt2);
+    free_gpr(a1, Wx);
+    free_gpr(a1, Xm);
+    free_gpr(a1, Xt1);
 }
 
 // ── fst/fstp m32/m64 — load-from-ST(0) + store, pop fused when fstp ─────────
 void translate_fst_single(TranslationResult& a1, IRInstr* a2, bool is_fstp) {
     AssemblerBuffer& buf = a1.insn_buf;
     const bool is_f32 = (a2->operands[0].mem.size == IROperandSize::S32);
+    // X87_NATIVE_SLOTS: a lone fst or fstp usually finds ST(0) still in
+    // Rosetta's 80-bit form.
+    const bool f80 = x87_slot_holds_f80_at(0);
 
     const int Xbase = alloc_gpr(a1, 0);
     const int Wtop = alloc_gpr(a1, 2);
     const int Dd = alloc_free_fpr(a1);
+    if (!f80) {
+        x87_slot_note_read(0);
+    }
 
     emit_x87_base(buf, a1, Xbase);
+
+    if (!is_fstp && f80) {
+        emit_load_top(buf, a1, Xbase, Wtop);
+        load_f80_st0_single(buf, a1, Xbase, Wtop, Dd, is_f32);
+        const int Xaddr =
+            compute_operand_address(a1, /*is_64bit=*/true, &a2->operands[0], GPR::XZR);
+        if (is_f32) {
+            emit_fcvt_d_to_s(buf, Dd, Dd);
+        }
+        emit_fstr_imm(buf, is_f32 ? 2 : 3, Dd, Xaddr, /*imm12=*/0);
+        free_gpr(a1, Xaddr);
+        free_fpr(a1, Dd);
+        free_gpr(a1, Wtop);
+        free_gpr(a1, Xbase);
+        return;
+    }
 
     if (!is_fstp) {
         // Non-popping fst: no state change at all — TOP read only.
         emit_load_top(buf, a1, Xbase, Wtop);  // LDRH + UBFX (Opt-6 X18-direct)
         const int Widx = alloc_free_gpr(a1);
-        emit_add_imm(buf, /*is_64bit=*/0, /*is_sub=*/0, /*is_set_flags=*/0,
-                     /*shift=*/0, 1, Wtop, Widx);
-        // LDR Dd, [Xbase, Widx, LSL #3] — st[TOP] at (TOP + 1) * 8.
-        emit_ldr_str_reg(buf, /*size=*/3, /*is_fp=*/1, /*opc=*/1 /*LDR*/, Widx, /*shift=*/1, Xbase,
-                         Dd);
+        if (a1.x87_cache.native_slots) {
+            emit_native_slot_offset(buf, Wtop, Widx);
+        } else {
+            emit_add_imm(buf, /*is_64bit=*/0, /*is_sub=*/0, /*is_set_flags=*/0,
+                         /*shift=*/0, 1, Wtop, Widx);
+        }
+        // LDR Dd, [Xbase, Widx, LSL #3]: st[TOP] at (TOP + 1) * 8, or
+        // [Xbase, Widx] in the native layout.
+        emit_ldr_str_reg(buf, /*size=*/3, /*is_fp=*/1, /*opc=*/1 /*LDR*/, Widx,
+                         /*shift=*/a1.x87_cache.native_slots ? 0 : 1, Xbase, Dd);
         free_gpr(a1, Widx);
         // Address convention matches translate_fst (hardcoded 64-bit).
         const int Xaddr =
@@ -195,13 +272,24 @@ void translate_fst_single(TranslationResult& a1, IRInstr* a2, bool is_fstp) {
 
     // fstp: fused pop — one combined status+tag RMW.
     const int Wsw = alloc_gpr(a1, 1);  // combined status(15:0) + tag(31:16)
+    if (f80) {
+        // The conversion's four scratch registers are free again before the
+        // pop takes Wm, Xaddr, Widx and Wsh.
+        emit_ldur_stur(buf, /*size=*/2, /*opc=*/1 /*LDUR*/, kX87StatusWordOff, Xbase, Wsw);
+        emit_ubfx_top(buf, Wtop, Wsw);  // oldTop
+        load_f80_st0_single(buf, a1, Xbase, Wtop, Dd, is_f32);
+    }
     const int Wm = alloc_gpr(a1, 3);
-    emit_ldur_stur(buf, /*size=*/2, /*opc=*/1 /*LDUR*/, kX87StatusWordOff, Xbase, Wsw);
+    if (!f80) {
+        emit_ldur_stur(buf, /*size=*/2, /*opc=*/1 /*LDUR*/, kX87StatusWordOff, Xbase, Wsw);
+    }
 
     // Address math overlaps the LDUR latency (matches translate_fst: 64-bit).
     const int Xaddr = compute_operand_address(a1, /*is_64bit=*/true, &a2->operands[0], GPR::XZR);
 
-    emit_ubfx_top(buf, Wtop, Wsw);  // oldTop
+    if (!f80) {
+        emit_ubfx_top(buf, Wtop, Wsw);  // oldTop
+    }
     emit_movn(buf, /*is_64bit=*/0, /*opc=MOVZ*/ 2, /*hw=*/1, kTagSeed, Wm);
 
     // Widx = oldTop + 1: DUAL USE — st[] scaled index AND unmasked newTop.
@@ -209,10 +297,21 @@ void translate_fst_single(TranslationResult& a1, IRInstr* a2, bool is_fstp) {
     emit_add_imm(buf, /*is_64bit=*/0, /*is_sub=*/0, /*is_set_flags=*/0,
                  /*shift=*/0, 1, Wtop, Widx);
     const int Wsh = alloc_free_gpr(a1);  // tag bit position = 2 * oldTop
-    emit_lsl1(buf, Wsh, Wtop);
-
-    // LDR Dd, [Xbase, Widx, LSL #3] — st[oldTop] at (oldTop + 1) * 8.
-    emit_ldr_str_reg(buf, /*size=*/3, /*is_fp=*/1, /*opc=*/1 /*LDR*/, Widx, /*shift=*/1, Xbase, Dd);
+    if (f80) {
+        emit_lsl1(buf, Wsh, Wtop);
+    } else if (a1.x87_cache.native_slots) {
+        // Widx cannot double as the index here: the slot is at
+        // 6 + 10 * oldTop.  Wsh holds that offset until the load.
+        emit_native_slot_offset(buf, Wtop, Wsh);
+        emit_ldr_str_reg(buf, /*size=*/3, /*is_fp=*/1, /*opc=*/1 /*LDR*/, Wsh, /*shift=*/0, Xbase,
+                         Dd);
+        emit_lsl1(buf, Wsh, Wtop);
+    } else {
+        emit_lsl1(buf, Wsh, Wtop);
+        // LDR Dd, [Xbase, Widx, LSL #3]: st[oldTop] at (oldTop + 1) * 8.
+        emit_ldr_str_reg(buf, /*size=*/3, /*is_fp=*/1, /*opc=*/1 /*LDR*/, Widx, /*shift=*/1, Xbase,
+                         Dd);
+    }
 
     emit_lslv(buf, 0, Wsh, Wm, Wm);  // mask = 0x30000 << (2 * oldTop)
     // ORR Wsw, Wsw, Wm — tag half: mark oldTop kEmpty (bits = 11).
@@ -230,6 +329,7 @@ void translate_fst_single(TranslationResult& a1, IRInstr* a2, bool is_fstp) {
 
     // STUR Wsw, [Xbase, #2] — single combined status+tag write-back.
     emit_ldur_stur(buf, /*size=*/2, /*opc=*/0 /*STUR*/, kX87StatusWordOff, Xbase, Wsw);
+    x87_slot_note_pop(1);
 
     free_fpr(a1, Dd);
     free_gpr(a1, Wsh);

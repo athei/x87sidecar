@@ -34,6 +34,8 @@
 // every one of its own paths.  The sidecar's binary64 slots at +0x08,
 // stride 8, exist only inside one reply: Translator converts at the reply's
 // entry and exit (emit_native_state_boundary), so stock never sees them.
+// With X87_NATIVE_SLOTS the binary64 values sit inside the native slots
+// instead, and only the slots a reply reads are converted (slot_effect).
 // =============================================================================
 
 static bool is_handled_x87(uint16_t op) {
@@ -128,6 +130,215 @@ static bool is_handled_x87(uint16_t op) {
         default:
             return false;
     }
+}
+
+// The stack register an operand names, or -1 for a memory or other operand.
+// fstsw AX is the only handled x87 instruction with a register operand that
+// is not a stack register, and slot_effect does not look at its operands.
+static int st_operand(const IRInstr& insn, int k) {
+    if (k >= insn.num_operands || insn.operands[k].kind != IROperandKind::Register) {
+        return -1;
+    }
+    return insn.operands[k].reg.reg.index() & 7;
+}
+
+// Every stack register named by an operand, as a depth mask.  Rosetta puts
+// ST(0) in the operands of the two-register and the memory forms of the
+// arithmetic, compare, fcmov and fxch instructions, so for those this is the
+// set of registers read.
+static uint8_t st_operand_mask(const IRInstr& insn) {
+    uint8_t mask = 0;
+    for (int k = 0; k < insn.num_operands && k < 4; k++) {
+        const int d = st_operand(insn, k);
+        if (d >= 0) {
+            mask |= static_cast<uint8_t>(1U << d);
+        }
+    }
+    return mask;
+}
+
+// The table behind X87_NATIVE_SLOTS: which stack registers each handled
+// instruction reads as binary64, which it writes without reading, and how it
+// moves TOP.  It has to cover every read the emitters make: a read the table
+// misses finds a slot still in the 80-bit format, which emit_load_st reports
+// as a translation failure (the request is declined, or the X87_STRICT_ALLOC
+// harness asserts).
+X87Cache::SlotEffect X87Cache::slot_effect(const IRInstr& insn) {
+    SlotEffect e;
+    switch (insn.opcode()) {
+        case kOpcodeName_fldz:
+        case kOpcodeName_fld1:
+        case kOpcodeName_fldl2e:
+        case kOpcodeName_fldl2t:
+        case kOpcodeName_fldlg2:
+        case kOpcodeName_fldln2:
+        case kOpcodeName_fldpi:
+        case kOpcodeName_fild:
+        case kOpcodeName_fbld:
+            e.pushes = 1;
+            break;
+        case kOpcodeName_fld: {
+            // fld st(i) is [ST(0) destination, ST(i) source].
+            const int src = st_operand(insn, 1);
+            if (st_operand(insn, 0) >= 0 && src >= 0) {
+                e.reads = static_cast<uint8_t>(1U << src);
+                e.soft = e.reads;  // an 80-bit ST(i) is copied as ten bytes
+            }
+            e.pushes = 1;
+            break;
+        }
+        case kOpcodeName_fst:
+        case kOpcodeName_fstp:
+        case kOpcodeName_fst_stack:
+        case kOpcodeName_fstp_stack: {
+            // The register forms copy ST(0) into operands[0].  fst st(0)
+            // copies nothing, but the IR and the fusions still load ST(0)
+            // for it.  fstp m80 copies an 80-bit ST(0) as it is and converts
+            // a binary64 one, so it needs no conversion.
+            const int dst = st_operand(insn, 0);
+            const bool m80 = dst < 0 && insn.num_operands > 0 &&
+                             insn.operands[0].mem.size == IROperandSize::S80;
+            if (!m80) {
+                // An 80-bit ST(0) is copied to a register as ten bytes, and
+                // converted into an FPR for m32/m64.
+                e.reads = 1;
+                e.soft = 1;
+            }
+            if (dst > 0) {
+                e.writes = static_cast<uint8_t>(1U << dst);
+            }
+            if (insn.opcode() == kOpcodeName_fstp || insn.opcode() == kOpcodeName_fstp_stack) {
+                e.pops = 1;
+            }
+            break;
+        }
+        case kOpcodeName_fadd:
+        case kOpcodeName_fsub:
+        case kOpcodeName_fsubr:
+        case kOpcodeName_fdiv:
+        case kOpcodeName_fdivr:
+        case kOpcodeName_fmul:
+        case kOpcodeName_fcom:
+        case kOpcodeName_fucom:
+        case kOpcodeName_fcomi:
+        case kOpcodeName_fucomi:
+        case kOpcodeName_fcmovb:
+        case kOpcodeName_fcmovbe:
+        case kOpcodeName_fcmove:
+        case kOpcodeName_fcmovnb:
+        case kOpcodeName_fcmovnbe:
+        case kOpcodeName_fcmovne:
+        case kOpcodeName_fcmovu:
+        case kOpcodeName_fcmovnu:
+            e.reads = static_cast<uint8_t>(st_operand_mask(insn) | 1U);
+            break;
+        case kOpcodeName_faddp:
+        case kOpcodeName_fsubp:
+        case kOpcodeName_fsubrp:
+        case kOpcodeName_fdivp:
+        case kOpcodeName_fdivrp:
+        case kOpcodeName_fmulp:
+        case kOpcodeName_fcomp:
+        case kOpcodeName_fucomp:
+        case kOpcodeName_fcomip:
+        case kOpcodeName_fucomip:
+            e.reads = static_cast<uint8_t>(st_operand_mask(insn) | 1U);
+            e.pops = 1;
+            break;
+        case kOpcodeName_fcompp:
+        case kOpcodeName_fucompp:
+            e.reads = 0x3;
+            e.pops = 2;
+            break;
+        case kOpcodeName_fist:
+            // The integer stores convert an 80-bit ST(0) exactly
+            // (emit_f80_slot_to_int) when the GPRs allow.
+            e.reads = 1;
+            e.soft = 1;
+            break;
+        case kOpcodeName_fistp:
+        case kOpcodeName_fisttp:
+            e.reads = 1;
+            e.soft = 1;
+            e.pops = 1;
+            break;
+        case kOpcodeName_fiadd:
+        case kOpcodeName_fisub:
+        case kOpcodeName_fisubr:
+        case kOpcodeName_fimul:
+        case kOpcodeName_fidiv:
+        case kOpcodeName_fidivr:
+        case kOpcodeName_ficom:
+        case kOpcodeName_ftst:
+        case kOpcodeName_fxam:
+        case kOpcodeName_fchs:
+        case kOpcodeName_fabs:
+        case kOpcodeName_fsqrt:
+        case kOpcodeName_frndint:
+        case kOpcodeName_fsin:
+        case kOpcodeName_fcos:
+        case kOpcodeName_f2xm1:
+            e.reads = 1;
+            break;
+        case kOpcodeName_ficomp:
+        case kOpcodeName_fbstp:
+            e.reads = 1;
+            e.pops = 1;
+            break;
+        case kOpcodeName_fsincos:
+        case kOpcodeName_fptan:
+        case kOpcodeName_fxtract:
+            e.reads = 1;
+            e.pushes = 1;
+            break;
+        case kOpcodeName_fscale:
+        case kOpcodeName_fprem:
+        case kOpcodeName_fprem1:
+            e.reads = 0x3;
+            break;
+        case kOpcodeName_fpatan:
+        case kOpcodeName_fyl2x:
+        case kOpcodeName_fyl2xp1:
+            e.reads = 0x3;
+            e.pops = 1;
+            break;
+        case kOpcodeName_fxch: {
+            const int d = st_operand(insn, 1);
+            if (d > 0) {
+                // A deferred FXCH reads nothing; a swap in memory moves
+                // ten-byte images when an 80-bit slot takes part.
+                e.reads = static_cast<uint8_t>(1U | (1U << d));
+                e.soft = e.reads;
+                e.kind = kEffectFxch;
+                e.arg = static_cast<int8_t>(d);
+            }
+            break;
+        }
+        case kOpcodeName_ffree:
+            e.kind = kEffectFree;
+            e.arg = static_cast<int8_t>(st_operand(insn, 0) < 0 ? 0 : st_operand(insn, 0));
+            break;
+        case kOpcodeName_fincstp:
+            e.kind = kEffectTopInc;
+            break;
+        case kOpcodeName_fdecstp:
+            e.kind = kEffectTopDec;
+            break;
+        case kOpcodeName_fsave:
+            // 80-bit slots go into the save area as their ten bytes.
+            e.reads = 0xFF;
+            e.soft = 0xFF;
+            e.kind = kEffectSave;
+            break;
+        case kOpcodeName_frstor:
+            e.kind = kEffectRestore;
+            break;
+        default:
+            // fstsw, fldcw, fnstcw, fnop, fdisi, feni, and any non-x87
+            // instruction.
+            break;
+    }
+    return e;
 }
 
 // The ops a native transport reply may contain.  None of them does

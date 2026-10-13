@@ -27,6 +27,10 @@ namespace TranslatorX87 {
 //
 // All scratch is caller-allocated; NZCV is clobbered.
 //
+// An unnormal, pseudo-infinity or pseudo-NaN (integer bit clear, exponent
+// nonzero) gives the default NaN, as in stock Rosetta; a pseudo-denormal
+// (exponent 0, integer bit set) keeps its value.
+//
 // Wd_aux plays two roles sequentially: first it captures the rounding-carry
 // flag, then (after the carry is consumed) it holds the 0x7FFF/0x7FF
 // constants for the inf/nan exponent override.  Caller passes one register
@@ -39,10 +43,54 @@ void emit_f80_to_f64_convert(AssemblerBuffer& buf, int Xmant_inout, int Wexp, in
 void emit_f64_to_f80(AssemblerBuffer& buf, int Xaddr_slot, int Dd_src, int Xbits, int Wexp,
                      int Wd_tmp);
 
+// The same conversions without touching NZCV, in four GPRs.  Control flow is
+// CBZ/CBNZ/TBZ/TBNZ and B, all forward.
+//
+// emit_f80_bits_to_f64: Xm holds the 64-bit significand and Wx the sign and
+// exponent halfword (bits 31:16 zero, as LDRH leaves them).  Xm receives the
+// binary64 bits emit_f80_to_f64_convert would produce: an unnormal,
+// pseudo-infinity or pseudo-NaN gives the default NaN in both, as in stock
+// Rosetta.  Wx, Xt1 and Xt2 are clobbered.
+//
+// round_to_odd truncates instead and sets the lowest result bit when any
+// discarded bit was set.  Narrowing that result to binary32 (FCVT) then
+// rounds the 80-bit value once, as fst m32 does, where rounding to nearest
+// first could round twice.  Finite values beyond binary64's range still
+// become infinity.
+void emit_f80_bits_to_f64(AssemblerBuffer& buf, int Xm, int Wx, int Xt1, int Xt2,
+                          bool round_to_odd = false);
+
+// emit_f64_bits_to_f80: writes the f80 for the binary64 bits in Xb to
+// [Xaddr, #0..#9], the bytes emit_f64_to_f80 writes.  Xb, We and Wt are
+// clobbered; Xaddr is not.
+void emit_f64_bits_to_f80(AssemblerBuffer& buf, int Xaddr, int Xb, int We, int Wt);
+
+// Copies the ten bytes at [Xsrc, #src_off] to [Xdst, #dst_off] as an 8-byte
+// and a 2-byte access on each side, both loads before the stores.  A guest
+// operand that is naturally aligned stays so for both accesses, which
+// uncached memory requires; two overlapping 8-byte accesses would not.
+// Offsets must keep src_off + 8 and dst_off + 8 within the signed 9-bit
+// range.  Xt1 and Xt2 are clobbered.
+void emit_copy_f80(AssemblerBuffer& buf, int Xdst, int dst_off, int Xsrc, int src_off, int Xt1,
+                   int Xt2);
+
 // Bracket a complete translate_insn reply. Entering converts native packed
 // f80 to private compact f64; leaving converts it back. Preserves NZCV and
 // allocator masks. Must run outside an active x87 register-cache run.
 void emit_native_state_boundary(TranslationResult& tr, bool entering);
+
+// The end of an X87_NATIVE_SLOTS reply: converts each slot the slot tracker
+// has in binary64 back to the native 80-bit format, in place.  Emits nothing
+// when there is none.  Preserves NZCV and allocator masks.  Must run outside
+// an active x87 register-cache run.
+void emit_native_slots_export(TranslationResult& tr);
+
+// X87_IGNORE_FTZ_DAZ for an X87_NATIVE_SLOTS reply: the entry clears FPCR's
+// flush bits (or the Apple register's) when the guest set them, keeping the
+// originals in a stash at +86, and the exit puts them back.  Both emit
+// nothing without X87_IGNORE_FTZ_DAZ.  Preserve NZCV and allocator masks.
+void emit_native_slots_fpcr_enter(TranslationResult& tr);
+void emit_native_slots_fpcr_exit(TranslationResult& tr);
 
 // Where Rosetta keeps the guest's MXCSR.FTZ/DAZ on this machine, which is
 // what X87_IGNORE_FTZ_DAZ clears and restores.  Chosen the way the runtime

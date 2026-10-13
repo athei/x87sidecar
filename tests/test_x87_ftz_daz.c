@@ -17,7 +17,10 @@
  * code at all, which is measured first with no x87 code involved; that was
  * only checked on macOS 27.  The x87 checks never skip.  The storm part
  * repeats one case under a SIGUSR1 storm so a signal lands inside the x87
- * code while the flush bits are set.
+ * code while the flush bits are set.  A second storm starts with the bits
+ * clear and its handler sets both in the signal context, so the interrupted
+ * code resumes under FTZ|DAZ; the results must not change, and MXCSR must
+ * keep the bits from then on.
  *
  * On Macs without FEAT_AFP the runtime keeps FTZ/DAZ in the Apple register
  * S3_6_C15_C2_5, and there a signal that lands inside an x87 reply can make
@@ -257,6 +260,17 @@ static void handler(int sig) {
     g_signals++;
 }
 
+/* The modctx variant: the handler rewrites the MXCSR in the signal context
+ * to FTZ|DAZ, so the interrupted code resumes with both bits set although it
+ * started the loop with them clear. */
+static void handler_modctx(int sig, siginfo_t* info, void* context) {
+    (void)sig;
+    (void)info;
+    ucontext_t* uc = context;
+    uc->uc_mcontext->__fs.__fpu_mxcsr = 0x9FC0;
+    g_signals++;
+}
+
 static void* storm(void* arg) {
     (void)arg;
     sigset_t set;
@@ -297,20 +311,33 @@ static double now_s(void) {
     return ts.tv_sec + ts.tv_nsec * 1e-9;
 }
 
-static void run_storm(void) {
+/* modctx: the loop starts with FTZ and DAZ clear and the handler sets both
+ * in the signal context (handler_modctx); MXCSR may then change from clear
+ * to FTZ|DAZ once and must not change back, and it must end as FTZ|DAZ when
+ * a signal arrived. */
+static void run_storm(int modctx) {
     const float in32[2] = {f_of(0x00000007), 0x1p100f};
     const double in64[2] = {d_of(3), 0x1p600};
     const uint32_t want32[2] = {0x00000007, 0x28600000};
     const uint64_t want64 = 0x2268000000000000ULL;
+    const char* label = modctx ? "[storm modctx] x87 run under SIGUSR1, handler sets FTZ|DAZ"
+                               : "[storm] FTZ|DAZ x87 run under SIGUSR1";
 
-    set_mxcsr(0x9FC0);
+    set_mxcsr(modctx ? 0x1F80 : 0x9FC0);
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
-    sa.sa_handler = handler;
-    sa.sa_flags = SA_RESTART;
+    if (modctx) {
+        sa.sa_sigaction = handler_modctx;
+        sa.sa_flags = SA_RESTART | SA_SIGINFO;
+    } else {
+        sa.sa_handler = handler;
+        sa.sa_flags = SA_RESTART;
+    }
     sigaction(SIGUSR1, &sa, NULL);
     g_main = pthread_self();
+    g_signals = 0;
     g_run = 1;
+    int ftz_seen = 0;
     pthread_t th;
     const int have = pthread_create(&th, NULL, storm, NULL) == 0;
 
@@ -346,14 +373,23 @@ static void run_storm(void) {
                     (g64 != want64 && g64 != 0))
                     bad_other++;
             }
-            if ((get_mxcsr() & ~0x3Fu) != 0x9FC0)
+            const uint32_t mx = get_mxcsr() & ~0x3Fu;
+            if (!modctx) {
+                if (mx != 0x9FC0)
+                    bad_mx++;
+            } else if (mx == 0x9FC0) {
+                ftz_seen = 1;
+            } else if (mx != 0x1F80 || ftz_seen) {
                 bad_mx++;
+            }
             g_iters = ++iters;
         }
     }
     g_run = 0;
     if (have)
         pthread_join(th, NULL);
+    if (modctx && g_signals > 0 && (get_mxcsr() & ~0x3Fu) != 0x9FC0)
+        bad_mx++;
     set_mxcsr(0x1F80);
     char first[128] = "";
     if (bad)
@@ -364,19 +400,15 @@ static void run_storm(void) {
         /* Known limitation, see the header: noted, not failed.  Results that
          * are not a flush to +0, and the MXCSR check, stay strict. */
         printf(
-            "NOTE  [storm] FTZ|DAZ x87 run under SIGUSR1: %lu flushed results of %lu "
-            "(signals=%d)%s; known limitation where the runtime keeps FTZ/DAZ in "
-            "S3_6_C15_C2_5\n",
-            bad, iters, (int)g_signals, first);
+            "NOTE  %s: %lu flushed results of %lu (signals=%d)%s; known limitation where "
+            "the runtime keeps FTZ/DAZ in S3_6_C15_C2_5\n",
+            label, bad, iters, (int)g_signals, first);
     } else if (bad || bad_mx) {
-        printf(
-            "FAIL  [storm] FTZ|DAZ x87 run under SIGUSR1: %lu bad results (%lu not a flush), "
-            "%lu bad mxcsr of %lu (signals=%d)%s\n",
-            bad, bad_other, bad_mx, iters, (int)g_signals, first);
+        printf("FAIL  %s: %lu bad results (%lu not a flush), %lu bad mxcsr of %lu (signals=%d)%s\n",
+               label, bad, bad_other, bad_mx, iters, (int)g_signals, first);
         failures++;
     } else {
-        printf("PASS  [storm] FTZ|DAZ x87 run under SIGUSR1 (iters=%lu signals=%d)\n", iters,
-               (int)g_signals);
+        printf("PASS  %s (iters=%lu signals=%d)\n", label, iters, (int)g_signals);
     }
 }
 
@@ -387,7 +419,8 @@ int main(void) {
     run_mode(0x9F80, "FTZ");
     run_mode(0x1FC0, "DAZ");
     set_mxcsr(0x1F80);
-    run_storm();
+    run_storm(0);
+    run_storm(1);
     printf("\n%d failure(s)\n", failures);
     return failures ? 1 : 0;
 }
