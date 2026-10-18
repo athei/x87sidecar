@@ -70,7 +70,8 @@
 #      test_x87_cross_reply_exact has to fail; exporting X87_NATIVE_SLOTS=0
 #      for the whole run makes every phase run that way
 #   H. test_opcode_host_table, natively: the name-derived opcode maps
-#      against the pinned 26.4 table and the identity mapping
+#      against the pinned 26.4 table and the identity mapping; and
+#      test_opcode_table_parse: the "index < N" bound on synthetic blobs
 #   R. replay tests/data/geom_block_874c40.ir under --fpr-pool 8 and
 #      assert the pressure splits keep it on the IR path (fpr_fail=0), then
 #      replay tests/data/fist_pressure.ir the same way and assert it exits 0
@@ -1370,25 +1371,28 @@ if [[ $NATIVE_ONLY -eq 0 ]] && ! native_slots_off; then
     fi
 fi
 
-# ── Host: name-derived opcode maps against the pinned tables ─────────────
+# ── Host: name-derived opcode maps and the table parse ──────────────────
 # Native arm64, no Rosetta: opcode_set_host_table fed the internal names, the
-# 26.4 names and a macOS 15.7.8-shaped list.
+# 26.4 names and a macOS 15.7.8-shaped list; parseOpcodeTable fed synthetic
+# __cstring blobs.
 if [[ ${#SELECTED_TESTS[@]} -eq 0 ]]; then
     echo ""
     echo -e "${BOLD}=== Host: opcode host table ===${NC}"
-    TOTAL=$((TOTAL + 1))
-    HOST_TABLE_BIN="$BIN/test_opcode_host_table"
-    if [[ ! -x "$HOST_TABLE_BIN" ]]; then
-        echo -e "${YELLOW}SKIP${NC}  opcode_host_table  (binary not found)"
-        ERRORS=$((ERRORS + 1))
-    elif HOUT=$("$HOST_TABLE_BIN" 2>&1); then
-        echo -e "${GREEN}PASS${NC}  opcode_host_table"
-        PASSED=$((PASSED + 1))
-    else
-        echo -e "${RED}FAIL${NC}  opcode_host_table"
-        echo "$HOUT" | sed 's/^/      /'
-        FAILED=$((FAILED + 1))
-    fi
+    for HOST_TEST in opcode_host_table opcode_table_parse; do
+        TOTAL=$((TOTAL + 1))
+        HOST_BIN="$BIN/test_$HOST_TEST"
+        if [[ ! -x "$HOST_BIN" ]]; then
+            echo -e "${YELLOW}SKIP${NC}  $HOST_TEST  (binary not found)"
+            ERRORS=$((ERRORS + 1))
+        elif HOUT=$("$HOST_BIN" 2>&1); then
+            echo -e "${GREEN}PASS${NC}  $HOST_TEST"
+            PASSED=$((PASSED + 1))
+        else
+            echo -e "${RED}FAIL${NC}  $HOST_TEST"
+            echo "$HOUT" | sed 's/^/      /'
+            FAILED=$((FAILED + 1))
+        fi
+    done
 fi
 
 # ── Replay: captured WoW geom block through the clamped pressure gate ────

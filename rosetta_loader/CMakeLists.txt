@@ -32,6 +32,7 @@ add_executable(x87sidecar
     src/macho_loader.cpp
     src/mach_exception.cpp
     src/offset_finder.cpp
+    src/opcode_table.cpp
     src/sidecar.cpp
     src/x87_trace.cpp
     src/stub_asm.cpp

@@ -8,12 +8,16 @@
 // To preserve backwards compatibility with 26.4, we need to be able to translate between the two
 // sets of opcodes.
 
-// translates potential Opcode_26_4 opcode to Opcode
+// translates a host opcode id to Opcode. Once a host table is set, an id the
+// runtime's table has no Opcode for (or one past it, other than the synthetic
+// ARPL id) comes back as kOpcodeUnmapped. Without a table it is the identity
+// above 26.4 and the pinned 26.4 table at or below it.
 auto opcode_host_to_internal(uint16_t opcode) -> uint16_t;
 
-// translates Opcode to potential Opcode_26_4 opcode. Without a host table an
-// opcode the 26.4 numbering lacks comes back as 0; with one it comes back as
-// kOpcodeUnmapped.
+// translates Opcode to a host opcode id. Once a host table is set, an opcode
+// the runtime does not define comes back as kOpcodeUnmapped. Without a table it
+// is the identity above 26.4; at or below it, an opcode the 26.4 numbering
+// lacks comes back as 0.
 auto opcode_internal_to_host(uint16_t opcode) -> uint16_t;
 
 // Returned by the mapping functions, once a host table is set, for an id the

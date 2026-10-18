@@ -278,6 +278,9 @@ static bool runtimeAssumptionsHold(const OffsetFinder& f) {
         fprintf(stdout, "[rosettax87] cannot route opcodes for this libRosettaRuntime\n");
         ok = false;
     }
+    if (!stub_asm::filterOpcodeIdsFit()) {
+        ok = false;
+    }
     if (f.translationResultSize_ == 0) {
         fprintf(stdout, "[rosettax87] TranslationResult size not found; unchecked\n");
     } else if (f.translationResultSize_ != sidecar::kStockTRSize) {
@@ -310,7 +313,9 @@ static int probeRuntime() {
         return 1;
     }
     rosetta_core_set_runtime_version(f.runtimeVersion_);
-    if (!f.opcodeNames_.empty()) {
+    // Only a table cut at the runtime's own bound; without it the check below
+    // refuses the runtime, and the report should not claim a name mapping.
+    if (!f.opcodeNames_.empty() && f.opcodeCount_ != 0) {
         opcode_set_host_table(f.opcodeNames_);
     }
     printf("  version            0x%llx (%s)\n", f.runtimeVersion_,
@@ -1481,9 +1486,10 @@ int main(int argc, char* argv[]) try {
     VERBOSE_LOG("Rosetta version: %llx\n", offsetFinder.runtimeVersion_);
     rosetta_core_set_runtime_version(offsetFinder.runtimeVersion_);
     // Map opcode ids by name from the runtime's own mnemonic table when it was
-    // found; the version-keyed tables stay as the fallback for a runtime that
-    // has no readable table. Also before the fork, for the same reason.
-    if (!offsetFinder.opcodeNames_.empty()) {
+    // found with its bound; the version-keyed tables stay as the fallback for a
+    // runtime that has no readable table (one without the bound is refused
+    // below). Also before the fork, for the same reason.
+    if (!offsetFinder.opcodeNames_.empty() && offsetFinder.opcodeCount_ != 0) {
         opcode_set_host_table(offsetFinder.opcodeNames_);
     }
 

@@ -888,6 +888,23 @@ IpcPatches emit_mach_msg2_ipc(std::vector<uint8_t>& ipc, uint32_t sidecarReqName
 
 // ──── public ────────────────────────────────────────────────────────────────
 
+bool filterOpcodeIdsFit() {
+    const auto host_fcmovb = opcode_internal_to_host(kOpcodeName_fcmovb);
+    const auto host_f2xm1 = opcode_internal_to_host(kOpcodeName_f2xm1);
+    const auto host_arpl = opcode_internal_to_host(kOpcodeName_arpl);
+    // sub_imm_w and cmp_imm_w keep 12 bits of their immediate, and these ids
+    // are the runtime's, so this cannot be a static_assert. It also catches an
+    // id the host table has no entry for (kOpcodeUnmapped).
+    if (host_fcmovb > 0xFFF || host_f2xm1 > 0xFFF || host_arpl > 0xFFF) {
+        fprintf(stdout,
+                "[rosettax87] stub filter: host opcode ids do not fit a 12-bit immediate "
+                "(fcmovb=%u f2xm1=%u arpl=%u)\n",
+                host_fcmovb, host_f2xm1, host_arpl);
+        return false;
+    }
+    return true;
+}
+
 StubBlobs build(uint64_t handlerAddr, uint64_t translateInsnAddr, const uint8_t origPrologue16[16],
                 uint32_t sidecarReqName, uint32_t parentReplyName) {
     StubBlobs blobs;
@@ -961,23 +978,19 @@ StubBlobs build(uint64_t handlerAddr, uint64_t translateInsnAddr, const uint8_t 
         "stub filter assumes fxrstor sits inside the high x87 range");
 
     // The IRInstr::opcode_ field carries the runtime's *host* opcode IDs, not
-    // our canonical (kOpcodeName_*) IDs.  Both 26.4 and 26.5 keep the two x87
-    // ranges contiguous and same-sized, so the cmp_imm_w (range size) stays
+    // our canonical (kOpcodeName_*) IDs.  Every supported runtime keeps the two
+    // x87 ranges contiguous and same-sized, so the cmp_imm_w (range size) stays
     // canonical, but the sub_imm_w (range start) must be host-translated via
-    // the compat layer.  rosetta_core_init must have run before stub injection.
+    // the compat layer.  The loader seeds the runtime version and the host
+    // table before stub injection; this does not call rosetta_core_init.
     const auto host_fcmovb = opcode_internal_to_host(kOpcodeName_fcmovb);
     const auto host_f2xm1 = opcode_internal_to_host(kOpcodeName_f2xm1);
     // Synthetic: the first id past the runtime's own opcodes, so it comes from
     // the compat layer too.
     const auto host_arpl = opcode_internal_to_host(kOpcodeName_arpl);
-    // sub_imm_w and cmp_imm_w keep 12 bits of their immediate, and these ids
-    // are the runtime's, so this cannot be a static_assert. It also catches an
-    // id the host table has no entry for (kOpcodeUnmapped).
-    if (host_fcmovb > 0xFFF || host_f2xm1 > 0xFFF || host_arpl > 0xFFF) {
-        fprintf(stdout,
-                "[rosettax87] stub filter: host opcode ids do not fit a 12-bit immediate "
-                "(fcmovb=%u f2xm1=%u arpl=%u)\n",
-                host_fcmovb, host_f2xm1, host_arpl);
+    // Backstop: the loader runs filterOpcodeIdsFit() before launch, so this
+    // should not fire.
+    if (!filterOpcodeIdsFit()) {
         blobs.entry.clear();  // the caller's failure signal
         return blobs;
     }
