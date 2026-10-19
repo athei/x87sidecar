@@ -116,3 +116,14 @@ add_x86_sample(test_x87_ftz_daz)
 # Invoked by the opt-in tracing regression, not the arithmetic phase matrix.
 add_x86_sample(test_x87_trace_threads)
 add_x86_sample(test_x87_trace_freeze)
+
+# Host-side (arm64) check of the name-derived opcode maps against the pinned
+# tables. Not an x86 sample: it links rosetta_core and runs natively.
+add_executable(test_opcode_host_table host/test_opcode_host_table.cpp)
+target_link_libraries(test_opcode_host_table PRIVATE rosetta_core)
+
+# Host-side check of the opcode table parse (the "index < N" bound) on
+# synthetic __cstring blobs.
+add_executable(test_opcode_table_parse host/test_opcode_table_parse.cpp
+    ${PROJECT_SOURCE_DIR}/rosetta_loader/src/opcode_table.cpp)
+target_include_directories(test_opcode_table_parse PRIVATE ${PROJECT_SOURCE_DIR}/rosetta_loader/src)

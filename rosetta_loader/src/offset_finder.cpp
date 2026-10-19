@@ -8,9 +8,11 @@
 #include <iterator>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "macho_loader.hpp"
+#include "opcode_table.hpp"
 #include "types.h"
 
 namespace {
@@ -504,24 +506,13 @@ auto OffsetFinder::determineRuntimeOffsets() -> bool {
         std::memcpy(decodeOpcodePrologue_.data(), image.data() + offsetDecodeOpcode_, 16);
     }
 
-    // The opcode mnemonic table, in host enum order: what the runtime's own
-    // module printer uses. Read it whole; the loader checks the entries the
-    // stub filter's opcode ranges depend on against it.
-    static const char kTableHead[] = "\0aaa\0aad\0aam\0aas\0adc\0add\0";
-    const auto heads =
-        findAll(image, reinterpret_cast<const std::uint8_t*>(kTableHead), sizeof(kTableHead) - 1);
-    if (heads.size() == 1) {
-        std::uint64_t p = heads[0] + 1;
-        const std::uint64_t end = std::min<std::uint64_t>(cstrings.end, image.size());
-        while (p < end && opcodeNames_.size() < 1024) {
-            const char* s = reinterpret_cast<const char*>(image.data() + p);
-            const std::size_t n = strnlen(s, end - p);
-            if (n == 0) {
-                break;
-            }
-            opcodeNames_.emplace_back(s, n);
-            p += n + 1;
-        }
+    // The opcode mnemonic table and the runtime's own count of opcodes
+    // (opcode_table.cpp).
+    if (cstrings.begin < cstrings.end && cstrings.end <= image.size()) {
+        OpcodeTable table = parseOpcodeTable(
+            image.data() + cstrings.begin, static_cast<std::size_t>(cstrings.end - cstrings.begin));
+        opcodeNames_ = std::move(table.names);
+        opcodeCount_ = table.count;
     }
 
     return true;

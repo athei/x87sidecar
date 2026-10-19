@@ -1,12 +1,97 @@
 #include "rosetta_core/OpcodeCompatibility.h"
 
 #include <cstdint>
+#include <string>
+#include <unordered_map>
+#include <vector>
 
 #include "rosetta_core/Opcode.h"
 #include "rosetta_core/Opcode_26_4.h"
 #include "rosetta_core/RosettaCore.h"
 
+namespace {
+bool g_table_active = false;
+std::vector<uint16_t> g_host_to_internal;  // indexed by host id
+std::vector<uint16_t> g_internal_to_host;  // indexed by kOpcodeName_*
+uint16_t g_host_arpl = kOpcodeName_arpl;
+}  // namespace
+
+void opcode_set_host_table(const std::vector<std::string>& hostNames) {
+    std::unordered_map<std::string, uint16_t> internalByName;
+    for (uint16_t i = 0; i < kOpcodeNames.size(); ++i) {
+        if (i != kOpcodeName_arpl && kOpcodeNames[i] != nullptr) {
+            internalByName.emplace(kOpcodeNames[i], i);
+        }
+    }
+    g_host_to_internal.assign(hostNames.size(), kOpcodeUnmapped);
+    g_internal_to_host.assign(kOpcodeNames.size(), kOpcodeUnmapped);
+    for (size_t h = 0; h < hostNames.size(); ++h) {
+        const auto it = internalByName.find(hostNames[h]);
+        if (it == internalByName.end()) {
+            continue;
+        }
+        g_host_to_internal[h] = it->second;
+        if (g_internal_to_host[it->second] == kOpcodeUnmapped) {
+            g_internal_to_host[it->second] = static_cast<uint16_t>(h);
+        }
+    }
+    // Synthetic ARPL: the first id past the runtime's opcodes, as before, but
+    // past *this* runtime's table rather than the 26.4 one. The caller hands
+    // over exactly the runtime's opcodes, so this is 668 wherever it was.
+    g_host_arpl = static_cast<uint16_t>(hostNames.size());
+    g_internal_to_host[kOpcodeName_arpl] = g_host_arpl;
+    g_table_active = true;
+}
+
+bool opcode_host_table_active() {
+    return g_table_active;
+}
+
+void opcode_clear_host_table() {
+    g_table_active = false;
+    g_host_to_internal.clear();
+    g_internal_to_host.clear();
+    g_host_arpl = kOpcodeName_arpl;
+}
+
+auto opcode_first_unmapped_required() -> uint16_t {
+    if (!g_table_active) {
+        return kOpcodeUnmapped;
+    }
+    // The two ranges the stub filter claims and the translator handles.
+    static constexpr uint16_t kRanges[][2] = {
+        {kOpcodeName_fcmovb, kOpcodeName_fucomip},
+        {kOpcodeName_f2xm1, kOpcodeName_fyl2xp1},
+    };
+    for (const auto& r : kRanges) {
+        for (uint16_t op = r[0]; op <= r[1]; ++op) {
+            if (g_internal_to_host[op] == kOpcodeUnmapped) {
+                return op;
+            }
+        }
+    }
+    // What run bridging reads between x87 instructions (X87Bridge.h,
+    // X87IRBuild.cpp). Keep in step with those.
+    static constexpr uint16_t kBridged[] = {
+        kOpcodeName_wait,   kOpcodeName_mov, kOpcodeName_lea, kOpcodeName_movzx, kOpcodeName_movsx,
+        kOpcodeName_movsxd, kOpcodeName_add, kOpcodeName_sub, kOpcodeName_and,   kOpcodeName_or,
+        kOpcodeName_xor,    kOpcodeName_inc, kOpcodeName_dec,
+    };
+    for (const uint16_t op : kBridged) {
+        if (g_internal_to_host[op] == kOpcodeUnmapped) {
+            return op;
+        }
+    }
+    return kOpcodeUnmapped;
+}
+
 auto opcode_host_to_internal(uint16_t opcode) -> uint16_t {
+    if (g_table_active) {
+        if (opcode == g_host_arpl) {
+            return kOpcodeName_arpl;
+        }
+        return opcode < g_host_to_internal.size() ? g_host_to_internal[opcode] : kOpcodeUnmapped;
+    }
     if (rosetta_core_runtime_version() > kVersion_26_4) {
         return opcode;
     }
@@ -1358,6 +1443,9 @@ auto opcode_host_to_internal(uint16_t opcode) -> uint16_t {
 }
 
 auto opcode_internal_to_host(uint16_t opcode) -> uint16_t {
+    if (g_table_active) {
+        return opcode < g_internal_to_host.size() ? g_internal_to_host[opcode] : kOpcodeUnmapped;
+    }
     if (rosetta_core_runtime_version() > kVersion_26_4) {
         return opcode;
     }

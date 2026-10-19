@@ -36,6 +36,11 @@ struct StubBlobs {
     std::vector<uint8_t> handler;
 };
 
+// Whether the host ids the stub filter compares against (both x87 range
+// starts and the synthetic ARPL id) fit its 12-bit immediates under the current
+// opcode mapping. Prints what does not fit. build() refuses in that case too.
+bool filterOpcodeIdsFit();
+
 // Build the blob bytes.
 //   handlerAddr        : absolute address of where `handler` will be written
 //                         (i.e., where OUR_HANDLER will live in the parent)
