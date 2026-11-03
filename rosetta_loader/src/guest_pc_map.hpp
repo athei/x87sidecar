@@ -57,10 +57,10 @@ enum class NoGuestReason : uint8_t {
     BeforeFirstBoundary,  ///< inside a translated fragment, before its first mapped boundary
 };
 
-/// Offset of the ARM-keyed fragment tree root within the runtime image, as
-/// built in. The loader replaces it with the value it reads out of the
-/// installed runtime (OffsetFinder::armTreeRootOffset_) before sampling starts.
-inline constexpr uint64_t kArmTreeRootOffset = 0x3ba08;
+/// Offset of the ARM-keyed fragment tree root within the runtime image. The
+/// loader sets it from the installed runtime (OffsetFinder::armTreeRootOffset_)
+/// before anything samples. 0 means not found: the slot moves between runtimes,
+/// so there is no default, and the sampler does not start.
 void setArmTreeRootOffset(uint64_t offset);
 uint64_t armTreeRootOffset();
 

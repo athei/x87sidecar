@@ -321,7 +321,7 @@ __text:00000000000147B4 08 F1 4F 39                 LDRB            W8, [X8,#dis
 
     // The sampler's fragment lookup: a plain tree search rooted at a global,
     // which panics with a fixed string when the pc is in no fragment. Best
-    // effort: only the sampler needs it.
+    // effort: only the sampler needs it, and it does not start without it.
     const Range text = sectionRange(runtime, "__TEXT", "__text");
     const Range cstrings = sectionRange(runtime, "__TEXT", "__cstring");
     if (const std::uint64_t panic =

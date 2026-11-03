@@ -251,9 +251,11 @@ static int probeRuntime() {
             "  exports_fetch      0x%llx\n  mmap wrapper       0x%llx\n  g_disable_aot      "
             "0x%llx\n",
             f.offsetExportsFetch_, f.offsetSvcCallEntry_, f.offsetDisableAot_);
-        printf("  fragment tree root %s0x%llx\n",
-               f.armTreeRootOffset_ ? "" : "not found, sampler uses built-in ",
-               f.armTreeRootOffset_ ? f.armTreeRootOffset_ : guest_pc::kArmTreeRootOffset);
+        if (f.armTreeRootOffset_ != 0) {
+            printf("  fragment tree root 0x%llx\n", f.armTreeRootOffset_);
+        } else {
+            printf("  fragment tree root not found: X87_SAMPLE is disabled\n");
+        }
     }
     printf("libRosettaRuntime: %s\n", libOk ? "ok" : (runtimeOk ? "NOT SUPPORTED" : "not checked"));
     if (!libOk) {
@@ -293,8 +295,8 @@ static int probeRuntime() {
     if (!ok) {
         printf("NOT fully supported\n");
     } else if (f.armTreeRootOffset_ == 0) {
-        // Only the X87_SAMPLE profiler reads the root, and a launch without
-        // the anchor goes on with the built-in offset.
+        // Only the X87_SAMPLE profiler reads the root; without it the
+        // profiler does not start and everything else runs.
         printf("supported (profiler: fragment tree root not found)\n");
     } else {
         printf("supported\n");
@@ -1417,13 +1419,8 @@ int main(int argc, char* argv[]) try {
     if (!runtimeAssumptionsHold(offsetFinder)) {
         return notLaunching("unsupported Rosetta");
     }
-    if (offsetFinder.armTreeRootOffset_ != 0) {
-        if (offsetFinder.armTreeRootOffset_ != guest_pc::kArmTreeRootOffset) {
-            VERBOSE_LOG("fragment tree root moved: 0x%llx (built in: 0x%llx)\n",
-                        offsetFinder.armTreeRootOffset_, guest_pc::kArmTreeRootOffset);
-        }
-        guest_pc::setArmTreeRootOffset(offsetFinder.armTreeRootOffset_);
-    }
+    // 0 when not found, which keeps the sampler from starting.
+    guest_pc::setArmTreeRootOffset(offsetFinder.armTreeRootOffset_);
 
     // Default attach only: hold the taskport right before anything is forked
     // or launched. Root needs no authorization (and headless CI has no dialog),

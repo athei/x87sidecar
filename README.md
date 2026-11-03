@@ -175,6 +175,11 @@ follows that thread alone. Stacks come from walking the guest frame-pointer
 chain; return addresses on the guest stack are already guest addresses, so
 only the leaf needs resolving.
 
+Those maps hang off a tree whose root the loader locates in
+`/usr/libexec/rosetta/runtime`. When it cannot, `x87sidecar --probe` says
+`fragment tree root not found: X87_SAMPLE is disabled`, and `X87_SAMPLE`
+prints one line and samples nothing. Everything else runs as usual.
+
 The profile is one self-describing text file, rewritten in full every report
 interval so it can be read while the target runs, and written again on every
 catchable exit. It carries its own module map, so symbolising needs nothing
