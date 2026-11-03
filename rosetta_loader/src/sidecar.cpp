@@ -3105,6 +3105,15 @@ void startSampler(mach_port_t parentTaskPort, uint64_t runtimeBase, const Sample
     if (in.path.empty()) {
         return;
     }
+    // Without the tree root no pc resolves, so the sampler would never latch
+    // and never write a profile. Say so once instead.
+    if (guest_pc::armTreeRootOffset() == 0) {
+        fprintf(stdout,
+                "[rosettax87] X87_SAMPLE: profiler disabled: the fragment tree root was not "
+                "found in /usr/libexec/rosetta/runtime (see x87sidecar --probe)\n");
+        fflush(stdout);
+        return;
+    }
     SamplerConfig cfg = in;
     // Sweeping every thread faster than the sample rate is never what was
     // meant: the sweep is the expensive mode and the rate is the cheap one.

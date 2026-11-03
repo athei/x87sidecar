@@ -51,9 +51,12 @@ def check_paths(directory, name):
             assert re.search(r"wrote [1-9][0-9]* block counters", output), output
             block_path = Path(f"{profile}.{process.pid}")
             sample_path = Path(f"{sample}.{process.pid}")
+            windows_path = Path(f"{sample_path}.windows")
             assert block_path.stat().st_size > 0, output
+            assert sample_path.exists(), output
+            assert windows_path.exists(), output
             assert "[leaves]" in sample_path.read_text(), output
-            assert "end_window " in Path(f"{sample_path}.windows").read_text(), output
+            assert "end_window " in windows_path.read_text(), output
         for path in sentinels:
             assert path.read_bytes() == b"preserve me\n", path
         expected = set(sentinels)
@@ -69,7 +72,9 @@ def check_paths(directory, name):
                 # Only this test's process group, including its detached sidecar.
                 try:
                     os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
+                except (ProcessLookupError, PermissionError):
+                    # A target that exited and was not reaped yet is the only
+                    # member left: killpg reports EPERM for a group of zombies.
                     pass
                 process.communicate(timeout=5)
 

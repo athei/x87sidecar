@@ -32,8 +32,8 @@ struct OffsetFinder {
     std::uint64_t offsetSvcCallRet_ = 0;
     std::uint64_t offsetDisableAot_ = 0;
     // Root of the ARM-keyed code-fragment tree the sampler walks, from the
-    // lookup that panics with "cannot locate code fragment for arm address".
-    // 0 when not located (the sampler keeps its built-in value).
+    // lookup that panics with "cannot locate code fragment for arm address"
+    // (findArmTreeRoot). 0 when not located, which disables the sampler.
     std::uint64_t armTreeRootOffset_ = 0;
 
     // libRosettaRuntime

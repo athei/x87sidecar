@@ -8,10 +8,25 @@ on:
 
 jobs:
   build-and-test:
-    runs-on: macos-26
-    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # One matrix value per leg, so each check is named
+        # "build-and-test (<os>)". macos-27 runs on the xcode-27 image.
+        os: [macos-15, macos-26, macos-27]
+    runs-on: ${{ matrix.os == 'macos-27' && 'xcode-27' || matrix.os }}
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+
+      - name: Show the kernel
+        run: sysctl -n kern.version
+
+      - name: Select Xcode
+        # macos-15 builds with Xcode 16.4; the other legs use the image's
+        # default Xcode.
+        if: matrix.os == 'macos-15'
+        run: echo "DEVELOPER_DIR=/Applications/Xcode_16.4.app/Contents/Developer" >> "$GITHUB_ENV"
 
       - name: Ensure Rosetta is installed
         run: softwareupdate --install-rosetta --agree-to-license
@@ -34,10 +49,10 @@ jobs:
 
       - name: Run tests
         # PT_ATTACH on macOS needs either the debugger entitlement (granted
-        # via an interactive system dialog on first launch — not available
-        # in headless CI, would hang the job) or root.  GitHub's macos-26
-        # runners give passwordless sudo, so just use that.
-        run: sudo python3 scripts/diagnose_ci.py --output-dir build/ci-diagnostics -- bash scripts/run_tests.sh --no-build
+        # via an interactive system dialog on first launch, which would hang
+        # a headless job) or root.  GitHub's macOS runners give passwordless
+        # sudo, so just use that.
+        run: sudo python3 scripts/diagnose_ci.py --total-timeout 900 --output-dir build/ci-diagnostics -- bash scripts/run_tests.sh --no-build
 
       - name: Check concurrent profiler output paths
         run: sudo python3 scripts/test_profile_paths.py
@@ -46,5 +61,5 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ci-diagnostics
+          name: ci-diagnostics-${{ matrix.os }}
           path: build/ci-diagnostics

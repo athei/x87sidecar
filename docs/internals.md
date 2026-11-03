@@ -34,19 +34,23 @@ tracee, which is exactly how the block profiler's counter array is wired.
 
 The default loader attaches with `PT_ATTACHEXC`, so its stops arrive as
 Mach exceptions. Dropping the ptrace attachment and replying to the held
-exception are separate operations. On macOS 26.6.2 (XNU 12377.161.14), the
-classic sequence successfully detached, but the target stopped again after
-the reply to the synthetic SIGSTOP. The sidecar then waited for the stopped
-target to exit. This reproduced on unchanged master after the CI runner
-moved from macOS 26.5.2 to 26.6.2.
+exception are separate operations. On macOS 26.6.2 (XNU 12377.161.14), a
+release that detached from a held SIGSTOP stop completed the detach, but the
+target stopped again after the reply to the synthetic SIGSTOP. The sidecar
+then waited for the stopped target to exit. This reproduced on unchanged
+master after the CI runner moved from macOS 26.5.2 to 26.6.2.
 
-That Tahoe kernel family now uses the same reply-before-detach sequence as
-newer Golden Gate kernels: catch SIGSTOP, hold a Mach task suspend,
-suppress and reply to the signal while still traced, balance the task
-suspend, catch a SIGCONT stop, restore exception ports, then detach from
-that stop (see below). Older Tahoe builds and early Golden Gate kernels
-retain their existing sequence. The Tahoe cutoff is the verified build, not
-a claim about the first build to change this behavior.
+macOS 15.8.1 (XNU 11417.140.69.712.69) showed the same stall on a build
+whose predecessor, 24G824, passed with the same Rosetta runtime, so affected
+builds cannot be listed in advance. The loader therefore uses one sequence
+on every kernel: catch SIGSTOP, hold a Mach task suspend, suppress and reply
+to the signal while still traced, balance the task suspend, catch a SIGCONT
+stop, restore exception ports, then detach from that stop (see below).
+`--cooperative` does not detach, so it avoids this release altogether, but
+only for a target that performs the handshake, such as the patched wine
+(see "Attaching to the target" in the README). A plain binary started with
+`--cooperative` runs without the hook, and its sidecar gives up waiting for
+the handshake after 30 s.
 
 In that sequence the ptrace detach used to fail. `PT_DETACH` returns EBUSY
 unless the target's `p_stat` is `SSTOP`, which for a traced target means a
@@ -79,9 +83,9 @@ exception ports, and detaches from that stop, which succeeds and clears
 `P_LTRACED`. The held exception is then released with a plain Mach reply.
 On macOS 27.0.1 the signal held at the stop is delivered to the target after
 a successful detach, although `PT_DETACH` passes no signal. That is why a
-detach from a held SIGSTOP stop, as the classic sequence does, leaves the
-target stopped (state `T`), which is also what 26.6.2 showed and the reason
-for the reply-first sequence. A SIGCONT delivered to a running process has
+detach from a held SIGSTOP stop leaves the target stopped (state `T`), as
+macOS 15.8.1, 26.6.2 and 27.0.1 showed. From a SIGCONT stop, delivery and
+non-delivery are both harmless. A SIGCONT delivered to a running process has
 no effect unless it has a SIGCONT handler, and the release happens during
 Rosetta's init, before guest code can install one.
 
@@ -99,6 +103,12 @@ default-attach `s_fstp64` check in phase 17 of `run_tests.sh` is the one that
 reproduces the hang itself. Every run of the loader in `run_tests.sh` is
 bounded, so a target that does not exit is reported as a failure of its
 test.
+
+Phase 0 of `run_tests.sh` runs `scripts/test_release_not_stopped.py`, which
+waits on the target as its real parent and fails if it ever reports a stop.
+The run aborts on that result, since every later default-attach run would
+otherwise cost its full timeout. With SIGCONT blocked the target stays
+traced, so that mode checks only the exit status and the output.
 
 `test_detach_signals` checks that a released target can receive SIGUSR1 in
 its own handler without involving x87 arithmetic. CI also watches the test

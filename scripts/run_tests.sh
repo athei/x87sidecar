@@ -4,6 +4,10 @@
 # custom x87sidecar, checking self-reported PASS/FAIL output.
 #
 # Phases:
+#   0. test_fldconst through test_release_not_stopped.py, three runs each with
+#      the hook, with X87_DISABLE_HOOK=1 and with SIGCONT blocked: the target
+#      must keep running after the default attach releases it.  Runs even
+#      when tests are named, and a stop ends the whole run
 #   1. Native Rosetta (baseline)
 #   2. x87sidecar (IR + fusions enabled, default config)
 #   3. x87sidecar with X87_DISABLE_X87_IR=1 (direct translator only).
@@ -70,8 +74,10 @@
 #      test_x87_cross_reply_exact has to fail; exporting X87_NATIVE_SLOTS=0
 #      for the whole run makes every phase run that way
 #   H. test_opcode_host_table, natively: the name-derived opcode maps
-#      against the pinned 26.4 table and the identity mapping; and
-#      test_opcode_table_parse: the "index < N" bound on synthetic blobs
+#      against the pinned 26.4 table and the identity mapping;
+#      test_opcode_table_parse: the "index < N" bound on synthetic blobs; and
+#      test_fragment_root: the sampler's fragment tree root on synthetic
+#      images, through adrp/add and through adr/nop
 #   R. replay tests/data/geom_block_874c40.ir under --fpr-pool 8 and
 #      assert the pressure splits keep it on the IR path (fpr_fail=0), then
 #      replay tests/data/fist_pressure.ir the same way and assert it exits 0
@@ -281,6 +287,10 @@ filter_runtime_lines() {
 
 # Every run of the loader goes through run_bounded, so a target or sidecar
 # that never exits is reported as a failure instead of stalling the harness.
+# Phase 0 is the exception: test_release_not_stopped.py has to be the
+# target's parent to see it stop, and run_bounded would put perl there, so
+# the script bounds its own runs with TEST_TIMEOUT and kills the group the
+# same way.
 # shellcheck source=scripts/run_bounded.sh
 source "$SCRIPT_DIR/run_bounded.sh"
 
@@ -441,6 +451,46 @@ check_output() {
         PASSED=$((PASSED + 1))
     fi
 }
+
+print_results() {
+    echo "================================================================"
+    echo -e "Results: ${GREEN}${PASSED} passed${NC}, ${RED}${FAILED} failed${NC}, ${YELLOW}${XFAILED} stock divergences${NC}, ${YELLOW}${ERRORS} skipped${NC} / ${TOTAL} total"
+}
+
+# ── Phase 0: the target keeps running after the release ──────────────────────
+# A target left stopped by the release never exits, so every later run of the
+# default attach would cost its full TEST_TIMEOUT.  This phase comes first and
+# a stop (exit 2) ends the run.  The script bounds its own runs, because it has
+# to be the target's parent to see the stop and run_bounded would put perl
+# there.
+if [[ $NATIVE_ONLY -eq 0 ]]; then
+    echo -e "${BOLD}=== Phase 0: release without a stop (test_fldconst) ===${NC}"
+
+    if [[ ! -x "$TESTS_BIN/test_fldconst" ]]; then
+        echo -e "${YELLOW}SKIP${NC}  test_fldconst  (binary not found)"
+        ERRORS=$((ERRORS + 1))
+    else
+        for mode in hook passthrough sigcont-blocked; do
+            TOTAL=$((TOTAL + 1))
+            EXIT=0
+            OUT=$(python3 "$SCRIPT_DIR/test_release_not_stopped.py" "$mode" 2>&1) || EXIT=$?
+            if [[ $EXIT -eq 0 ]]; then
+                echo -e "${GREEN}PASS${NC}  release  $mode"
+                PASSED=$((PASSED + 1))
+            else
+                echo -e "${RED}FAIL${NC}  release  $mode  (exit=$EXIT)"
+                FAILED=$((FAILED + 1))
+                tail -3 <<<"$OUT" | sed 's/^/      /'
+                if [[ $EXIT -eq 2 ]]; then
+                    echo "Target stopped after the release; stopping the run."
+                    print_results
+                    exit 1
+                fi
+            fi
+        done
+    fi
+    echo ""
+fi
 
 # ── Phase 1: native Rosetta ───────────────────────────────────────────────────
 echo -e "${BOLD}=== Phase 1: native Rosetta ===${NC}"
@@ -1371,14 +1421,14 @@ if [[ $NATIVE_ONLY -eq 0 ]] && ! native_slots_off; then
     fi
 fi
 
-# ── Host: name-derived opcode maps and the table parse ──────────────────
+# ── Host: opcode maps, the table parse and the fragment tree root ─────────
 # Native arm64, no Rosetta: opcode_set_host_table fed the internal names, the
-# 26.4 names and a macOS 15.7.8-shaped list; parseOpcodeTable fed synthetic
-# __cstring blobs.
+# 26.4 names and a macOS 15.8.1-shaped list; parseOpcodeTable fed synthetic
+# __cstring blobs; findArmTreeRoot fed synthetic images.
 if [[ ${#SELECTED_TESTS[@]} -eq 0 ]]; then
     echo ""
-    echo -e "${BOLD}=== Host: opcode host table ===${NC}"
-    for HOST_TEST in opcode_host_table opcode_table_parse; do
+    echo -e "${BOLD}=== Host: opcode host table and fragment tree root ===${NC}"
+    for HOST_TEST in opcode_host_table opcode_table_parse fragment_root; do
         TOTAL=$((TOTAL + 1))
         HOST_BIN="$BIN/test_$HOST_TEST"
         if [[ ! -x "$HOST_BIN" ]]; then
@@ -1516,8 +1566,7 @@ if [[ $NATIVE_ONLY -eq 0 && " ${TESTS[*]} " == *" test_x87_signal_context "* ]];
     check_output "x87_trace" "$OUT" "$EXIT"
 fi
 
-echo "================================================================"
-echo -e "Results: ${GREEN}${PASSED} passed${NC}, ${RED}${FAILED} failed${NC}, ${YELLOW}${XFAILED} stock divergences${NC}, ${YELLOW}${ERRORS} skipped${NC} / ${TOTAL} total"
+print_results
 
 if [[ $FAILED -gt 0 ]]; then
     exit 1

@@ -427,7 +427,7 @@ Status resolveInFragment(const Reader& reader, const Fragment& frag, uint64_t ar
 }  // namespace
 
 namespace {
-uint64_t g_armTreeRootOffset = kArmTreeRootOffset;
+uint64_t g_armTreeRootOffset = 0;
 }  // namespace
 
 void setArmTreeRootOffset(uint64_t offset) {
@@ -439,7 +439,8 @@ uint64_t armTreeRootOffset() {
 
 Status lookupFragment(const Reader& reader, uint64_t runtimeBase, uint64_t armPc, Fragment& out) {
     uint64_t nodeAddr = 0;
-    if (!reader(runtimeBase + g_armTreeRootOffset, &nodeAddr, sizeof(nodeAddr))) {
+    if (g_armTreeRootOffset == 0 ||
+        !reader(runtimeBase + g_armTreeRootOffset, &nodeAddr, sizeof(nodeAddr))) {
         return Status::Unavailable;
     }
 

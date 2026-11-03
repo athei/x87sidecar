@@ -175,6 +175,11 @@ follows that thread alone. Stacks come from walking the guest frame-pointer
 chain; return addresses on the guest stack are already guest addresses, so
 only the leaf needs resolving.
 
+Those maps hang off a tree whose root the loader locates in
+`/usr/libexec/rosetta/runtime`. When it cannot, `x87sidecar --probe` says
+`fragment tree root not found: X87_SAMPLE is disabled`, and `X87_SAMPLE`
+prints one line and samples nothing. Everything else runs as usual.
+
 The profile is one self-describing text file, rewritten in full every report
 interval so it can be read while the target runs, and written again on every
 catchable exit. It carries its own module map, so symbolising needs nothing
@@ -300,9 +305,10 @@ the assumptions the emitted code relies on against the installed runtime,
 and refuses a runtime that fails a check rather than patching guessed
 addresses; [Attaching](#attaching-to-the-target) says what then happens to
 the program. `x87sidecar --probe` prints that report and exits 0 only when
-every feature is supported; run it first after a macOS update. CI runs it
-on the current `macos-26` runner before the test suite, and it runs on
-macOS 27.
+everything a launch needs is present; an anchor that only the sampling
+profiler uses is named on the verdict line and does not change the exit
+status. Run it first after a macOS update. CI runs it and the test suite on
+macOS 15, 26 and 27.
 
 x87 coverage: arithmetic, memory operands, comparisons, the full
 transcendental set (`fsin`, `fcos`, `fsincos`, `fpatan`, `f2xm1`, `fyl2x`,
@@ -398,6 +404,7 @@ bash scripts/run_tests.sh --native-only  # stock Rosetta baseline only
 bash scripts/run_tests.sh test_arith     # one test
 python3 scripts/test_profile_paths.py    # concurrent profiler output paths
 python3 scripts/test_unhooked_fallback.py  # unhooked fallback, no privileges
+python3 scripts/test_release_not_stopped.py hook  # no stop after the release
 bash scripts/run_benchmarks.sh           # build + benchmark table
 ```
 

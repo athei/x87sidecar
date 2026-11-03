@@ -11,6 +11,7 @@
 #include <utility>
 #include <vector>
 
+#include "fragment_root.hpp"
 #include "macho_loader.hpp"
 #include "opcode_table.hpp"
 #include "types.h"
@@ -319,36 +320,14 @@ __text:00000000000147B4 08 F1 4F 39                 LDRB            W8, [X8,#dis
     offsetDisableAot_ = adrpTarget(adrp_instruction, adrp_offset) + ldrb_imm12;
 
     // The sampler's fragment lookup: a plain tree search rooted at a global,
-    // which panics with a fixed string when the pc is in no fragment. Find the
-    // string's reference, then the last `adrp xM; add xM, xM, #lo` before it
-    // that does not build the string itself: that is the root. Best effort.
+    // which panics with a fixed string when the pc is in no fragment. Best
+    // effort: only the sampler needs it, and it does not start without it.
     const Range text = sectionRange(runtime, "__TEXT", "__text");
     const Range cstrings = sectionRange(runtime, "__TEXT", "__cstring");
     if (const std::uint64_t panic =
             findCString(buffer, cstrings, "cannot locate code fragment for arm address")) {
-        for (const std::uint64_t ref : findAdrpAddRefs(buffer, text, panic)) {
-            for (std::uint64_t back = 4; back <= 64 * 4 && ref >= text.begin + back; back += 4) {
-                const std::uint32_t add = insnAt(buffer, ref - back);
-                if (!isAddImm(add) || (add & 31) != ((add >> 5) & 31) || (add & 31) == 0) {
-                    continue;
-                }
-                const std::uint32_t adrp = insnAt(buffer, ref - back - 4);
-                if (!isAdrp(adrp) || (adrp & 31) != (add & 31)) {
-                    continue;
-                }
-                const std::uint64_t target =
-                    adrpTarget(adrp, ref - back - 4) + ((add >> 10) & 0xFFF);
-                // The root is a global in __DATA or __bss, past __text and
-                // possibly past the end of the file (bss has no file bytes).
-                if (target >= text.end && target < text.end + 0x400000) {
-                    armTreeRootOffset_ = target;
-                }
-                break;
-            }
-            if (armTreeRootOffset_ != 0) {
-                break;
-            }
-        }
+        armTreeRootOffset_ =
+            findArmTreeRoot(buffer.data(), buffer.size(), text.begin, text.end, panic);
     }
 
     return true;

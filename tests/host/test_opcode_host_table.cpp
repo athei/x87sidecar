@@ -4,7 +4,7 @@
 // compares the result with what the pinned tables say:
 //   - the internal (26.5+) names, where both maps must be the identity;
 //   - the 26.4 names, where both maps must equal the pinned 26.4 table;
-//   - a list shaped like macOS 15.7.8's runtime, which is the 26.4 list
+//   - a list shaped like macOS 15.8.1's runtime, which is the 26.4 list
 //     without the four XSAVE-family opcodes.
 // The synthetic ARPL id must be the first id past each list.
 
@@ -133,7 +133,7 @@ void test264(const Pinned& p) {
     opcode_clear_host_table();
 }
 
-// macOS 15.7.8: the 26.4 order with xgetbv, xrstor, xsave and xsetbv absent,
+// macOS 15.8.1: the 26.4 order with xgetbv, xrstor, xsave and xsetbv absent,
 // 664 opcodes.
 void testSequoia(const Pinned& p) {
     std::vector<std::string> names;
@@ -142,11 +142,11 @@ void testSequoia(const Pinned& p) {
             names.emplace_back(kOpcodeNames[p.hostToInternal[h]]);
         }
     }
-    CHECK(names.size() == 664, "15.7.8: list has %zu names, want 664", names.size());
+    CHECK(names.size() == 664, "15.8.1: list has %zu names, want 664", names.size());
     opcode_set_host_table(names);
     for (uint16_t i = 0; i < kRealOpcodes; ++i) {
         if (isXsaveFamily(i)) {
-            CHECK(opcode_internal_to_host(i) == kOpcodeUnmapped, "15.7.8: %s is mapped",
+            CHECK(opcode_internal_to_host(i) == kOpcodeUnmapped, "15.8.1: %s is mapped",
                   kOpcodeNames[i]);
             continue;
         }
@@ -158,24 +158,24 @@ void testSequoia(const Pinned& p) {
                 --want;
             }
         }
-        CHECK(opcode_internal_to_host(i) == want, "15.7.8: %s -> host %u, want %u", kOpcodeNames[i],
+        CHECK(opcode_internal_to_host(i) == want, "15.8.1: %s -> host %u, want %u", kOpcodeNames[i],
               opcode_internal_to_host(i), want);
-        CHECK(opcode_host_to_internal(want) == i, "15.7.8: host %u -> %u, want %s", want,
+        CHECK(opcode_host_to_internal(want) == i, "15.8.1: host %u -> %u, want %s", want,
               opcode_host_to_internal(want), kOpcodeNames[i]);
     }
     // Spelled out, since this is the runtime the table exists for.
-    CHECK(opcode_internal_to_host(kOpcodeName_xchg) == kOpcode_26_4_xchg, "15.7.8: xchg moved");
+    CHECK(opcode_internal_to_host(kOpcodeName_xchg) == kOpcode_26_4_xchg, "15.8.1: xchg moved");
     CHECK(opcode_internal_to_host(kOpcodeName_xlat) == kOpcode_26_4_xlat - 1,
-          "15.7.8: xlat not one lower");
+          "15.8.1: xlat not one lower");
     CHECK(opcode_internal_to_host(kOpcodeName_xorps) == kOpcode_26_4_xorps - 1,
-          "15.7.8: xorps not one lower");
-    CHECK(opcode_internal_to_host(kOpcodeName_arpl) == 664, "15.7.8: arpl at %u, want 664",
+          "15.8.1: xorps not one lower");
+    CHECK(opcode_internal_to_host(kOpcodeName_arpl) == 664, "15.8.1: arpl at %u, want 664",
           opcode_internal_to_host(kOpcodeName_arpl));
-    CHECK(opcode_host_to_internal(664) == kOpcodeName_arpl, "15.7.8: host 664 is not arpl");
-    CHECK(opcode_host_to_internal(665) == kOpcodeUnmapped, "15.7.8: host 665 is mapped");
+    CHECK(opcode_host_to_internal(664) == kOpcodeName_arpl, "15.8.1: host 664 is not arpl");
+    CHECK(opcode_host_to_internal(665) == kOpcodeUnmapped, "15.8.1: host 665 is mapped");
     CHECK(opcode_first_unmapped_required() == kOpcodeUnmapped,
-          "15.7.8: a required opcode is unmapped");
-    checkRangesContiguous("15.7.8");
+          "15.8.1: a required opcode is unmapped");
+    checkRangesContiguous("15.8.1");
     opcode_clear_host_table();
 }
 
