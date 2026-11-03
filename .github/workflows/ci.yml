@@ -87,6 +87,11 @@ jobs:
         # so this needs no privileges.
         run: python3 scripts/test_unhooked_fallback.py
 
+      - name: Probe the installed Rosetta
+        # Locates every anchor this build hooks in the runner's Rosetta and
+        # validates the assumptions behind them; exits non-zero if any is off.
+        run: build/bin/x87sidecar --probe
+
       - name: Run tests
         # PT_ATTACH on macOS needs either the debugger entitlement (granted
         # via an interactive system dialog on first launch, which would hang
@@ -96,13 +101,6 @@ jobs:
 
       - name: Check concurrent profiler output paths
         run: sudo python3 scripts/test_profile_paths.py
-
-      - name: Probe the installed Rosetta
-        # Locates every anchor this build hooks in the runner's Rosetta and
-        # validates the assumptions behind them; exits non-zero if any is off.
-        # This comes after the tests here, so that a probe failure on one of
-        # these runners does not keep the suite from running.
-        run: build/bin/x87sidecar --probe
 
       - name: Upload test diagnostics
         if: always()

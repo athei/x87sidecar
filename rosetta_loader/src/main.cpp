@@ -237,8 +237,10 @@ static bool runtimeAssumptionsHold(const OffsetFinder& f) {
 }
 
 // --probe: locate and validate everything in the installed Rosetta, print the
-// report, launch nothing. Exit status 0 means this build can hook this
-// Rosetta with every feature; 1 means something is off (the report says what).
+// report, launch nothing. Exit status 0 means this build has everything a
+// launch needs from this Rosetta; 1 means something is off (the report says
+// what). An anchor only the profiler uses is named on the verdict line and does
+// not change the exit status.
 static int probeRuntime() {
     OffsetFinder f;
     const bool runtimeOk = f.determineOffsets();
@@ -287,9 +289,16 @@ static int probeRuntime() {
     }
     printf("  MXCSR FTZ/DAZ in   %s (X87_IGNORE_FTZ_DAZ)\n",
            TranslatorX87::flush_control_name(TranslatorX87::flush_control()));
-    const bool ok =
-        runtimeAssumptionsHold(f) && f.offsetDecodeOpcode_ != 0 && f.armTreeRootOffset_ != 0;
-    printf("%s\n", ok ? "supported" : "NOT fully supported");
+    const bool ok = runtimeAssumptionsHold(f) && f.offsetDecodeOpcode_ != 0;
+    if (!ok) {
+        printf("NOT fully supported\n");
+    } else if (f.armTreeRootOffset_ == 0) {
+        // Only the X87_SAMPLE profiler reads the root, and a launch without
+        // the anchor goes on with the built-in offset.
+        printf("supported (profiler: fragment tree root not found)\n");
+    } else {
+        printf("supported\n");
+    }
     return ok ? 0 : 1;
 }
 
@@ -1128,7 +1137,8 @@ static void print_loader_usage(const char* prog) {
         "                 Non-cooperative targets keep using the default path.\n"
         "  --probe        locate and validate everything this build hooks in the\n"
         "                 installed Rosetta, print the report and exit; launches\n"
-        "                 nothing. Exit status 0 when fully supported.\n"
+        "                 nothing. Exit status 0 when a launch has all it needs;\n"
+        "                 an anchor only the profiler uses does not change it.\n"
         "  --help         print this message and exit\n"
         "\n"
         "Sampling profiler (see also the X87_SAMPLE* variables below, which win\n"

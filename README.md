@@ -300,8 +300,10 @@ the assumptions the emitted code relies on against the installed runtime,
 and refuses a runtime that fails a check rather than patching guessed
 addresses; [Attaching](#attaching-to-the-target) says what then happens to
 the program. `x87sidecar --probe` prints that report and exits 0 only when
-every feature is supported; run it first after a macOS update. CI runs it
-and the test suite on macOS 15, 26 and 27.
+everything a launch needs is present; an anchor that only the sampling
+profiler uses is named on the verdict line and does not change the exit
+status. Run it first after a macOS update. CI runs it and the test suite on
+macOS 15, 26 and 27.
 
 x87 coverage: arithmetic, memory operands, comparisons, the full
 transcendental set (`fsin`, `fcos`, `fsincos`, `fpatan`, `f2xm1`, `fyl2x`,
