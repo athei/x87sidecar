@@ -1417,7 +1417,7 @@ fi
 
 # ── Host: name-derived opcode maps and the table parse ──────────────────
 # Native arm64, no Rosetta: opcode_set_host_table fed the internal names, the
-# 26.4 names and a macOS 15.7.8-shaped list; parseOpcodeTable fed synthetic
+# 26.4 names and a macOS 15.8.1-shaped list; parseOpcodeTable fed synthetic
 # __cstring blobs.
 if [[ ${#SELECTED_TESTS[@]} -eq 0 ]]; then
     echo ""

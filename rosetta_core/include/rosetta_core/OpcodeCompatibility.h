@@ -30,7 +30,7 @@ constexpr uint16_t kOpcodeUnmapped = 0xFFFF;
 // runtime's opcode_to_string assert). Once set, both mapping functions use it
 // instead of the version-keyed 26.4 table / identity guess.
 //
-// That covers a runtime the version alone misjudges. macOS 15.7.8's reports a
+// That covers a runtime the version alone misjudges. macOS 15.8.1's reports a
 // version on the 26.4 side but has 664 opcodes instead of 668: the four
 // XSAVE-family entries (xgetbv, xrstor, xsave, xsetbv) are absent, so every id
 // through xchg equals its 26.4 id and xlat, xorpd, xorps sit one lower.

@@ -677,6 +677,6 @@ enum Opcode_26_4 {
     // Synthetic; see kOpcodeName_arpl. Appended past everything Rosetta itself
     // defines, so the same id under this table and the internal numbering. With
     // a host table set (OpcodeCompatibility.h) it is instead the first id past
-    // the runtime's own opcodes: 664 on macOS 15.7.8's runtime.
+    // the runtime's own opcodes: 664 on macOS 15.8.1's runtime.
     kOpcode_26_4_arpl = 0x29C,
 };
