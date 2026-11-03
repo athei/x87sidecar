@@ -127,3 +127,9 @@ target_link_libraries(test_opcode_host_table PRIVATE rosetta_core)
 add_executable(test_opcode_table_parse host/test_opcode_table_parse.cpp
     ${PROJECT_SOURCE_DIR}/rosetta_loader/src/opcode_table.cpp)
 target_include_directories(test_opcode_table_parse PRIVATE ${PROJECT_SOURCE_DIR}/rosetta_loader/src)
+
+# Host-side check of the fragment tree root search on synthetic images, with
+# adrp/add pairs and with adr/nop.
+add_executable(test_fragment_root host/test_fragment_root.cpp
+    ${PROJECT_SOURCE_DIR}/rosetta_loader/src/fragment_root.cpp)
+target_include_directories(test_fragment_root PRIVATE ${PROJECT_SOURCE_DIR}/rosetta_loader/src)
