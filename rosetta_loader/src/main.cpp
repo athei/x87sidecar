@@ -8,7 +8,6 @@
 #include <sys/event.h>
 #include <sys/mman.h>
 #include <sys/ptrace.h>
-#include <sys/sysctl.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -64,60 +63,6 @@ static bool g_sigcontBlockedAtStart = false;
             printf(fmt, ##__VA_ARGS__); \
         }                               \
     } while (0)
-
-// Returns true when the running XNU build is >= the given threshold build
-// number, compared component-wise (numeric), parsed from kern.version's
-// "root:xnu-<A.B.C.D.E>~<F>" token. On any parse/sysctl failure, returns
-// `fallback` (default false, i.e. keep the conservative detach() path).
-//
-// A string compare would be wrong here ("9" > "13432" lexically, and the dotted
-// tail needs numeric ordering), so we compare each dotted component as an int.
-// The trailing "~N" revision suffix is ignored. Missing trailing components in
-// the running build are treated as 0, so an exact prefix match counts as "at
-// least" (>=).
-static bool xnuBuildAtLeast(const int* threshold, size_t nThreshold, bool fallback = false) {
-    char buf[512];
-    size_t len = sizeof(buf);
-    if (sysctlbyname("kern.version", buf, &len, nullptr, 0) != 0) {
-        return fallback;
-    }
-    buf[sizeof(buf) - 1] = '\0';
-
-    const char* p = strstr(buf, "root:xnu-");
-    if (!p) {
-        return fallback;
-    }
-    p += strlen("root:xnu-");
-
-    for (size_t i = 0; i < nThreshold; ++i) {
-        // A component must start with a digit; anything else (end of token,
-        // "~", "/") means the running build has no more components -> treat as 0.
-        int running = 0;
-        if (*p >= '0' && *p <= '9') {
-            char* end = nullptr;
-            long v = strtol(p, &end, 10);
-            running = static_cast<int>(v);
-            p = end;
-            if (*p == '.') {
-                ++p;  // step over the separator to the next component
-            }
-        }
-        if (running != threshold[i]) {
-            return running > threshold[i];
-        }
-    }
-    // All compared components equal -> at least the threshold.
-    return true;
-}
-
-// Golden Gate uses the debugserver-style detach from this XNU build.
-// Earlier Golden Gate kernels need the classic detach().
-static const int kGoldenGateXnuBuild[] = {13432, 0, 94, 501, 4};
-// Tahoe 26.6.2 also needs the reply-before-detach ordering. Keep the
-// exception to that XNU family so it does not include early Golden Gate
-// kernels that still require the classic path.
-static const int kTahoeResumeFirstXnuBuild[] = {12377, 161, 14};
-static const int kAfterTahoeXnuBuild[] = {12378};
 
 // The default attach path's post-exec task_for_pid on the translated tracee
 // needs the system.privilege.taskport right, which macOS grants to the login
@@ -647,43 +592,6 @@ public:
         return waitForBreakpoint();
     }
 
-    bool detach() {
-        // PT_DETACH requires the tracee to be in a BSD signal-stop. Under
-        // PT_ATTACHEXC our stops arrive as Mach exceptions (the BRK is a bare
-        // EXC_BREAKPOINT carrying no signal), which PT_DETACH rejects with
-        // EBUSY. So synthesize a SIGSTOP job-control stop to detach from — the
-        // approach debugserver takes in MachProcess::DoSIGSTOP/Detach. SIGSTOP
-        // cannot be caught or ignored, so the process stays stopped until
-        // PT_DETACH continues it.
-        // Drive the tracee into a SIGSTOP job-control stop and hold it. SIGSTOP
-        // can't be caught or ignored, and PT_DETACH only accepts a held
-        // signal-stop like this one — a bare EXC_BREAKPOINT or a running
-        // process both give EBUSY.
-        kill(childPid_, SIGSTOP);
-        if (!exc_.reply(0)) {  // release the held stop; run into the SIGSTOP
-            return false;
-        }
-        if (!waitForStopped(SIGSTOP)) {
-            fprintf(stdout, "detach: failed to reach SIGSTOP stop\n");
-            return false;
-        }
-        // Restore the task's exception ports, PT_DETACH from the held SIGSTOP
-        // stop, then release the exception (unblocking the thread). Order
-        // matters: PT_DETACH must run while the SIGSTOP exception is still held,
-        // and the release must run after (ptrace is no longer valid post-detach).
-        exc_.restoreAndTearDown();
-        bool ok = true;
-        if (ptrace(PT_DETACH, childPid_, reinterpret_cast<caddr_t>(1), 0) < 0) {
-            fprintf(stdout, "ptrace(PT_DETACH): %s\n", strerror(errno));
-            ok = false;
-        }
-        exc_.release();
-        if (ok) {
-            VERBOSE_LOG("Debugger detached.\n");
-        }
-        return ok;
-    }
-
     bool detachReplyFirst() {
         // Follows lldb debugserver's MachProcess::Detach()
         // (llvm lldb/tools/debugserver/source/MacOSX/MachProcess.mm). Order:
@@ -767,7 +675,8 @@ public:
         //    On macOS 27.0.1 the signal held at the stop is delivered to the
         //    target after a successful detach, although PT_DETACH passes 0.
         //    That is why another SIGSTOP would leave the target stopped
-        //    (state T), as the classic sequence does there and on 26.6.2.
+        //    (state T). Detaching from a held SIGSTOP stop did that on macOS
+        //    15.8.1, 26.6.2 and 27.0.1.
         //    A SIGCONT delivered to a running process has no effect unless it
         //    has a SIGCONT handler, and the release happens during Rosetta's
         //    init, before guest code can install one.
@@ -1699,22 +1608,11 @@ int main(int argc, char* argv[]) try {
                         mach_error_string(kr));
             }
         } else {
-            // Both kernel families need reply-before-detach from the verified
-            // builds below. Earlier builds retain the classic sequence; using
-            // reply-first there leaves the tracee P_LTRACED and interferes
-            // with later signal delivery.
-            if (xnuBuildAtLeast(kGoldenGateXnuBuild,
-                               sizeof(kGoldenGateXnuBuild) / sizeof(kGoldenGateXnuBuild[0])) ||
-                (xnuBuildAtLeast(kTahoeResumeFirstXnuBuild,
-                                sizeof(kTahoeResumeFirstXnuBuild) /
-                                    sizeof(kTahoeResumeFirstXnuBuild[0])) &&
-                 !xnuBuildAtLeast(kAfterTahoeXnuBuild, 1))) {
-                VERBOSE_LOG("Using reply-before-detach ordering\n");
-                (void)dbg.detachReplyFirst();
-            } else {
-                VERBOSE_LOG("Using classic detach\n");
-                (void)dbg.detach();
-            }
+            // Detach from a held SIGCONT stop on every kernel. Whether the
+            // kernel delivers the held signal after PT_DETACH or drops it, the
+            // target keeps running and its parent sees no stop. See "Releasing
+            // the default attach stop" in docs/internals.md.
+            (void)dbg.detachReplyFirst();
         }
     };
 
