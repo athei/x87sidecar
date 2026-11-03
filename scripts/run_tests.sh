@@ -4,6 +4,10 @@
 # custom x87sidecar, checking self-reported PASS/FAIL output.
 #
 # Phases:
+#   0. test_fldconst through test_release_not_stopped.py, three runs each with
+#      the hook, with X87_DISABLE_HOOK=1 and with SIGCONT blocked: the target
+#      must keep running after the default attach releases it.  Runs even
+#      when tests are named, and a stop ends the whole run
 #   1. Native Rosetta (baseline)
 #   2. x87sidecar (IR + fusions enabled, default config)
 #   3. x87sidecar with X87_DISABLE_X87_IR=1 (direct translator only).
@@ -441,6 +445,46 @@ check_output() {
         PASSED=$((PASSED + 1))
     fi
 }
+
+print_results() {
+    echo "================================================================"
+    echo -e "Results: ${GREEN}${PASSED} passed${NC}, ${RED}${FAILED} failed${NC}, ${YELLOW}${XFAILED} stock divergences${NC}, ${YELLOW}${ERRORS} skipped${NC} / ${TOTAL} total"
+}
+
+# ── Phase 0: the target keeps running after the release ──────────────────────
+# A target left stopped by the release never exits, so every later run of the
+# default attach would cost its full TEST_TIMEOUT.  This phase comes first and
+# a stop (exit 2) ends the run.  The script bounds its own runs, because it has
+# to be the target's parent to see the stop and run_bounded would put perl
+# there.
+if [[ $NATIVE_ONLY -eq 0 ]]; then
+    echo -e "${BOLD}=== Phase 0: release without a stop (test_fldconst) ===${NC}"
+
+    if [[ ! -x "$TESTS_BIN/test_fldconst" ]]; then
+        echo -e "${YELLOW}SKIP${NC}  test_fldconst  (binary not found)"
+        ERRORS=$((ERRORS + 1))
+    else
+        for mode in hook passthrough sigcont-blocked; do
+            TOTAL=$((TOTAL + 1))
+            EXIT=0
+            OUT=$(python3 "$SCRIPT_DIR/test_release_not_stopped.py" "$mode" 2>&1) || EXIT=$?
+            if [[ $EXIT -eq 0 ]]; then
+                echo -e "${GREEN}PASS${NC}  release  $mode"
+                PASSED=$((PASSED + 1))
+            else
+                echo -e "${RED}FAIL${NC}  release  $mode  (exit=$EXIT)"
+                FAILED=$((FAILED + 1))
+                tail -3 <<<"$OUT" | sed 's/^/      /'
+                if [[ $EXIT -eq 2 ]]; then
+                    echo "Target stopped after the release; stopping the run."
+                    print_results
+                    exit 1
+                fi
+            fi
+        done
+    fi
+    echo ""
+fi
 
 # ── Phase 1: native Rosetta ───────────────────────────────────────────────────
 echo -e "${BOLD}=== Phase 1: native Rosetta ===${NC}"
@@ -1516,8 +1560,7 @@ if [[ $NATIVE_ONLY -eq 0 && " ${TESTS[*]} " == *" test_x87_signal_context "* ]];
     check_output "x87_trace" "$OUT" "$EXIT"
 fi
 
-echo "================================================================"
-echo -e "Results: ${GREEN}${PASSED} passed${NC}, ${RED}${FAILED} failed${NC}, ${YELLOW}${XFAILED} stock divergences${NC}, ${YELLOW}${ERRORS} skipped${NC} / ${TOTAL} total"
+print_results
 
 if [[ $FAILED -gt 0 ]]; then
     exit 1

@@ -48,3 +48,65 @@ jobs:
         with:
           name: ci-diagnostics
           path: build/ci-diagnostics
+
+  build-and-test-other-macos:
+    name: build-and-test-${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-15
+            runner: macos-15
+            developer_dir: /Applications/Xcode_16.4.app/Contents/Developer
+          - name: macos-27
+            runner: xcode-27
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show the kernel
+        run: sysctl -n kern.version
+
+      - name: Select Xcode
+        # macos-27 builds with the image's default Xcode.
+        if: matrix.developer_dir != ''
+        run: echo "DEVELOPER_DIR=${{ matrix.developer_dir }}" >> "$GITHUB_ENV"
+
+      - name: Ensure Rosetta is installed
+        run: softwareupdate --install-rosetta --agree-to-license
+
+      - name: Configure
+        run: cmake -B build
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Check the unhooked fallback
+        # Cooperative mode with X87_FORCE_UNSUPPORTED=1 only execs the target,
+        # so this needs no privileges.
+        run: python3 scripts/test_unhooked_fallback.py
+
+      - name: Run tests
+        # PT_ATTACH on macOS needs either the debugger entitlement (granted
+        # via an interactive system dialog on first launch, which would hang
+        # a headless job) or root.  GitHub's macOS runners give passwordless
+        # sudo, so just use that.
+        run: sudo python3 scripts/diagnose_ci.py --total-timeout 900 --output-dir build/ci-diagnostics -- bash scripts/run_tests.sh --no-build
+
+      - name: Check concurrent profiler output paths
+        run: sudo python3 scripts/test_profile_paths.py
+
+      - name: Probe the installed Rosetta
+        # Locates every anchor this build hooks in the runner's Rosetta and
+        # validates the assumptions behind them; exits non-zero if any is off.
+        # This comes after the tests here, so that a probe failure on one of
+        # these runners does not keep the suite from running.
+        run: build/bin/x87sidecar --probe
+
+      - name: Upload test diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-diagnostics-${{ matrix.name }}
+          path: build/ci-diagnostics

@@ -301,8 +301,7 @@ and refuses a runtime that fails a check rather than patching guessed
 addresses; [Attaching](#attaching-to-the-target) says what then happens to
 the program. `x87sidecar --probe` prints that report and exits 0 only when
 every feature is supported; run it first after a macOS update. CI runs it
-on the current `macos-26` runner before the test suite, and it runs on
-macOS 27.
+and the test suite on macOS 15, 26 and 27.
 
 x87 coverage: arithmetic, memory operands, comparisons, the full
 transcendental set (`fsin`, `fcos`, `fsincos`, `fpatan`, `f2xm1`, `fyl2x`,
@@ -398,6 +397,7 @@ bash scripts/run_tests.sh --native-only  # stock Rosetta baseline only
 bash scripts/run_tests.sh test_arith     # one test
 python3 scripts/test_profile_paths.py    # concurrent profiler output paths
 python3 scripts/test_unhooked_fallback.py  # unhooked fallback, no privileges
+python3 scripts/test_release_not_stopped.py hook  # no stop after the release
 bash scripts/run_benchmarks.sh           # build + benchmark table
 ```
 
