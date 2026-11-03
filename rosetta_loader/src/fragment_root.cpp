@@ -84,27 +84,34 @@ auto findArmTreeRoot(const std::uint8_t* image, std::size_t size, std::uint64_t 
     if (image == nullptr || textBegin >= textEnd) {
         return 0;
     }
+    const auto isGlobal = [textEnd](std::uint64_t target) {
+        return target >= textEnd && target < textEnd + 0x400000;
+    };
     for (const std::uint64_t ref : refsTo(image, textBegin, textEnd, panicString)) {
-        // Walk back to the last address materialised into a register other
-        // than x0, which carries the string itself, and take it if it is a
-        // global past __text.
+        // Walk back from the string, skipping x0, which carries the string
+        // itself. An `adr xN` whose target is a global past __text is the
+        // root; one aimed anywhere else, such as a jump table in __text, is
+        // passed over. The first `adrp xN; add xN, xN, #lo` pair ends the
+        // walk: the root if its target is a global, else nothing.
         for (std::uint64_t back = 4; back <= 64 * 4 && ref >= textBegin + back; back += 4) {
             const std::uint64_t off = ref - back;
             const std::uint32_t insn = insnAt(image, off);
-            std::uint64_t target = 0;
             if (isAdr(insn)) {
-                if ((insn & 31) == 0) {
-                    continue;
+                if ((insn & 31) != 0 && isGlobal(adrTarget(insn, off))) {
+                    return adrTarget(insn, off);
                 }
-                target = adrTarget(insn, off);
-            } else if (isAddImm(insn) && (insn & 31) == ((insn >> 5) & 31) && (insn & 31) != 0 &&
-                       off >= textBegin + 4 && isAdrp(insnAt(image, off - 4)) &&
-                       (insnAt(image, off - 4) & 31) == (insn & 31)) {
-                target = adrpTarget(insnAt(image, off - 4), off - 4) + ((insn >> 10) & 0xFFF);
-            } else {
                 continue;
             }
-            if (target >= textEnd && target < textEnd + 0x400000) {
+            if (!isAddImm(insn) || (insn & 31) != ((insn >> 5) & 31) || (insn & 31) == 0 ||
+                off < textBegin + 4) {
+                continue;
+            }
+            const std::uint32_t adrp = insnAt(image, off - 4);
+            if (!isAdrp(adrp) || (adrp & 31) != (insn & 31)) {
+                continue;
+            }
+            const std::uint64_t target = adrpTarget(adrp, off - 4) + ((insn >> 10) & 0xFFF);
+            if (isGlobal(target)) {
                 return target;
             }
             break;

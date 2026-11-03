@@ -10,9 +10,11 @@
 // The lookup that walks the tree panics with "cannot locate code fragment for
 // arm address" when a pc is in no fragment; `panicString` is that string's
 // offset. The root is the global the lookup materialises last before the
-// string. Both addresses come either from `adrp xN; add xN, xN, #lo` or, where
-// the linker relaxed that pair, from `adr xN; nop`. The root is a global in
-// __DATA or __bss, so it lies past __text, within 4 MB of its end.
+// string, in a register other than x0. Both addresses come either from
+// `adrp xN; add xN, xN, #lo` or, where the linker relaxed that pair, from
+// `adr xN; nop`. The root is a global in __DATA or __bss, so it lies past
+// __text, within 4 MB of its end. Walking back from the string, an adr aimed
+// elsewhere is passed over, and the first adrp/add pair ends the search.
 //
 // `image` holds the whole file and `[textBegin, textEnd)` is __text, as file
 // offsets, which equal the image's vm offsets. Returns 0 when not found.

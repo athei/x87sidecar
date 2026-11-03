@@ -135,6 +135,32 @@ void testNegativeImmediate() {
           static_cast<unsigned long long>(im.root()));
 }
 
+void testLocalAdrBetween() {
+    // An adr into __text, such as a jump table, between the root and the
+    // string is no global: the walk passes over it and still finds the root.
+    Image a;
+    a.emit(adrp(24, a.pc, kRoot));
+    a.emit(add(24, 24, kRoot & 0xFFF));
+    searchBody(a, 24);
+    a.emit(adr(16, a.pc, kTextBegin + 0x40));
+    a.emit(kNop);
+    a.emit(adr(0, a.pc, kPanic));
+    a.emit(kNop);
+    CHECK(a.root() == kRoot, "adrp/add root, local adr x16 after it: root 0x%llx",
+          static_cast<unsigned long long>(a.root()));
+
+    Image b;
+    b.emit(adr(24, b.pc, kRoot));
+    b.emit(kNop);
+    searchBody(b, 24);
+    b.emit(adr(16, b.pc, kTextBegin + 0x40));
+    b.emit(kNop);
+    b.emit(adr(0, b.pc, kPanic));
+    b.emit(kNop);
+    CHECK(b.root() == kRoot, "adr root, local adr x16 after it: root 0x%llx",
+          static_cast<unsigned long long>(b.root()));
+}
+
 void testOutOfRange() {
     // A target more than 4 MB past __text is no global of this image. adr
     // reaches only 1 MB, so the far target uses adrp/add.
@@ -178,6 +204,7 @@ int main() {
     testAdrNop();
     testMixed();
     testNegativeImmediate();
+    testLocalAdrBetween();
     testOutOfRange();
     testX0IsNotTheRoot();
     testNoReference();
