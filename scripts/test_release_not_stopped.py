@@ -119,12 +119,13 @@ def finish(process, deadline):
     The sidecar exits once it sees the target exit, so after an exit it gets
     the rest of the run's time, as under run_bounded. Anything else gets
     SIGKILL for the whole group, because a traced target can survive SIGKILL
-    until its tracer is gone. Returns whether nothing of the run is left.
+    until its tracer is gone. Returns (in_time, gone): whether the run ended
+    by itself before the deadline, and whether nothing of it is left.
     """
     if process.returncode is not None and wait_for_group(process, deadline):
-        return True
+        return True, True
     kill_group(process.pid)
-    return wait_for_group(process, time.monotonic() + KILL_WAIT)
+    return False, wait_for_group(process, time.monotonic() + KILL_WAIT)
 
 
 def run_once(mode, env):
@@ -140,7 +141,7 @@ def run_once(mode, env):
         try:
             result = watch(process, mode, deadline)
         finally:
-            finished = finish(process, deadline)
+            in_time, finished = finish(process, deadline)
         out.seek(0)
         output = out.read().decode(errors="replace")
 
@@ -149,6 +150,11 @@ def run_once(mode, env):
         reason = "target stopped after the release"
     elif result == EXIT_TIMEOUT:
         reason = f"timed out after {TIMEOUT:g} s"
+    elif not in_time:
+        # The target exited, but its group, the sidecar, was still there at
+        # the deadline. run_bounded reports that as a timeout too.
+        reason = f"sidecar still running {TIMEOUT:g} s after the start"
+        result = EXIT_TIMEOUT
     elif not finished:
         reason = "process group still present after SIGKILL"
         result = EXIT_WRONG_RESULT

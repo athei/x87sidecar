@@ -46,8 +46,11 @@ builds cannot be listed in advance. The loader therefore uses one sequence
 on every kernel: catch SIGSTOP, hold a Mach task suspend, suppress and reply
 to the signal while still traced, balance the task suspend, catch a SIGCONT
 stop, restore exception ports, then detach from that stop (see below).
-`--cooperative` does not detach and is the fallback for a kernel where this
-misbehaves.
+`--cooperative` does not detach, so it avoids this release altogether, but
+only for a target that performs the handshake, such as the patched wine
+(see "Attaching to the target" in the README). A plain binary started with
+`--cooperative` runs without the hook, and its sidecar gives up waiting for
+the handshake after 30 s.
 
 In that sequence the ptrace detach used to fail. `PT_DETACH` returns EBUSY
 unless the target's `p_stat` is `SSTOP`, which for a traced target means a

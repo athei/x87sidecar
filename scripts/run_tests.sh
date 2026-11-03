@@ -287,6 +287,10 @@ filter_runtime_lines() {
 
 # Every run of the loader goes through run_bounded, so a target or sidecar
 # that never exits is reported as a failure instead of stalling the harness.
+# Phase 0 is the exception: test_release_not_stopped.py has to be the
+# target's parent to see it stop, and run_bounded would put perl there, so
+# the script bounds its own runs with TEST_TIMEOUT and kills the group the
+# same way.
 # shellcheck source=scripts/run_bounded.sh
 source "$SCRIPT_DIR/run_bounded.sh"
 
