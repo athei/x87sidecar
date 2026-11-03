@@ -42,11 +42,17 @@ function(_add_x86_sample_impl name extra_flags)
     # unaffected — but it lets the harness exercise --cooperative without wine.
     set(coop_src "${CMAKE_SOURCE_DIR}/tests/coop_handshake.c")
     set(coop_inc "${CMAKE_SOURCE_DIR}/rosetta_loader/src")
+    # The deployment target is the one project setting the samples take, so
+    # they do not default to the build machine's macOS version.
+    set(min_flag "")
+    if(CMAKE_OSX_DEPLOYMENT_TARGET)
+        set(min_flag "-mmacosx-version-min=${CMAKE_OSX_DEPLOYMENT_TARGET}")
+    endif()
     add_custom_command(
         OUTPUT  "${out}"
         COMMAND ${CMAKE_COMMAND} -E make_directory "${out_dir}"
-        COMMAND /usr/bin/clang -arch x86_64 -O2 ${extra_flags} -I "${coop_inc}" -o "${out}"
-                "${src}" "${coop_src}"
+        COMMAND /usr/bin/clang -arch x86_64 ${min_flag} -O2 ${extra_flags}
+                -I "${coop_inc}" -o "${out}" "${src}" "${coop_src}"
         DEPENDS "${src}" "${coop_src}" ${X86_SAMPLE_EXTRA_DEPS}
         COMMENT "Building x86_64 ${name}"
         VERBATIM

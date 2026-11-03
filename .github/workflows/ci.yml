@@ -37,6 +37,12 @@ jobs:
       - name: Build
         run: cmake --build build --parallel
 
+      - name: Check the deployment target
+        # Must match CMAKE_OSX_DEPLOYMENT_TARGET on every runner image.
+        run: |
+          vtool -show-build build/bin/x87sidecar | grep -Eq '^ *minos 14\.0$'
+          vtool -show-build build/bin/tests/test_fld | grep -Eq '^ *minos 14\.0$'
+
       - name: Check the unhooked fallback
         # Cooperative mode with X87_FORCE_UNSUPPORTED=1 only execs the target,
         # so this needs no privileges.

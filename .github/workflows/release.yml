@@ -6,7 +6,9 @@ on:
 
 jobs:
   release:
-    runs-on: macos-26
+    # macOS 27 with the latest Xcode. The deployment target, not the runner,
+    # sets the oldest macOS the binaries run on.
+    runs-on: xcode-27
     permissions:
       contents: write
     steps:
@@ -29,6 +31,11 @@ jobs:
         # Builds both signed artifacts: x87sidecar (flat, no entitlements) and
         # x87sidecar_entitled (cs.debugger + get-task-allow), via POST_BUILD.
         run: cmake --build build --target x87sidecar --parallel
+
+      - name: Check the deployment target
+        run: |
+          vtool -show-build build/bin/x87sidecar
+          vtool -show-build build/bin/x87sidecar | grep -Eq '^ *minos 14\.0$'
 
       - name: Package artifacts
         run: |

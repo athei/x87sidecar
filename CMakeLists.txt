@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.27)
 
 # Must be set before project() to drive per-target deployment-target flags.
+# cmake/AddX86Sample.cmake passes it to the x86_64 samples as well, and the
+# CI and release workflows check the built binaries against this version.
 set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "Minimum macOS deployment version")
 
 project(x87sidecar
