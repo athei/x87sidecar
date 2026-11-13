@@ -25,9 +25,12 @@
 //                    integer %gs: load: 400 requests in one translation,
 //                    with stock's fixups between the sidecar's;
 //   gs_sidecar_fixups  the same 400 runs separated by a cmpq instead, so
-//                    every fixup in the list is the sidecar's, and the list
-//                    outgrows a region the sidecar handed over earlier in the
-//                    same translation.
+//                    every fixup in the list is the sidecar's.  Only the
+//                    first translation (warm-up run 0, whose result is
+//                    checked) outgrows the 4 KB region the sidecar handed
+//                    over earlier in it; the sidecar keeps the larger region
+//                    and every later translation fits its 400 fixups there,
+//                    so the measured retranslations do not take that path.
 //
 // Every run's x87 result is checked against its input, which changes per
 // run.
