@@ -446,7 +446,10 @@ A marked page stays marked for the rest of the process: nothing tells the
 sidecar that the guest has stopped rewriting it, and unmarking it would
 bring the stale run back on the next rewrite. The tables are bounded
 (131072 blocks or 16 MB of their bytes, 4096 marked pages) and, when full,
-drop the entry inserted first, not the one used least recently. The
+drop the entry inserted first, not the one used least recently. With the
+per-record overhead (map node, vector header, heap rounding, queue slot,
+page counts) on top of the bytes, the worst case is about 30 MB of sidecar
+memory. The
 sidecar prints a line for each of the first ten pages it marks and for
 every thousandth after that. With `X87_LOG_THROUGHPUT=1` its line ends in
 `smc_pages=M/R`: M is the number of marked pages, R the number of pages
@@ -460,7 +463,10 @@ which a page's code is first changed still runs the old instruction once,
 where stock runs the new one. Every later execution matches stock. If
 another thread changes the code between Rosetta's decode and the sidecar's
 read of the bytes, the record takes the new bytes, and that change is
-missed for one more execution. In `test_x87_smc` without its warm-up
+missed for one more execution. Records are keyed by block start, so a
+patch is missed for as long as the block that holds the store is never
+translated twice from the same start across a change. In `test_x87_smc`
+without its warm-up
 (`SMC_NO_WARMUP=1`), each of the six same-run patches gets its first
 iteration wrong and the other 499 right.
 

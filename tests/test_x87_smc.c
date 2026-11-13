@@ -561,7 +561,8 @@ static void run_case(const struct test_case* c, unsigned iters) {
                                    (int32_t)(patched | c->word_hi)};
 
     /* The warm-up runs the code once before the measured loop, a patch_ case
-     * patching its fmul to fadd.  That execution still runs the fmul, and its
+     * writing its patched form over the fmul (fadd, or for patch_len the
+     * jump).  That execution still runs the fmul, and its
      * result is not checked: the sidecar learns that the page is rewritten
      * only from the next translation, which finds the new bytes (see
      * docs/internals.md, "Code on writable pages").  SMC_NO_WARMUP=1 leaves
