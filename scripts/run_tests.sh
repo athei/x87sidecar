@@ -1487,20 +1487,20 @@ if [[ $NATIVE_ONLY -eq 0 ]]; then
         fi
         # Without the warm-up, a page's first rewrite runs one stale
         # instruction: exactly one wrong iteration, the first, in each of the
-        # four same-run patches, and nothing else wrong.
+        # six same-run patches, and nothing else wrong.
         TOTAL=$((TOTAL + 1))
         EXIT=0
         OUT=$(run_bounded "$TEST_TIMEOUT" env SMC_NO_WARMUP=1 "$LOADER" "$SMC_BIN" 2>/dev/null |
             filter_runtime_lines) || EXIT=$?
-        SAME_RUN='^FAIL  smc (c_)?patch_(same|bridged): 1 of [0-9]+ iterations differ'
+        SAME_RUN='^FAIL  smc (c_)?patch_(same|bridged|len): 1 of [0-9]+ iterations differ'
         STALE=$(grep -cE "$SAME_RUN" <<<"$OUT" || true)
         OTHER=$(grep -E '^FAIL' <<<"$OUT" | grep -cvE "$SAME_RUN" || true)
         FIRST=$(grep -c '^      first at iteration 0 ' <<<"$OUT" || true)
-        if [[ $EXIT -eq 1 && $STALE -eq 4 && $OTHER -eq 0 && $FIRST -eq 4 ]]; then
+        if [[ $EXIT -eq 1 && $STALE -eq 6 && $OTHER -eq 0 && $FIRST -eq 6 ]]; then
             echo -e "${GREEN}PASS${NC}  test_x87_smc  (SMC_NO_WARMUP=1: one stale first iteration per same-run patch, as documented)"
             PASSED=$((PASSED + 1))
         else
-            echo -e "${RED}FAIL${NC}  test_x87_smc  (SMC_NO_WARMUP=1: wanted one stale first iteration in each of 4 cases, got $STALE, $OTHER other failures, exit=$EXIT)"
+            echo -e "${RED}FAIL${NC}  test_x87_smc  (SMC_NO_WARMUP=1: wanted one stale first iteration in each of 6 cases, got $STALE, $OTHER other failures, exit=$EXIT)"
             FAILED=$((FAILED + 1))
             grep -E '^FAIL' <<<"$OUT" | head -5 | sed 's/^/      /' || true
         fi

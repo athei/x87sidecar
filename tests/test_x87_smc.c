@@ -19,7 +19,10 @@
  *                       x87 instructions, which no bridge takes;
  *   patch_bridged       the same patch by a 32-bit integer store that run
  *                       bridging would join with the x87 instructions around
- *                       it into one run.
+ *                       it into one run;
+ *   patch_len           patch_same's code with the fmul patched to a jump
+ *                       over its displacement and back, which moves where
+ *                       the block ends on every patch.
  *
  * getpc is not modified code: it checks that fnstenv after an fldz reports
  * the fldz's address as FIP, which packers and shellcode decoders that
@@ -147,6 +150,17 @@ __asm__(
 extern char rewrite[], rewrite_end[], rewrite_patch[], rewrite_add[];
 extern char c_rewrite[], c_rewrite_end[], c_rewrite_patch[], c_rewrite_add[];
 
+/* The reference for patch_len's jump form: the patched fmull is skipped. */
+__asm__(
+    ".text\n.p2align 4\n.globl _rewrite_skip\n_rewrite_skip:\n"
+    "mov 0x30(%rdi), %rsi\nfninit\nfldl 0x00(%rsi)\n"
+    "fstpl 0x10(%rdi)\nfnstsw 0x20(%rsi)\nret\n"
+    ".p2align 4\n.code32\n.globl _c_rewrite_skip\n_c_rewrite_skip:\n"
+    "mov 0x30(%eax), %edx\nfninit\nfldl 0x00(%edx)\n"
+    "fstpl 0x10(%eax)\nfnstsw 0x20(%edx)\npush %edi\npush %esi\nlret\n"
+    ".code64\n");
+extern char rewrite_skip[], c_rewrite_skip[];
+
 /* The patch_ cases rewrite their own fmull into faddl from inside the run:
  * an fistps of 0x4edc or 0x46dc writes DC 4E (fmul) or DC 46 (fadd) over
  * the opcode and ModRM of an instruction further down the same block,
@@ -228,8 +242,9 @@ struct test_case {
     const char* code_end;
     const char* patch; /* rewrite: the patched instruction; getpc: the fldz */
     const char* ref;   /* reference for the code as built, if not code */
-    const char* alt;   /* rewrite, patch_: the reference for the fadd form */
+    const char* alt;   /* rewrite, patch_: the reference for the patched form */
     uint32_t word_hi;  /* patch_: bytes the store writes past the opcode and ModRM */
+    uint32_t alt_word; /* patch_: the patched form's bytes, if not the fadd */
     int stock_aborts;  /* runs only when named or with SMC_ALL=1 */
     int offset;        /* where the code starts in its two-page mapping */
     int file;          /* map a temporary file r-x instead of anonymous RWX */
@@ -251,6 +266,9 @@ struct test_case {
 
 /* patch_bridged's store also writes the fmull's disp8 and the fstpl's opcode. */
 #define DISP8_FSTP 0xdd080000u
+/* patch_len's patched form: EB 01, a jump over the fmull's disp8, which
+ * ends the block at the jump and so changes where it ends. */
+#define JMP_OVER_DISP8 0x01ebu
 
 static const struct test_case cases[] = {
     {.name = "data_write", .kind = K_DATA, .width = 8, CODE(data_write)},
@@ -269,6 +287,13 @@ static const struct test_case cases[] = {
     {PATCH(patch_next, 0, REFS64)},
     {PATCH(patch_bridge, 0, REFS64)},
     {PATCH(patch_bridged, 0, REFS64), .word_hi = DISP8_FSTP},
+    {.name = "patch_len",
+     .kind = K_PATCH,
+     .width = 8,
+     CODE(patch_same),
+     .ref = rewrite,
+     .alt = rewrite_skip,
+     .alt_word = JMP_OVER_DISP8},
     {.name = "getpc", .kind = K_GETPC, .width = 4, CODE(getpc), .patch = getpc_insn},
     {.name = "file_rx", .kind = K_STILL, .width = 8, CODE(data_write), .file = 1},
     {.name = "file_rx_cross",
@@ -300,6 +325,14 @@ static const struct test_case cases[] = {
     {PATCH(c_patch_same, 1, REFS32)},
     {PATCH(c_patch_next, 1, REFS32)},
     {PATCH(c_patch_bridged, 1, REFS32), .word_hi = DISP8_FSTP},
+    {.name = "c_patch_len",
+     .kind = K_PATCH,
+     .width = 8,
+     .compat = 1,
+     CODE(c_patch_same),
+     .ref = c_rewrite,
+     .alt = c_rewrite_skip,
+     .alt_word = JMP_OVER_DISP8},
     {.name = "c_getpc",
      .kind = K_GETPC,
      .width = 4,
@@ -523,8 +556,9 @@ static void run_case(const struct test_case* c, unsigned iters) {
         }
     }
     /* The stored value whose low bytes are DC and the fmul or fadd ModRM. */
+    const uint32_t patched = c->alt_word ? c->alt_word : (c->compat ? 0x42dcu : 0x46dcu);
     const int32_t patch_word[2] = {(int32_t)((c->compat ? 0x4adcu : 0x4edcu) | c->word_hi),
-                                   (int32_t)((c->compat ? 0x42dcu : 0x46dcu) | c->word_hi)};
+                                   (int32_t)(patched | c->word_hi)};
 
     /* The warm-up runs the code once before the measured loop, a patch_ case
      * patching its fmul to fadd.  That execution still runs the fmul, and its
@@ -584,9 +618,8 @@ static void run_case(const struct test_case* c, unsigned iters) {
         printf("FAIL  smc %s: %u of %u iterations differ (%.0f ns/iter)\n", c->name, bad, iters,
                per);
         printf("      first at iteration %ld%s\n", first_bad,
-               c->kind == K_REWRITE || c->kind == K_PATCH
-                   ? (first_op ? " (patched to fadd)" : " (fmul)")
-                   : "");
+               c->kind == K_REWRITE || c->kind == K_PATCH ? (first_op ? " (patched)" : " (fmul)")
+                                                          : "");
         dump("got      ", got_first.out, c->width, got_first.sw);
         const struct result* want = &ref[first_op][first_bad % PERIOD];
         dump("expected ", want->out, c->width, want->sw);

@@ -425,37 +425,44 @@ Windows program.
 The second condition is that the guest has rewritten code on the block's
 page. On each fill of a block that passes the first condition, the sidecar
 reads the block's guest bytes (from its start for `IRBlock::code_size`,
-terminator included) and records a hash of them under the block's start
-address. When a block with the same start and length comes back with other
-bytes, its 4 KB pages are marked. A block with the same start but another
-length, because a translation split the code elsewhere, replaces the record
-without a mark.
-
-Rosetta translates unchanged code again too, and an earlier version that
-marked a page whenever an instruction address came back marked such pages:
-a loop whose head sits before a 4 KB boundary, where Rosetta ends the block
-and the loop head starts a second translation, a block that Rosetta starts
-over, and a second translation covering the same code. Comparing the bytes
-keeps them out. With the maximum-protection condition switched off for the
-measurement, the 108 tests and 61 benchmarks mark no page except in the
-`test_x87_smc` cases that patch code. A store that writes the bytes already
-there, as in `data_write`, marks nothing either.
+terminator included) and keeps them under the block's start address. When a
+block with a recorded start comes back, it compares the bytes that both
+versions cover, up to the shorter length, and marks the block's 4 KB pages
+if they differ. A patch that moves where the block ends, such as a jump
+written over a later instruction, differs inside that overlap. Rosetta
+also translates unchanged code again: a loop whose head sits before a 4 KB
+boundary, where Rosetta ends the block and the loop head starts a second
+translation, a block that Rosetta starts over, a second translation
+covering the same code, or one that splits the block at another branch
+target. From the same start their bytes are the same, so none of them
+marks. With the maximum-protection condition switched off for the
+measurement, the 108 tests and 61 benchmarks mark only pages whose code
+the test changes: the `test_x87_smc` cases that patch code, and
+`test_x87_retranslate_mem`, which rewrites an immediate between runs. A
+store that writes the bytes already there, as in `data_write`, marks
+nothing.
 
 A marked page stays marked for the rest of the process: nothing tells the
 sidecar that the guest has stopped rewriting it, and unmarking it would
-bring the stale run back on the next rewrite. Both tables are bounded
-(131072 blocks recorded, 4096 pages marked) and, when full, drop the entry
-inserted first, not the one used least recently. The sidecar prints a line
-for each of the first ten pages it marks and for every thousandth after
-that. With `X87_LOG_THROUGHPUT=1` its line ends in `smc_pages=M/R`: M pages
-marked, of the R pages holding a recorded block.
+bring the stale run back on the next rewrite. The tables are bounded
+(131072 blocks or 16 MB of their bytes, 4096 marked pages) and, when full,
+drop the entry inserted first, not the one used least recently. The
+sidecar prints a line for each of the first ten pages it marks and for
+every thousandth after that. With `X87_LOG_THROUGHPUT=1` its line ends in
+`smc_pages=M/R`: M is the number of marked pages, R the number of pages
+holding the first or last byte of a recorded block. Pages are marked only
+among the latter, but a marked page stays counted in M after its records
+are dropped, so M can exceed R.
 
 The second condition leaves a gap. The sidecar learns of a rewrite only
 from the first translation that sees the new bytes, so the execution in
 which a page's code is first changed still runs the old instruction once,
-where stock runs the new one. Every later execution matches stock. In
-`test_x87_smc` without its warm-up (`SMC_NO_WARMUP=1`), each of the four
-same-run patches gets its first iteration wrong and the other 499 right.
+where stock runs the new one. Every later execution matches stock. If
+another thread changes the code between Rosetta's decode and the sidecar's
+read of the bytes, the record takes the new bytes, and that change is
+missed for one more execution. In `test_x87_smc` without its warm-up
+(`SMC_NO_WARMUP=1`), each of the six same-run patches gets its first
+iteration wrong and the other 499 right.
 
 On a marked page the shorter runs also expose
 [#53](https://github.com/athei/x87sidecar/issues/53): an IR run rounds an
@@ -475,10 +482,13 @@ What the tests show, on an M5 Max against the build without the rule:
 - Code on Mach-O image pages, where all the benchmarks run, never reaches
   the second condition. The benchmark loops take the same time: geometric
   mean 1.00 over 207 rows, five runs each.
-- Each IR-cache fill on a page that passes the first condition gains four
-  reads: the module record, the region, the IR block and the guest bytes.
-  On `data_write`, whose block is translated again on every iteration and
-  never marked, that is about 6 us per iteration (48 against 42 us).
+- Each IR-cache fill gains a read of the module record and region queries
+  for the block's first instruction: one, or two for code in the shared
+  cache's submap, and as many again for the last instruction when the block
+  crosses into another mapping. A fill that passes the first condition gains
+  two more reads, the IR block and the guest bytes. On `data_write`, whose
+  block is translated again on every iteration and never marked, that is
+  about 6 us per iteration (45 against 38 us, medians of five runs).
 - Code on a marked page: with the rule forced onto every block
   (`X87_SMC_SPLIT=2`), the benchmark loops take 1.29 times as long as a
   geometric mean, up to 15 times for a chain of `fst` stores and 6 to 12
@@ -494,7 +504,9 @@ each end, which is slower but changes no other result.
 32-bit code through an LDT segment: stores into the code page as the run's
 first instruction and after its arithmetic, patches of a later instruction
 in the same run, in the next run, by an unbridged 16-bit `mov` and by a
-bridged 32-bit `mov`, the `fnstenv` program counter, and the never-written
+bridged 32-bit `mov`, a same-run patch that alternates the instruction with
+a jump over its displacement and so moves the block's end
+(`patch_len`), the `fnstenv` program counter, and the never-written
 cases above. Each case runs its code once before it measures; in a patch
 case that warm-up makes the first real patch, so the measured loop starts
 on a marked page. `run_tests.sh` runs the test in every per-test phase and

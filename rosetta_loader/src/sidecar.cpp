@@ -2156,46 +2156,58 @@ bool guestMaxProtection(mach_port_t task, uint64_t va, vm_prot_t& maxProt, uint6
     }
 }
 
-// X87_SMC_SPLIT=1 page statistics for the X87_LOG_THROUGHPUT line: guest
-// pages holding a recorded block, and pages marked as rewritten.
+// X87_SMC_SPLIT=1 page statistics for the X87_LOG_THROUGHPUT line: pages
+// marked as rewritten, and pages holding the first or last byte of a
+// recorded block.  Marks are only made on the latter, but a marked page
+// stays marked after its records are dropped.
 std::atomic<uint64_t> g_statSmcPagesRecorded{0};
 std::atomic<uint64_t> g_statSmcPagesMarked{0};
 
 /// X87_SMC_SPLIT=1: the guest pages, among those the guest can make
 /// writable, whose code the guest has rewritten.  Each fill of a block on
-/// such a page records a hash of the block's guest bytes under its start
-/// address; when a block with the same start and length comes back with
-/// other bytes, its pages are marked.  Rosetta also translates unchanged
-/// code again (when it starts a block over, when a loop head becomes the
-/// start of a second translation, as at a 4 KB boundary, or when a second
-/// translation covers the same code), and the bytes keep those out.  A block
-/// that starts at a recorded address but has another length, because the
-/// translation split it elsewhere, replaces the record without a mark.  A
-/// page stays marked for the rest of the process: nothing tells the sidecar
-/// that the guest has stopped rewriting it, and unmarking it would bring the
-/// stale run back on the next rewrite.  Both tables are bounded and, when
-/// full, drop the entry inserted first, not the one used least recently.
-/// Receive thread only, like g_irCache.
+/// such a page records the block's guest bytes under its start address.
+/// When a block with a recorded start comes back, the bytes both versions
+/// cover (the shorter length) are compared, and the block's pages are
+/// marked if they differ.  Comparing the overlap catches a patch that moves
+/// the block's end, such as a jump written over a later instruction, and
+/// leaves out what Rosetta translates again unchanged (a block started over,
+/// a loop head that starts a second translation, as at a 4 KB boundary, a
+/// second translation covering the same code, or a split at another
+/// branch target), whose bytes from the same start are the same.  A page
+/// stays marked for the rest of the process: nothing tells the sidecar that
+/// the guest has stopped rewriting it, and unmarking it would bring the
+/// stale run back on the next rewrite.  The tables are bounded (blocks,
+/// their bytes, marked pages) and, when full, drop the entry inserted
+/// first, not the one used least recently.  Receive thread only, like
+/// g_irCache.
 struct SmcPages {
     static constexpr uint64_t kPageShift = 12;  // the guest's 4 KB pages
     static constexpr size_t kMaxBlocks = 131072;
+    static constexpr size_t kMaxBytes = size_t{16} << 20;
     static constexpr size_t kMaxRewrittenPages = 4096;
-    struct Record {
-        uint64_t hash;
-        uint32_t len;
-    };
-    std::unordered_map<uint64_t, Record> blocks;  // by guest start address
+    std::unordered_map<uint64_t, std::vector<uint8_t>> blocks;  // by guest start
     std::deque<uint64_t> blockOrder;
+    size_t totalBytes = 0;
     std::unordered_map<uint64_t, uint32_t> blocksPerPage;
     std::unordered_set<uint64_t> rewritten;
     std::deque<uint64_t> rewrittenOrder;
 
-    static uint64_t hashBytes(const uint8_t* p, size_t n) {
-        uint64_t h = 0xcbf29ce484222325ULL;  // FNV-1a
-        for (size_t i = 0; i < n; i++) {
-            h = (h ^ p[i]) * 0x100000001b3ULL;
+    /// Counts the pages of the block's first and last byte as holding it.
+    void countPages(uint64_t start, size_t len, int delta) {
+        const auto count = [&](uint64_t page) {
+            auto& n = blocksPerPage[page];
+            n = static_cast<uint32_t>(static_cast<int64_t>(n) + delta);
+            if (n == 0) {
+                blocksPerPage.erase(page);
+            }
+        };
+        const uint64_t first = start >> kPageShift;
+        const uint64_t last = (start + len - 1) >> kPageShift;
+        count(first);
+        if (last != first) {
+            count(last);
         }
-        return h;
+        g_statSmcPagesRecorded.store(blocksPerPage.size(), std::memory_order_relaxed);
     }
 
     void mark(uint64_t va) {
@@ -2221,32 +2233,37 @@ struct SmcPages {
         }
     }
 
-    /// Records the `len` bytes of the block starting at `start` and marks its
-    /// pages when the same block was recorded with other bytes.
+    /// Records the `len` bytes of the block starting at `start`, and marks its
+    /// pages when a block recorded at the same start had other bytes where
+    /// both have some.
     void noteBlock(uint64_t start, const uint8_t* bytes, uint32_t len) {
-        const uint64_t hash = hashBytes(bytes, len);
         auto it = blocks.find(start);
         if (it != blocks.end()) {
-            if (it->second.len == len && it->second.hash != hash) {
+            std::vector<uint8_t>& old = it->second;
+            const size_t overlap = std::min<size_t>(old.size(), len);
+            if (std::memcmp(old.data(), bytes, overlap) != 0) {
                 mark(start);
                 mark(start + len - 1);
             }
-            it->second = Record{.hash = hash, .len = len};
-            return;
+            countPages(start, old.size(), -1);
+            totalBytes -= old.size();
+            old.assign(bytes, bytes + len);
+            totalBytes += len;
+            countPages(start, len, +1);
+        } else {
+            blocks.emplace(start, std::vector<uint8_t>(bytes, bytes + len));
+            blockOrder.push_back(start);
+            totalBytes += len;
+            countPages(start, len, +1);
         }
-        if (blocks.size() >= kMaxBlocks) {
-            const uint64_t old = blockOrder.front();
+        while (blocks.size() > kMaxBlocks || totalBytes > kMaxBytes) {
+            const uint64_t oldest = blockOrder.front();
             blockOrder.pop_front();
-            blocks.erase(old);
-            auto pit = blocksPerPage.find(old >> kPageShift);
-            if (pit != blocksPerPage.end() && --pit->second == 0) {
-                blocksPerPage.erase(pit);
-            }
+            auto oit = blocks.find(oldest);
+            countPages(oldest, oit->second.size(), -1);
+            totalBytes -= oit->second.size();
+            blocks.erase(oit);
         }
-        blocks.emplace(start, Record{.hash = hash, .len = len});
-        blockOrder.push_back(start);
-        blocksPerPage[start >> kPageShift]++;
-        g_statSmcPagesRecorded.store(blocksPerPage.size(), std::memory_order_relaxed);
     }
 
     [[nodiscard]] bool isRewritten(uint64_t va) const {

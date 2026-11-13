@@ -515,7 +515,7 @@ Loader and sidecar diagnostics:
 | variable | effect |
 |---|---|
 | `X87_LOGS=1` | verbose loader logging |
-| `X87_LOG_THROUGHPUT=1` | requests per second, traps per request, cache hit rates, allocation declines and `smc_pages=marked/recorded` (guest pages `X87_SMC_SPLIT` marked as rewritten, of those it holds a block of) every 2 s |
+| `X87_LOG_THROUGHPUT=1` | requests per second, traps per request, cache hit rates, allocation declines and `smc_pages=M/R` (M guest pages `X87_SMC_SPLIT` marked as rewritten, R pages holding the first or last byte of a block it recorded; marks stay when records are dropped, so M can exceed R) every 2 s |
 | `X87_LOG_OPS=1` | one line per translated op; high volume, for freeze bisects |
 | `X87_NO_IR_CACHE=1`, `X87_NO_TCO_CACHE=1` | re-read the IR array or the thread-context layout on every request |
 | `X87_NO_PREAUTH=1` | skip acquiring the developer-tools right before launch (default attach only) |
