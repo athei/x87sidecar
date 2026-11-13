@@ -472,6 +472,24 @@ static int precise_window(const IRInstr* instrs, int64_t num, int64_t idx, int l
     return k;
 }
 
+// X87_SMC_SPLIT, for code on a page the guest writes to.  Rosetta
+// write-protects such a page while it holds translations of it, so a store
+// into it faults; the runtime then drops those translations and runs
+// the interrupted one forward to its next instruction-map entry before it
+// translates the new code.  With one entry per reply, the rest of a reply
+// after a store that rewrote a later instruction of it still runs the old
+// instruction.  Returns how many instructions from idx (at least one, at
+// most limit) a reply may take so that none follows a store to memory.
+static int smc_window(const IRInstr* instrs, int64_t num, int64_t idx, int limit) {
+    int k = 1;
+    while (k < limit && idx + k < num &&
+           !(x87_writes_memory(instrs[idx + k - 1].opcode()) &&
+             x87_accesses_memory(instrs[idx + k - 1]))) {
+        k++;
+    }
+    return k;
+}
+
 // A memory fault in translated code is recovered by rolling back to the
 // start of the instruction-map entry the faulting pc belongs to, and there
 // is one entry per reply.  The runtime only rolls back when nothing before
@@ -887,6 +905,13 @@ static auto translate_instruction_impl(TranslationResult* translation_result, IR
                 if (split) {
                     run = precise_window(instr_array, num_instrs, insn_idx, run);
                 }
+                // On rewritten code a run also ends after each store
+                // (smc_window), and it is not bridged: a bridged region
+                // can hold integer stores.
+                const bool smc = smc_split_enabled();
+                if (smc && run > 1) {
+                    run = smc_window(instr_array, num_instrs, insn_idx, run);
+                }
                 cache.set_run(run);
                 // Run bridging: at a fresh run start, check whether short v1
                 // gaps join this run to following x87 segments.  Stash the
@@ -915,7 +940,7 @@ static auto translate_instruction_impl(TranslationResult* translation_result, IR
                 // A native transport run is not bridged: the bridged region
                 // would be lowered by the IR into the compact layout.  Nor is
                 // a split run: the region would hold later memory accesses.
-                if (bridge_allowed && run >= 1 && !cache.native_transport && !split) {
+                if (bridge_allowed && run >= 1 && !cache.native_transport && !split && !smc) {
                     const auto br = X87Cache::lookahead_bridged(
                         instr_array, num_instrs, insn_idx, g_rosetta_config->bridge_max_gap,
                         g_rosetta_config->bridge_max_total,
@@ -1489,11 +1514,16 @@ static auto translate_instruction_impl(TranslationResult* translation_result, IR
         fusions_mask |= ~(1ULL << static_cast<int>(FusionId::fild_fistp));
     }
     // With X87_PRECISE_FAULTS=2 and native slots a fusion must not take an
-    // instruction that accesses memory after the first (precise_window),
-    // also when the run cache is off and a reply is not a run.
-    const int64_t fusion_num = cache.native_slots && precise_split_enabled()
-                                   ? insn_idx + precise_window(instr_array, num_instrs, insn_idx, 8)
-                                   : num_instrs;
+    // instruction that accesses memory after the first (precise_window), and
+    // on rewritten code one that follows a store (smc_window), also when the
+    // run cache is off and a reply is not a run.
+    int64_t fusion_num = cache.native_slots && precise_split_enabled()
+                             ? insn_idx + precise_window(instr_array, num_instrs, insn_idx, 8)
+                             : num_instrs;
+    if (smc_split_enabled()) {
+        fusion_num = std::min<int64_t>(fusion_num,
+                                       insn_idx + smc_window(instr_array, num_instrs, insn_idx, 8));
+    }
     const auto fused = TranslatorX87::try_peephole(translation_result, instr_array, fusion_num,
                                                    insn_idx, fusions_mask);
 

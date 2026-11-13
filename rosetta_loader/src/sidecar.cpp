@@ -11,12 +11,14 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bitset>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <deque>
 #include <map>
 #include <mutex>
 #include <string>
@@ -239,6 +241,7 @@ struct IRCacheEntry {
     uint64_t hash = 0;      // profile::hash_ir_stream of ir, when hash_valid
     bool hash_valid = false;
     bool has_bcd = false;  // ir contains FBLD or FBSTP; set on every fill
+    bool smc_split = false;  // blockSplitForSmc, on every fill when X87_SMC_SPLIT=1
     std::vector<IRInstr> ir;
 };
 std::unordered_map<uint64_t, IRCacheEntry> g_irCache;
@@ -2127,6 +2130,167 @@ bool writeTranslate(mach_port_t task, uint64_t addr, const void* src, size_t siz
     return writeParent(task, addr, src, size);
 }
 
+/// The maximum protection of the mapping at `va`, looked through submaps (the
+/// shared cache is one), and the mapping's end.  False when nothing is
+/// mapped at `va`.
+bool guestMaxProtection(mach_port_t task, uint64_t va, vm_prot_t& maxProt, uint64_t& end) {
+    natural_t depth = 0;
+    for (;;) {
+        mach_vm_address_t address = va;
+        mach_vm_size_t size = 0;
+        vm_region_submap_info_data_64_t info{};
+        mach_msg_type_number_t count = VM_REGION_SUBMAP_INFO_COUNT_64;
+        g_statVmSyscalls.fetch_add(1, std::memory_order_relaxed);
+        if (mach_vm_region_recurse(task, &address, &size, &depth,
+                                   reinterpret_cast<vm_region_recurse_info_t>(&info),
+                                   &count) != KERN_SUCCESS ||
+            va < address) {
+            return false;
+        }
+        if (info.is_submap != 0) {
+            depth++;
+            continue;
+        }
+        maxProt = info.max_protection;
+        end = address + size;
+        return true;
+    }
+}
+
+/// X87_SMC_SPLIT=1: the guest pages, among those the guest can make
+/// writable, on which the sidecar has seen an instruction translated again.
+/// Rosetta translates code again after a write to its page has dropped the
+/// old translation.  It also does when it starts a block over or covers the
+/// same code in a second translation, which puts a page that is not
+/// rewritten in the set; that costs speed on that page and nothing else.  A
+/// page stays in the set for the rest of the process: nothing tells the
+/// sidecar that a page has stopped being rewritten, and leaving it would
+/// bring the stale run back on the next rewrite.  Both tables are bounded
+/// and drop their oldest page when full.  Receive thread only, like
+/// g_irCache.
+struct SmcPages {
+    static constexpr uint64_t kPageShift = 12;  // the guest's 4 KB pages
+    static constexpr size_t kMaxSeenPages = 16384;
+    static constexpr size_t kMaxRewrittenPages = 4096;
+    /// Per page, the offsets of the instructions a fill has been asked for.
+    std::unordered_map<uint64_t, std::bitset<size_t{1} << kPageShift>> seen;
+    std::deque<uint64_t> seenOrder;
+    std::unordered_set<uint64_t> rewritten;
+    std::deque<uint64_t> rewrittenOrder;
+
+    /// Records that the instruction at `va` is being translated, and adds its
+    /// page to the rewritten set when it was translated before.
+    void noteTranslated(uint64_t va) {
+        const uint64_t page = va >> kPageShift;
+        const uint64_t offset = va & ((uint64_t{1} << kPageShift) - 1);
+        auto it = seen.find(page);
+        if (it == seen.end()) {
+            if (seen.size() >= kMaxSeenPages) {
+                seen.erase(seenOrder.front());
+                seenOrder.pop_front();
+            }
+            it = seen.emplace(page, std::bitset<size_t{1} << kPageShift>{}).first;
+            seenOrder.push_back(page);
+        }
+        if (!it->second.test(offset)) {
+            it->second.set(offset);
+            return;
+        }
+        if (rewritten.contains(page)) {
+            return;
+        }
+        if (rewritten.size() >= kMaxRewrittenPages) {
+            rewritten.erase(rewrittenOrder.front());
+            rewrittenOrder.pop_front();
+        }
+        rewritten.insert(page);
+        rewrittenOrder.push_back(page);
+        static int marked = 0;
+        ++marked;
+        if (marked <= 10 || marked % 1000 == 0) {
+            fprintf(stdout,
+                    "[rosettax87] X87_SMC_SPLIT: guest code at 0x%llx translated again; x87 runs "
+                    "on its page end after each store from now on (#%d)\n",
+                    static_cast<unsigned long long>(va), marked);
+            fflush(stdout);
+        }
+    }
+
+    [[nodiscard]] bool isRewritten(uint64_t va) const {
+        return rewritten.contains(va >> kPageShift);
+    }
+};
+SmcPages g_smcPages;
+
+/// Says once that the mapping of guest code could not be looked up; the
+/// block is then treated as not writable, as without the knob.
+bool warnNoMapping(uint64_t va) {
+    static bool warned = false;
+    if (!warned) {
+        warned = true;
+        fprintf(stdout,
+                "[rosettax87] X87_SMC_SPLIT: could not look up the mapping of guest code at "
+                "0x%llx; treating such code as not writable\n",
+                static_cast<unsigned long long>(va));
+        fflush(stdout);
+    }
+    return false;
+}
+
+/// Whether the guest can make the code between `first` and `last` writable:
+/// the maximum protection of a mapping that holds either allows writing.
+///
+/// Rosetta write-protects a writable page while it holds translations of
+/// it, so at translation time the current protection of an RWX page reads
+/// r-x, the same as that of code the guest never asked to write.  The
+/// maximum protection is the guest's limit: r-x for a Mach-O image mapped by
+/// dyld and the shared cache, rwx for anything the guest mapped itself (an
+/// RWX allocation, an anonymous or private file mapping; under wine that
+/// includes every PE image).
+bool guestCodeWritable(mach_port_t task, uint64_t first, uint64_t last) {
+    const auto writable = [](vm_prot_t prot) {
+        return (static_cast<unsigned>(prot) & static_cast<unsigned>(VM_PROT_WRITE)) != 0;
+    };
+    vm_prot_t maxProt = VM_PROT_NONE;
+    uint64_t end = 0;
+    if (!guestMaxProtection(task, first, maxProt, end)) {
+        return warnNoMapping(first);
+    }
+    if (writable(maxProt)) {
+        return true;
+    }
+    if (last < end) {
+        return false;
+    }
+    if (!guestMaxProtection(task, last, maxProt, end)) {
+        return warnNoMapping(last);
+    }
+    return writable(maxProt);
+}
+
+/// Whether the x87 runs of a block end after each store (X87_SMC_SPLIT=1):
+/// the guest can make its code writable (guestCodeWritable), and code on its
+/// page has been translated again (SmcPages).  The instruction of every
+/// fill of such a block is recorded first, so the retranslation that
+/// follows the first rewrite of a page is split already.  IRInstr::pc is an
+/// offset from the module record's text_vmaddr_range.  The first and the
+/// last instruction are both checked, for a block that crosses into another
+/// mapping or page.
+bool blockSplitForSmc(mach_port_t task, uint64_t moduleData, const IRInstr* ir, uint64_t num,
+                      uint64_t idx) {
+    IRModuleData mod{};
+    if (moduleData == 0 || !readTranslate(task, moduleData, &mod, sizeof(mod))) {
+        return warnNoMapping(0);
+    }
+    const uint64_t first = mod.text_vmaddr_range + ir[0].pc;
+    const uint64_t last = mod.text_vmaddr_range + ir[num - 1].pc;
+    if (!guestCodeWritable(task, first, last)) {
+        return false;
+    }
+    g_smcPages.noteTranslated(mod.text_vmaddr_range + ir[idx].pc);
+    return g_smcPages.isRewritten(first) || g_smcPages.isRewritten(last);
+}
+
 // Allocate a parent-side replacement buffer of size `newCap`, copy parent's
 // existing live bytes, then append `tailSize` bytes from `tail`. On success
 // returns the parent VA of the new buffer. On any failure deallocates and
@@ -2306,6 +2470,10 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask, const Translate
             irc.has_bcd = std::ranges::any_of(irc.ir, [](const IRInstr& ins) {
                 return ins.opcode() == kOpcodeName_fbld || ins.opcode() == kOpcodeName_fbstp;
             });
+            irc.smc_split =
+                g_rosetta_config != nullptr && g_rosetta_config->smc_split == 1 &&
+                blockSplitForSmc(parentTask, reinterpret_cast<uint64_t>(tr.ir_module_data),
+                                 irc.ir.data(), req.num_instrs, req.insn_idx);
             g_statIrMisses.fetch_add(1, std::memory_order_relaxed);
         }
         // Conservative until the reply is known; the Some path below moves it.
@@ -2480,6 +2648,7 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask, const Translate
     std::optional<int64_t> result;
     if (!stock_hash_hit && !stock_bcd_hit) {
         _bypass_guard.ran_translator = true;
+        set_guest_code_rewritten(irc.smc_split);
         result = Translator::translate_instruction(
             &tr, reinterpret_cast<IRBlock*>(req.block), localIR,
             static_cast<int64_t>(req.num_instrs), static_cast<int64_t>(req.insn_idx));

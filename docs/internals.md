@@ -375,6 +375,113 @@ runtime's message. `SYNC_FAULT_IN_RUN=1` adds the cases inside runs and the
 transport pair's store, which pass under stock Rosetta and under the sidecar
 with `X87_PRECISE_FAULTS=2`; the phase runs them that way too.
 
+## Code on writable pages
+
+In a block on a page that the guest can make writable and on which the
+sidecar has seen code translated again, an x87 run ends after each
+instruction that stores to guest memory, the run is not bridged, and a
+fusion does not take an instruction that follows such a store
+(`smc_window` in `Translator.cpp`). Elsewhere the emitted code is the same
+as without the rule.
+
+Rosetta write-protects a writable page while it holds translations of it.
+A store into the page faults, and the runtime drops the page's
+translations, runs the interrupted translation forward to its next
+instruction-map entry, and translates again from there. Stock has an entry
+after every instruction, so code that a store rewrites runs in its new form
+from the next instruction on. A sidecar reply holds a whole run (see
+[Asynchronous signals inside emitted code](#asynchronous-signals-inside-emitted-code)),
+so the rest of the run after the store ran from the old translation. In
+`test_x87_smc`'s `patch_same`, an `fistps` turns a later `fmul` of its own
+run into `fadd`, and every iteration got the previous iteration's
+operation. A 32-bit integer `mov` store that bridging carried into a run
+did the same. `X87_DISABLE_CACHE=1` and `X87_PRECISE_FAULTS=2` hid it,
+since both put a map entry after the store.
+
+The sidecar decides per block, once per IR-cache fill, on two conditions.
+
+The first is that the guest can write the code: the sidecar reads the
+block's module record for the guest address and asks the kernel for the
+maximum protection of the mappings that hold the block's first and last
+instruction, through submaps. The current protection cannot be used: by the
+time the request arrives Rosetta has already removed write from an RWX page,
+and nothing in the translation result or the IR block tells such a page
+from code that was never writable. What the sidecar sees at translation
+time on macOS 27.2.1:
+
+| guest code | protection | maximum |
+|---|---|---|
+| Mach-O image `__TEXT`, mapped by dyld | r-x | r-x |
+| shared cache (inside its submap) | r-x | r-x |
+| `mmap` RWX, 64-bit or through an LDT code segment | r-x | rwx |
+| `mmap` RW, then `mprotect` r-x | r-x | rwx |
+| private file mapping r-x | r-x | rwx |
+
+So the maximum protection covers everything the guest mapped itself. Under
+wine that is every PE image, which wine maps as private file mappings or
+anonymous memory, so this condition alone would split all x87 code of a
+Windows program.
+
+The second condition is that code on the block's page has been translated
+again. Rosetta translates code again after a write to its page has dropped
+the old translation, so the sidecar records, per 4 KB guest page, the
+address of the instruction each fill on such a page asks for, and marks the
+page when an address comes back. A marked page stays marked for the rest of
+the process: nothing tells the sidecar that the guest has stopped rewriting
+it, and unmarking it would bring the stale run back on the next rewrite.
+Both tables are bounded (16384 pages recorded, 4096 marked) and drop their
+oldest page when full. The sidecar prints a line for each of the first ten
+pages it marks. Rosetta also translates code again without a write: when it
+starts a block over, and when a second translation covers code a first one
+already did. With the maximum protection ignored, 11 of the 168 test and
+benchmark binaries marked one to three pages that way. Such a page loses
+speed and nothing else.
+
+The second condition leaves a gap. The sidecar learns of a rewrite only
+from the translation that follows it, so the execution in which a page is
+rewritten for the first time still runs the old instruction once, where
+stock runs the new one. Every later execution matches stock. In
+`test_x87_smc` without its warm-up (`SMC_NO_WARMUP=1`), each of the four
+same-run patches gets its first iteration wrong and the other 499 right.
+
+What it costs, measured on an M5 Max against the build without the rule:
+
+- Code that is not rewritten, on an image page or on a writable one such
+  as a wine PE section: the emitted code is unchanged. The benchmark loops
+  take the same time: geometric mean 1.00 over 207 rows, each within 5
+  percent, five runs each.
+- Each IR-cache fill gains one read of the module record and one or two
+  region queries. On `test_x87_smc`'s `data_write`, whose block is
+  translated again on every iteration, that is about 6 us of the 100 us an
+  iteration takes.
+- Code on a marked page: with the rule forced onto every block
+  (`X87_SMC_SPLIT=2`), the benchmark loops take 1.29 times as long as a
+  geometric mean, up to 15 times for a chain of `fst` stores and 6 to 12
+  times for the `fxch` and arithmetic-then-`fstp` loops, whose runs have a
+  store in the middle. A loop whose only store ends its run is unchanged.
+- Where the guest keeps writing the page, each write drops the page's
+  translations, and each translation now takes one more reply per store:
+  `data_write` goes from 72 to 94 us per iteration with the region query
+  off (`X87_SMC_SPLIT=2`).
+
+`X87_SMC_SPLIT=0` turns the rule off, and `X87_SMC_SPLIT=2` applies it to
+every block, which the test harness uses to run the whole suite with it.
+With `X87_NATIVE_SLOTS=0` the extra replies convert all eight registers at
+each end, which is slower but changes no result.
+
+`test_x87_smc` runs each case from a fresh RWX page, in 64-bit code and in
+32-bit code through an LDT segment: stores into the code page as the run's
+first instruction and after its arithmetic, patches of a later instruction
+in the same run, in the next run, by an unbridged 16-bit `mov` and by a
+bridged 32-bit `mov`, and the `fnstenv` program counter. Each case runs its
+code once before it measures, and in a patch case that warm-up writes the
+bytes already there, which marks the page. Its `file_rx` case runs code from
+a private r-x file mapping that it never writes. `run_tests.sh` runs the
+test in every per-test phase and in phase 21, where it has to fail its
+same-run patches with `X87_SMC_SPLIT=0`, has to show the one stale first
+iteration without the warm-up, and `file_rx` has to get the same emitted
+code as with `X87_SMC_SPLIT=0`.
+
 ## Guest flags in NZCV
 
 Stock Rosetta keeps the guest's EFLAGS in NZCV, and a flag one translator

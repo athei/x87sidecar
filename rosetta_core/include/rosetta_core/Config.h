@@ -173,6 +173,17 @@ struct RosettaConfig {
                                       //                           instead of the compact layout,
                                       //                           and converts per slot.  =0 is
                                       //                           the kill switch.
+    uint8_t smc_split;                // X87_SMC_SPLIT             (default 1) in a block on a
+                                      //                           page the guest can make
+                                      //                           writable and on which code has
+                                      //                           been translated again, end
+                                      //                           each x87 run after an
+                                      //                           instruction that stores to
+                                      //                           guest memory, so a store that
+                                      //                           rewrites a later instruction of
+                                      //                           the run takes effect at once,
+                                      //                           as in stock.  =0 off, =2 every
+                                      //                           block (for testing).
 
     // X87_BRIDGE_HASH_LIST / X87_NO_BRIDGE_HASH_LIST — per-block bridging
     // bisect, same semantics and hash key as the rollback lists above:
