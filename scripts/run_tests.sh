@@ -246,6 +246,7 @@ ALL_TESTS=(
     test_bcd_exact
     test_alloc_decline
     test_x87_smc
+    test_x87_retranslate_mem
 )
 
 RED='\033[0;31m'
