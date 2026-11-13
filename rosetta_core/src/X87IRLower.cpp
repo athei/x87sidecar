@@ -763,6 +763,21 @@ void lower(Context& ctx, TranslationResult* result) {
                 emit_f64_const(buf, Dd, n.imm_bits, Wd_tmp);
                 break;
             }
+            case Op::CvtI64: {
+                // The input FPR holds an fild m64's bits.  SCVTF from a GPR,
+                // as LoadI64 converts.
+                const int Dn = fprs.get(n.inputs[0]);
+                int Dd = fprs.try_reuse_input(ctx, i);
+                if (Dd < 0) {
+                    Dd = alloc_free_fpr(*result);
+                }
+                fprs.node_fpr[i] = static_cast<int8_t>(Dd);
+                const int Xv = alloc_free_gpr(*result);
+                emit_fmov_d_to_x(buf, Xv, Dn);
+                emit_scvtf_x_to_d(buf, Dd, Xv);
+                free_gpr(*result, Xv);
+                break;
+            }
 
             // ── Binary arithmetic ───────────────────────────────────────────
             case Op::FAdd: {
@@ -1537,6 +1552,22 @@ void lower(Context& ctx, TranslationResult* result) {
         if (Dd < 0) {
             continue;  // dead or already freed
         }
+        if (ctx.nodes[val].flags & kExactI64) {
+            // Dd holds an fild m64's integer bits: write its exact 80-bit
+            // value, as translate_fild_native does, so the exit leaves the
+            // slot as it is.
+            emit_native_st_addr(buf, Xbase, Wd_top, d, Wd_tmp, Xst_base);
+            const int Xint = alloc_free_gpr(*result);
+            const int Xs = alloc_free_gpr(*result);
+            const int Xe = alloc_free_gpr(*result);
+            emit_fmov_d_to_x(buf, Xint, Dd);
+            TranslatorX87::emit_i64_to_f80_slot(buf, Wd_tmp, Xint, Xs, Xe);
+            free_gpr(*result, Xe);
+            free_gpr(*result, Xs);
+            free_gpr(*result, Xint);
+            x87_slot_note_native(d);
+            continue;
+        }
         emit_store_st(buf, Xbase, Wd_top, d, Wd_tmp, Dd, Xst_base);
     }
 
@@ -1634,6 +1665,7 @@ void lower(Context& ctx, TranslationResult* result) {
 //   - LoadF64, LoadF32, StoreF64, StoreF32: 1 (addr from compute_operand_address);
 //     3 for a StoreF32 narrowing an 80-bit slot (narrows_native_slot)
 //   - LoadI16/I32/I64: 2 (addr + Wd_val)
+//   - CvtI64: 1 (the bits between FMOV and SCVTF)
 //   - StoreI16/I32/I64: 2 (Wd_int + the indefinite guard's Xt, then Wd_int + addr);
 //     4 for an exact store of an 80-bit slot (stores_native_slot)
 //   - FRndInt without RC cache: 1 (Wd_rc via alloc_gpr(3))
@@ -1645,6 +1677,8 @@ void lower(Context& ctx, TranslationResult* result) {
 //   - FStsw (non-fused): 2 (Wd_sw + Wd_adj if top_delta != 0)
 //   - StoreCW/LoadCW: 2 (addr + Wd_cw)
 //   - Epilogue (top_delta != 0): 2 (Wd_tmp2 + Wd_tagw)
+//   - Epilogue write-back of a kExactI64 value: 3 (Xint, Xs, Xe), with
+//     every pinned register still held
 //
 // Fused FCmp/FTst holds 1 GPR (Wd_packed) alive across nodes until FStsw.
 // We track this as a "held" count that overlaps with per-node transient demand.
@@ -1781,6 +1815,11 @@ int peak_live_gprs(const Context& ctx, int budget, int* first_over_node, bool fa
                 transient = 4;
                 break;
 
+            // CvtI64: the int64 bits pass through one GPR.
+            case Op::CvtI64:
+                transient = 1;
+                break;
+
             // 1 GPR: addr from compute_operand_address
             case Op::LoadF64:
             case Op::LoadF32:
@@ -1888,6 +1927,25 @@ int peak_live_gprs(const Context& ctx, int budget, int* first_over_node, bool fa
         }
     }
 
+    // Epilogue write-back: an exact fild m64 value left on the stack takes
+    // Xint, Xs and Xe for its conversion before the tag update frees
+    // Xst_base.  An overflow is attributed to the last node, as below.
+    bool exact_writeback = false;
+    for (const short v : ctx.slot_val) {
+        if (v >= 0 && v < ctx.num_nodes && (ctx.nodes[v].flags & kExactI64) &&
+            !(ctx.nodes[v].flags & kDead)) {
+            exact_writeback = true;
+        }
+    }
+    if (exact_writeback) {
+        const int writeback_total = pinned + held + 3;
+        peak = std::max(writeback_total, peak);
+        if (first_over_node && *first_over_node < 0 && writeback_total > budget &&
+            ctx.num_nodes > 0) {
+            *first_over_node = ctx.num_nodes - 1;
+        }
+    }
+
     // Epilogue: if top_delta != 0, needs 2 more transient GPRs (Wd_tmp2 + Wd_tagw).
     // lower() releases Xst_base before allocating those two — the tag-batch
     // helpers don't use it — so the actual peak at the epilogue is
@@ -1990,6 +2048,7 @@ int peak_live_fprs(const Context& ctx, int budget, int* first_over_node) {
             case Op::ConstZero:
             case Op::ConstOne:
             case Op::ConstF64:
+            case Op::CvtI64:
             case Op::FAdd:
             case Op::FSub:
             case Op::FMul:
@@ -2230,49 +2289,9 @@ static int split_prefix_len(const Context& ctx, int first_over_node, int attempt
 // inputs, slot_val, initial_read, last_fcmp/last_fcomi, node_src — are
 // remapped.  The caller retargets the consumer afterwards.
 static bool insert_clone_at(Context& ctx, int src, int pos) {
-    if (ctx.num_nodes >= kMaxNodes || src >= pos) {
+    if (src >= pos || !insert_node_at(ctx, pos)) {
         return false;
     }
-    const int n = ctx.num_nodes;
-    std::memmove(&ctx.nodes[pos + 1], &ctx.nodes[pos], static_cast<size_t>(n - pos) * sizeof(Node));
-    std::memmove(&ctx.node_src[pos + 1], &ctx.node_src[pos],
-                 static_cast<size_t>(n - pos) * sizeof(int16_t));
-    ctx.num_nodes = static_cast<int16_t>(n + 1);
-
-    const auto remap = [pos](int16_t& ref) {
-        if (ref >= pos) {
-            ref = static_cast<int16_t>(ref + 1);
-        }
-    };
-    for (int i = 0; i < ctx.num_nodes; i++) {
-        if (i == pos) {
-            continue;  // clone slot, written below
-        }
-        const int nrefs = node_ref_input_count(ctx.nodes[i]);
-        for (int k = 0; k < nrefs; k++) {
-            auto& in = ctx.nodes[i].inputs[k];
-            if (in >= 0) {
-                remap(in);
-            }
-        }
-    }
-    for (auto& v : ctx.slot_val) {
-        if (v >= 0) {
-            remap(v);
-        }
-    }
-    for (auto& v : ctx.initial_read) {
-        if (v >= 0) {
-            remap(v);
-        }
-    }
-    if (ctx.last_fcmp >= 0) {
-        remap(ctx.last_fcmp);
-    }
-    if (ctx.last_fcomi >= 0) {
-        remap(ctx.last_fcomi);
-    }
-
     ctx.nodes[pos] = ctx.nodes[src];  // src < pos: unshifted
     ctx.nodes[pos].flags = kNone;
     ctx.node_src[pos] = ctx.node_src[pos + 1];  // same instruction as the consumer
@@ -2541,7 +2560,7 @@ int compile_run(TranslationResult* result, IRInstr* instr_array, int64_t num_ins
             return 0;
         }
 
-        optimize(ctx);
+        optimize(ctx, result->x87_cache.native_slots != 0);
         // X87_NATIVE_SLOTS: which initial depths hold an 80-bit value.
         // lower()'s prologue flushes a leftover FXCH permutation by moving
         // the slots as they are, so depth d then holds what was at depth

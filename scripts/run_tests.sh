@@ -63,13 +63,14 @@
 #  18. test_crash_after_release: a target that is no longer traced after
 #      the release and then dies (abort, SIGSEGV, SIGKILL, SIGILL, exit(3))
 #      must end with its own exit status natively and under both attaches
-#  19. test_x87_cross_reply_exact with X87_NATIVE_SLOTS=1 (default, IR off,
-#      fusions off, run cache off, single-op fast path off, clamped
-#      register pool, bridging off, X87_PRECISE_FAULTS=1,
-#      X87_FAIL_ALLOC_EVERY=N, and X87_GPR_POOL_LIMIT=4, where integer
-#      stores fall back to binary64), then the tests that read or replace the
-#      native x87 state with it.  The knob is on by default, so this covers
-#      it also in a run that exports X87_NATIVE_SLOTS=0
+#  19. test_x87_cross_reply_exact with X87_NATIVE_SLOTS=1 in each of these
+#      configurations: default; IR off; IR and fusions off; fusions off
+#      with the IR on; run cache off; single-op fast path off; clamped
+#      register pool; bridging off; X87_PRECISE_FAULTS=1;
+#      X87_FAIL_ALLOC_EVERY=N; and X87_GPR_POOL_LIMIT=4, where integer
+#      stores fall back to binary64.  Then the tests that read or replace
+#      the native x87 state with it.  The knob is on by default, so this
+#      covers it also in a run that exports X87_NATIVE_SLOTS=0
 #  20. every test with X87_NATIVE_SLOTS=0, the kill switch, where
 #      test_x87_cross_reply_exact has to fail; exporting X87_NATIVE_SLOTS=0
 #      for the whole run makes every phase run that way
@@ -1307,6 +1308,7 @@ NATIVE_SLOTS_CONFIGS=(
     ""
     "X87_DISABLE_X87_IR=1"
     "X87_DISABLE_X87_IR=1 X87_DISABLE_ALL_FUSIONS=1"
+    "X87_DISABLE_ALL_FUSIONS=1"
     "X87_DISABLE_CACHE=1"
     "X87_DISABLE_SINGLE_FAST=1"
     "X87_FPR_POOL_LIMIT=5"
@@ -1444,14 +1446,6 @@ fi
 # X87_SMC_SPLIT=2, which splits every block, since the other tests' code is
 # on read-only image pages.  Naming tests on the command line runs the last
 # part for them, and the rest only when test_x87_smc is among them.
-#
-# test_fild_fistp_copy is left out of the X87_SMC_SPLIT=2 run.  An IR run
-# rounds an fild m64 whose value is still on the x87 stack when the run
-# ends, and the split ends runs inside its copies; the same copies with an
-# lfence in place of the split are rounded without the split too.
-SMC_SPLIT_ALL_SKIP=(
-    test_fild_fistp_copy
-)
 SMC_CONFIGS=(
     "X87_PRECISE_FAULTS=1"
     "X87_PRECISE_FAULTS=2"
@@ -1533,7 +1527,6 @@ if [[ $NATIVE_ONLY -eq 0 ]]; then
     fi
     echo "      X87_SMC_SPLIT=2"
     for t in "${TESTS[@]}"; do
-        [[ " ${SMC_SPLIT_ALL_SKIP[*]} " == *" $t "* ]] && continue
         BINARY="$TESTS_BIN/$t"
         if [[ ! -x "$BINARY" ]]; then
             echo -e "${YELLOW}SKIP${NC}  $t  (binary not found)"

@@ -328,10 +328,11 @@ binary64 exponent range; at 64-bit or 24-bit precision control, for 64-bit
 integers above 2^53 that meet arithmetic and for sequences that carry extra
 precision from one instruction to the next, such as the `fyl2x`-based
 `pow`, they do not. The registers themselves stay in Rosetta's 80-bit
-format, and a register is converted to binary64 only where arithmetic reads
-it, so a value that is only loaded, held on the stack, copied, exchanged or
-stored keeps all its bits, across blocks too: a `fild m64; fistp m64` copy
-moves its eight bytes unchanged and an `fld m80; fstp m80` copy its ten.
+format, and a register is converted to binary64 only where arithmetic, a
+compare or `fcmov` reads it, so a value that is only loaded, held on the
+stack, copied, exchanged or stored keeps all its bits, across blocks too: a
+`fild m64; fistp m64` copy moves its eight bytes unchanged and an `fld m80;
+fstp m80` copy its ten.
 `X87_NATIVE_SLOTS=0` goes back to converting every register to binary64 in
 each reply with floating-point work.
 [docs/internals.md](docs/internals.md#precision-and-the-floating-point-environment)
@@ -375,9 +376,7 @@ Code that rewrites itself runs in its new form at the next instruction, as
 under stock Rosetta, once the sidecar has seen its page rewritten: on such
 a page an x87 run ends after each store, so a store into the run's own code
 takes effect. The execution that first rewrites a page can still run one
-stale instruction, and on such a page an IR run rounds an `fild m64` value
-still on the stack at its end
-([#53](https://github.com/athei/x87sidecar/issues/53)).
+stale instruction.
 [docs/internals.md](docs/internals.md#code-on-writable-pages) says how
 pages are picked, what was tested and what it costs.
 
@@ -469,8 +468,8 @@ knowing. Bracketed values are defaults.
 | `X87_BRIDGE_V2=0` | disable bridging across flag-writing ALU whose flags Rosetta's liveness proves dead [on] |
 | `X87_ENABLE_IR_SPLIT=0`, `X87_ENABLE_IR_REMAT=0` | disable register-pressure relief: splitting over-pressure runs, sinking long-lived values [on] |
 | `X87_NATIVE_TRANSPORT=0` | put replies made only of integer loads and stores (`fild`, `fistp`, ...) back through the ordinary replies, which with `X87_NATIVE_SLOTS=0` round int64 values of 2^53 or more held on the stack; for bisecting [on] |
-| `X87_NATIVE_SLOTS=0` | go back to converting all eight x87 registers to binary64 and back in every reply with floating-point work, which rounds values held on the stack, copied, exchanged, stored with `fst`/`fistp` or saved with `fsave`; for bisecting. By default the registers stay in their native 80-bit slots and a register is converted to binary64 only where arithmetic reads it, so those values keep all 80 bits as on real x87 [on, see [docs/internals.md](docs/internals.md#asynchronous-signals-inside-emitted-code)] |
-| `X87_SMC_SPLIT=0` | keep x87 runs whole in code the guest rewrites; for bisecting. By default, on a page the guest can make writable and whose code bytes the sidecar has seen change, a run ends after each x87 store and is not bridged, so a store that rewrites a later instruction of the same run takes effect, as in stock Rosetta, except in the execution that first changes the page. x87 loops with stores inside a run get slower on such pages, 1.29 times as a geometric mean over the benchmarks with the split forced on, and [#53](https://github.com/athei/x87sidecar/issues/53) rounds some int64 copies there. In the tests, code on a private file mapping or an RWX page that is never written keeps its emitted code; no wine run was done. `=2` applies it to every block, for testing [on, see [docs/internals.md](docs/internals.md#code-on-writable-pages)] |
+| `X87_NATIVE_SLOTS=0` | go back to converting all eight x87 registers to binary64 and back in every reply with floating-point work, which rounds values held on the stack, copied, exchanged, stored with `fst`/`fistp` or saved with `fsave`; for bisecting. By default the registers stay in their native 80-bit slots and a register is converted to binary64 only where arithmetic, a compare or `fcmov` reads it, so those values keep all 80 bits as on real x87 [on, see [docs/internals.md](docs/internals.md#asynchronous-signals-inside-emitted-code)] |
+| `X87_SMC_SPLIT=0` | keep x87 runs whole in code the guest rewrites; for bisecting. By default, on a page the guest can make writable and whose code bytes the sidecar has seen change, a run ends after each x87 store and is not bridged, so a store that rewrites a later instruction of the same run takes effect, as in stock Rosetta, except in the execution that first changes the page. x87 loops with stores inside a run get slower on such pages, 1.29 times as a geometric mean over the benchmarks with the split forced on. In the tests, code on a private file mapping or an RWX page that is never written keeps its emitted code; no wine run was done. `=2` applies it to every block, for testing [on, see [docs/internals.md](docs/internals.md#code-on-writable-pages)] |
 | `X87_PRECISE_FAULTS=1` | for a program that aborts with "unexpectedly need to EmulateForward on a synchronous exception": probe the memory operand of each reply's first x87 instruction and answer runs of integer loads and stores one instruction per reply, so a memory fault there reaches the program's handler; costs up to 7 percent on x87 loops, makes an x87 store into write-combined memory 23 to 40 times slower, and faults later in a floating-point run still abort. `=2` also ends each x87 run before every later memory access, so every fault reaches the handler, and makes x87 loops up to 63 times slower (3.7 times as a geometric mean); it needs `X87_NATIVE_SLOTS` and acts as `=1` without it [off: any memory fault in translated x87 code aborts] |
 | `X87_DISABLE_X87_IR=1` | direct translator only, no IR pipeline |
 | `X87_DISABLE_ALL_FUSIONS=1`, `X87_DISABLE_FUSIONS=f1,f2` | disable every fusion, or the named ones (`--help` lists the names) |
