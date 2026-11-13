@@ -171,10 +171,11 @@ void dumpBlockIfNew(mach_port_t parentTask, uint64_t module_data_ptr, uint64_t b
 // Stock builds a new TR with an empty instruction buffer and empty lists for
 // every translation, so step 4 moves a buffer on the first request of a
 // translation that starts with an x87 run, and whenever the fixups the
-// translator pushes (the BL to the TLS base routine of a %gs: operand) do
-// not fit, which the first one in a translation never does.  The regions are
-// reused, not allocated per translation; g_targetBuffers says why that is
-// safe.
+// translator pushes do not fit, which the first one in a list never does:
+// the BL to the TLS base routine of a %gs: operand (_fixups) and the
+// ADRP/ADD pair of an immediate-address operand (external_fixups).  The
+// regions are reused, not allocated per translation; g_targetBuffers says
+// why that is safe.
 
 constexpr size_t kListCount = 6;
 
@@ -2389,9 +2390,16 @@ TargetRegion placeInTargetBuffer(mach_port_t task, std::vector<TargetRegion>& re
     const auto inUse = [cur](const TargetRegion& r) {
         return cur >= r.addr && cur < r.addr + r.size;
     };
+    // The largest spare, so that a translation that outgrew a small region
+    // keeps the large one for the next.
     TargetRegion dst{};
-    const auto spare = std::ranges::find_if(
-        regions, [&](const TargetRegion& r) { return !inUse(r) && r.size >= minCap; });
+    auto spare = regions.end();
+    for (auto it = regions.begin(); it != regions.end(); ++it) {
+        if (!inUse(*it) && it->size >= minCap &&
+            (spare == regions.end() || it->size > spare->size)) {
+            spare = it;
+        }
+    }
     const bool fresh = spare == regions.end();
     if (fresh) {
         dst.size = (minCap + 0xFFF) & ~static_cast<uint64_t>(0xFFF);
