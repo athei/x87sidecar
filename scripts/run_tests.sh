@@ -63,14 +63,14 @@
 #  18. test_crash_after_release: a target that is no longer traced after
 #      the release and then dies (abort, SIGSEGV, SIGKILL, SIGILL, exit(3))
 #      must end with its own exit status natively and under both attaches
-#  19. test_x87_cross_reply_exact with X87_NATIVE_SLOTS=1 (default, IR off,
-#      IR off and fusions off, fusions off with the IR on, run cache off,
-#      single-op fast path off, clamped register pool, bridging off,
-#      X87_PRECISE_FAULTS=1, X87_FAIL_ALLOC_EVERY=N, and
-#      X87_GPR_POOL_LIMIT=4, where integer stores fall back to binary64),
-#      then the tests that read or replace the native x87 state with it.
-#      The knob is on by default, so this covers it also in a run that
-#      exports X87_NATIVE_SLOTS=0
+#  19. test_x87_cross_reply_exact with X87_NATIVE_SLOTS=1 in each of these
+#      configurations: default; IR off; IR and fusions off; fusions off
+#      with the IR on; run cache off; single-op fast path off; clamped
+#      register pool; bridging off; X87_PRECISE_FAULTS=1;
+#      X87_FAIL_ALLOC_EVERY=N; and X87_GPR_POOL_LIMIT=4, where integer
+#      stores fall back to binary64.  Then the tests that read or replace
+#      the native x87 state with it.  The knob is on by default, so this
+#      covers it also in a run that exports X87_NATIVE_SLOTS=0
 #  20. every test with X87_NATIVE_SLOTS=0, the kill switch, where
 #      test_x87_cross_reply_exact has to fail; exporting X87_NATIVE_SLOTS=0
 #      for the whole run makes every phase run that way

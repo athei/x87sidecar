@@ -36,6 +36,8 @@ enum class Op : uint8_t {
     ConstZero,  // 0.0
     ConstOne,   // 1.0
     ConstF64,   // arbitrary f64 constant (imm_bits in payload)
+    CvtI64,     // inputs[0] holds an int64's bits (a LoadF64 retagged by
+                // pass_exact_i64_copy); convert them to f64
 
     // Binary arithmetic
     FAdd,
@@ -163,7 +165,8 @@ enum NodeFlags : uint8_t {
     // LoadF64 retagged from an fild m64 (pass_exact_i64_copy) whose value is
     // still on the stack when the run ends: its FPR holds the int64's bits,
     // and lower()'s write-back stores the exact 80-bit value into the native
-    // slot (X87_NATIVE_SLOTS only).
+    // slot (X87_NATIVE_SLOTS only).  Readers that need a number read a
+    // CvtI64 of it.
     kExactI64 = 1 << 7,
 };
 
@@ -333,6 +336,13 @@ bool build(Context& ctx, IRInstr* instr_array, int64_t num_instrs, int64_t start
 // exact int64 copy).  native_slots: the run lowers into a reply with
 // X87_NATIVE_SLOTS, whose write-back can store an exact fild m64 value.
 void optimize(Context& ctx, bool native_slots);
+
+// Open a slot at `pos` by shifting nodes [pos..) and their node_src entries
+// up one, and remap every node reference (inputs, slot_val, initial_read,
+// last_fcmp, last_fcomi) past it.  nodes[pos] and node_src[pos] keep a copy
+// of what moved to pos + 1; the caller writes them.  Returns false when the
+// node budget is exhausted.
+bool insert_node_at(Context& ctx, int pos);
 
 // pass_fma_reduce diagnostics.  Atomic counters incremented as the pass
 // walks a Context, plus a reject-reason histogram for chains the pass

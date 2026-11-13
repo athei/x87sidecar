@@ -173,7 +173,7 @@ work; `X87_NATIVE_SLOTS=0` turns them off and brings back the compact slots
 and their conversion. The register file stays in the native layout for the
 whole reply, and there is no entry or exit conversion of all eight slots. A
 slot is converted to binary64 in place, inside its own ten bytes, only where
-an instruction reads it for arithmetic or a compare; an IR run, an
+an instruction reads it for arithmetic, a compare or `fcmov`; an IR run, an
 `fst m32`/`fst m64`, an integer store and the single-op fast path convert it
 into a register instead and leave the slot as it is. `fld st(i)`, `fst` and
 `fstp` to a register, `fxch` and the deferred FXCH flush, `fld m80`,
@@ -194,16 +194,18 @@ that loaded the value; `--dump` prints the reads, and a run under stock
 Rosetta prints the same ones. Its last group loads the int64 inside an IR
 run that ends with the value still on the stack.
 
-In an IR run, an `fild m64` value that the run only stores with `fistp m64`
-or `fisttp m64`, or leaves on the stack, is loaded as its eight bytes: the
-stores write them unchanged, and the run's end writes the exact 80-bit value
-into the slot. This does not depend on the fusion knobs. The IR has one
-value for the load and all its `fld st(i)` copies, so a value the run also
-reads in any other way (arithmetic, a compare, `fst` to m32 or m64, `fist`
-or `fistp` to m16 or m32) is converted to binary64 when it is loaded. Its
-64-bit integer stores in the run and every copy of it that is on the stack
-when the run ends then get the rounded value. The direct emitters round
-only the copy that arithmetic, a compare or an `fst` to memory reads.
+In an IR run, an `fild m64` that the run stores with `fistp m64` or
+`fisttp m64`, or leaves on the stack, is loaded as its eight bytes, and the
+fusion knobs do not change that. Those stores write the bytes unchanged, and
+the run's end writes the exact 80-bit value into every slot that holds the
+value or one of its `fld st(i)` copies. A reader that needs the number
+(arithmetic, a compare, `fst` to m32 or m64, `fist` or `fistp` to m16 or
+m32, `fcmov`) reads a binary64 conversion of the bytes in a register of its
+own: it sees the value rounded, as in the direct emitters, and no copy
+changes. `fcmov` is the exception: in an IR run the register it writes
+holds the rounded value, and the direct emitters, which take every `fcmov`
+without an `fcomi` earlier in its run, convert the value in place, so all
+its copies are rounded. Stock keeps them all exact.
 
 An opaque save/restore round trip can hide a layout mismatch: the same
 misinterpreted bytes can be copied out and back unchanged. It fails when a
@@ -681,15 +683,14 @@ from one block to the next arrives intact. Inside a run that also holds
 other instructions, the `fild_fistp` fusion (a lone pair, or up to three
 nested pairs) and an IR pass copy the eight bytes as long as nothing else
 reads the value. With the native slots, the default, the value keeps its 80
-bits until arithmetic reads it (see [Asynchronous signals inside emitted
-code](#asynchronous-signals-inside-emitted-code)), so the copy is exact
-whatever runs in between, with the IR and the fusions on or off. The
-exception is an IR run that also reads the value in another way, through
-any of its copies: arithmetic, a compare, `fst` to m32 or m64, or `fist` or
-`fistp` to m16 or m32. That run loads it as binary64, so its `fistp m64`
-stores in the run and the copies it leaves on the stack are rounded. An
-integer store converts the 80-bit value exactly when five scratch registers
-are free; with fewer, the stored integer comes from a binary64 copy and the
+bits until arithmetic, a compare or `fcmov` reads it (see [Asynchronous
+signals inside emitted code](#asynchronous-signals-inside-emitted-code)),
+and an `fld st(i)` copy of it keeps them when another copy is read that
+way, so the copy is exact whatever runs in between, with the IR and the
+fusions on or off. The exception is `fcmov`: the copy it writes is rounded,
+and outside an IR run so is the value it reads, in every copy. An integer
+store converts the 80-bit value exactly when five scratch registers are
+free; with fewer, the stored integer comes from a binary64 copy and the
 register keeps its bits. With `X87_NATIVE_SLOTS=0` what remains is a value
 that meets arithmetic, or that is on the stack while a reply with
 floating-point work runs, since that reply converts its slots to binary64:
@@ -833,14 +834,12 @@ reverse of the hardware.
 
 These differences from stock Rosetta remain with the native slots.
 Arithmetic is still binary64, with the precision-control and exponent-range
-differences above. A register that arithmetic, a compare, `fxam` or `ftst`
-reads is converted to binary64 in place, so it stays rounded for the rest of
-its life, also when a later `fstp m80` stores it, where stock would keep the
-untouched source register's 80 bits. An integer store short of registers
-rounds the stored value through binary64, as described above, and so does
-an IR run's `fistp m64` of an `fild m64` value that the run also reads in
-another way, together with the copies the run leaves on the stack. Reading
-an 80-bit value as binary64 (for arithmetic, or for `fst m64`) always
+differences above. A register that arithmetic, a compare, `fcmov`, `fxam`
+or `ftst` reads is converted to binary64 in place, so it stays rounded for
+the rest of its life, also when a later `fstp m80` stores it, where stock
+would keep the untouched source register's 80 bits. An integer store short
+of registers rounds the stored value through binary64, as described above.
+Reading an 80-bit value as binary64 (for arithmetic, or for `fst m64`) always
 rounds to nearest even, where the hardware's `fst m64` follows the control
 word's RC; `fst m32` rounds by MXCSR.RC, like the arithmetic, and a finite
 value beyond binary64's range becomes infinity whatever the rounding mode.

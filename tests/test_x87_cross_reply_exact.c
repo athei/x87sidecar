@@ -35,7 +35,8 @@
  * A last group loads the int64 inside a run the IR lowers, which ends with
  * the value still on the stack (at an lfence or the block's end), stores it
  * in the next reply with fistp m64 or fstp m80, and checks the integer
- * stores of copies of it inside the run.
+ * stores of copies of it, also where the run reads another copy with
+ * arithmetic, fist m32, fcom or fcomi.
  *
  * Expected: passes under stock Rosetta and under x87sidecar, fails with
  * X87_NATIVE_SLOTS=0 (run_tests.sh checks both).
@@ -286,46 +287,98 @@ static uint16_t status_word(void) {
 /* The fild m64 is one of three or more x87 instructions in a run the IR
  * lowers, and its value is still on the stack when the run ends: lfence ends
  * the run inside the block, SEP ends the block.  A later reply stores it.
- * The integer stores in the run (dst2) must be exact too. */
+ * The integer stores into dst2 and dst3 must be exact too, also where the
+ * run reads another copy of the value as a number.  PRE runs in a block of
+ * its own before the run, TAIL after the store. */
 #define RUN_FSTPL "fildll (%[src])\n\tfildll (%[w])\n\tfstpl 0(%[out])\n\t"
 #define RUN_COPY "fildll (%[src])\n\tfld %%st(0)\n\tfistpll (%[dst2])\n\t"
 #define RUN_DEPTH1 "fildll (%[src])\n\tfldl 0(%[c])\n\tfmull 8(%[c])\n\t"
 #define RUN_COPY2 \
     "fildll (%[src])\n\tfld %%st(0)\n\tfld %%st(0)\n\tfistpll (%[dst2])\n\tfistpll (%[dst3])\n\t"
+/* Copies read as a number: arithmetic, fist m32, fcom, fcomi. */
+#define RUN_ARITH "fildll (%[src])\n\tfld %%st(0)\n\tfldz\n\tfaddp %%st, %%st(1)\n\t"
+#define RUN_FIST32 "fildll (%[src])\n\tfld %%st(0)\n\tfistpll (%[dst2])\n\tfistl 0(%[out])\n\t"
+#define RUN_FCOM "fildll (%[src])\n\tfld %%st(0)\n\tfcompl 0(%[c])\n\tfld %%st(0)\n\tfistpll (%[dst2])\n\t"
+#define RUN_FCOMI                                                                  \
+    "fildll (%[src])\n\tfld %%st(0)\n\tfldz\n\tfcomip %%st(1), %%st\n\tfstp %%st(0)\n\t" \
+    "fld %%st(0)\n\tfistpll (%[dst2])\n\t"
+/* Three copies on the stack at the run's end. */
+#define RUN_THREE "fildll (%[src])\n\tfld %%st(0)\n\tfld %%st(0)\n\t"
+/* No net push or pop: the value goes over a slot that holds an 80-bit 1.0
+ * from the earlier block. */
+#define RUN_DELTA0 "fildll (%[src])\n\tfstp %%st(2)\n\tfxch %%st(1)\n\t"
+/* fxch inside the run. */
+#define RUN_FXCH "fildll (%[src])\n\tfildll (%[w])\n\tfxch %%st(1)\n\t"
+#define PRE_FSTPL ""
+#define PRE_COPY ""
+#define PRE_DEPTH1 ""
+#define PRE_COPY2 ""
+#define PRE_ARITH ""
+#define PRE_FIST32 ""
+#define PRE_FCOM ""
+#define PRE_FCOMI ""
+#define PRE_THREE ""
+#define PRE_DELTA0 "fld1\n\tfld1\n\t" SEP
+#define PRE_FXCH ""
 #define AFTER_FSTPL ""
 #define AFTER_COPY ""
 #define AFTER_DEPTH1 "fstpl 0(%[out])\n\t"
 #define AFTER_COPY2 ""
+#define AFTER_ARITH "fstp %%st(0)\n\t"
+#define AFTER_FIST32 ""
+#define AFTER_FCOM ""
+#define AFTER_FCOMI ""
+#define AFTER_THREE "fistpll (%[dst2])\n\tfistpll (%[dst3])\n\t"
+#define AFTER_DELTA0 ""
+#define AFTER_FXCH ""
+#define TAIL_FSTPL ""
+#define TAIL_COPY ""
+#define TAIL_DEPTH1 ""
+#define TAIL_COPY2 ""
+#define TAIL_ARITH ""
+#define TAIL_FIST32 ""
+#define TAIL_FCOM ""
+#define TAIL_FCOMI ""
+#define TAIL_THREE ""
+#define TAIL_DELTA0 "\tfstpl 0(%[out])\n"
+#define TAIL_FXCH "\tfstpl 0(%[out])\n"
 #define LFENCE "lfence\n\t"
 
 typedef void (*run_fn)(const int64_t* src, void* dst, int64_t* dst2, int64_t* dst3, double* out);
 
-#define DEFINE_RUN_CASE(name, RUN, BREAK, AFTER, STORE)                                       \
+#define DEFINE_RUN_CASE(name, PRE, RUN, BREAK, AFTER, STORE, TAIL)                             \
     static void name(const int64_t* src, void* dst, int64_t* dst2, int64_t* dst3, double* out) { \
         static const int64_t w = 7;                                                           \
-        __asm__ volatile(RUN BREAK AFTER STORE                                                \
+        __asm__ volatile(PRE RUN BREAK AFTER STORE TAIL                                       \
                          :                                                                    \
                          : [src] "r"(src), [dst] "r"(dst), [dst2] "r"(dst2), [dst3] "r"(dst3), \
                            [out] "r"(out), [w] "r"(&w), [c] "r"(kConst)                       \
                          : CLOBBERS);                                                         \
     }
 
-#define DEFINE_RUN_FORMS(shape)                                                        \
-    DEFINE_RUN_CASE(run_lf_i64_##shape, RUN_##shape, LFENCE, AFTER_##shape, STORE_I64) \
-    DEFINE_RUN_CASE(run_lf_m80_##shape, RUN_##shape, LFENCE, AFTER_##shape, STORE_M80) \
-    DEFINE_RUN_CASE(run_jmp_i64_##shape, RUN_##shape, SEP, AFTER_##shape, STORE_I64)   \
-    DEFINE_RUN_CASE(run_jmp_m80_##shape, RUN_##shape, SEP, AFTER_##shape, STORE_M80)
+#define DEFINE_RUN_FORMS(s)                                                                   \
+    DEFINE_RUN_CASE(run_lf_i64_##s, PRE_##s, RUN_##s, LFENCE, AFTER_##s, STORE_I64, TAIL_##s) \
+    DEFINE_RUN_CASE(run_lf_m80_##s, PRE_##s, RUN_##s, LFENCE, AFTER_##s, STORE_M80, TAIL_##s) \
+    DEFINE_RUN_CASE(run_jmp_i64_##s, PRE_##s, RUN_##s, SEP, AFTER_##s, STORE_I64, TAIL_##s)   \
+    DEFINE_RUN_CASE(run_jmp_m80_##s, PRE_##s, RUN_##s, SEP, AFTER_##s, STORE_M80, TAIL_##s)
 
 DEFINE_RUN_FORMS(FSTPL)
 DEFINE_RUN_FORMS(COPY)
 DEFINE_RUN_FORMS(DEPTH1)
 DEFINE_RUN_FORMS(COPY2)
+DEFINE_RUN_FORMS(ARITH)
+DEFINE_RUN_FORMS(FIST32)
+DEFINE_RUN_FORMS(FCOM)
+DEFINE_RUN_FORMS(FCOMI)
+DEFINE_RUN_FORMS(THREE)
+DEFINE_RUN_FORMS(DELTA0)
+DEFINE_RUN_FORMS(FXCH)
 
 typedef struct {
     const char* name;
     run_fn fn[4]; /* lfence + fistp m64, lfence + fstp m80, jmp + fistp m64, jmp + fstp m80 */
-    int in_run_stores; /* how many of dst2, dst3 the run stores */
-    double want_out;   /* out[0], or 0 when nothing is written there */
+    int in_run_stores; /* how many of dst2, dst3 the case stores */
+    double want_out;   /* out[0], or 0 when it is not checked */
 } run_shape;
 
 #define RUN_FORMS(shape) \
@@ -336,6 +389,13 @@ static const run_shape kRunShapes[] = {
     {"fild, fld st(0), fistp m64", RUN_FORMS(COPY), 1, 0},
     {"fild, fldl, fmull, then fstpl", RUN_FORMS(DEPTH1), 0, 6.0},
     {"fild, fld st(0) twice, fistp m64 twice", RUN_FORMS(COPY2), 2, 0},
+    {"fild, fld st(0), fldz, faddp", RUN_FORMS(ARITH), 0, 0},
+    {"fild, fld st(0), fistp m64, fist m32", RUN_FORMS(FIST32), 1, 0},
+    {"fild, fld st(0), fcomp m64, fld st(0), fistp m64", RUN_FORMS(FCOM), 1, 0},
+    {"fild, fld st(0), fldz, fcomip, fstp, fld st(0), fistp m64", RUN_FORMS(FCOMI), 1, 0},
+    {"fild, fld st(0) twice, then fistp m64 twice", RUN_FORMS(THREE), 2, 0},
+    {"fild, fstp st(2), fxch over held 80-bit values", RUN_FORMS(DELTA0), 0, 1.0},
+    {"fild, fild, fxch", RUN_FORMS(FXCH), 0, 7.0},
 };
 static const char* const kRunForms[] = {"lfence, fistp m64", "lfence, fstp m80",
                                         "jmp, fistp m64", "jmp, fstp m80"};
@@ -559,15 +619,15 @@ int main(int argc, char** argv) {
                                to_m80 ? sizeof(f80) : sizeof(int64_t));
                     }
                     if (s->in_run_stores >= 1 && !int64_matches(&dst2, &v->v)) {
-                        report("fistp m64 in the run", s->name, rot, v->name, &dst2, &v->v,
+                        report("fistp m64 of a copy", s->name, rot, v->name, &dst2, &v->v,
                                sizeof(dst2));
                     }
                     if (s->in_run_stores >= 2 && !int64_matches(&dst3, &v->v)) {
-                        report("second fistp m64 in the run", s->name, rot, v->name, &dst3, &v->v,
+                        report("second fistp m64 of a copy", s->name, rot, v->name, &dst3, &v->v,
                                sizeof(dst3));
                     }
                     if (s->want_out != 0 && memcmp(&out[0], &s->want_out, sizeof(double)) != 0) {
-                        report("result in the run", s->name, rot, v->name, &out[0], &s->want_out,
+                        report("other result", s->name, rot, v->name, &out[0], &s->want_out,
                                sizeof(double));
                     }
                     const uint16_t top = (status_word() >> 11) & 7;

@@ -713,10 +713,13 @@ static void pass_fma_reduce(Context& ctx) {
 // With X87_NATIVE_SLOTS the value may also be left on the stack: such a
 // load is tagged kExactI64, and lower()'s write-back converts the bits into
 // the exact 80-bit value in the native slot, as fild m64 does outside the
-// IR.  The compact slots of X87_NATIVE_SLOTS=0 hold binary64, so there a
-// value left on the stack keeps the SCVTF.  Exactness is not a fusion, so
-// with the native slots the pass ignores the fusion knobs; without them it
-// is gated with the fild_fistp peephole on FusionId::fild_fistp.
+// IR.  A load that other nodes also read as a number keeps the bits for its
+// 64-bit stores and the stack, and those readers get a CvtI64 of it.  The
+// compact slots of X87_NATIVE_SLOTS=0 hold binary64, so there a value left
+// on the stack, or read as a number, keeps the SCVTF.  Exactness is not a
+// fusion, so with the native slots the pass ignores the fusion knobs;
+// without them it is gated with the fild_fistp peephole on
+// FusionId::fild_fistp.
 //
 // Runs last, after every pass that matches LoadF64 or StoreI64.
 
@@ -758,12 +761,43 @@ static void pass_exact_i64_copy(Context& ctx, bool native_slots) {
         }
     }
 
-    for (int i = 0; i < ctx.num_nodes; i++) {
-        auto& n = ctx.nodes[i];
-        if (n.op != Op::LoadI64 || (n.flags & kDead) || other_use[i] ||
-            (store_uses[i] == 0 && !on_stack[i]) || has_seg_override(n)) {
+    // Descending, so a CvtI64 inserted after load i only shifts nodes this
+    // loop has already handled, and the use tables stay valid for the rest.
+    for (int i = ctx.num_nodes - 1; i >= 0; i--) {
+        if (ctx.nodes[i].op != Op::LoadI64 || (ctx.nodes[i].flags & kDead) ||
+            (store_uses[i] == 0 && !on_stack[i]) || has_seg_override(ctx.nodes[i])) {
             continue;
         }
+        if (other_use[i]) {
+            // Readers that need the number (arithmetic, compares, fst, the
+            // narrower integer stores, fcmov) take a CvtI64 placed right
+            // after the load; the 64-bit stores and the stack keep the bits.
+            if (!native_slots || !insert_node_at(ctx, i + 1)) {
+                continue;
+            }
+            Node& cvt = ctx.nodes[i + 1];
+            cvt.op = Op::CvtI64;
+            cvt.flags = kNone;
+            cvt.inputs[0] = static_cast<int16_t>(i);
+            cvt.inputs[1] = -1;
+            cvt.inputs[2] = -1;
+            cvt.imm_bits = 0;
+            ctx.node_src[i + 1] = ctx.node_src[i];
+            for (int j = i + 2; j < ctx.num_nodes; j++) {
+                Node& m = ctx.nodes[j];
+                if (m.flags & kDead) {
+                    continue;
+                }
+                const int nrefs = node_ref_input_count(m);
+                for (int k = 0; k < nrefs; k++) {
+                    const bool exact_store = m.op == Op::StoreI64 && k == 0 && !has_seg_override(m);
+                    if (m.inputs[k] == i && !exact_store) {
+                        m.inputs[k] = static_cast<int16_t>(i + 1);
+                    }
+                }
+            }
+        }
+        Node& n = ctx.nodes[i];
         n.op = Op::LoadF64;
         if (on_stack[i]) {
             n.flags |= kExactI64;
@@ -779,6 +813,52 @@ static void pass_exact_i64_copy(Context& ctx, bool native_slots) {
 }
 
 // ── Public API ──────────────────────────────────────────────────────────────
+
+bool insert_node_at(Context& ctx, int pos) {
+    if (ctx.num_nodes >= kMaxNodes || pos < 0 || pos > ctx.num_nodes) {
+        return false;
+    }
+    const int n = ctx.num_nodes;
+    std::memmove(&ctx.nodes[pos + 1], &ctx.nodes[pos], static_cast<size_t>(n - pos) * sizeof(Node));
+    std::memmove(&ctx.node_src[pos + 1], &ctx.node_src[pos],
+                 static_cast<size_t>(n - pos) * sizeof(int16_t));
+    ctx.num_nodes = static_cast<int16_t>(n + 1);
+
+    const auto remap = [pos](int16_t& ref) {
+        if (ref >= pos) {
+            ref = static_cast<int16_t>(ref + 1);
+        }
+    };
+    for (int i = 0; i < ctx.num_nodes; i++) {
+        if (i == pos) {
+            continue;  // the opened slot, written by the caller
+        }
+        const int nrefs = node_ref_input_count(ctx.nodes[i]);
+        for (int k = 0; k < nrefs; k++) {
+            auto& in = ctx.nodes[i].inputs[k];
+            if (in >= 0) {
+                remap(in);
+            }
+        }
+    }
+    for (auto& v : ctx.slot_val) {
+        if (v >= 0) {
+            remap(v);
+        }
+    }
+    for (auto& v : ctx.initial_read) {
+        if (v >= 0) {
+            remap(v);
+        }
+    }
+    if (ctx.last_fcmp >= 0) {
+        remap(ctx.last_fcmp);
+    }
+    if (ctx.last_fcomi >= 0) {
+        remap(ctx.last_fcomi);
+    }
+    return true;
+}
 
 void optimize(Context& ctx, bool native_slots) {
     pass_dse(ctx);

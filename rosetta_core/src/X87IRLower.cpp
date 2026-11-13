@@ -763,6 +763,21 @@ void lower(Context& ctx, TranslationResult* result) {
                 emit_f64_const(buf, Dd, n.imm_bits, Wd_tmp);
                 break;
             }
+            case Op::CvtI64: {
+                // The input FPR holds an fild m64's bits.  SCVTF from a GPR,
+                // as LoadI64 converts.
+                const int Dn = fprs.get(n.inputs[0]);
+                int Dd = fprs.try_reuse_input(ctx, i);
+                if (Dd < 0) {
+                    Dd = alloc_free_fpr(*result);
+                }
+                fprs.node_fpr[i] = static_cast<int8_t>(Dd);
+                const int Xv = alloc_free_gpr(*result);
+                emit_fmov_d_to_x(buf, Xv, Dn);
+                emit_scvtf_x_to_d(buf, Dd, Xv);
+                free_gpr(*result, Xv);
+                break;
+            }
 
             // ── Binary arithmetic ───────────────────────────────────────────
             case Op::FAdd: {
@@ -1650,6 +1665,7 @@ void lower(Context& ctx, TranslationResult* result) {
 //   - LoadF64, LoadF32, StoreF64, StoreF32: 1 (addr from compute_operand_address);
 //     3 for a StoreF32 narrowing an 80-bit slot (narrows_native_slot)
 //   - LoadI16/I32/I64: 2 (addr + Wd_val)
+//   - CvtI64: 1 (the bits between FMOV and SCVTF)
 //   - StoreI16/I32/I64: 2 (Wd_int + the indefinite guard's Xt, then Wd_int + addr);
 //     4 for an exact store of an 80-bit slot (stores_native_slot)
 //   - FRndInt without RC cache: 1 (Wd_rc via alloc_gpr(3))
@@ -1797,6 +1813,11 @@ int peak_live_gprs(const Context& ctx, int budget, int* first_over_node, bool fa
             case Op::FYl2x:
             case Op::FScale:
                 transient = 4;
+                break;
+
+            // CvtI64: the int64 bits pass through one GPR.
+            case Op::CvtI64:
+                transient = 1;
                 break;
 
             // 1 GPR: addr from compute_operand_address
@@ -2027,6 +2048,7 @@ int peak_live_fprs(const Context& ctx, int budget, int* first_over_node) {
             case Op::ConstZero:
             case Op::ConstOne:
             case Op::ConstF64:
+            case Op::CvtI64:
             case Op::FAdd:
             case Op::FSub:
             case Op::FMul:
@@ -2267,49 +2289,9 @@ static int split_prefix_len(const Context& ctx, int first_over_node, int attempt
 // inputs, slot_val, initial_read, last_fcmp/last_fcomi, node_src — are
 // remapped.  The caller retargets the consumer afterwards.
 static bool insert_clone_at(Context& ctx, int src, int pos) {
-    if (ctx.num_nodes >= kMaxNodes || src >= pos) {
+    if (src >= pos || !insert_node_at(ctx, pos)) {
         return false;
     }
-    const int n = ctx.num_nodes;
-    std::memmove(&ctx.nodes[pos + 1], &ctx.nodes[pos], static_cast<size_t>(n - pos) * sizeof(Node));
-    std::memmove(&ctx.node_src[pos + 1], &ctx.node_src[pos],
-                 static_cast<size_t>(n - pos) * sizeof(int16_t));
-    ctx.num_nodes = static_cast<int16_t>(n + 1);
-
-    const auto remap = [pos](int16_t& ref) {
-        if (ref >= pos) {
-            ref = static_cast<int16_t>(ref + 1);
-        }
-    };
-    for (int i = 0; i < ctx.num_nodes; i++) {
-        if (i == pos) {
-            continue;  // clone slot, written below
-        }
-        const int nrefs = node_ref_input_count(ctx.nodes[i]);
-        for (int k = 0; k < nrefs; k++) {
-            auto& in = ctx.nodes[i].inputs[k];
-            if (in >= 0) {
-                remap(in);
-            }
-        }
-    }
-    for (auto& v : ctx.slot_val) {
-        if (v >= 0) {
-            remap(v);
-        }
-    }
-    for (auto& v : ctx.initial_read) {
-        if (v >= 0) {
-            remap(v);
-        }
-    }
-    if (ctx.last_fcmp >= 0) {
-        remap(ctx.last_fcmp);
-    }
-    if (ctx.last_fcomi >= 0) {
-        remap(ctx.last_fcomi);
-    }
-
     ctx.nodes[pos] = ctx.nodes[src];  // src < pos: unshifted
     ctx.nodes[pos].flags = kNone;
     ctx.node_src[pos] = ctx.node_src[pos + 1];  // same instruction as the consumer
