@@ -371,6 +371,16 @@ much higher cost;
 [docs/internals.md](docs/internals.md#memory-faults-inside-emitted-code)
 explains why.
 
+Code that rewrites itself runs in its new form at the next instruction, as
+under stock Rosetta, once the sidecar has seen its page rewritten: on such
+a page an x87 run ends after each store, so a store into the run's own code
+takes effect. The execution that first rewrites a page can still run one
+stale instruction, and on such a page an IR run rounds an `fild m64` value
+still on the stack at its end
+([#53](https://github.com/athei/x87sidecar/issues/53)).
+[docs/internals.md](docs/internals.md#code-on-writable-pages) says how
+pages are picked, what was tested and what it costs.
+
 Two encodings real hardware runs are missing from Rosetta's decode tables,
 so a program containing them traps under stock Rosetta. A second small stub
 on `decode_opcode` substitutes an encoding the decoder accepts, entirely
@@ -408,7 +418,7 @@ python3 scripts/test_release_not_stopped.py hook  # no stop after the release
 bash scripts/run_benchmarks.sh           # build + benchmark table
 ```
 
-The harness runs 105 self-checking x86-64 test binaries under stock Rosetta
+The harness runs 108 self-checking x86-64 test binaries under stock Rosetta
 and then under the sidecar in ten configurations (default, IR off, fusions
 off, hook bypassed, FMA contraction on, clamped register pool, pressure
 relief off, fast rounding, bridging off, bridging v2 off), plus a
@@ -419,7 +429,10 @@ runs only in that phase), the guest-flags test with the `fcomi` and the
 `fcmov` families handed to stock, the memory-fault test with
 `X87_PRECISE_FAULTS=1` in seven configurations and under allocation
 failures, and once without it, where it must abort (`test_x87_sync_fault`
-runs only in that phase), and an IR replay phase. The stock run is
+runs only in that phase), the self-modifying-code test with the
+`X87_SMC_SPLIT` variants (without the split it must fail, and a never
+written file mapping must keep its code), every test with
+`X87_SMC_SPLIT=2`, and an IR replay phase. The stock run is
 the baseline: a case that fails there is reported XFAIL in later phases
 rather than gating, and the stock run itself may only fail for tests listed
 in `KNOWN_STOCK_DIVERGENCE`. The harness uses the default attach path, so
@@ -457,6 +470,7 @@ knowing. Bracketed values are defaults.
 | `X87_ENABLE_IR_SPLIT=0`, `X87_ENABLE_IR_REMAT=0` | disable register-pressure relief: splitting over-pressure runs, sinking long-lived values [on] |
 | `X87_NATIVE_TRANSPORT=0` | put replies made only of integer loads and stores (`fild`, `fistp`, ...) back through the ordinary replies, which with `X87_NATIVE_SLOTS=0` round int64 values of 2^53 or more held on the stack; for bisecting [on] |
 | `X87_NATIVE_SLOTS=0` | go back to converting all eight x87 registers to binary64 and back in every reply with floating-point work, which rounds values held on the stack, copied, exchanged, stored with `fst`/`fistp` or saved with `fsave`; for bisecting. By default the registers stay in their native 80-bit slots and a register is converted to binary64 only where arithmetic reads it, so those values keep all 80 bits as on real x87 [on, see [docs/internals.md](docs/internals.md#asynchronous-signals-inside-emitted-code)] |
+| `X87_SMC_SPLIT=0` | keep x87 runs whole in code the guest rewrites; for bisecting. By default, on a page the guest can make writable and whose code bytes the sidecar has seen change, a run ends after each x87 store and is not bridged, so a store that rewrites a later instruction of the same run takes effect, as in stock Rosetta, except in the execution that first changes the page. x87 loops with stores inside a run get slower on such pages, 1.29 times as a geometric mean over the benchmarks with the split forced on, and [#53](https://github.com/athei/x87sidecar/issues/53) rounds some int64 copies there. In the tests, code on a private file mapping or an RWX page that is never written keeps its emitted code; no wine run was done. `=2` applies it to every block, for testing [on, see [docs/internals.md](docs/internals.md#code-on-writable-pages)] |
 | `X87_PRECISE_FAULTS=1` | for a program that aborts with "unexpectedly need to EmulateForward on a synchronous exception": probe the memory operand of each reply's first x87 instruction and answer runs of integer loads and stores one instruction per reply, so a memory fault there reaches the program's handler; costs up to 7 percent on x87 loops, makes an x87 store into write-combined memory 23 to 40 times slower, and faults later in a floating-point run still abort. `=2` also ends each x87 run before every later memory access, so every fault reaches the handler, and makes x87 loops up to 63 times slower (3.7 times as a geometric mean); it needs `X87_NATIVE_SLOTS` and acts as `=1` without it [off: any memory fault in translated x87 code aborts] |
 | `X87_DISABLE_X87_IR=1` | direct translator only, no IR pipeline |
 | `X87_DISABLE_ALL_FUSIONS=1`, `X87_DISABLE_FUSIONS=f1,f2` | disable every fusion, or the named ones (`--help` lists the names) |
@@ -501,7 +515,7 @@ Loader and sidecar diagnostics:
 | variable | effect |
 |---|---|
 | `X87_LOGS=1` | verbose loader logging |
-| `X87_LOG_THROUGHPUT=1` | requests per second, traps per request, cache hit rates and allocation declines every 2 s |
+| `X87_LOG_THROUGHPUT=1` | requests per second, traps per request, cache hit rates, allocation declines and `smc_pages=M/R` (M guest pages `X87_SMC_SPLIT` marked as rewritten, R pages holding the first or last byte of a block it recorded; marks stay when records are dropped, so M can exceed R) every 2 s |
 | `X87_LOG_OPS=1` | one line per translated op; high volume, for freeze bisects |
 | `X87_NO_IR_CACHE=1`, `X87_NO_TCO_CACHE=1` | re-read the IR array or the thread-context layout on every request |
 | `X87_NO_PREAUTH=1` | skip acquiring the developer-tools right before launch (default attach only) |

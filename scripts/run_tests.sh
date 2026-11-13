@@ -73,6 +73,14 @@
 #  20. every test with X87_NATIVE_SLOTS=0, the kill switch, where
 #      test_x87_cross_reply_exact has to fail; exporting X87_NATIVE_SLOTS=0
 #      for the whole run makes every phase run that way
+#  21. test_x87_smc, whose code is on RWX pages, with X87_PRECISE_FAULTS=1
+#      and 2, the run cache off, native transport off and allocation
+#      failures; with X87_SMC_SPLIT=0, where its same-run patches have to
+#      fail; with SMC_NO_WARMUP=1, where each of them has to fail its first
+#      iteration only; its never-written file mapping and its loops across
+#      a 4 KB boundary, which must get the code X87_SMC_SPLIT=0 gets; then
+#      every test with X87_SMC_SPLIT=2,
+#      which ends runs after each store in every block
 #   H. test_opcode_host_table, natively: the name-derived opcode maps
 #      against the pinned 26.4 table and the identity mapping;
 #      test_opcode_table_parse: the "index < N" bound on synthetic blobs; and
@@ -238,6 +246,8 @@ ALL_TESTS=(
     test_x87_cross_reply_exact
     test_bcd_exact
     test_alloc_decline
+    test_x87_smc
+    test_x87_retranslate_mem
 )
 
 RED='\033[0;31m'
@@ -1419,6 +1429,122 @@ if [[ $NATIVE_ONLY -eq 0 ]] && ! native_slots_off; then
     else
         export X87_NATIVE_SLOTS="$SAVED_NATIVE_SLOTS"
     fi
+fi
+
+# ── Phase 21: X87_SMC_SPLIT (x87 runs on rewritten code) ────────────────
+# test_x87_smc rewrites code on RWX pages, where after the first rewrite a
+# run ends after each x87 store and is not bridged.  Here it runs with the
+# knobs that change where a run ends; without the split, where its cases
+# that patch a later instruction of the same run have to fail (a pass would
+# mean the test no longer reaches what the split fixes); without its
+# warm-up, where each of those cases has to show the one stale iteration
+# docs/internals.md describes; and its never-written cases, file_rx and the
+# loops across a 4 KB boundary, have to get the same code as without the
+# split.  Then every test runs with
+# X87_SMC_SPLIT=2, which splits every block, since the other tests' code is
+# on read-only image pages.  Naming tests on the command line runs the last
+# part for them, and the rest only when test_x87_smc is among them.
+#
+# test_fild_fistp_copy is left out of the X87_SMC_SPLIT=2 run.  An IR run
+# rounds an fild m64 whose value is still on the x87 stack when the run
+# ends, and the split ends runs inside its copies; the same copies with an
+# lfence in place of the split are rounded without the split too.
+SMC_SPLIT_ALL_SKIP=(
+    test_fild_fistp_copy
+)
+SMC_CONFIGS=(
+    "X87_PRECISE_FAULTS=1"
+    "X87_PRECISE_FAULTS=2"
+    "X87_DISABLE_CACHE=1"
+    "X87_NATIVE_TRANSPORT=0"
+    "X87_STRICT_ALLOC=0 X87_FAIL_ALLOC_EVERY=17"
+)
+if [[ $NATIVE_ONLY -eq 0 ]]; then
+    echo ""
+    echo -e "${BOLD}=== Phase 21: X87_SMC_SPLIT (x87 runs on rewritten code) ===${NC}"
+    SMC_BIN="$TESTS_BIN/test_x87_smc"
+    if [[ " ${TESTS[*]} " == *" test_x87_smc "* && -x "$SMC_BIN" ]]; then
+        for cfg in "${SMC_CONFIGS[@]}"; do
+            echo "      $cfg"
+            read -ra CFG_ENV <<<"$cfg"
+            EXIT=0
+            OUT=$(run_bounded "$TEST_TIMEOUT" env "${CFG_ENV[@]}" "$LOADER" "$SMC_BIN" 2>/dev/null |
+                filter_runtime_lines) || EXIT=$?
+            check_output "test_x87_smc" "$OUT" "$EXIT"
+        done
+        TOTAL=$((TOTAL + 1))
+        EXIT=0
+        OUT=$(run_bounded "$TEST_TIMEOUT" env X87_SMC_SPLIT=0 "$LOADER" "$SMC_BIN" 2>/dev/null |
+            filter_runtime_lines) || EXIT=$?
+        if [[ $EXIT -eq 1 ]] && grep -q '^FAIL  smc patch_same:' <<<"$OUT" &&
+            grep -q '^FAIL  smc c_patch_same:' <<<"$OUT"; then
+            echo -e "${GREEN}PASS${NC}  test_x87_smc  (fails without X87_SMC_SPLIT, as expected)"
+            PASSED=$((PASSED + 1))
+        else
+            echo -e "${RED}FAIL${NC}  test_x87_smc  (wanted patch_same failures without X87_SMC_SPLIT, got exit=$EXIT)"
+            FAILED=$((FAILED + 1))
+            tail -3 <<<"$OUT" | sed 's/^/      /'
+        fi
+        # Without the warm-up, a page's first rewrite runs one stale
+        # instruction: exactly one wrong iteration, the first, in each of the
+        # six same-run patches, and nothing else wrong.
+        TOTAL=$((TOTAL + 1))
+        EXIT=0
+        OUT=$(run_bounded "$TEST_TIMEOUT" env SMC_NO_WARMUP=1 "$LOADER" "$SMC_BIN" 2>/dev/null |
+            filter_runtime_lines) || EXIT=$?
+        SAME_RUN='^FAIL  smc (c_)?patch_(same|bridged|len): 1 of [0-9]+ iterations differ'
+        STALE=$(grep -cE "$SAME_RUN" <<<"$OUT" || true)
+        OTHER=$(grep -E '^FAIL' <<<"$OUT" | grep -cvE "$SAME_RUN" || true)
+        FIRST=$(grep -c '^      first at iteration 0 ' <<<"$OUT" || true)
+        if [[ $EXIT -eq 1 && $STALE -eq 6 && $OTHER -eq 0 && $FIRST -eq 6 ]]; then
+            echo -e "${GREEN}PASS${NC}  test_x87_smc  (SMC_NO_WARMUP=1: one stale first iteration per same-run patch, as documented)"
+            PASSED=$((PASSED + 1))
+        else
+            echo -e "${RED}FAIL${NC}  test_x87_smc  (SMC_NO_WARMUP=1: wanted one stale first iteration in each of 6 cases, got $STALE, $OTHER other failures, exit=$EXIT)"
+            FAILED=$((FAILED + 1))
+            grep -E '^FAIL' <<<"$OUT" | head -5 | sed 's/^/      /' || true
+        fi
+        # Code the guest can make writable but never writes keeps its runs:
+        # file_rx on a private r-x file mapping, the way wine maps a PE
+        # section, and a loop crossing a 4 KB boundary on such a mapping and
+        # on an RWX page, where Rosetta translates the loop head again.  The
+        # emitted code has to be the same as with the split off, and differ
+        # from the split forced on, which shows the case has a run to split.
+        # $1 = case, $2.. = environment
+        smc_emit() {
+            local c="$1"
+            shift
+            run_bounded "$TEST_TIMEOUT" env SMC_CASE="$c" X87_DUMP_EMIT=1 "$@" "$LOADER" \
+                "$SMC_BIN" 2>/dev/null | grep 'EMIT pc=' | sed -E 's/ at=[0-9a-f]+//' | sort || true
+        }
+        for c in file_rx file_rx_cross rwx_cross; do
+            TOTAL=$((TOTAL + 1))
+            EMIT_ON=$(smc_emit "$c" X87_SMC_SPLIT=1)
+            EMIT_OFF=$(smc_emit "$c" X87_SMC_SPLIT=0)
+            EMIT_ALL=$(smc_emit "$c" X87_SMC_SPLIT=2)
+            if [[ -n "$EMIT_ON" && "$EMIT_ON" == "$EMIT_OFF" && "$EMIT_ON" != "$EMIT_ALL" ]]; then
+                echo -e "${GREEN}PASS${NC}  test_x87_smc $c  (never written, keeps its runs)"
+                PASSED=$((PASSED + 1))
+            else
+                echo -e "${RED}FAIL${NC}  test_x87_smc $c  (emitted code differs from X87_SMC_SPLIT=0, or the case has nothing to split)"
+                FAILED=$((FAILED + 1))
+            fi
+        done
+    fi
+    echo "      X87_SMC_SPLIT=2"
+    for t in "${TESTS[@]}"; do
+        [[ " ${SMC_SPLIT_ALL_SKIP[*]} " == *" $t "* ]] && continue
+        BINARY="$TESTS_BIN/$t"
+        if [[ ! -x "$BINARY" ]]; then
+            echo -e "${YELLOW}SKIP${NC}  $t  (binary not found)"
+            ERRORS=$((ERRORS + 1))
+            continue
+        fi
+        EXIT=0
+        OUT=$(run_bounded "$TEST_TIMEOUT" env X87_SMC_SPLIT=2 "$LOADER" "$BINARY" 2>/dev/null |
+            filter_runtime_lines) || EXIT=$?
+        check_output "$t" "$OUT" "$EXIT"
+    done
 fi
 
 # ── Host: opcode maps, the table parse and the fragment tree root ─────────

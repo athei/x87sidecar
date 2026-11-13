@@ -17,6 +17,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <deque>
 #include <map>
 #include <mutex>
 #include <string>
@@ -30,6 +31,7 @@
 #include "rosetta_core/ConfigEnv.h"
 #include "rosetta_core/CoreConfig.h"
 #include "rosetta_core/Fixup.h"
+#include "rosetta_core/IRBlock.h"
 #include "rosetta_core/IRInstr.h"
 #include "rosetta_core/IRModuleData.h"
 #include "rosetta_core/Opcode.h"
@@ -145,36 +147,35 @@ void dumpBlockIfNew(mach_port_t parentTask, uint64_t module_data_ptr, uint64_t b
 }
 
 // ── Cross-process marshalling helpers ───────────────────────────────────────
-// Translator + its helpers grow `insn_buf` (mmap/calloc) and append to six
-// fixup lists (`::operator new`). Both allocators land in *this* process, so
-// we can't simply hand parent's pointers to Translator — the resulting
-// pointers would be unreachable from the parent.
+// Translator and its helpers grow `insn_buf` (calloc) and append to the fixup
+// lists (`::operator new`) in *this* process, so they cannot work on the
+// parent's buffers directly.
 //
-// Strategy:
-//   1. Read parent's TR, ThreadContextOffsets, and IR array into locals.
-//      sizeof(tr) bytes are read in full — the loader's M2 init patched
-//      stock's TR allocator to allocate sizeof(TranslationResult) per TR
-//      so parent's heap has the full extended struct (including our
-//      appended x87_cache, OPT-1).
-//   2. RESET TR's mutable buffers to empty (data=null, end=0, end_cap=0,
-//      use_heap=1) and lists to nullptr. With use_heap=1 grow uses calloc
-//      (no munmap of foreign pointers); with empty lists push_back_slow's
-//      `delete old_begin` is `delete nullptr`, which is a no-op.
-//   3. Run Translator on `tr`. Its growth/pushes allocate fresh sidecar-
-//      local heap; the local TR's data/list pointers now name those.
-//   4. APPEND the locally-produced bytes/fixups to parent's existing
-//      buffers. If the append fits within parent's capacity we just
-//      mach_vm_write the delta. If it doesn't, allocate a parent-side
-//      replacement via `mach_vm_allocate`, copy parent's existing
-//      contents over, then append the new tail. Update TR's pointers to
-//      the parent VA.
-//   5. mach_vm_write the patched TR back in full (sizeof(TranslationResult))
-//      — including x87_cache so OPT-1's cross-instruction state persists.
-//      Free our local allocations.
+// Strategy (processTranslateRequest):
+//   1. Read stock's part of the parent's TR (kStockTRSize bytes), its
+//      ThreadContextOffsets and the IR array into locals.  The x87 cache is
+//      kept here, keyed by TR address (g_x87Cache).
+//   2. Give the local TR a local instruction buffer at least as large as the
+//      parent's, with `end` at the parent's end so that fixup offsets count
+//      from the start of the parent's buffer, and use_heap=1 so that a grow
+//      callocs and never unmaps the old pointer.  Empty every list, so that
+//      push_back_slow deletes nullptr.
+//   3. Run Translator on the local TR.
+//   4. Append the emitted words and the pushed fixups to the parent's
+//      buffers.  What fits in the parent's capacity is written in place.
+//      A buffer that does not fit moves, with the parent's existing
+//      contents, into a region the sidecar owns (placeInTargetBuffer), and
+//      the TR is pointed at that region.
+//   5. Write stock's part of the TR back and free the local allocations.
 //
-// Parent's old buffer (when we replace it on grow) becomes orphaned in
-// parent's heap — we can't `free()` parent-side from here. The leak is
-// per-grow only; capacity doubles each time so growths are logarithmic.
+// Stock builds a new TR with an empty instruction buffer and empty lists for
+// every translation, so step 4 moves a buffer on the first request of a
+// translation that starts with an x87 run, and whenever the fixups the
+// translator pushes do not fit, which the first one in a list never does:
+// the BL to the TLS base routine of a %gs: operand (_fixups) and the
+// ADRP/ADD pair of an immediate-address operand (external_fixups).  The
+// regions are reused, not allocated per translation; g_targetBuffers says
+// why that is safe.
 
 constexpr size_t kListCount = 6;
 
@@ -239,6 +240,7 @@ struct IRCacheEntry {
     uint64_t hash = 0;      // profile::hash_ir_stream of ir, when hash_valid
     bool hash_valid = false;
     bool has_bcd = false;  // ir contains FBLD or FBSTP; set on every fill
+    bool smc_split = false;  // blockSplitForSmc, on every fill when X87_SMC_SPLIT=1
     std::vector<IRInstr> ir;
 };
 std::unordered_map<uint64_t, IRCacheEntry> g_irCache;
@@ -2127,35 +2129,333 @@ bool writeTranslate(mach_port_t task, uint64_t addr, const void* src, size_t siz
     return writeParent(task, addr, src, size);
 }
 
-// Allocate a parent-side replacement buffer of size `newCap`, copy parent's
-// existing live bytes, then append `tailSize` bytes from `tail`. On success
-// returns the parent VA of the new buffer. On any failure deallocates and
-// returns 0.
-mach_vm_address_t allocAndAppendInParent(mach_port_t parentTask, uint64_t origAddr,
-                                         uint64_t origLive, uint64_t newCap, const void* tail,
-                                         uint64_t tailSize) {
-    // Round up to page granularity.
-    newCap = (newCap + 0xFFF) & ~static_cast<uint64_t>(0xFFF);
-    mach_vm_address_t parentNew = 0;
-    g_statVmSyscalls.fetch_add(1, std::memory_order_relaxed);
-    if (mach_vm_allocate(parentTask, &parentNew, newCap, VM_FLAGS_ANYWHERE) != KERN_SUCCESS) {
-        return 0;
+/// The maximum protection of the mapping at `va`, looked through submaps (the
+/// shared cache is one), and the mapping's end.  False when nothing is
+/// mapped at `va`.
+bool guestMaxProtection(mach_port_t task, uint64_t va, vm_prot_t& maxProt, uint64_t& end) {
+    natural_t depth = 0;
+    for (;;) {
+        mach_vm_address_t address = va;
+        mach_vm_size_t size = 0;
+        vm_region_submap_info_data_64_t info{};
+        mach_msg_type_number_t count = VM_REGION_SUBMAP_INFO_COUNT_64;
+        g_statVmSyscalls.fetch_add(1, std::memory_order_relaxed);
+        if (mach_vm_region_recurse(task, &address, &size, &depth,
+                                   reinterpret_cast<vm_region_recurse_info_t>(&info),
+                                   &count) != KERN_SUCCESS ||
+            va < address) {
+            return false;
+        }
+        if (info.is_submap != 0) {
+            depth++;
+            continue;
+        }
+        maxProt = info.max_protection;
+        end = address + size;
+        return true;
     }
-    if (origLive > 0) {
-        std::vector<uint8_t> stash(origLive);
-        if (!readTranslate(parentTask, origAddr, stash.data(), origLive) ||
-            !writeTranslate(parentTask, parentNew, stash.data(), origLive)) {
-            mach_vm_deallocate(parentTask, parentNew, newCap);
-            return 0;
+}
+
+// X87_SMC_SPLIT=1 page statistics for the X87_LOG_THROUGHPUT line: pages
+// marked as rewritten, and pages holding the first or last byte of a
+// recorded block.  Marks are only made on the latter, but a marked page
+// stays marked after its records are dropped.
+std::atomic<uint64_t> g_statSmcPagesRecorded{0};
+std::atomic<uint64_t> g_statSmcPagesMarked{0};
+
+/// X87_SMC_SPLIT=1: the guest pages, among those the guest can make
+/// writable, whose code the guest has rewritten.  Each fill of a block on
+/// such a page records the block's guest bytes under its start address.
+/// When a block with a recorded start comes back, the bytes both versions
+/// cover (the shorter length) are compared, and the block's pages are
+/// marked if they differ.  Comparing the overlap catches a patch that moves
+/// the block's end, such as a jump written over a later instruction, and
+/// leaves out what Rosetta translates again unchanged (a block started over,
+/// a loop head that starts a second translation, as at a 4 KB boundary, a
+/// second translation covering the same code, or a split at another
+/// branch target), whose bytes from the same start are the same.  A page
+/// stays marked for the rest of the process: nothing tells the sidecar that
+/// the guest has stopped rewriting it, and unmarking it would bring the
+/// stale run back on the next rewrite.  The tables are bounded (blocks,
+/// their bytes, marked pages) and, when full, drop the entry inserted
+/// first, not the one used least recently.  Receive thread only, like
+/// g_irCache.
+struct SmcPages {
+    static constexpr uint64_t kPageShift = 12;  // the guest's 4 KB pages
+    static constexpr size_t kMaxBlocks = 131072;
+    static constexpr size_t kMaxBytes = size_t{16} << 20;
+    static constexpr size_t kMaxRewrittenPages = 4096;
+    std::unordered_map<uint64_t, std::vector<uint8_t>> blocks;  // by guest start
+    std::deque<uint64_t> blockOrder;
+    size_t totalBytes = 0;
+    std::unordered_map<uint64_t, uint32_t> blocksPerPage;
+    std::unordered_set<uint64_t> rewritten;
+    std::deque<uint64_t> rewrittenOrder;
+
+    /// Counts the pages of the block's first and last byte as holding it.
+    void countPages(uint64_t start, size_t len, int delta) {
+        const auto count = [&](uint64_t page) {
+            auto& n = blocksPerPage[page];
+            n = static_cast<uint32_t>(static_cast<int64_t>(n) + delta);
+            if (n == 0) {
+                blocksPerPage.erase(page);
+            }
+        };
+        const uint64_t first = start >> kPageShift;
+        const uint64_t last = (start + len - 1) >> kPageShift;
+        count(first);
+        if (last != first) {
+            count(last);
+        }
+        g_statSmcPagesRecorded.store(blocksPerPage.size(), std::memory_order_relaxed);
+    }
+
+    void mark(uint64_t va) {
+        const uint64_t page = va >> kPageShift;
+        if (rewritten.contains(page)) {
+            return;
+        }
+        if (rewritten.size() >= kMaxRewrittenPages) {
+            rewritten.erase(rewrittenOrder.front());
+            rewrittenOrder.pop_front();
+        }
+        rewritten.insert(page);
+        rewrittenOrder.push_back(page);
+        g_statSmcPagesMarked.store(rewritten.size(), std::memory_order_relaxed);
+        static int marked = 0;
+        ++marked;
+        if (marked <= 10 || marked % 1000 == 0) {
+            fprintf(stdout,
+                    "[rosettax87] X87_SMC_SPLIT: guest code at 0x%llx was rewritten; x87 runs on "
+                    "its page end after each store from now on (#%d)\n",
+                    static_cast<unsigned long long>(va), marked);
+            fflush(stdout);
         }
     }
-    if (tailSize > 0) {
-        if (!writeTranslate(parentTask, parentNew + origLive, tail, tailSize)) {
-            mach_vm_deallocate(parentTask, parentNew, newCap);
-            return 0;
+
+    /// Records the `len` bytes of the block starting at `start`, and marks its
+    /// pages when a block recorded at the same start had other bytes where
+    /// both have some.
+    void noteBlock(uint64_t start, const uint8_t* bytes, uint32_t len) {
+        auto it = blocks.find(start);
+        if (it != blocks.end()) {
+            std::vector<uint8_t>& old = it->second;
+            const size_t overlap = std::min<size_t>(old.size(), len);
+            if (std::memcmp(old.data(), bytes, overlap) != 0) {
+                mark(start);
+                mark(start + len - 1);
+            }
+            countPages(start, old.size(), -1);
+            totalBytes -= old.size();
+            old.assign(bytes, bytes + len);
+            totalBytes += len;
+            countPages(start, len, +1);
+        } else {
+            blocks.emplace(start, std::vector<uint8_t>(bytes, bytes + len));
+            blockOrder.push_back(start);
+            totalBytes += len;
+            countPages(start, len, +1);
+        }
+        while (blocks.size() > kMaxBlocks || totalBytes > kMaxBytes) {
+            const uint64_t oldest = blockOrder.front();
+            blockOrder.pop_front();
+            auto oit = blocks.find(oldest);
+            countPages(oldest, oit->second.size(), -1);
+            totalBytes -= oit->second.size();
+            blocks.erase(oit);
         }
     }
-    return parentNew;
+
+    [[nodiscard]] bool isRewritten(uint64_t va) const {
+        return rewritten.contains(va >> kPageShift);
+    }
+};
+SmcPages g_smcPages;
+
+/// Says once that X87_SMC_SPLIT could not decide on a block, and why; the
+/// block is then treated as not rewritten, as without the knob.
+bool warnSmcLookup(const char* what, uint64_t addr) {
+    static bool warned = false;
+    if (!warned) {
+        warned = true;
+        fprintf(stdout,
+                "[rosettax87] X87_SMC_SPLIT: could not read %s at 0x%llx; treating such code as "
+                "not rewritten\n",
+                what, static_cast<unsigned long long>(addr));
+        fflush(stdout);
+    }
+    return false;
+}
+
+/// Whether the guest can make the code between `first` and `last` writable:
+/// the maximum protection of a mapping that holds either allows writing.
+///
+/// Rosetta write-protects a writable page while it holds translations of
+/// it, so at translation time the current protection of an RWX page reads
+/// r-x, the same as that of code the guest never asked to write.  The
+/// maximum protection is the guest's limit: r-x for a Mach-O image mapped by
+/// dyld and the shared cache, rwx for anything the guest mapped itself (an
+/// RWX allocation, an anonymous or private file mapping; under wine that
+/// includes every PE image).
+bool guestCodeWritable(mach_port_t task, uint64_t first, uint64_t last) {
+    const auto writable = [](vm_prot_t prot) {
+        return (static_cast<unsigned>(prot) & static_cast<unsigned>(VM_PROT_WRITE)) != 0;
+    };
+    vm_prot_t maxProt = VM_PROT_NONE;
+    uint64_t end = 0;
+    if (!guestMaxProtection(task, first, maxProt, end)) {
+        return warnSmcLookup("the mapping of guest code", first);
+    }
+    if (writable(maxProt)) {
+        return true;
+    }
+    if (last < end) {
+        return false;
+    }
+    if (!guestMaxProtection(task, last, maxProt, end)) {
+        return warnSmcLookup("the mapping of guest code", last);
+    }
+    return writable(maxProt);
+}
+
+/// Whether the x87 runs of a block end after each store (X87_SMC_SPLIT=1):
+/// the guest can make its code writable (guestCodeWritable), and has
+/// rewritten code on its page (SmcPages).  The block's bytes are recorded
+/// before the decision, so the translation that first sees a page's
+/// rewritten bytes is split already.  IRInstr::pc and IRBlock::start_pc are
+/// offsets from the module record's text_vmaddr_range, and the block's bytes
+/// run for IRBlock::code_size from its start, terminator included.  The
+/// first and the last instruction are both checked, for a block that
+/// crosses into another mapping or page.
+bool blockSplitForSmc(mach_port_t task, uint64_t moduleData, uint64_t blockAddr, const IRInstr* ir,
+                      uint64_t num) {
+    IRModuleData mod{};
+    if (moduleData == 0 || !readTranslate(task, moduleData, &mod, sizeof(mod))) {
+        return warnSmcLookup("the translation's module record", moduleData);
+    }
+    const uint64_t first = mod.text_vmaddr_range + ir[0].pc;
+    const uint64_t last = mod.text_vmaddr_range + ir[num - 1].pc;
+    if (!guestCodeWritable(task, first, last)) {
+        return false;
+    }
+    IRBlock blk{};
+    if (!readTranslate(task, blockAddr, &blk, sizeof(blk))) {
+        return warnSmcLookup("the IR block", blockAddr);
+    }
+    constexpr uint32_t kMaxBlockBytes = 1U << 16;
+    if (blk.start_pc != ir[0].pc || blk.code_size == 0 || blk.code_size > kMaxBlockBytes ||
+        ir[num - 1].pc >= blk.start_pc + blk.code_size) {
+        return warnSmcLookup("a consistent IR block", blockAddr);
+    }
+    std::vector<uint8_t> bytes(blk.code_size);
+    if (!readTranslate(task, first, bytes.data(), bytes.size())) {
+        return warnSmcLookup("the guest code", first);
+    }
+    g_smcPages.noteBlock(first, bytes.data(), blk.code_size);
+    return g_smcPages.isRewritten(first) || g_smcPages.isRewritten(last);
+}
+
+/// A region of tracee memory the sidecar allocated.
+struct TargetRegion {
+    uint64_t addr = 0;
+    uint64_t size = 0;
+};
+
+/// The TR buffers that can outgrow their capacity in a request: the
+/// instruction buffer and the two fixup lists the translator appends to.
+enum TargetBuffer : uint8_t { kInsnBuffer, kExternalFixups, kFixups, kNoTargetBuffer };
+
+/// The TargetBuffer of each entry of processTranslateRequest's `lists`.  The
+/// translator appends to no other list, and stock moves field_1A8's storage
+/// to the list of the segment being built (field_1F0), where field_1A8 no
+/// longer names it, so the placement rule below would not hold for that one.
+constexpr std::array<TargetBuffer, kListCount> kListTargetBuffer = {
+    kExternalFixups, kNoTargetBuffer, kFixups, kNoTargetBuffer, kNoTargetBuffer, kNoTargetBuffer,
+};
+
+/// Regions the sidecar hands to stock as the storage of a TR buffer that a
+/// request outgrows, per TargetBuffer: at most the one the TR names and one
+/// spare.
+///
+/// Stock allocates every translation's buffers from one bump arena in
+/// libRosettaRuntime that its next translator_reset reclaims, and frees none
+/// of them individually.  A region outside that arena is reclaimed by nobody,
+/// so instead of allocating one per translation the sidecar writes a region
+/// again once the TR in a request no longer names it.  That is safe because:
+///   - the runtime translates under a process-wide lock, from translator_reset
+///     through translator_translate, translator_apply_fixups and
+///     translator_free, so a request of a later translation, from whichever
+///     thread, comes after stock is done with the earlier one;
+///   - stock keeps the storage of these buffers only in their TR fields: it
+///     grows one by copying it into the arena, copies the instruction words
+///     out through translator_get_data and reads the lists through the TR;
+///   - during a request the requesting thread waits in translate_insn and no
+///     other thread translates, so nothing reads the TR between the read at
+///     the start of the request and its write-back.
+/// Receive thread only.
+std::array<std::vector<TargetRegion>, kNoTargetBuffer> g_targetBuffers;
+
+/// Puts a TR buffer into a region of `regions` of at least `minCap` bytes:
+/// its first `liveBytes` from tracee address `cur`, then `tailSize` bytes
+/// from `tail`.  `cur` is the buffer's address in the TR as the request read
+/// it; a region holding it is still stock's and is not written.  Regions
+/// that do not hold it are reused or deallocated.  Returns the region, or an
+/// empty one on failure, when the TR has to stay as it was read.
+TargetRegion placeInTargetBuffer(mach_port_t task, std::vector<TargetRegion>& regions, uint64_t cur,
+                                 uint64_t liveBytes, uint64_t minCap, const void* tail,
+                                 uint64_t tailSize) {
+    const auto inUse = [cur](const TargetRegion& r) {
+        return cur >= r.addr && cur < r.addr + r.size;
+    };
+    // The largest spare, so that a translation that outgrew a small region
+    // keeps the large one for the next.
+    TargetRegion dst{};
+    auto spare = regions.end();
+    for (auto it = regions.begin(); it != regions.end(); ++it) {
+        if (!inUse(*it) && it->size >= minCap &&
+            (spare == regions.end() || it->size > spare->size)) {
+            spare = it;
+        }
+    }
+    const bool fresh = spare == regions.end();
+    if (fresh) {
+        dst.size = (minCap + 0xFFF) & ~static_cast<uint64_t>(0xFFF);
+        mach_vm_address_t addr = 0;
+        g_statVmSyscalls.fetch_add(1, std::memory_order_relaxed);
+        if (mach_vm_allocate(task, &addr, dst.size, VM_FLAGS_ANYWHERE) != KERN_SUCCESS) {
+            return {};
+        }
+        dst.addr = addr;
+    } else {
+        dst = *spare;
+    }
+    bool ok = true;
+    if (liveBytes > 0) {
+        std::vector<uint8_t> stash(liveBytes);
+        ok = readTranslate(task, cur, stash.data(), liveBytes) &&
+             writeTranslate(task, dst.addr, stash.data(), liveBytes);
+    }
+    if (ok && tailSize > 0) {
+        ok = writeTranslate(task, dst.addr + liveBytes, tail, tailSize);
+    }
+    if (!ok) {
+        if (fresh) {
+            mach_vm_deallocate(task, dst.addr, dst.size);
+        }
+        return {};
+    }
+    std::erase_if(regions, [&](const TargetRegion& r) {
+        if (inUse(r) || r.addr == dst.addr) {
+            return false;
+        }
+        g_statVmSyscalls.fetch_add(1, std::memory_order_relaxed);
+        mach_vm_deallocate(task, r.addr, r.size);
+        return true;
+    });
+    if (fresh) {
+        regions.push_back(dst);
+    }
+    return dst;
 }
 
 // Run Translator and write its output back to parent's TR. Returns Some(N)
@@ -2306,6 +2606,10 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask, const Translate
             irc.has_bcd = std::ranges::any_of(irc.ir, [](const IRInstr& ins) {
                 return ins.opcode() == kOpcodeName_fbld || ins.opcode() == kOpcodeName_fbstp;
             });
+            irc.smc_split =
+                g_rosetta_config != nullptr && g_rosetta_config->smc_split == 1 &&
+                blockSplitForSmc(parentTask, reinterpret_cast<uint64_t>(tr.ir_module_data),
+                                 req.block, irc.ir.data(), req.num_instrs);
             g_statIrMisses.fetch_add(1, std::memory_order_relaxed);
         }
         // Conservative until the reply is known; the Some path below moves it.
@@ -2480,6 +2784,7 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask, const Translate
     std::optional<int64_t> result;
     if (!stock_hash_hit && !stock_bcd_hit) {
         _bypass_guard.ran_translator = true;
+        set_guest_code_rewritten(irc.smc_split);
         result = Translator::translate_instruction(
             &tr, reinterpret_cast<IRBlock*>(req.block), localIR,
             static_cast<int64_t>(req.num_instrs), static_cast<int64_t>(req.insn_idx));
@@ -2565,10 +2870,9 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask, const Translate
         // Two cases:
         //  - No grow + fits in parent's cap → mach_vm_write the tail
         //    in place.
-        //  - Grow OR doesn't fit → allocate a parent-side replacement,
-        //    copy parent's existing [0..origInsnEnd] bytes over, then
-        //    append our emitted slice, and pivot TR.insn_buf.data onto
-        //    it.
+        //  - Grow OR doesn't fit → copy parent's existing [0..origInsnEnd]
+        //    bytes and our emitted slice into a sidecar-owned region
+        //    (placeInTargetBuffer) and pivot TR.insn_buf.data onto it.
         uint64_t finalInsnEnd = origInsnEnd + insnEmitted;
         uint32_t* finalInsnData = origInsnData;
         uint64_t finalInsnCap = origInsnCap;
@@ -2580,15 +2884,15 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask, const Translate
                 }
             }
         } else {
-            uint64_t newCap = std::max(origInsnCap * 2, finalInsnEnd);
-            mach_vm_address_t parentNew = allocAndAppendInParent(
-                parentTask, reinterpret_cast<uint64_t>(origInsnData), origInsnEnd, newCap,
-                localInsnData + origInsnEnd, insnEmitted);
-            if (parentNew == 0) {
+            const TargetRegion region = placeInTargetBuffer(
+                parentTask, g_targetBuffers[kInsnBuffer], reinterpret_cast<uint64_t>(origInsnData),
+                origInsnEnd, std::max(origInsnCap * 2, finalInsnEnd), localInsnData + origInsnEnd,
+                insnEmitted);
+            if (region.addr == 0) {
                 return out;
             }
-            finalInsnData = reinterpret_cast<uint32_t*>(parentNew);
-            finalInsnCap = (newCap + 0xFFF) & ~static_cast<uint64_t>(0xFFF);
+            finalInsnData = reinterpret_cast<uint32_t*>(region.addr);
+            finalInsnCap = region.size;
         }
         tr.insn_buf.data = finalInsnData;
         tr.insn_buf.end = finalInsnEnd;
@@ -2615,17 +2919,31 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask, const Translate
                 lists[i]->end =
                     reinterpret_cast<Fixup*>(reinterpret_cast<uint8_t*>(orig.begin) + newLive);
             } else {
-                uint64_t newCap = std::max(parentCap * 2, newLive);
-                mach_vm_address_t parentNew =
-                    allocAndAppendInParent(parentTask, reinterpret_cast<uint64_t>(orig.begin),
-                                           parentLive, newCap, localPushed[i], added);
-                if (parentNew == 0) {
+                if (kListTargetBuffer[i] == kNoTargetBuffer) {
+                    static bool logged = false;
+                    if (!logged) {
+                        logged = true;
+                        fprintf(stdout,
+                                "[rosettax87] the translator appended to fixup list %zu, which "
+                                "the sidecar does not grow; declined to stock\n",
+                                i);
+                        fflush(stdout);
+                    }
                     return out;
                 }
-                uint64_t roundedCap = (newCap + 0xFFF) & ~static_cast<uint64_t>(0xFFF);
-                lists[i]->begin = reinterpret_cast<Fixup*>(parentNew);
-                lists[i]->end = reinterpret_cast<Fixup*>(parentNew + newLive);
-                lists[i]->end_cap = reinterpret_cast<Fixup*>(parentNew + roundedCap);
+                const TargetRegion region =
+                    placeInTargetBuffer(parentTask, g_targetBuffers[kListTargetBuffer[i]],
+                                        reinterpret_cast<uint64_t>(orig.begin), parentLive,
+                                        std::max(parentCap * 2, newLive), localPushed[i], added);
+                if (region.addr == 0) {
+                    return out;
+                }
+                // Stock divides the capacity by sizeof(Fixup) with a
+                // multiply that is exact only for whole elements.
+                const uint64_t capBytes = region.size / sizeof(Fixup) * sizeof(Fixup);
+                lists[i]->begin = reinterpret_cast<Fixup*>(region.addr);
+                lists[i]->end = reinterpret_cast<Fixup*>(region.addr + newLive);
+                lists[i]->end_cap = reinterpret_cast<Fixup*>(region.addr + capBytes);
             }
         }
     }
@@ -2851,8 +3169,12 @@ void* reporterEntry(void* /*arg*/) {
         prev_vm = vm;
         if (delta == 0) {
             if (!printed_idle && cur > 0) {
-                fprintf(stdout, "[rosettax87] sidecar: idle (total %llu)\n",
-                        static_cast<unsigned long long>(cur));
+                fprintf(stdout, "[rosettax87] sidecar: idle (total %llu) smc_pages=%llu/%llu\n",
+                        static_cast<unsigned long long>(cur),
+                        static_cast<unsigned long long>(
+                            g_statSmcPagesMarked.load(std::memory_order_relaxed)),
+                        static_cast<unsigned long long>(
+                            g_statSmcPagesRecorded.load(std::memory_order_relaxed)));
                 fflush(stdout);
                 printed_idle = true;
             }
@@ -2862,17 +3184,22 @@ void* reporterEntry(void* /*arg*/) {
         // vm/req counts mach_vm_* traps on the translate path this period
         // (mach_msg excluded: 1/request by construction).  Cache columns are
         // cumulative hits/misses so rates are readable at a glance.
-        fprintf(stdout,
-                "[rosettax87] sidecar: %llu req/s (total %llu) vm/req=%.2f "
-                "ir=%llu/%llu tco=%llu alloc_declines=%llu\n",
-                static_cast<unsigned long long>(delta / kReporterPeriodSec),
-                static_cast<unsigned long long>(cur),
-                static_cast<double>(vm_delta) / static_cast<double>(delta),
-                static_cast<unsigned long long>(g_statIrHits.load(std::memory_order_relaxed)),
-                static_cast<unsigned long long>(g_statIrMisses.load(std::memory_order_relaxed)),
-                static_cast<unsigned long long>(g_statTcoHits.load(std::memory_order_relaxed)),
-                static_cast<unsigned long long>(
-                    g_statAllocDeclines.load(std::memory_order_relaxed)));
+        // smc_pages: guest pages holding a block recorded for X87_SMC_SPLIT,
+        // and how many of them are marked as rewritten.
+        fprintf(
+            stdout,
+            "[rosettax87] sidecar: %llu req/s (total %llu) vm/req=%.2f "
+            "ir=%llu/%llu tco=%llu alloc_declines=%llu smc_pages=%llu/%llu\n",
+            static_cast<unsigned long long>(delta / kReporterPeriodSec),
+            static_cast<unsigned long long>(cur),
+            static_cast<double>(vm_delta) / static_cast<double>(delta),
+            static_cast<unsigned long long>(g_statIrHits.load(std::memory_order_relaxed)),
+            static_cast<unsigned long long>(g_statIrMisses.load(std::memory_order_relaxed)),
+            static_cast<unsigned long long>(g_statTcoHits.load(std::memory_order_relaxed)),
+            static_cast<unsigned long long>(g_statAllocDeclines.load(std::memory_order_relaxed)),
+            static_cast<unsigned long long>(g_statSmcPagesMarked.load(std::memory_order_relaxed)),
+            static_cast<unsigned long long>(
+                g_statSmcPagesRecorded.load(std::memory_order_relaxed)));
         fflush(stdout);
     }
 }

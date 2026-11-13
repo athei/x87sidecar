@@ -18,3 +18,19 @@ bool precise_split_enabled() {
     return g_rosetta_config != nullptr && g_rosetta_config->precise_faults >= 2 &&
            g_rosetta_config->native_slots != 0;
 }
+
+namespace {
+bool g_guest_code_rewritten = false;
+}
+
+void set_guest_code_rewritten(bool rewritten) {
+    g_guest_code_rewritten = rewritten;
+}
+
+bool smc_split_enabled() {
+    if (g_rosetta_config == nullptr) {
+        return false;
+    }
+    const uint8_t mode = g_rosetta_config->smc_split;
+    return mode == 2 || (mode == 1 && g_guest_code_rewritten);
+}

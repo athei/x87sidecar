@@ -168,6 +168,14 @@ RosettaConfig load_config_from_env() {
         }
     }
 
+    // X87_SMC_SPLIT: 1 (default) ends x87 runs after their stores in blocks
+    // on pages the guest can write and has rewritten, 0 never, 2 in every
+    // block.
+    cfg.smc_split = env_default_on("X87_SMC_SPLIT");
+    if (const char* t = std::getenv("X87_SMC_SPLIT"); t != nullptr && std::strcmp(t, "2") == 0) {
+        cfg.smc_split = 2;
+    }
+
     // Test-only gate pool clamps: make register-pressure splits
     // deterministically reproducible regardless of stock's dynamic FPR
     // seeding.  0 (unset) = no clamp.  Narrow the gate only — allocation
@@ -503,6 +511,16 @@ void print_env_help(std::FILE* out) {
         "                                registers stay in their native 80-bit slots\n"
         "                                and are converted one at a time where\n"
         "                                arithmetic reads them.\n"
+        "  X87_SMC_SPLIT=0               keep x87 runs whole on pages the guest\n"
+        "                                rewrites; for bisecting.  Default ON: on a\n"
+        "                                page the guest can write and whose code bytes\n"
+        "                                the sidecar has seen change, a run ends after\n"
+        "                                each x87 store and is not bridged, so a store\n"
+        "                                that rewrites a later instruction of the run\n"
+        "                                takes effect, as in stock Rosetta.  The\n"
+        "                                execution that first changes a page can still\n"
+        "                                run one stale instruction.  =2 splits every\n"
+        "                                block, for testing.\n"
         "  X87_ENABLE_FMA_CONTRACT=1     fold fmul+fadd/fsub into a single FMA (IR pass,\n"
         "                                fld_arith_arithp fusion, arith_faddp peephole).\n"
         "                                Off by default: real x87 rounds the product\n"
