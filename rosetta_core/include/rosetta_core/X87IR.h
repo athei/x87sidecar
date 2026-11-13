@@ -159,6 +159,12 @@ enum NodeFlags : uint8_t {
     kFmaReduceMember = 1 << 5,  // FMAdd / LoadF32 absorbed by a chain (incl. head)
 
     kBridge64 = 1 << 6,  // Bridge*: 64-bit operand width (default 32-bit)
+
+    // LoadF64 retagged from an fild m64 (pass_exact_i64_copy) whose value is
+    // still on the stack when the run ends: its FPR holds the int64's bits,
+    // and lower()'s write-back stores the exact 80-bit value into the native
+    // slot (X87_NATIVE_SLOTS only).
+    kExactI64 = 1 << 7,
 };
 
 // Guest GPR numbers inside Bridge* nodes' inputs[] — negative so every pass
@@ -324,8 +330,9 @@ bool build(Context& ctx, IRInstr* instr_array, int64_t num_instrs, int64_t start
            int run_length, bool allow_bridges = false, bool bridges_v2 = false);
 
 // Run optimization passes on the IR (DSE, FMA detection, FCOM+FSTSW fusion,
-// exact int64 copy).
-void optimize(Context& ctx);
+// exact int64 copy).  native_slots: the run lowers into a reply with
+// X87_NATIVE_SLOTS, whose write-back can store an exact fild m64 value.
+void optimize(Context& ctx, bool native_slots);
 
 // pass_fma_reduce diagnostics.  Atomic counters incremented as the pass
 // walks a Context, plus a reject-reason histogram for chains the pass

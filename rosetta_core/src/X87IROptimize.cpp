@@ -710,24 +710,33 @@ static void pass_fma_reduce(Context& ctx) {
 // bridge node.  Operands with a segment override are left alone so the GPR
 // model's per-op cost for them does not drop.
 //
-// Runs last, after every pass that matches LoadF64 or StoreI64.  Gated with
-// the fild_fistp peephole on FusionId::fild_fistp.
+// With X87_NATIVE_SLOTS the value may also be left on the stack: such a
+// load is tagged kExactI64, and lower()'s write-back converts the bits into
+// the exact 80-bit value in the native slot, as fild m64 does outside the
+// IR.  The compact slots of X87_NATIVE_SLOTS=0 hold binary64, so there a
+// value left on the stack keeps the SCVTF.  Exactness is not a fusion, so
+// with the native slots the pass ignores the fusion knobs; without them it
+// is gated with the fild_fistp peephole on FusionId::fild_fistp.
+//
+// Runs last, after every pass that matches LoadF64 or StoreI64.
 
 static bool has_seg_override(const Node& n) {
     return n.mem_operand != nullptr && n.mem_operand->mem.seg_override != 0;
 }
 
-static void pass_exact_i64_copy(Context& ctx) {
-    if (g_rosetta_config != nullptr &&
+static void pass_exact_i64_copy(Context& ctx, bool native_slots) {
+    if (!native_slots && g_rosetta_config != nullptr &&
         fusion_is_disabled(*g_rosetta_config, FusionId::fild_fistp)) {
         return;
     }
 
     int16_t store_uses[kMaxNodes] = {};
     bool other_use[kMaxNodes] = {};
+    bool on_stack[kMaxNodes] = {};
     for (short d : ctx.slot_val) {
         if (d >= 0 && d < ctx.num_nodes) {
-            other_use[d] = true;
+            on_stack[d] = true;
+            other_use[d] = other_use[d] || !native_slots;
         }
     }
     for (int i = 0; i < ctx.num_nodes; i++) {
@@ -751,11 +760,14 @@ static void pass_exact_i64_copy(Context& ctx) {
 
     for (int i = 0; i < ctx.num_nodes; i++) {
         auto& n = ctx.nodes[i];
-        if (n.op != Op::LoadI64 || (n.flags & kDead) || other_use[i] || store_uses[i] == 0 ||
-            has_seg_override(n)) {
+        if (n.op != Op::LoadI64 || (n.flags & kDead) || other_use[i] ||
+            (store_uses[i] == 0 && !on_stack[i]) || has_seg_override(n)) {
             continue;
         }
         n.op = Op::LoadF64;
+        if (on_stack[i]) {
+            n.flags |= kExactI64;
+        }
         for (int j = i + 1; j < ctx.num_nodes; j++) {
             auto& s = ctx.nodes[j];
             if (s.op == Op::StoreI64 && !(s.flags & kDead) && s.inputs[0] == i) {
@@ -768,7 +780,7 @@ static void pass_exact_i64_copy(Context& ctx) {
 
 // ── Public API ──────────────────────────────────────────────────────────────
 
-void optimize(Context& ctx) {
+void optimize(Context& ctx, bool native_slots) {
     pass_dse(ctx);
     // FMA contraction changes numerics (no intermediate rounding of the
     // product), so it must be opt-in.  pass_fma_reduce only matches FMAdd
@@ -778,7 +790,7 @@ void optimize(Context& ctx) {
     }
     pass_fma_reduce(ctx);
     pass_fcom_fstsw_fusion(ctx);
-    pass_exact_i64_copy(ctx);
+    pass_exact_i64_copy(ctx, native_slots);
 }
 
 }  // namespace X87IR

@@ -32,6 +32,10 @@
  * each of the eight physical registers and the middle block's pushes wrap
  * TOP past 0.
  * Blocks are separated by `jmp 1f; 1:`, which ends a translation block.
+ * A last group loads the int64 inside a run the IR lowers, which ends with
+ * the value still on the stack (at an lfence or the block's end), stores it
+ * in the next reply with fistp m64 or fstp m80, and checks the integer
+ * stores of copies of it inside the run.
  *
  * Expected: passes under stock Rosetta and under x87sidecar, fails with
  * X87_NATIVE_SLOTS=0 (run_tests.sh checks both).
@@ -278,6 +282,64 @@ static uint16_t status_word(void) {
     return sw;
 }
 
+/* ── fild m64 inside a run ───────────────────────────────────────────────── */
+/* The fild m64 is one of three or more x87 instructions in a run the IR
+ * lowers, and its value is still on the stack when the run ends: lfence ends
+ * the run inside the block, SEP ends the block.  A later reply stores it.
+ * The integer stores in the run (dst2) must be exact too. */
+#define RUN_FSTPL "fildll (%[src])\n\tfildll (%[w])\n\tfstpl 0(%[out])\n\t"
+#define RUN_COPY "fildll (%[src])\n\tfld %%st(0)\n\tfistpll (%[dst2])\n\t"
+#define RUN_DEPTH1 "fildll (%[src])\n\tfldl 0(%[c])\n\tfmull 8(%[c])\n\t"
+#define RUN_COPY2 \
+    "fildll (%[src])\n\tfld %%st(0)\n\tfld %%st(0)\n\tfistpll (%[dst2])\n\tfistpll (%[dst3])\n\t"
+#define AFTER_FSTPL ""
+#define AFTER_COPY ""
+#define AFTER_DEPTH1 "fstpl 0(%[out])\n\t"
+#define AFTER_COPY2 ""
+#define LFENCE "lfence\n\t"
+
+typedef void (*run_fn)(const int64_t* src, void* dst, int64_t* dst2, int64_t* dst3, double* out);
+
+#define DEFINE_RUN_CASE(name, RUN, BREAK, AFTER, STORE)                                       \
+    static void name(const int64_t* src, void* dst, int64_t* dst2, int64_t* dst3, double* out) { \
+        static const int64_t w = 7;                                                           \
+        __asm__ volatile(RUN BREAK AFTER STORE                                                \
+                         :                                                                    \
+                         : [src] "r"(src), [dst] "r"(dst), [dst2] "r"(dst2), [dst3] "r"(dst3), \
+                           [out] "r"(out), [w] "r"(&w), [c] "r"(kConst)                       \
+                         : CLOBBERS);                                                         \
+    }
+
+#define DEFINE_RUN_FORMS(shape)                                                        \
+    DEFINE_RUN_CASE(run_lf_i64_##shape, RUN_##shape, LFENCE, AFTER_##shape, STORE_I64) \
+    DEFINE_RUN_CASE(run_lf_m80_##shape, RUN_##shape, LFENCE, AFTER_##shape, STORE_M80) \
+    DEFINE_RUN_CASE(run_jmp_i64_##shape, RUN_##shape, SEP, AFTER_##shape, STORE_I64)   \
+    DEFINE_RUN_CASE(run_jmp_m80_##shape, RUN_##shape, SEP, AFTER_##shape, STORE_M80)
+
+DEFINE_RUN_FORMS(FSTPL)
+DEFINE_RUN_FORMS(COPY)
+DEFINE_RUN_FORMS(DEPTH1)
+DEFINE_RUN_FORMS(COPY2)
+
+typedef struct {
+    const char* name;
+    run_fn fn[4]; /* lfence + fistp m64, lfence + fstp m80, jmp + fistp m64, jmp + fstp m80 */
+    int in_run_stores; /* how many of dst2, dst3 the run stores */
+    double want_out;   /* out[0], or 0 when nothing is written there */
+} run_shape;
+
+#define RUN_FORMS(shape) \
+    {run_lf_i64_##shape, run_lf_m80_##shape, run_jmp_i64_##shape, run_jmp_m80_##shape}
+
+static const run_shape kRunShapes[] = {
+    {"fild, fild, fstpl", RUN_FORMS(FSTPL), 0, 7.0},
+    {"fild, fld st(0), fistp m64", RUN_FORMS(COPY), 1, 0},
+    {"fild, fldl, fmull, then fstpl", RUN_FORMS(DEPTH1), 0, 6.0},
+    {"fild, fld st(0) twice, fistp m64 twice", RUN_FORMS(COPY2), 2, 0},
+};
+static const char* const kRunForms[] = {"lfence, fistp m64", "lfence, fstp m80",
+                                        "jmp, fistp m64", "jmp, fstp m80"};
+
 /* ── Values ──────────────────────────────────────────────────────────────── */
 
 typedef struct {
@@ -310,6 +372,7 @@ static const i64_value kI64Values[] = {
     {"2^62+3", 4611686018427387907LL, {0x8000000000000006ULL, 0x403D}},
     {"INT64_MIN", INT64_MIN, {0x8000000000000000ULL, 0xC03E}},
     {"2^53+1", 9007199254740993LL, {0x8000000000000400ULL, 0x4034}},
+    {"INT64_MAX", INT64_MAX, {0xFFFFFFFFFFFFFFFEULL, 0x403D}},
     {"-(2^63-1)", -INT64_MAX, {0xFFFFFFFFFFFFFFFEULL, 0xC03D}},
 };
 
@@ -470,6 +533,50 @@ int main(int argc, char** argv) {
                            &kI64Values[vi].as_f80, sizeof(f80));
                 }
                 check_balanced(m, rot);
+            }
+        }
+    }
+    for (size_t si = 0; si < sizeof(kRunShapes) / sizeof(kRunShapes[0]); si++) {
+        const run_shape* s = &kRunShapes[si];
+        for (int form = 0; form < 4; form++) {
+            const int to_m80 = form == 1 || form == 3;
+            for (int rot = 0; rot < 8; rot++) {
+                for (size_t vi = 0; vi < sizeof(kI64Values) / sizeof(kI64Values[0]); vi++) {
+                    const i64_value* v = &kI64Values[vi];
+                    f80_slot dst;
+                    int64_t dst2 = 0x5A5A5A5A5A5A5A5ALL;
+                    int64_t dst3 = 0x5A5A5A5A5A5A5A5ALL;
+                    double out[2] = {0};
+                    memset(&dst, 0xA5, sizeof(dst));
+                    rotate_down(rot);
+                    s->fn[form](&v->v, &dst, &dst2, &dst3, out);
+                    rotate_up(rot);
+                    cases++;
+                    if (to_m80 ? memcmp(&dst.v, &v->as_f80, sizeof(f80)) != 0
+                               : !int64_matches(&dst, &v->v)) {
+                        report(kRunForms[form], s->name, rot, v->name, &dst,
+                               to_m80 ? (const void*)&v->as_f80 : (const void*)&v->v,
+                               to_m80 ? sizeof(f80) : sizeof(int64_t));
+                    }
+                    if (s->in_run_stores >= 1 && !int64_matches(&dst2, &v->v)) {
+                        report("fistp m64 in the run", s->name, rot, v->name, &dst2, &v->v,
+                               sizeof(dst2));
+                    }
+                    if (s->in_run_stores >= 2 && !int64_matches(&dst3, &v->v)) {
+                        report("second fistp m64 in the run", s->name, rot, v->name, &dst3, &v->v,
+                               sizeof(dst3));
+                    }
+                    if (s->want_out != 0 && memcmp(&out[0], &s->want_out, sizeof(double)) != 0) {
+                        report("result in the run", s->name, rot, v->name, &out[0], &s->want_out,
+                               sizeof(double));
+                    }
+                    const uint16_t top = (status_word() >> 11) & 7;
+                    if (top != 0) {
+                        const uint16_t zero = 0;
+                        report("TOP after the case", s->name, rot, v->name, &top, &zero,
+                               sizeof(top));
+                    }
+                }
             }
         }
     }

@@ -1537,6 +1537,22 @@ void lower(Context& ctx, TranslationResult* result) {
         if (Dd < 0) {
             continue;  // dead or already freed
         }
+        if (ctx.nodes[val].flags & kExactI64) {
+            // Dd holds an fild m64's integer bits: write its exact 80-bit
+            // value, as translate_fild_native does, so the exit leaves the
+            // slot as it is.
+            emit_native_st_addr(buf, Xbase, Wd_top, d, Wd_tmp, Xst_base);
+            const int Xint = alloc_free_gpr(*result);
+            const int Xs = alloc_free_gpr(*result);
+            const int Xe = alloc_free_gpr(*result);
+            emit_fmov_d_to_x(buf, Xint, Dd);
+            TranslatorX87::emit_i64_to_f80_slot(buf, Wd_tmp, Xint, Xs, Xe);
+            free_gpr(*result, Xe);
+            free_gpr(*result, Xs);
+            free_gpr(*result, Xint);
+            x87_slot_note_native(d);
+            continue;
+        }
         emit_store_st(buf, Xbase, Wd_top, d, Wd_tmp, Dd, Xst_base);
     }
 
@@ -1645,6 +1661,8 @@ void lower(Context& ctx, TranslationResult* result) {
 //   - FStsw (non-fused): 2 (Wd_sw + Wd_adj if top_delta != 0)
 //   - StoreCW/LoadCW: 2 (addr + Wd_cw)
 //   - Epilogue (top_delta != 0): 2 (Wd_tmp2 + Wd_tagw)
+//   - Epilogue write-back of a kExactI64 value: 3 (Xint, Xs, Xe), with
+//     every pinned register still held
 //
 // Fused FCmp/FTst holds 1 GPR (Wd_packed) alive across nodes until FStsw.
 // We track this as a "held" count that overlaps with per-node transient demand.
@@ -1885,6 +1903,25 @@ int peak_live_gprs(const Context& ctx, int budget, int* first_over_node, bool fa
         // and the transient=2 accounting already includes it.
         if ((n.op == Op::FCmp || n.op == Op::FTst) && (n.flags & kFcomFused)) {
             held++;
+        }
+    }
+
+    // Epilogue write-back: an exact fild m64 value left on the stack takes
+    // Xint, Xs and Xe for its conversion before the tag update frees
+    // Xst_base.  An overflow is attributed to the last node, as below.
+    bool exact_writeback = false;
+    for (const short v : ctx.slot_val) {
+        if (v >= 0 && v < ctx.num_nodes && (ctx.nodes[v].flags & kExactI64) &&
+            !(ctx.nodes[v].flags & kDead)) {
+            exact_writeback = true;
+        }
+    }
+    if (exact_writeback) {
+        const int writeback_total = pinned + held + 3;
+        peak = std::max(writeback_total, peak);
+        if (first_over_node && *first_over_node < 0 && writeback_total > budget &&
+            ctx.num_nodes > 0) {
+            *first_over_node = ctx.num_nodes - 1;
         }
     }
 
@@ -2541,7 +2578,7 @@ int compile_run(TranslationResult* result, IRInstr* instr_array, int64_t num_ins
             return 0;
         }
 
-        optimize(ctx);
+        optimize(ctx, result->x87_cache.native_slots != 0);
         // X87_NATIVE_SLOTS: which initial depths hold an 80-bit value.
         // lower()'s prologue flushes a leftover FXCH permutation by moving
         // the slots as they are, so depth d then holds what was at depth
