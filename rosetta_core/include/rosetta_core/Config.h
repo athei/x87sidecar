@@ -175,8 +175,8 @@ struct RosettaConfig {
                                       //                           the kill switch.
     uint8_t smc_split;                // X87_SMC_SPLIT             (default 1) in a block on a
                                       //                           page the guest can make
-                                      //                           writable and on which code has
-                                      //                           been translated again, end
+                                      //                           writable and whose code bytes
+                                      //                           have been seen to change, end
                                       //                           each x87 run after an
                                       //                           instruction that stores to
                                       //                           guest memory, so a store that

@@ -23,13 +23,16 @@
  *
  * getpc is not modified code: it checks that fnstenv after an fldz reports
  * the fldz's address as FIP, which packers and shellcode decoders that
- * rewrite themselves use to find their own address.  file_rx is not
- * modified either: data_write's code on a private r-x file mapping, the way
- * wine maps a PE section, which is never written.
+ * rewrite themselves use to find their own address.  The other cases that
+ * are not modified run code that is never written: file_rx has data_write's
+ * code on a private r-x file mapping, the way wine maps a PE section, and
+ * file_rx_cross and rwx_cross a loop that crosses a 4 KB boundary, on such a
+ * file mapping and on an RWX page.
  *
  * The c_ cases run the same code in 32-bit compatibility mode through an LDT
- * code segment.  Each case copies its code to a fresh RWX mapping below 4 GB
- * and runs it once as a warm-up, then a fixed number of times with inputs
+ * code segment.  Each case copies its code to a fresh mapping below 4 GB
+ * (RWX unless noted) and runs it once as a warm-up, in which a patch_ case
+ * makes its first real patch, then a fixed number of times with inputs
  * that change every iteration, so a store that did not happen leaves the
  * previous result.  The stored bytes and the status word are compared bit
  * for bit with a reference table taken before the loop from the same code
@@ -100,7 +103,7 @@ _Static_assert(__builtin_offsetof(struct area, env) == 0x38, "area layout");
     extern char name[], name##_end[];
 
 /* kind: what the loop does between executions. */
-enum kind { K_DATA, K_SELF, K_REWRITE, K_PATCH, K_GETPC, K_FILE };
+enum kind { K_DATA, K_SELF, K_REWRITE, K_PATCH, K_GETPC, K_STILL };
 
 /* form, store width, store instruction (64-bit and 32-bit operand). */
 #define STORES(X)                                             \
@@ -198,6 +201,24 @@ __asm__(
     ".globl _c_getpc_end\n_c_getpc_end:\n.code64\n");
 extern char getpc[], getpc_end[], getpc_insn[], c_getpc[], c_getpc_end[], c_getpc_insn[];
 
+/* A loop of 15 x87 instructions with stores inside its run, placed so that
+ * it crosses a 4 KB boundary.  Rosetta ends a block at the boundary, so the
+ * loop head starts a block of its own in a second translation; the code is
+ * never written, and must keep its runs.  Its inputs are in the output area
+ * itself (the case's area is its own input), and out gets (a*b + a)*b + a
+ * and that times b. */
+DEFINE64(cross_loop,
+         "push $4\npop %rcx\n"
+         "2:\n"
+         "fldl 0x00(%rdi)\nfmull 0x08(%rdi)\nfstpl 0x18(%rdi)\n"
+         "fldl 0x18(%rdi)\nfaddl 0x00(%rdi)\nfstpl 0x10(%rdi)\n"
+         "fldl 0x10(%rdi)\nfmull 0x08(%rdi)\nfstpl 0x18(%rdi)\n"
+         "fldl 0x18(%rdi)\nfaddl 0x00(%rdi)\nfstpl 0x10(%rdi)\n"
+         "fldl 0x10(%rdi)\nfmull 0x08(%rdi)\nfstpl 0x18(%rdi)\n"
+         "dec %ecx\njnz 2b\nfnstsw 0x20(%rdi)\n")
+/* The loop head lands 3 bytes in, at 0xfe2, so its run crosses 0x1000. */
+#define CROSS_OFF 0xfdf
+
 struct test_case {
     const char* name;
     enum kind kind;
@@ -210,6 +231,8 @@ struct test_case {
     const char* alt;   /* rewrite, patch_: the reference for the fadd form */
     uint32_t word_hi;  /* patch_: bytes the store writes past the opcode and ModRM */
     int stock_aborts;  /* runs only when named or with SMC_ALL=1 */
+    int offset;        /* where the code starts in its two-page mapping */
+    int file;          /* map a temporary file r-x instead of anonymous RWX */
 };
 
 #define CODE(sym) .code = sym, .code_end = sym##_end
@@ -247,7 +270,14 @@ static const struct test_case cases[] = {
     {PATCH(patch_bridge, 0, REFS64)},
     {PATCH(patch_bridged, 0, REFS64), .word_hi = DISP8_FSTP},
     {.name = "getpc", .kind = K_GETPC, .width = 4, CODE(getpc), .patch = getpc_insn},
-    {.name = "file_rx", .kind = K_FILE, .width = 8, CODE(data_write)},
+    {.name = "file_rx", .kind = K_STILL, .width = 8, CODE(data_write), .file = 1},
+    {.name = "file_rx_cross",
+     .kind = K_STILL,
+     .width = 16,
+     CODE(cross_loop),
+     .offset = CROSS_OFF,
+     .file = 1},
+    {.name = "rwx_cross", .kind = K_STILL, .width = 16, CODE(cross_loop), .offset = CROSS_OFF},
     {.name = "c_data_write",
      .kind = K_DATA,
      .width = 8,
@@ -352,7 +382,13 @@ static void invoke(const struct test_case* c, const char* entry, struct area* ar
 
 /* ── the loop ──────────────────────────────────────────────────────────── */
 
-enum { PERIOD = 16, CODE_PAGE = 4096, AREA_OFF = 0x800, DATA_BYTE_OFF = 0xc00 };
+enum {
+    PERIOD = 16,
+    CODE_PAGE = 4096,
+    MAP_LEN = 2 * CODE_PAGE,
+    AREA_OFF = 0x800,
+    DATA_BYTE_OFF = 0xc00
+};
 
 struct result {
     uint8_t out[16];
@@ -394,16 +430,16 @@ static void dump(const char* what, const uint8_t* p, int width, uint16_t sw) {
 static int next_hint;
 static int warmup = 1;
 
-/* A fresh mapping per case with the code at its start, below 4 GB so 32-bit
- * code can run there: RWX and anonymous, or for K_FILE a private r-x
- * mapping of a temporary file, the way wine maps a PE section. */
+/* A fresh two-page mapping per case with the code at c->offset, below 4 GB
+ * so 32-bit code can run there: RWX and anonymous, or with c->file a private
+ * r-x mapping of a temporary file, the way wine maps a PE section. */
 static char* map_code(const struct test_case* c) {
-    static char buf[CODE_PAGE];
+    static char buf[MAP_LEN];
     memset(buf, 0xcc, sizeof(buf));
-    memcpy(buf, c->code, (size_t)(c->code_end - c->code));
+    memcpy(buf + c->offset, c->code, (size_t)(c->code_end - c->code));
     void* hint = (void*)(uintptr_t)(0x20000000u + 0x100000u * (unsigned)next_hint++);
     char* page = MAP_FAILED;
-    if (c->kind == K_FILE) {
+    if (c->file) {
         char path[1024];
         const char* dir = getenv("TMPDIR");
         snprintf(path, sizeof(path), "%s/test_x87_smc.XXXXXX", dir ? dir : "/tmp");
@@ -414,16 +450,16 @@ static char* map_code(const struct test_case* c) {
                 close(fd);
             return NULL;
         }
-        page = mmap(hint, CODE_PAGE, PROT_READ | PROT_EXEC, MAP_PRIVATE, fd, 0);
+        page = mmap(hint, MAP_LEN, PROT_READ | PROT_EXEC, MAP_PRIVATE, fd, 0);
         unlink(path);
         close(fd);
     } else {
-        page = mmap(hint, CODE_PAGE, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANON, -1,
-                    0);
+        page =
+            mmap(hint, MAP_LEN, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANON, -1, 0);
         if (page != MAP_FAILED)
             memcpy(page, buf, sizeof(buf));
     }
-    if (page == MAP_FAILED || (uintptr_t)page + CODE_PAGE > 0x100000000ull) {
+    if (page == MAP_FAILED || (uintptr_t)page + MAP_LEN > 0x100000000ull) {
         printf("FAIL  smc %s: no code page below 4 GB (%p)\n", c->name, (void*)page);
         return NULL;
     }
@@ -456,6 +492,7 @@ static void run_case(const struct test_case* c, unsigned iters) {
         failures++;
         return;
     }
+    char* const entry = page + c->offset;
 
     static struct area side;
     memset(&side, 0, sizeof(side));
@@ -469,17 +506,17 @@ static void run_case(const struct test_case* c, unsigned iters) {
     size_t patch_off = 0;
     if (c->kind == K_REWRITE) {
         patch_off = (size_t)(c->patch - c->code) + 1;
-        if ((uint8_t)page[patch_off - 1] != 0xdc || ((uint8_t)page[patch_off] & 0x38) != 0x08) {
+        if ((uint8_t)entry[patch_off - 1] != 0xdc || ((uint8_t)entry[patch_off] & 0x38) != 0x08) {
             printf("FAIL  smc %s: unexpected encoding %02x %02x at the patch\n", c->name,
-                   (uint8_t)page[patch_off - 1], (uint8_t)page[patch_off]);
+                   (uint8_t)entry[patch_off - 1], (uint8_t)entry[patch_off]);
             failures++;
-            munmap(page, CODE_PAGE);
+            munmap(page, MAP_LEN);
             return;
         }
     }
-    const uint8_t modrm = (uint8_t)page[patch_off];
+    const uint8_t modrm = (uint8_t)entry[patch_off];
     if (c->kind == K_GETPC) {
-        const uint32_t fip = fip_kept ? (uint32_t)(uintptr_t)(page + (c->patch - c->code)) : 0;
+        const uint32_t fip = fip_kept ? (uint32_t)(uintptr_t)(entry + (c->patch - c->code)) : 0;
         for (unsigned k = 0; k < PERIOD; k++) {
             memset(&ref[0][k], 0, sizeof(ref[0][k]));
             memcpy(ref[0][k].out, &fip, 4);
@@ -489,16 +526,16 @@ static void run_case(const struct test_case* c, unsigned iters) {
     const int32_t patch_word[2] = {(int32_t)((c->compat ? 0x4adcu : 0x4edcu) | c->word_hi),
                                    (int32_t)((c->compat ? 0x42dcu : 0x46dcu) | c->word_hi)};
 
-    /* The warm-up runs the code once as built, a patch_ case writing the
-     * bytes that are already there.  That store makes Rosetta translate the
-     * code again on the next execution, which is when the sidecar learns that
-     * the page is rewritten; without it the first patch to fadd runs the
-     * fmul it replaced once (see docs/internals.md, "Code on writable
-     * pages").  SMC_NO_WARMUP=1 leaves it out and starts with that patch. */
+    /* The warm-up runs the code once before the measured loop, a patch_ case
+     * patching its fmul to fadd.  That execution still runs the fmul, and its
+     * result is not checked: the sidecar learns that the page is rewritten
+     * only from the next translation, which finds the new bytes (see
+     * docs/internals.md, "Code on writable pages").  SMC_NO_WARMUP=1 leaves
+     * it out, so the loop's first iteration is that execution. */
     if (warmup) {
         set_inputs(&side, 0);
-        side.patch = patch_word[0];
-        invoke(c, page, out);
+        side.patch = patch_word[1];
+        invoke(c, entry, out);
     }
     const unsigned op_base = warmup ? 0 : 1;
 
@@ -518,13 +555,13 @@ static void run_case(const struct test_case* c, unsigned iters) {
             page[DATA_BYTE_OFF] = (char)i;
         if (c->kind == K_REWRITE) {
             op = (int)(i & 1);
-            page[patch_off] = (char)(op ? modrm & ~0x08 : modrm);
+            entry[patch_off] = (char)(op ? modrm & ~0x08 : modrm);
         }
         if (c->kind == K_PATCH) {
             op = (int)((i + op_base) & 1);
             side.patch = patch_word[op];
         }
-        invoke(c, page, out);
+        invoke(c, entry, out);
         struct result got;
         if (c->kind == K_GETPC) {
             memset(&got, 0, sizeof(got));
@@ -557,7 +594,7 @@ static void run_case(const struct test_case* c, unsigned iters) {
     } else {
         printf("PASS  smc %s (%u iterations, %.0f ns/iter)\n", c->name, iters, per);
     }
-    munmap(page, CODE_PAGE);
+    munmap(page, MAP_LEN);
 }
 
 int main(void) {

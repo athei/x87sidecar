@@ -11,7 +11,6 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
-#include <bitset>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
@@ -32,6 +31,7 @@
 #include "rosetta_core/ConfigEnv.h"
 #include "rosetta_core/CoreConfig.h"
 #include "rosetta_core/Fixup.h"
+#include "rosetta_core/IRBlock.h"
 #include "rosetta_core/IRInstr.h"
 #include "rosetta_core/IRModuleData.h"
 #include "rosetta_core/Opcode.h"
@@ -2155,45 +2155,50 @@ bool guestMaxProtection(mach_port_t task, uint64_t va, vm_prot_t& maxProt, uint6
     }
 }
 
+// X87_SMC_SPLIT=1 page statistics for the X87_LOG_THROUGHPUT line: guest
+// pages holding a recorded block, and pages marked as rewritten.
+std::atomic<uint64_t> g_statSmcPagesRecorded{0};
+std::atomic<uint64_t> g_statSmcPagesMarked{0};
+
 /// X87_SMC_SPLIT=1: the guest pages, among those the guest can make
-/// writable, on which the sidecar has seen an instruction translated again.
-/// Rosetta translates code again after a write to its page has dropped the
-/// old translation.  It also does when it starts a block over or covers the
-/// same code in a second translation, which puts a page that is not
-/// rewritten in the set; that costs speed on that page and nothing else.  A
-/// page stays in the set for the rest of the process: nothing tells the
-/// sidecar that a page has stopped being rewritten, and leaving it would
-/// bring the stale run back on the next rewrite.  Both tables are bounded
-/// and drop their oldest page when full.  Receive thread only, like
-/// g_irCache.
+/// writable, whose code the guest has rewritten.  Each fill of a block on
+/// such a page records a hash of the block's guest bytes under its start
+/// address; when a block with the same start and length comes back with
+/// other bytes, its pages are marked.  Rosetta also translates unchanged
+/// code again (when it starts a block over, when a loop head becomes the
+/// start of a second translation, as at a 4 KB boundary, or when a second
+/// translation covers the same code), and the bytes keep those out.  A block
+/// that starts at a recorded address but has another length, because the
+/// translation split it elsewhere, replaces the record without a mark.  A
+/// page stays marked for the rest of the process: nothing tells the sidecar
+/// that the guest has stopped rewriting it, and unmarking it would bring the
+/// stale run back on the next rewrite.  Both tables are bounded and, when
+/// full, drop the entry inserted first, not the one used least recently.
+/// Receive thread only, like g_irCache.
 struct SmcPages {
     static constexpr uint64_t kPageShift = 12;  // the guest's 4 KB pages
-    static constexpr size_t kMaxSeenPages = 16384;
+    static constexpr size_t kMaxBlocks = 131072;
     static constexpr size_t kMaxRewrittenPages = 4096;
-    /// Per page, the offsets of the instructions a fill has been asked for.
-    std::unordered_map<uint64_t, std::bitset<size_t{1} << kPageShift>> seen;
-    std::deque<uint64_t> seenOrder;
+    struct Record {
+        uint64_t hash;
+        uint32_t len;
+    };
+    std::unordered_map<uint64_t, Record> blocks;  // by guest start address
+    std::deque<uint64_t> blockOrder;
+    std::unordered_map<uint64_t, uint32_t> blocksPerPage;
     std::unordered_set<uint64_t> rewritten;
     std::deque<uint64_t> rewrittenOrder;
 
-    /// Records that the instruction at `va` is being translated, and adds its
-    /// page to the rewritten set when it was translated before.
-    void noteTranslated(uint64_t va) {
+    static uint64_t hashBytes(const uint8_t* p, size_t n) {
+        uint64_t h = 0xcbf29ce484222325ULL;  // FNV-1a
+        for (size_t i = 0; i < n; i++) {
+            h = (h ^ p[i]) * 0x100000001b3ULL;
+        }
+        return h;
+    }
+
+    void mark(uint64_t va) {
         const uint64_t page = va >> kPageShift;
-        const uint64_t offset = va & ((uint64_t{1} << kPageShift) - 1);
-        auto it = seen.find(page);
-        if (it == seen.end()) {
-            if (seen.size() >= kMaxSeenPages) {
-                seen.erase(seenOrder.front());
-                seenOrder.pop_front();
-            }
-            it = seen.emplace(page, std::bitset<size_t{1} << kPageShift>{}).first;
-            seenOrder.push_back(page);
-        }
-        if (!it->second.test(offset)) {
-            it->second.set(offset);
-            return;
-        }
         if (rewritten.contains(page)) {
             return;
         }
@@ -2203,15 +2208,44 @@ struct SmcPages {
         }
         rewritten.insert(page);
         rewrittenOrder.push_back(page);
+        g_statSmcPagesMarked.store(rewritten.size(), std::memory_order_relaxed);
         static int marked = 0;
         ++marked;
         if (marked <= 10 || marked % 1000 == 0) {
             fprintf(stdout,
-                    "[rosettax87] X87_SMC_SPLIT: guest code at 0x%llx translated again; x87 runs "
-                    "on its page end after each store from now on (#%d)\n",
+                    "[rosettax87] X87_SMC_SPLIT: guest code at 0x%llx was rewritten; x87 runs on "
+                    "its page end after each store from now on (#%d)\n",
                     static_cast<unsigned long long>(va), marked);
             fflush(stdout);
         }
+    }
+
+    /// Records the `len` bytes of the block starting at `start` and marks its
+    /// pages when the same block was recorded with other bytes.
+    void noteBlock(uint64_t start, const uint8_t* bytes, uint32_t len) {
+        const uint64_t hash = hashBytes(bytes, len);
+        auto it = blocks.find(start);
+        if (it != blocks.end()) {
+            if (it->second.len == len && it->second.hash != hash) {
+                mark(start);
+                mark(start + len - 1);
+            }
+            it->second = Record{.hash = hash, .len = len};
+            return;
+        }
+        if (blocks.size() >= kMaxBlocks) {
+            const uint64_t old = blockOrder.front();
+            blockOrder.pop_front();
+            blocks.erase(old);
+            auto pit = blocksPerPage.find(old >> kPageShift);
+            if (pit != blocksPerPage.end() && --pit->second == 0) {
+                blocksPerPage.erase(pit);
+            }
+        }
+        blocks.emplace(start, Record{.hash = hash, .len = len});
+        blockOrder.push_back(start);
+        blocksPerPage[start >> kPageShift]++;
+        g_statSmcPagesRecorded.store(blocksPerPage.size(), std::memory_order_relaxed);
     }
 
     [[nodiscard]] bool isRewritten(uint64_t va) const {
@@ -2220,16 +2254,16 @@ struct SmcPages {
 };
 SmcPages g_smcPages;
 
-/// Says once that the mapping of guest code could not be looked up; the
-/// block is then treated as not writable, as without the knob.
-bool warnNoMapping(uint64_t va) {
+/// Says once that X87_SMC_SPLIT could not decide on a block, and why; the
+/// block is then treated as not rewritten, as without the knob.
+bool warnSmcLookup(const char* what, uint64_t addr) {
     static bool warned = false;
     if (!warned) {
         warned = true;
         fprintf(stdout,
-                "[rosettax87] X87_SMC_SPLIT: could not look up the mapping of guest code at "
-                "0x%llx; treating such code as not writable\n",
-                static_cast<unsigned long long>(va));
+                "[rosettax87] X87_SMC_SPLIT: could not read %s at 0x%llx; treating such code as "
+                "not rewritten\n",
+                what, static_cast<unsigned long long>(addr));
         fflush(stdout);
     }
     return false;
@@ -2252,7 +2286,7 @@ bool guestCodeWritable(mach_port_t task, uint64_t first, uint64_t last) {
     vm_prot_t maxProt = VM_PROT_NONE;
     uint64_t end = 0;
     if (!guestMaxProtection(task, first, maxProt, end)) {
-        return warnNoMapping(first);
+        return warnSmcLookup("the mapping of guest code", first);
     }
     if (writable(maxProt)) {
         return true;
@@ -2261,31 +2295,45 @@ bool guestCodeWritable(mach_port_t task, uint64_t first, uint64_t last) {
         return false;
     }
     if (!guestMaxProtection(task, last, maxProt, end)) {
-        return warnNoMapping(last);
+        return warnSmcLookup("the mapping of guest code", last);
     }
     return writable(maxProt);
 }
 
 /// Whether the x87 runs of a block end after each store (X87_SMC_SPLIT=1):
-/// the guest can make its code writable (guestCodeWritable), and code on its
-/// page has been translated again (SmcPages).  The instruction of every
-/// fill of such a block is recorded first, so the retranslation that
-/// follows the first rewrite of a page is split already.  IRInstr::pc is an
-/// offset from the module record's text_vmaddr_range.  The first and the
-/// last instruction are both checked, for a block that crosses into another
-/// mapping or page.
-bool blockSplitForSmc(mach_port_t task, uint64_t moduleData, const IRInstr* ir, uint64_t num,
-                      uint64_t idx) {
+/// the guest can make its code writable (guestCodeWritable), and has
+/// rewritten code on its page (SmcPages).  The block's bytes are recorded
+/// before the decision, so the translation that first sees a page's
+/// rewritten bytes is split already.  IRInstr::pc and IRBlock::start_pc are
+/// offsets from the module record's text_vmaddr_range, and the block's bytes
+/// run for IRBlock::code_size from its start, terminator included.  The
+/// first and the last instruction are both checked, for a block that
+/// crosses into another mapping or page.
+bool blockSplitForSmc(mach_port_t task, uint64_t moduleData, uint64_t blockAddr, const IRInstr* ir,
+                      uint64_t num) {
     IRModuleData mod{};
     if (moduleData == 0 || !readTranslate(task, moduleData, &mod, sizeof(mod))) {
-        return warnNoMapping(0);
+        return warnSmcLookup("the translation's module record", moduleData);
     }
     const uint64_t first = mod.text_vmaddr_range + ir[0].pc;
     const uint64_t last = mod.text_vmaddr_range + ir[num - 1].pc;
     if (!guestCodeWritable(task, first, last)) {
         return false;
     }
-    g_smcPages.noteTranslated(mod.text_vmaddr_range + ir[idx].pc);
+    IRBlock blk{};
+    if (!readTranslate(task, blockAddr, &blk, sizeof(blk))) {
+        return warnSmcLookup("the IR block", blockAddr);
+    }
+    constexpr uint32_t kMaxBlockBytes = 1U << 16;
+    if (blk.start_pc != ir[0].pc || blk.code_size == 0 || blk.code_size > kMaxBlockBytes ||
+        ir[num - 1].pc >= blk.start_pc + blk.code_size) {
+        return warnSmcLookup("a consistent IR block", blockAddr);
+    }
+    std::vector<uint8_t> bytes(blk.code_size);
+    if (!readTranslate(task, first, bytes.data(), bytes.size())) {
+        return warnSmcLookup("the guest code", first);
+    }
+    g_smcPages.noteBlock(first, bytes.data(), blk.code_size);
     return g_smcPages.isRewritten(first) || g_smcPages.isRewritten(last);
 }
 
@@ -2536,7 +2584,7 @@ TranslateOutcome processTranslateRequest(mach_port_t parentTask, const Translate
             irc.smc_split =
                 g_rosetta_config != nullptr && g_rosetta_config->smc_split == 1 &&
                 blockSplitForSmc(parentTask, reinterpret_cast<uint64_t>(tr.ir_module_data),
-                                 irc.ir.data(), req.num_instrs, req.insn_idx);
+                                 req.block, irc.ir.data(), req.num_instrs);
             g_statIrMisses.fetch_add(1, std::memory_order_relaxed);
         }
         // Conservative until the reply is known; the Some path below moves it.
@@ -3096,8 +3144,12 @@ void* reporterEntry(void* /*arg*/) {
         prev_vm = vm;
         if (delta == 0) {
             if (!printed_idle && cur > 0) {
-                fprintf(stdout, "[rosettax87] sidecar: idle (total %llu)\n",
-                        static_cast<unsigned long long>(cur));
+                fprintf(stdout, "[rosettax87] sidecar: idle (total %llu) smc_pages=%llu/%llu\n",
+                        static_cast<unsigned long long>(cur),
+                        static_cast<unsigned long long>(
+                            g_statSmcPagesMarked.load(std::memory_order_relaxed)),
+                        static_cast<unsigned long long>(
+                            g_statSmcPagesRecorded.load(std::memory_order_relaxed)));
                 fflush(stdout);
                 printed_idle = true;
             }
@@ -3107,17 +3159,22 @@ void* reporterEntry(void* /*arg*/) {
         // vm/req counts mach_vm_* traps on the translate path this period
         // (mach_msg excluded: 1/request by construction).  Cache columns are
         // cumulative hits/misses so rates are readable at a glance.
-        fprintf(stdout,
-                "[rosettax87] sidecar: %llu req/s (total %llu) vm/req=%.2f "
-                "ir=%llu/%llu tco=%llu alloc_declines=%llu\n",
-                static_cast<unsigned long long>(delta / kReporterPeriodSec),
-                static_cast<unsigned long long>(cur),
-                static_cast<double>(vm_delta) / static_cast<double>(delta),
-                static_cast<unsigned long long>(g_statIrHits.load(std::memory_order_relaxed)),
-                static_cast<unsigned long long>(g_statIrMisses.load(std::memory_order_relaxed)),
-                static_cast<unsigned long long>(g_statTcoHits.load(std::memory_order_relaxed)),
-                static_cast<unsigned long long>(
-                    g_statAllocDeclines.load(std::memory_order_relaxed)));
+        // smc_pages: guest pages holding a block recorded for X87_SMC_SPLIT,
+        // and how many of them are marked as rewritten.
+        fprintf(
+            stdout,
+            "[rosettax87] sidecar: %llu req/s (total %llu) vm/req=%.2f "
+            "ir=%llu/%llu tco=%llu alloc_declines=%llu smc_pages=%llu/%llu\n",
+            static_cast<unsigned long long>(delta / kReporterPeriodSec),
+            static_cast<unsigned long long>(cur),
+            static_cast<double>(vm_delta) / static_cast<double>(delta),
+            static_cast<unsigned long long>(g_statIrHits.load(std::memory_order_relaxed)),
+            static_cast<unsigned long long>(g_statIrMisses.load(std::memory_order_relaxed)),
+            static_cast<unsigned long long>(g_statTcoHits.load(std::memory_order_relaxed)),
+            static_cast<unsigned long long>(g_statAllocDeclines.load(std::memory_order_relaxed)),
+            static_cast<unsigned long long>(g_statSmcPagesMarked.load(std::memory_order_relaxed)),
+            static_cast<unsigned long long>(
+                g_statSmcPagesRecorded.load(std::memory_order_relaxed)));
         fflush(stdout);
     }
 }

@@ -77,8 +77,9 @@
 #      and 2, the run cache off, native transport off and allocation
 #      failures; with X87_SMC_SPLIT=0, where its same-run patches have to
 #      fail; with SMC_NO_WARMUP=1, where each of them has to fail its first
-#      iteration only; its never-written file mapping, which must get the
-#      code X87_SMC_SPLIT=0 gets; then every test with X87_SMC_SPLIT=2,
+#      iteration only; its never-written file mapping and its loops across
+#      a 4 KB boundary, which must get the code X87_SMC_SPLIT=0 gets; then
+#      every test with X87_SMC_SPLIT=2,
 #      which ends runs after each store in every block
 #   H. test_opcode_host_table, natively: the name-derived opcode maps
 #      against the pinned 26.4 table and the identity mapping;
@@ -1437,8 +1438,9 @@ fi
 # that patch a later instruction of the same run have to fail (a pass would
 # mean the test no longer reaches what the split fixes); without its
 # warm-up, where each of those cases has to show the one stale iteration
-# docs/internals.md describes; and its file_rx case, never written, has to
-# get the same code as without the split.  Then every test runs with
+# docs/internals.md describes; and its never-written cases, file_rx and the
+# loops across a 4 KB boundary, have to get the same code as without the
+# split.  Then every test runs with
 # X87_SMC_SPLIT=2, which splits every block, since the other tests' code is
 # on read-only image pages.  Naming tests on the command line runs the last
 # part for them, and the rest only when test_x87_smc is among them.
@@ -1464,9 +1466,9 @@ if [[ $NATIVE_ONLY -eq 0 ]]; then
     if [[ " ${TESTS[*]} " == *" test_x87_smc "* && -x "$SMC_BIN" ]]; then
         for cfg in "${SMC_CONFIGS[@]}"; do
             echo "      $cfg"
+            read -ra CFG_ENV <<<"$cfg"
             EXIT=0
-            # shellcheck disable=SC2086
-            OUT=$(run_bounded "$TEST_TIMEOUT" env $cfg "$LOADER" "$SMC_BIN" 2>/dev/null |
+            OUT=$(run_bounded "$TEST_TIMEOUT" env "${CFG_ENV[@]}" "$LOADER" "$SMC_BIN" 2>/dev/null |
                 filter_runtime_lines) || EXIT=$?
             check_output "test_x87_smc" "$OUT" "$EXIT"
         done
@@ -1502,25 +1504,32 @@ if [[ $NATIVE_ONLY -eq 0 ]]; then
             FAILED=$((FAILED + 1))
             grep -E '^FAIL' <<<"$OUT" | head -5 | sed 's/^/      /' || true
         fi
-        # Code on a private r-x file mapping, the way wine maps a PE section,
-        # can be made writable, but file_rx never writes it: its emitted code
-        # has to be the same as with the split off, and differ from the
-        # split forced on, which shows the case has a run to split.
+        # Code the guest can make writable but never writes keeps its runs:
+        # file_rx on a private r-x file mapping, the way wine maps a PE
+        # section, and a loop crossing a 4 KB boundary on such a mapping and
+        # on an RWX page, where Rosetta translates the loop head again.  The
+        # emitted code has to be the same as with the split off, and differ
+        # from the split forced on, which shows the case has a run to split.
+        # $1 = case, $2.. = environment
         smc_emit() {
-            run_bounded "$TEST_TIMEOUT" env SMC_CASE=file_rx X87_DUMP_EMIT=1 "$@" "$LOADER" \
+            local c="$1"
+            shift
+            run_bounded "$TEST_TIMEOUT" env SMC_CASE="$c" X87_DUMP_EMIT=1 "$@" "$LOADER" \
                 "$SMC_BIN" 2>/dev/null | grep 'EMIT pc=' | sed -E 's/ at=[0-9a-f]+//' | sort || true
         }
-        TOTAL=$((TOTAL + 1))
-        EMIT_ON=$(smc_emit X87_SMC_SPLIT=1)
-        EMIT_OFF=$(smc_emit X87_SMC_SPLIT=0)
-        EMIT_ALL=$(smc_emit X87_SMC_SPLIT=2)
-        if [[ -n "$EMIT_ON" && "$EMIT_ON" == "$EMIT_OFF" && "$EMIT_ON" != "$EMIT_ALL" ]]; then
-            echo -e "${GREEN}PASS${NC}  test_x87_smc file_rx  (unwritten file mapping keeps its runs)"
-            PASSED=$((PASSED + 1))
-        else
-            echo -e "${RED}FAIL${NC}  test_x87_smc file_rx  (emitted code differs from X87_SMC_SPLIT=0, or the case has nothing to split)"
-            FAILED=$((FAILED + 1))
-        fi
+        for c in file_rx file_rx_cross rwx_cross; do
+            TOTAL=$((TOTAL + 1))
+            EMIT_ON=$(smc_emit "$c" X87_SMC_SPLIT=1)
+            EMIT_OFF=$(smc_emit "$c" X87_SMC_SPLIT=0)
+            EMIT_ALL=$(smc_emit "$c" X87_SMC_SPLIT=2)
+            if [[ -n "$EMIT_ON" && "$EMIT_ON" == "$EMIT_OFF" && "$EMIT_ON" != "$EMIT_ALL" ]]; then
+                echo -e "${GREEN}PASS${NC}  test_x87_smc $c  (never written, keeps its runs)"
+                PASSED=$((PASSED + 1))
+            else
+                echo -e "${RED}FAIL${NC}  test_x87_smc $c  (emitted code differs from X87_SMC_SPLIT=0, or the case has nothing to split)"
+                FAILED=$((FAILED + 1))
+            fi
+        done
     fi
     echo "      X87_SMC_SPLIT=2"
     for t in "${TESTS[@]}"; do
